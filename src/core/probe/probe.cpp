@@ -6,11 +6,13 @@
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "core/config/settings.h"
 #include "core/maxine/gpu.h"
 #include "core/util/exec.h"
 #include "core/util/fs.h"
@@ -26,11 +28,18 @@ namespace studiocast::probe {
         constexpr int kRequiredDriverMajor = 570;
         constexpr int kRequiredDriverMinor = 26;
 
-        // Heuristic: Maxine Linux docs require Tensor Core GPUs (Turing+).
-        // Compute capability heuristic: treat >= 7.5 as "likely supported".
-        // (Note: some Turing GTX parts lack Tensor Cores; this is best-effort.)
+        // Heuristic: Tensor Core era (Turing+) roughly maps to compute capability >= 7.5.
+        // Best-effort only.
         constexpr int kMinCcMajor = 7;
         constexpr int kMinCcMinor = 5;
+
+        int ComputeCapRank(const std::string &cc) {
+            const auto parts = util::Split(util::TrimCopy(cc), '.');
+            if (parts.size() < 2) return -1;
+            const int maj = std::atoi(parts[0].c_str());
+            const int min = std::atoi(parts[1].c_str());
+            return maj * 10 + min; // "7.5" -> 75, "8.6" -> 86
+        }
 
         std::string KernelString() {
             utsname u{};
@@ -41,8 +50,6 @@ namespace studiocast::probe {
         }
 
         std::optional<Version> ParseVersionLike(const std::string &s) {
-            // Find first token that looks like digits[.digits][.digits]
-            // e.g. "580.105.08" or "570.26"
             std::string token;
             for (size_t i = 0; i < s.size(); ++i) {
                 if (!std::isdigit(static_cast<unsigned char>(s[i]))) continue;
@@ -80,12 +87,10 @@ namespace studiocast::probe {
         }
 
         std::optional<Version> DetectDriverVersion() {
-            // 1) Direct when kernel module is loaded.
             if (auto content = util::ReadTextFile("/proc/driver/nvidia/version")) {
                 if (auto v = ParseVersionLike(*content)) return v;
             }
 
-            // 2) Fallback to nvidia-smi.
             auto out = util::ExecCapture(
                 "nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null");
             if (out.exit_code == 0) {
@@ -94,7 +99,6 @@ namespace studiocast::probe {
                     if (auto v = ParseVersionLike(line)) return v;
                 }
             }
-
             return std::nullopt;
         }
 
@@ -118,45 +122,79 @@ namespace studiocast::probe {
             return min >= kMinCcMinor;
         }
 
-        std::vector<GpuInfo> DetectGpus() {
-            // Prefer querying compute capability too.
-            auto out = util::ExecCapture(
-                "nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null");
+        std::string JoinComma(const std::vector<std::string> &parts, size_t begin, size_t end_exclusive) {
+            std::string out;
+            for (size_t i = begin; i < end_exclusive; ++i) {
+                if (!out.empty()) out += ",";
+                out += parts[i];
+            }
+            return util::TrimCopy(out);
+        }
 
+        std::vector<std::string> SplitTrimComma(const std::string &line) {
+            auto parts = util::Split(line, ',');
+            for (auto &p: parts) p = util::TrimCopy(p);
+            return parts;
+        }
+
+        std::vector<GpuInfo> DetectGpus() {
             std::vector<GpuInfo> gpus;
 
+            // Best case: index + uuid + name + compute_cap
+            auto out = util::ExecCapture(
+                "nvidia-smi --query-gpu=index,uuid,name,compute_cap --format=csv,noheader 2>/dev/null");
+
             if (out.exit_code == 0) {
-                for (const auto &lineRaw: util::SplitLines(out.stdout_str)) {
-                    const auto line = util::TrimCopy(lineRaw);
+                for (const auto &raw: util::SplitLines(out.stdout_str)) {
+                    const auto line = util::TrimCopy(raw);
                     if (line.empty()) continue;
 
-                    // Split on last comma: "<name>, <compute_cap>"
-                    const auto pos = line.rfind(',');
-                    if (pos == std::string::npos) {
-                        gpus.push_back(GpuInfo{line, std::nullopt});
-                        continue;
-                    }
+                    auto fields = SplitTrimComma(line);
+                    if (fields.size() < 3) continue;
 
-                    auto name = util::TrimCopy(line.substr(0, pos));
-                    auto cap = util::TrimCopy(line.substr(pos + 1));
-                    if (name.empty()) name = line;
+                    // We expect 4 fields. If name contains commas, we may get >4.
+                    // Layout: idx, uuid, name...(maybe commas), compute_cap(last)
+                    GpuInfo g{};
+                    g.index = std::atoi(fields[0].c_str());
+                    g.uuid = (fields.size() >= 2) ? fields[1] : "";
 
-                    if (!cap.empty()) {
-                        gpus.push_back(GpuInfo{name, cap});
+                    if (fields.size() >= 4) {
+                        g.compute_cap = util::TrimCopy(fields.back());
+                        g.name = JoinComma(fields, 2, fields.size() - 1);
                     } else {
-                        gpus.push_back(GpuInfo{name, std::nullopt});
+                        g.name = JoinComma(fields, 2, fields.size());
+                        g.compute_cap = std::nullopt;
                     }
+
+                    if (g.compute_cap && !g.compute_cap->empty()) {
+                        g.likely_supported = LikelyMeetsTensorCoreRequirement(*g.compute_cap);
+                        g.maxine_gpu_arg = maxine::MaxineGpuArgFromComputeCap(*g.compute_cap);
+                    }
+                    gpus.push_back(g);
                 }
 
                 if (!gpus.empty()) return gpus;
             }
 
-            // Fallback: names only
-            out = util::ExecCapture("nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null");
+            // Fallback: index + uuid + name
+            out = util::ExecCapture("nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader 2>/dev/null");
             if (out.exit_code == 0) {
-                for (const auto &lineRaw: util::SplitLines(out.stdout_str)) {
-                    const auto name = util::TrimCopy(lineRaw);
-                    if (!name.empty()) gpus.push_back(GpuInfo{name, std::nullopt});
+                for (const auto &raw: util::SplitLines(out.stdout_str)) {
+                    const auto line = util::TrimCopy(raw);
+                    if (line.empty()) continue;
+
+                    auto fields = SplitTrimComma(line);
+                    if (fields.size() < 3) continue;
+
+                    GpuInfo g{};
+                    g.index = std::atoi(fields[0].c_str());
+                    g.uuid = fields[1];
+                    g.name = JoinComma(fields, 2, fields.size());
+                    g.compute_cap = std::nullopt;
+                    g.likely_supported = false;
+                    g.maxine_gpu_arg = std::nullopt;
+
+                    gpus.push_back(g);
                 }
             }
 
@@ -204,7 +242,6 @@ namespace studiocast::probe {
                 return s;
             }
 
-            // Default to the XDG candidate even if it doesn't exist (so we show users the expected path).
             s.root = xdgCandidate;
             s.chosen_from = "default";
             return s;
@@ -212,7 +249,6 @@ namespace studiocast::probe {
 
         std::string RootExplain(const RootSelection &s) {
             std::ostringstream oss;
-
             if (s.chosen_from == "default") {
                 oss << " (default user-local path)";
             } else if (s.chosen_from == "xdg") {
@@ -222,12 +258,41 @@ namespace studiocast::probe {
             } else if (s.chosen_from == "env") {
                 oss << " (from env override)";
             }
-
             if (!s.system_candidate.empty() && s.system_candidate != s.root) {
                 oss << " (also checked " << s.system_candidate.string() << ")";
             }
-
             return oss.str();
+        }
+
+        const GpuInfo *FindGpuByIndex(const std::vector<GpuInfo> &gpus, int index) {
+            for (const auto &g: gpus) {
+                if (g.index == index) return &g;
+            }
+            return nullptr;
+        }
+
+        const GpuInfo *FindGpuByUuid(const std::vector<GpuInfo> &gpus, const std::string &uuid) {
+            for (const auto &g: gpus) {
+                if (!g.uuid.empty() && g.uuid == uuid) return &g;
+            }
+            return nullptr;
+        }
+
+        const GpuInfo *PickBestSupportedGpu(const std::vector<GpuInfo> &gpus) {
+            const GpuInfo *best = nullptr;
+            int bestRank = -1;
+
+            for (const auto &g: gpus) {
+                if (!g.likely_supported) continue;
+                if (!g.compute_cap) continue;
+
+                const int r = ComputeCapRank(*g.compute_cap);
+                if (r > bestRank) {
+                    bestRank = r;
+                    best = &g;
+                }
+            }
+            return best;
         }
 
         CheckResult CheckDriver(const std::optional<Version> &v) {
@@ -251,62 +316,150 @@ namespace studiocast::probe {
 
         CheckResult CheckMaxineGpuSupport(const std::vector<GpuInfo> &gpus) {
             CheckResult r;
-            r.name = "GPU supports Maxine (Tensor Cores required)";
+            r.name = "At least one GPU supports Maxine (Tensor Cores required)";
 
             if (gpus.empty()) {
                 r.ok = false;
-                r.details = "No NVIDIA GPU detected via nvidia-smi.";
+                r.details = "No NVIDIA GPUs detected via nvidia-smi.";
                 return r;
             }
 
-            bool anyHasCap = false;
-            bool anyLikelyOk = false;
+            bool anyCap = false;
+            bool anySupported = false;
 
-            std::ostringstream detected;
-            for (size_t i = 0; i < gpus.size(); ++i) {
-                if (i) detected << "; ";
-                detected << gpus[i].name;
-                if (gpus[i].compute_cap) {
-                    anyHasCap = true;
-                    detected << " (compute_cap " << *gpus[i].compute_cap << ")";
-                    if (LikelyMeetsTensorCoreRequirement(*gpus[i].compute_cap)) anyLikelyOk = true;
+            std::ostringstream oss;
+            oss << "Detected:";
+            for (const auto &g: gpus) {
+                oss << " [" << g.index << "] " << g.name;
+                if (!g.uuid.empty()) oss << " (" << g.uuid << ")";
+                if (g.compute_cap) {
+                    anyCap = true;
+                    oss << " cc " << *g.compute_cap;
+                    oss << (g.likely_supported ? " supported" : " unsupported");
+                } else {
+                    oss << " cc ?";
                 }
+                oss << ";";
+                if (g.likely_supported) anySupported = true;
             }
 
-            if (!anyHasCap) {
+            if (!anyCap) {
                 r.skipped = true;
                 r.details =
-                        "Could not query compute capability. Try: nvidia-smi --query-gpu=name,compute_cap --format=csv";
+                        "Could not query compute capability. Try: nvidia-smi --query-gpu=index,uuid,name,compute_cap --format=csv";
                 return r;
             }
 
-            r.ok = anyLikelyOk;
-            if (r.ok) {
-                r.details = "Detected: " + detected.str();
-            } else {
-                r.details =
-                        "Detected: " + detected.str() +
-                        " | Maxine Linux SDKs require Tensor Core GPUs (Turing/Ampere/Ada/Hopper/Blackwell).";
-            }
+            r.ok = anySupported;
+            r.details = oss.str();
             return r;
         }
 
-        CheckResult CheckSuggestedGpuArgForFeatureInstalls(const std::vector<GpuInfo> &gpus) {
+        CheckResult CheckGpuSelectionPolicy(const config::Settings &settings, Report *rep) {
             CheckResult r;
-            r.name = "Suggested --gpu for VFX/AR feature install scripts";
-            r.skipped = true;
-            r.details = "No compute capability available.";
+            r.name = "GPU selection policy resolves to a supported GPU";
 
-            for (const auto &g: gpus) {
-                if (!g.compute_cap) continue;
-                if (auto arg = maxine::MaxineGpuArgFromComputeCap(*g.compute_cap)) {
-                    r.skipped = false;
-                    r.ok = true;
-                    r.details = "Detected compute_cap " + *g.compute_cap + " -> use --gpu " + *arg;
+            rep->gpu_selection_mode = config::ToString(settings.gpu.mode);
+            rep->selected_gpu_index.reset();
+            rep->selected_gpu_uuid.clear();
+
+            if (rep->gpus.empty()) {
+                r.ok = false;
+                r.details = "No GPUs available to select.";
+                return r;
+            }
+
+            const GpuInfo *selected = nullptr;
+            std::string reason;
+
+            if (settings.gpu.mode == config::GpuSelectMode::Uuid) {
+                if (settings.gpu.uuid.empty()) {
+                    r.ok = false;
+                    r.details = "gpu.mode=uuid but gpu.uuid is empty.";
+                    return r;
+                }
+                selected = FindGpuByUuid(rep->gpus, settings.gpu.uuid);
+                reason = "mode=uuid";
+                if (!selected) {
+                    r.ok = false;
+                    r.details = "Selected UUID not found: " + settings.gpu.uuid;
+                    return r;
+                }
+            } else if (settings.gpu.mode == config::GpuSelectMode::Index) {
+                if (!settings.gpu.index) {
+                    r.ok = false;
+                    r.details = "gpu.mode=index but gpu.index is missing.";
+                    return r;
+                }
+                selected = FindGpuByIndex(rep->gpus, *settings.gpu.index);
+                reason = "mode=index";
+                if (!selected) {
+                    r.ok = false;
+                    r.details = "Selected index not found: " + std::to_string(*settings.gpu.index);
+                    return r;
+                }
+            } else {
+                // auto
+                selected = PickBestSupportedGpu(rep->gpus);
+                reason = "mode=auto";
+                if (!selected) {
+                    // Fallback to first GPU when none supported, but fail the check.
+                    selected = &rep->gpus.front();
+                    rep->selected_gpu_index = selected->index;
+                    rep->selected_gpu_uuid = selected->uuid;
+                    r.ok = false;
+
+                    std::ostringstream oss;
+                    oss << "Auto mode found no supported GPUs. Selected fallback: [" << selected->index << "] "
+                            << selected->name;
+                    if (selected->compute_cap) oss << " cc " << *selected->compute_cap;
+                    r.details = oss.str();
                     return r;
                 }
             }
 
+            rep->selected_gpu_index = selected->index;
+            rep->selected_gpu_uuid = selected->uuid;
+
+            r.ok = selected->likely_supported;
+            std::ostringstream oss;
+            oss << reason << " -> [" << selected->index << "] " << selected->name;
+            if (!selected->uuid.empty()) oss << " (" << selected->uuid << ")";
+            if (selected->compute_cap) oss << " cc " << *selected->compute_cap;
+            if (selected->maxine_gpu_arg) oss << " maxine_gpu_arg=" << *selected->maxine_gpu_arg;
+
+            if (!r.ok) {
+                oss << " (selected GPU appears unsupported for Maxine)";
+            }
+            r.details = oss.str();
+            return r;
+        }
+
+        CheckResult CheckSuggestedGpuArgsForFeatureInstalls(const std::vector<GpuInfo> &gpus) {
+            CheckResult r;
+            r.name = "Suggested --gpu values for VFX/AR feature install scripts";
+
+            std::set<std::string> args;
+            for (const auto &g: gpus) {
+                if (!g.likely_supported) continue;
+                if (g.maxine_gpu_arg) args.insert(*g.maxine_gpu_arg);
+            }
+
+            if (args.empty()) {
+                r.skipped = true;
+                r.details = "No supported GPUs with known Maxine installer mapping.";
+                return r;
+            }
+
+            r.ok = true;
+            std::ostringstream oss;
+            oss << "Install for:";
+            bool first = true;
+            for (const auto &a: args) {
+                oss << (first ? " " : ", ") << a;
+                first = false;
+            }
+            r.details = oss.str();
             return r;
         }
 
@@ -414,6 +567,7 @@ namespace studiocast::probe {
         oss << "System\n";
         oss << "  OS: " << (os_pretty_name.empty() ? "unknown" : os_pretty_name) << "\n";
         oss << "  Kernel: " << (kernel.empty() ? "unknown" : kernel) << "\n";
+
         if (nvidia_driver) {
             oss << "  NVIDIA Driver: " << nvidia_driver->original << "\n";
         } else {
@@ -423,14 +577,28 @@ namespace studiocast::probe {
         if (!gpus.empty()) {
             oss << "  GPU(s):\n";
             for (const auto &g: gpus) {
+                oss << "    - [" << g.index << "] " << g.name;
+                if (!g.uuid.empty()) oss << " (" << g.uuid << ")";
                 if (g.compute_cap) {
-                    oss << "    - " << g.name << " (compute_cap " << *g.compute_cap << ")\n";
+                    oss << " (compute_cap " << *g.compute_cap << ")";
+                    oss << (g.likely_supported ? " [supported]" : " [unsupported]");
                 } else {
-                    oss << "    - " << g.name << "\n";
+                    oss << " (compute_cap unknown)";
                 }
+                if (g.maxine_gpu_arg) {
+                    oss << " (maxine --gpu " << *g.maxine_gpu_arg << ")";
+                }
+                oss << "\n";
             }
         } else {
             oss << "  GPU(s): none detected via nvidia-smi\n";
+        }
+
+        if (selected_gpu_index) {
+            oss << "  Selected GPU (policy=" << (gpu_selection_mode.empty() ? "unknown" : gpu_selection_mode)
+                    << "): [" << *selected_gpu_index << "]";
+            if (!selected_gpu_uuid.empty()) oss << " (" << selected_gpu_uuid << ")";
+            oss << "\n";
         }
 
         oss << "\nChecks\n";
@@ -461,15 +629,39 @@ namespace studiocast::probe {
             oss << "\"nvidia_driver\":null,";
         }
 
+        oss << "\"gpu_selection_mode\":\"" << JsonEscape(gpu_selection_mode) << "\",";
+        if (selected_gpu_index) {
+            oss << "\"selected_gpu_index\":" << *selected_gpu_index << ",";
+        } else {
+            oss << "\"selected_gpu_index\":null,";
+        }
+        if (!selected_gpu_uuid.empty()) {
+            oss << "\"selected_gpu_uuid\":\"" << JsonEscape(selected_gpu_uuid) << "\",";
+        } else {
+            oss << "\"selected_gpu_uuid\":null,";
+        }
+
         oss << "\"gpus\":[";
         for (size_t i = 0; i < gpus.size(); ++i) {
             if (i) oss << ",";
-            oss << "{"
-                    << "\"name\":\"" << JsonEscape(gpus[i].name) << "\",";
-            if (gpus[i].compute_cap) {
-                oss << "\"compute_cap\":\"" << JsonEscape(*gpus[i].compute_cap) << "\"";
+            oss << "{";
+            oss << "\"index\":" << gpus[i].index << ",";
+            if (!gpus[i].uuid.empty()) {
+                oss << "\"uuid\":\"" << JsonEscape(gpus[i].uuid) << "\",";
             } else {
-                oss << "\"compute_cap\":null";
+                oss << "\"uuid\":null,";
+            }
+            oss << "\"name\":\"" << JsonEscape(gpus[i].name) << "\",";
+            if (gpus[i].compute_cap) {
+                oss << "\"compute_cap\":\"" << JsonEscape(*gpus[i].compute_cap) << "\",";
+            } else {
+                oss << "\"compute_cap\":null,";
+            }
+            oss << "\"likely_supported\":" << (gpus[i].likely_supported ? "true" : "false") << ",";
+            if (gpus[i].maxine_gpu_arg) {
+                oss << "\"maxine_gpu_arg\":\"" << JsonEscape(*gpus[i].maxine_gpu_arg) << "\"";
+            } else {
+                oss << "\"maxine_gpu_arg\":null";
             }
             oss << "}";
         }
@@ -508,18 +700,19 @@ namespace studiocast::probe {
         rep.nvidia_driver = DetectDriverVersion();
         rep.gpus = DetectGpus();
 
-        // Canonical user-local install root (XDG default):
-        //   ~/.local/share/studiocast/maxine/<SDK>
+        const auto settings = config::LoadSettings();
+
+        // Canonical user-local install root (XDG default)
         const fs::path vfxXdg = util::DefaultVfxRoot();
         const fs::path arXdg = util::DefaultArRoot();
         const fs::path afxXdg = util::DefaultAfxRoot();
 
-        // Optional system-wide installs (NVIDIA docs commonly use /usr/local for VFX/AR).
+        // Optional system-wide installs
         const fs::path vfxSys = "/usr/local/VideoFX";
         const fs::path arSys = "/usr/local/ARSDK";
         const fs::path afxSys = "/usr/local/Audio_Effects_SDK";
 
-        // Env overrides.
+        // Env overrides
         const fs::path vfxEnv = GetEnvPathAny({"STUDIOCAST_VFX_SDK_ROOT"});
         const fs::path arEnv = GetEnvPathAny({"STUDIOCAST_AR_SDK_ROOT"});
         const fs::path afxEnv = GetEnvPathAny({"AFX_SDK_ROOT", "STUDIOCAST_AFX_SDK_ROOT"});
@@ -528,9 +721,14 @@ namespace studiocast::probe {
         const auto arRoot = ResolveRoot(arEnv, "STUDIOCAST_AR_SDK_ROOT", arXdg, arSys);
         const auto afxRoot = ResolveRoot(afxEnv, "AFX_SDK_ROOT", afxXdg, afxSys);
 
+        // Checks
         rep.checks.push_back(CheckDriver(rep.nvidia_driver));
         rep.checks.push_back(CheckMaxineGpuSupport(rep.gpus));
-        rep.checks.push_back(CheckSuggestedGpuArgForFeatureInstalls(rep.gpus));
+
+        // Selection check populates rep.gpu_selection_mode + selected_gpu_*
+        rep.checks.push_back(CheckGpuSelectionPolicy(settings, &rep));
+
+        rep.checks.push_back(CheckSuggestedGpuArgsForFeatureInstalls(rep.gpus));
 
         // VFX
         {
@@ -578,11 +776,12 @@ namespace studiocast::probe {
                 rep.notes.push_back("Default user-local Maxine base dir: " + base.string());
             }
         }
-        rep.notes.push_back("Overrides: STUDIOCAST_VFX_SDK_ROOT, STUDIOCAST_AR_SDK_ROOT, AFX_SDK_ROOT.");
+        rep.notes.push_back("GPU policy file: " + config::SettingsPath().string());
+        rep.notes.push_back(
+            "Override GPU policy via env: STUDIOCAST_GPU_MODE, STUDIOCAST_GPU_UUID, STUDIOCAST_GPU_INDEX.");
+        rep.notes.push_back("Overrides for SDK roots: STUDIOCAST_VFX_SDK_ROOT, STUDIOCAST_AR_SDK_ROOT, AFX_SDK_ROOT.");
         rep.notes.push_back("VFX/AR features are installed via features/install_feature.sh (NGC_CLI_API_KEY).");
         rep.notes.push_back("AFX features are downloaded via features/download_features.sh (NGC_API_KEY).");
-        rep.notes.push_back(
-            "Maxine Linux SDK docs describe server-side optimization; desktop use is not officially supported.");
 
         return rep;
     }

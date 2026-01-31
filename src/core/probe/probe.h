@@ -15,8 +15,12 @@ namespace studiocast::probe {
     };
 
     struct GpuInfo {
+        int index = -1;              // nvidia-smi index
+        std::string uuid;            // stable identifier
         std::string name;
-        std::optional<std::string> compute_cap;  // e.g. "8.6"
+        std::optional<std::string> compute_cap;          // e.g. "7.5"
+        bool likely_supported = false;                   // heuristic (>= 7.5)
+        std::optional<std::string> maxine_gpu_arg;       // e.g. "t4", "a10"
     };
 
     struct CheckResult {
@@ -35,6 +39,11 @@ namespace studiocast::probe {
 
         std::optional<Version> nvidia_driver;
         std::vector<GpuInfo> gpus;
+
+        // What StudioCast would target (based on settings + detected GPUs)
+        std::string gpu_selection_mode;                 // "auto" | "index" | "uuid"
+        std::optional<int> selected_gpu_index;          // nvidia-smi index
+        std::string selected_gpu_uuid;                  // if known
 
         std::vector<CheckResult> checks;
         std::vector<std::string> notes;

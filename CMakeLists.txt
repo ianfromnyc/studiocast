@@ -87,6 +87,8 @@ add_executable(studiocast
         src/gui/pages/video_page.h
         src/gui/pages/video_page.cpp
         src/core/probe/probe.h
+        src/core/config/settings.h
+        src/core/config/settings.cpp
 )
 
 target_link_libraries(studiocast PRIVATE
