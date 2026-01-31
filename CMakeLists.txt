@@ -6,13 +6,13 @@ project(StudioCast
         LANGUAGES CXX
 )
 
-foreach(var IN ITEMS CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH)
-    if(DEFINED ENV{${var}} AND NOT "$ENV{${var}}" STREQUAL "")
+foreach (var IN ITEMS CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH)
+    if (DEFINED ENV{${var}} AND NOT "$ENV{${var}}" STREQUAL "")
         message(WARNING
                 "${var} is set to '$ENV{${var}}'. This can break the C++ toolchain by forcing mismatched headers. "
                 "Consider unsetting it for StudioCast builds.")
-    endif()
-endforeach()
+    endif ()
+endforeach ()
 
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -57,6 +57,12 @@ add_library(studiocast_core
         src/core/util/xdg.cpp
         src/core/maxine/gpu.h
         src/core/maxine/gpu.cpp
+        src/core/audio/pulse/pactl.h
+        src/core/audio/pulse/pactl.cpp
+        src/core/audio/virtual_mic_state.h
+        src/core/audio/virtual_mic_state.cpp
+        src/core/audio/virtual_mic.h
+        src/core/audio/virtual_mic.cpp
 )
 
 set_target_properties(studiocast_core PROPERTIES
@@ -109,7 +115,7 @@ set_target_properties(studiocast PROPERTIES
 )
 
 # -----------------------------
-# Probe tool (Phase 1)
+# Probe tool 
 # -----------------------------
 add_executable(studiocast-probe
         src/tools/studiocast_probe_main.cpp
@@ -132,7 +138,7 @@ studiocast_set_project_warnings(studiocast-probe)
 studiocast_enable_sanitizers(studiocast-probe)
 
 # -----------------------------
-# Maxine helper tool (Phase 1)
+# Maxine helper tool 
 # -----------------------------
 add_executable(studiocast-maxine
         src/tools/studiocast_maxine_main.cpp
@@ -150,6 +156,32 @@ target_include_directories(studiocast-maxine PRIVATE
 studiocast_set_project_warnings(studiocast-maxine)
 studiocast_enable_sanitizers(studiocast-maxine)
 
+# -----------------------------
+# Audio tool 
+# -----------------------------
+add_executable(studiocast-audio
+        src/tools/studiocast_audio_main.cpp
+)
+
+target_link_libraries(studiocast-audio PRIVATE studiocast_core)
+
+target_include_directories(studiocast-audio PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${STUDIOCAST_GENERATED_DIR}"
+)
+
+studiocast_set_project_warnings(studiocast-audio)
+studiocast_enable_sanitizers(studiocast-audio)
+
+set_target_properties(studiocast-audio PROPERTIES
+        AUTOMOC OFF
+        AUTOUIC OFF
+        AUTORCC OFF
+)
+
+# -----------------------------
+# Install step
+# -----------------------------
 include(GNUInstallDirs)
 install(TARGETS studiocast studiocast-probe studiocast-maxine
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"

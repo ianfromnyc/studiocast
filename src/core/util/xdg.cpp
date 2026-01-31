@@ -78,4 +78,17 @@ namespace studiocast::util {
         return base / "Audio_Effects_SDK";
     }
 
+    fs::path XdgStateHome() {
+        if (auto p = GetEnvPath("XDG_STATE_HOME"); !p.empty()) return p;
+
+        const auto home = HomeDir();
+        if (home.empty()) return {};
+        return home / ".local" / "state";
+    }
+
+    fs::path StudioCastStateDir() {
+        const auto stateHome = XdgStateHome();
+        if (stateHome.empty()) return {};
+        return stateHome / "studiocast";
+    }
 }  // namespace studiocast::util

@@ -17,4 +17,7 @@ namespace studiocast::util {
     std::filesystem::path DefaultArRoot();   // .../maxine/ARSDK
     std::filesystem::path DefaultAfxRoot();  // .../maxine/Audio_Effects_SDK
 
+    std::filesystem::path XdgStateHome();
+    std::filesystem::path StudioCastStateDir();
+
 }  // namespace studiocast::util
