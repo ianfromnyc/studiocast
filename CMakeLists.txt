@@ -63,6 +63,12 @@ add_library(studiocast_core
         src/core/audio/virtual_mic_state.cpp
         src/core/audio/virtual_mic.h
         src/core/audio/virtual_mic.cpp
+        src/core/video/v4l2loopback.h
+        src/core/video/v4l2loopback.cpp
+        src/core/video/v4l2_writer.h
+        src/core/video/v4l2_writer.cpp
+        src/core/video/pattern.h
+        src/core/video/pattern.cpp
 )
 
 set_target_properties(studiocast_core PROPERTIES
@@ -180,9 +186,33 @@ set_target_properties(studiocast-audio PROPERTIES
 )
 
 # -----------------------------
+# Video tool
+# -----------------------------
+add_executable(studiocast-video
+        src/tools/studiocast_video_main.cpp
+)
+
+target_link_libraries(studiocast-video PRIVATE studiocast_core)
+
+target_include_directories(studiocast-video PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${STUDIOCAST_GENERATED_DIR}"
+)
+
+studiocast_set_project_warnings(studiocast-video)
+studiocast_enable_sanitizers(studiocast-video)
+
+set_target_properties(studiocast-video PROPERTIES
+        AUTOMOC OFF
+        AUTOUIC OFF
+        AUTORCC OFF
+)
+
+
+# -----------------------------
 # Install step
 # -----------------------------
 include(GNUInstallDirs)
-install(TARGETS studiocast studiocast-probe studiocast-maxine
+install(TARGETS studiocast studiocast-probe studiocast-maxine studiocast-audio studiocast-video
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )

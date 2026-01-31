@@ -1,80 +1,65 @@
 #include "video_page.h"
 
-#include <QCheckBox>
-#include <QComboBox>
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QSlider>
+#include <QPlainTextEdit>
+#include <QPushButton>
 #include <QVBoxLayout>
+
+#include "core/video/v4l2loopback.h"
 
 namespace studiocast::gui {
 
-VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
-  auto* root = new QVBoxLayout(this);
-  root->setSpacing(12);
+    VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
+        auto* root = new QVBoxLayout(this);
+        root->setSpacing(12);
 
-  auto* title = new QLabel("Camera", this);
-  title->setStyleSheet("font-size: 20px; font-weight: 600;");
-  root->addWidget(title);
+        auto* title = new QLabel("Camera", this);
+        title->setStyleSheet("font-size: 20px; font-weight: 600;");
+        root->addWidget(title);
 
-  auto* topRow = new QHBoxLayout();
+        auto* box = new QGroupBox("Virtual Camera (v4l2loopback)", this);
+        auto* boxLayout = new QVBoxLayout(box);
 
-  // Left side: controls
-  auto* controlsCol = new QVBoxLayout();
+        auto* btnRow = new QHBoxLayout();
+        refreshBtn_ = new QPushButton("Refresh", box);
+        copyCmdBtn_ = new QPushButton("Copy suggested command", box);
 
-  auto* inputBox = new QGroupBox("Input", this);
-  auto* inputLayout = new QHBoxLayout(inputBox);
-  inputLayout->addWidget(new QLabel("Device:", inputBox));
+        btnRow->addWidget(refreshBtn_);
+        btnRow->addWidget(copyCmdBtn_);
+        btnRow->addStretch(1);
+        boxLayout->addLayout(btnRow);
 
-  auto* cameras = new QComboBox(inputBox);
-  cameras->addItem("Default webcam (placeholder)");
-  cameras->addItem("External cam (placeholder)");
-  inputLayout->addWidget(cameras, 1);
-  controlsCol->addWidget(inputBox);
+        statusText_ = new QPlainTextEdit(box);
+        statusText_->setReadOnly(true);
+        statusText_->setMinimumHeight(260);
+        boxLayout->addWidget(statusText_, 1);
 
-  auto* effectsBox = new QGroupBox("Effects (placeholders)", this);
-  auto* effectsLayout = new QVBoxLayout(effectsBox);
+        root->addWidget(box);
+        root->addStretch(1);
 
-  effectsLayout->addWidget(new QCheckBox("Virtual Background", effectsBox));
-  effectsLayout->addWidget(new QCheckBox("Background Blur", effectsBox));
-  effectsLayout->addWidget(new QCheckBox("Auto Frame", effectsBox));
-  effectsLayout->addWidget(new QCheckBox("Eye Contact", effectsBox));
-  effectsLayout->addWidget(new QCheckBox("Video Noise Removal", effectsBox));
-  effectsLayout->addWidget(new QCheckBox("Virtual Key Light", effectsBox));
+        connect(refreshBtn_, &QPushButton::clicked, this, &VideoPage::Refresh);
+        connect(copyCmdBtn_, &QPushButton::clicked, this, &VideoPage::CopySuggestedCommand);
 
-  auto* strengthRow = new QHBoxLayout();
-  strengthRow->addWidget(new QLabel("Strength:", effectsBox));
-  auto* strength = new QSlider(Qt::Horizontal, effectsBox);
-  strength->setRange(0, 100);
-  strength->setValue(60);
-  strengthRow->addWidget(strength, 1);
-  effectsLayout->addLayout(strengthRow);
+        Refresh();
+    }
 
-  controlsCol->addWidget(effectsBox);
+    void VideoPage::Refresh() {
+        const auto rep = studiocast::video::ProbeLoopback();
+        statusText_->setPlainText(QString::fromStdString(rep.ToText()));
 
-  auto* outputBox = new QGroupBox("Output", this);
-  auto* outputLayout = new QVBoxLayout(outputBox);
-  outputLayout->addWidget(new QLabel(
-      "Phase 0: virtual camera not implemented.\n"
-      "Later: v4l2loopback device \u201cStudioCast Camera\u201d.",
-      outputBox));
-  controlsCol->addWidget(outputBox);
-  controlsCol->addStretch(1);
+        suggestedCmd_ = QString::fromStdString(rep.suggested_modprobe_cmd);
+        copyCmdBtn_->setEnabled(!suggestedCmd_.isEmpty());
+    }
 
-  // Right side: preview placeholder
-  auto* previewBox = new QGroupBox("Preview", this);
-  auto* previewLayout = new QVBoxLayout(previewBox);
-  auto* preview = new QLabel("Preview will appear here (Phase 0 placeholder)", previewBox);
-  preview->setMinimumSize(480, 360);
-  preview->setAlignment(Qt::AlignCenter);
-  preview->setStyleSheet("border: 1px solid rgba(255,255,255,0.2);");
-  previewLayout->addWidget(preview, 1);
-
-  topRow->addLayout(controlsCol, 1);
-  topRow->addWidget(previewBox, 1);
-
-  root->addLayout(topRow, 1);
-}
+    void VideoPage::CopySuggestedCommand() {
+        if (suggestedCmd_.isEmpty()) return;
+        if (auto* cb = QGuiApplication::clipboard()) {
+            cb->setText(suggestedCmd_);
+        }
+    }
 
 }  // namespace studiocast::gui

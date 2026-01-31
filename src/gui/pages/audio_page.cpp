@@ -248,7 +248,7 @@ namespace studiocast::gui {
         int activeIdx = -1;
         int firstAvailable = -1;
 
-        for (int i = 0; i < static_cast<int>(info->ports.size()); ++i) {
+        for (std::size_t i = 0; i < info->ports.size(); ++i) {
             const auto &p = info->ports[i];
 
             std::string label = p.description.empty() ? p.name : p.description;
