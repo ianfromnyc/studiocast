@@ -8,12 +8,15 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "core/maxine/gpu.h"
 #include "core/util/exec.h"
 #include "core/util/fs.h"
 #include "core/util/os_release.h"
 #include "core/util/strings.h"
+#include "core/util/xdg.h"
 #include "studiocast/version.h"
 
 namespace fs = std::filesystem;
@@ -38,6 +41,8 @@ namespace studiocast::probe {
         }
 
         std::optional<Version> ParseVersionLike(const std::string &s) {
+            // Find first token that looks like digits[.digits][.digits]
+            // e.g. "580.105.08" or "570.26"
             std::string token;
             for (size_t i = 0; i < s.size(); ++i) {
                 if (!std::isdigit(static_cast<unsigned char>(s[i]))) continue;
@@ -75,12 +80,12 @@ namespace studiocast::probe {
         }
 
         std::optional<Version> DetectDriverVersion() {
-            // 1) Direct when kernel module is loaded
+            // 1) Direct when kernel module is loaded.
             if (auto content = util::ReadTextFile("/proc/driver/nvidia/version")) {
                 if (auto v = ParseVersionLike(*content)) return v;
             }
 
-            // 2) Fallback to nvidia-smi
+            // 2) Fallback to nvidia-smi.
             auto out = util::ExecCapture(
                 "nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null");
             if (out.exit_code == 0) {
@@ -115,7 +120,6 @@ namespace studiocast::probe {
 
         std::vector<GpuInfo> DetectGpus() {
             // Prefer querying compute capability too.
-            // nvidia-smi supports: --query-gpu=name,compute_cap (newer drivers) :contentReference[oaicite:1]{index=1}
             auto out = util::ExecCapture(
                 "nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null");
 
@@ -167,6 +171,65 @@ namespace studiocast::probe {
             return {};
         }
 
+        struct RootSelection {
+            fs::path root;
+            std::string chosen_from; // "env", "xdg", "system", "default"
+            fs::path xdg_candidate;
+            fs::path system_candidate;
+            std::string env_hint;
+        };
+
+        RootSelection ResolveRoot(const fs::path &env,
+                                  const std::string &envHint,
+                                  const fs::path &xdgCandidate,
+                                  const fs::path &systemCandidate) {
+            RootSelection s;
+            s.env_hint = envHint;
+            s.xdg_candidate = xdgCandidate;
+            s.system_candidate = systemCandidate;
+
+            if (!env.empty()) {
+                s.root = env;
+                s.chosen_from = "env";
+                return s;
+            }
+            if (!xdgCandidate.empty() && fs::exists(xdgCandidate)) {
+                s.root = xdgCandidate;
+                s.chosen_from = "xdg";
+                return s;
+            }
+            if (!systemCandidate.empty() && fs::exists(systemCandidate)) {
+                s.root = systemCandidate;
+                s.chosen_from = "system";
+                return s;
+            }
+
+            // Default to the XDG candidate even if it doesn't exist (so we show users the expected path).
+            s.root = xdgCandidate;
+            s.chosen_from = "default";
+            return s;
+        }
+
+        std::string RootExplain(const RootSelection &s) {
+            std::ostringstream oss;
+
+            if (s.chosen_from == "default") {
+                oss << " (default user-local path)";
+            } else if (s.chosen_from == "xdg") {
+                oss << " (found user-local install)";
+            } else if (s.chosen_from == "system") {
+                oss << " (found system install)";
+            } else if (s.chosen_from == "env") {
+                oss << " (from env override)";
+            }
+
+            if (!s.system_candidate.empty() && s.system_candidate != s.root) {
+                oss << " (also checked " << s.system_candidate.string() << ")";
+            }
+
+            return oss.str();
+        }
+
         CheckResult CheckDriver(const std::optional<Version> &v) {
             CheckResult r;
             r.name = "NVIDIA driver >= 570.26 (Maxine requirement)";
@@ -180,8 +243,8 @@ namespace studiocast::probe {
 
             r.ok = MeetsRequiredDriver(*v);
             std::ostringstream oss;
-            oss << "Detected: " << v->original << " | Required: " << kRequiredDriverMajor << "." <<
-                    kRequiredDriverMinor;
+            oss << "Detected: " << v->original << " | Required: " << kRequiredDriverMajor << "."
+                    << kRequiredDriverMinor;
             r.details = oss.str();
             return r;
         }
@@ -225,6 +288,25 @@ namespace studiocast::probe {
                         "Detected: " + detected.str() +
                         " | Maxine Linux SDKs require Tensor Core GPUs (Turing/Ampere/Ada/Hopper/Blackwell).";
             }
+            return r;
+        }
+
+        CheckResult CheckSuggestedGpuArgForFeatureInstalls(const std::vector<GpuInfo> &gpus) {
+            CheckResult r;
+            r.name = "Suggested --gpu for VFX/AR feature install scripts";
+            r.skipped = true;
+            r.details = "No compute capability available.";
+
+            for (const auto &g: gpus) {
+                if (!g.compute_cap) continue;
+                if (auto arg = maxine::MaxineGpuArgFromComputeCap(*g.compute_cap)) {
+                    r.skipped = false;
+                    r.ok = true;
+                    r.details = "Detected compute_cap " + *g.compute_cap + " -> use --gpu " + *arg;
+                    return r;
+                }
+            }
+
             return r;
         }
 
@@ -426,39 +508,79 @@ namespace studiocast::probe {
         rep.nvidia_driver = DetectDriverVersion();
         rep.gpus = DetectGpus();
 
-        // Roots:
-        // - VFX/AR docs commonly use /usr/local/... but for dev we allow overrides.
-        fs::path vfxRoot = GetEnvPathAny({"STUDIOCAST_VFX_SDK_ROOT"});
-        if (vfxRoot.empty()) vfxRoot = "/usr/local/VideoFX";
+        // Canonical user-local install root (XDG default):
+        //   ~/.local/share/studiocast/maxine/<SDK>
+        const fs::path vfxXdg = util::DefaultVfxRoot();
+        const fs::path arXdg = util::DefaultArRoot();
+        const fs::path afxXdg = util::DefaultAfxRoot();
 
-        fs::path arRoot = GetEnvPathAny({"STUDIOCAST_AR_SDK_ROOT"});
-        if (arRoot.empty()) arRoot = "/usr/local/ARSDK";
+        // Optional system-wide installs (NVIDIA docs commonly use /usr/local for VFX/AR).
+        const fs::path vfxSys = "/usr/local/VideoFX";
+        const fs::path arSys = "/usr/local/ARSDK";
+        const fs::path afxSys = "/usr/local/Audio_Effects_SDK";
 
-        fs::path afxRoot = GetEnvPathAny({"AFX_SDK_ROOT", "STUDIOCAST_AFX_SDK_ROOT"});
+        // Env overrides.
+        const fs::path vfxEnv = GetEnvPathAny({"STUDIOCAST_VFX_SDK_ROOT"});
+        const fs::path arEnv = GetEnvPathAny({"STUDIOCAST_AR_SDK_ROOT"});
+        const fs::path afxEnv = GetEnvPathAny({"AFX_SDK_ROOT", "STUDIOCAST_AFX_SDK_ROOT"});
+
+        const auto vfxRoot = ResolveRoot(vfxEnv, "STUDIOCAST_VFX_SDK_ROOT", vfxXdg, vfxSys);
+        const auto arRoot = ResolveRoot(arEnv, "STUDIOCAST_AR_SDK_ROOT", arXdg, arSys);
+        const auto afxRoot = ResolveRoot(afxEnv, "AFX_SDK_ROOT", afxXdg, afxSys);
 
         rep.checks.push_back(CheckDriver(rep.nvidia_driver));
         rep.checks.push_back(CheckMaxineGpuSupport(rep.gpus));
+        rep.checks.push_back(CheckSuggestedGpuArgForFeatureInstalls(rep.gpus));
 
-        rep.checks.push_back(CheckSdkCorePresent(
-            "Maxine VFX SDK core present", vfxRoot, "STUDIOCAST_VFX_SDK_ROOT"));
-        rep.checks.push_back(CheckInstallScript(
-            "VFX features install script present (features/install_feature.sh)",
-            vfxRoot, fs::path("features") / "install_feature.sh", "STUDIOCAST_VFX_SDK_ROOT"));
+        // VFX
+        {
+            auto core = CheckSdkCorePresent("Maxine VFX SDK core present", vfxRoot.root, vfxRoot.env_hint.c_str());
+            if (!core.ok && !core.skipped) core.details += RootExplain(vfxRoot);
+            rep.checks.push_back(core);
 
-        rep.checks.push_back(CheckSdkCorePresent(
-            "Maxine AR SDK core present", arRoot, "STUDIOCAST_AR_SDK_ROOT"));
-        rep.checks.push_back(CheckInstallScript(
-            "AR features install script present (features/install_feature.sh)",
-            arRoot, fs::path("features") / "install_feature.sh", "STUDIOCAST_AR_SDK_ROOT"));
+            rep.checks.push_back(CheckInstallScript(
+                "VFX features install script present (features/install_feature.sh)",
+                vfxRoot.root,
+                fs::path("features") / "install_feature.sh",
+                vfxRoot.env_hint.c_str()));
+        }
 
-        rep.checks.push_back(CheckSdkCorePresent(
-            "Maxine AFX SDK root set", afxRoot, "AFX_SDK_ROOT"));
-        rep.checks.push_back(CheckInstallScript(
-            "AFX features directory present (features/)",
-            afxRoot, fs::path("features"), "AFX_SDK_ROOT"));
+        // AR
+        {
+            auto core = CheckSdkCorePresent("Maxine AR SDK core present", arRoot.root, arRoot.env_hint.c_str());
+            if (!core.ok && !core.skipped) core.details += RootExplain(arRoot);
+            rep.checks.push_back(core);
 
-        rep.notes.push_back(
-            "Maxine SDKs require feature/model packages (not included in core). Install via the included scripts (NGC API key required).");
+            rep.checks.push_back(CheckInstallScript(
+                "AR features install script present (features/install_feature.sh)",
+                arRoot.root,
+                fs::path("features") / "install_feature.sh",
+                arRoot.env_hint.c_str()));
+        }
+
+        // AFX
+        {
+            auto core = CheckSdkCorePresent("Maxine AFX SDK core present", afxRoot.root, afxRoot.env_hint.c_str());
+            if (!core.ok && !core.skipped) core.details += RootExplain(afxRoot);
+            rep.checks.push_back(core);
+
+            rep.checks.push_back(CheckInstallScript(
+                "AFX feature download script present (features/download_features.sh)",
+                afxRoot.root,
+                fs::path("features") / "download_features.sh",
+                afxRoot.env_hint.c_str()));
+        }
+
+        // Notes
+        {
+            const auto base = util::StudioCastMaxineDir();
+            if (!base.empty()) {
+                rep.notes.push_back("Default user-local Maxine base dir: " + base.string());
+            }
+        }
+        rep.notes.push_back("Overrides: STUDIOCAST_VFX_SDK_ROOT, STUDIOCAST_AR_SDK_ROOT, AFX_SDK_ROOT.");
+        rep.notes.push_back("VFX/AR features are installed via features/install_feature.sh (NGC_CLI_API_KEY).");
+        rep.notes.push_back("AFX features are downloaded via features/download_features.sh (NGC_API_KEY).");
         rep.notes.push_back(
             "Maxine Linux SDK docs describe server-side optimization; desktop use is not officially supported.");
 

@@ -53,6 +53,10 @@ add_library(studiocast_core
         src/core/util/os_release.cpp
         src/core/util/strings.h
         src/core/util/strings.cpp
+        src/core/util/xdg.h
+        src/core/util/xdg.cpp
+        src/core/maxine/gpu.h
+        src/core/maxine/gpu.cpp
 )
 
 set_target_properties(studiocast_core PROPERTIES
@@ -125,7 +129,26 @@ target_include_directories(studiocast-probe PRIVATE
 studiocast_set_project_warnings(studiocast-probe)
 studiocast_enable_sanitizers(studiocast-probe)
 
+# -----------------------------
+# Maxine helper tool (Phase 1)
+# -----------------------------
+add_executable(studiocast-maxine
+        src/tools/studiocast_maxine_main.cpp
+)
+
+set_target_properties(studiocast-maxine PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+
+target_link_libraries(studiocast-maxine PRIVATE studiocast_core)
+
+target_include_directories(studiocast-maxine PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${STUDIOCAST_GENERATED_DIR}"
+)
+
+studiocast_set_project_warnings(studiocast-maxine)
+studiocast_enable_sanitizers(studiocast-maxine)
+
 include(GNUInstallDirs)
-install(TARGETS studiocast studiocast-probe
+install(TARGETS studiocast studiocast-probe studiocast-maxine
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
