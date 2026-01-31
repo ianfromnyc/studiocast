@@ -2,6 +2,7 @@
 
 #include <sys/utsname.h>
 
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
@@ -18,347 +19,449 @@
 namespace fs = std::filesystem;
 
 namespace studiocast::probe {
-namespace {
+    namespace {
+        constexpr int kRequiredDriverMajor = 570;
+        constexpr int kRequiredDriverMinor = 26;
 
-constexpr int kRequiredDriverMajor = 570;
-constexpr int kRequiredDriverMinor = 26;
+        // Heuristic: Maxine Linux docs require Tensor Core GPUs (Turing+).
+        // Compute capability heuristic: treat >= 7.5 as "likely supported".
+        // (Note: some Turing GTX parts lack Tensor Cores; this is best-effort.)
+        constexpr int kMinCcMajor = 7;
+        constexpr int kMinCcMinor = 5;
 
-std::string KernelString() {
-  utsname u{};
-  if (uname(&u) != 0) return "unknown";
-  std::ostringstream oss;
-  oss << u.sysname << " " << u.release << " (" << u.machine << ")";
-  return oss.str();
-}
-
-std::optional<Version> ParseVersionLike(const std::string& s) {
-  // Find first token that looks like digits[.digits][.digits]
-  // e.g. "570.26" or "570.26.02"
-  std::string token;
-  for (size_t i = 0; i < s.size(); ++i) {
-    if (!std::isdigit(static_cast<unsigned char>(s[i]))) continue;
-    size_t j = i;
-    while (j < s.size()) {
-      char c = s[j];
-      if (std::isdigit(static_cast<unsigned char>(c)) || c == '.') {
-        ++j;
-      } else {
-        break;
-      }
-    }
-    token = s.substr(i, j - i);
-    break;
-  }
-  if (token.empty()) return std::nullopt;
-
-  std::vector<std::string> parts = util::Split(token, '.');
-  if (parts.size() < 2) return std::nullopt;
-
-  Version v;
-  v.original = util::TrimCopy(token);
-  v.major = std::atoi(parts[0].c_str());
-  v.minor = std::atoi(parts[1].c_str());
-  if (parts.size() >= 3) {
-    v.patch = std::atoi(parts[2].c_str());
-    v.has_patch = true;
-  }
-  return v;
-}
-
-bool MeetsRequiredDriver(const Version& v) {
-  if (v.major != kRequiredDriverMajor) return v.major > kRequiredDriverMajor;
-  return v.minor >= kRequiredDriverMinor;
-}
-
-std::optional<Version> DetectDriverVersion() {
-  // 1) /proc/driver/nvidia/version is the most direct when the kernel module is loaded.
-  if (auto content = util::ReadTextFile("/proc/driver/nvidia/version")) {
-    if (auto v = ParseVersionLike(*content)) return v;
-  }
-
-  // 2) fallback to nvidia-smi (if installed and in PATH)
-  auto out = util::ExecCapture("nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null");
-  if (out.exit_code == 0) {
-    const std::string line = util::FirstNonEmptyLine(out.stdout_str);
-    if (!line.empty()) {
-      if (auto v = ParseVersionLike(line)) return v;
-    }
-  }
-
-  return std::nullopt;
-}
-
-std::vector<std::string> DetectGpus() {
-  auto out = util::ExecCapture("nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null");
-  if (out.exit_code != 0) return {};
-
-  std::vector<std::string> lines = util::SplitLines(out.stdout_str);
-  std::vector<std::string> gpus;
-  for (auto& l : lines) {
-    auto t = util::TrimCopy(l);
-    if (!t.empty()) gpus.push_back(t);
-  }
-  return gpus;
-}
-
-fs::path GetEnvPathAny(std::initializer_list<const char*> names) {
-  for (const char* n : names) {
-    const char* v = std::getenv(n);
-    if (v && *v) return fs::path(v);
-  }
-  return {};
-}
-
-CheckResult CheckDriver(const std::optional<Version>& v) {
-  CheckResult r;
-  r.name = "NVIDIA driver >= 570.26 (Maxine requirement)";
-  if (!v) {
-    r.ok = false;
-    r.details = "Driver version not detected (missing driver, kernel module not loaded, or nvidia-smi not available).";
-    return r;
-  }
-
-  r.ok = MeetsRequiredDriver(*v);
-  std::ostringstream oss;
-  oss << "Detected: " << v->original << " | Required: " << kRequiredDriverMajor << "." << kRequiredDriverMinor;
-  r.details = oss.str();
-  return r;
-}
-
-CheckResult CheckVfxCore(const fs::path& root) {
-  CheckResult r;
-  r.name = "Maxine VFX SDK core present (/usr/local/VideoFX)";
-  if (root.empty()) {
-    r.ok = false;
-    r.details = "Root path not set.";
-    return r;
-  }
-  if (!fs::exists(root)) {
-    r.ok = false;
-    r.details = "Not found: " + root.string();
-    return r;
-  }
-  r.ok = true;
-  r.details = "Found: " + root.string();
-  return r;
-}
-
-CheckResult CheckVfxInstallScript(const fs::path& root) {
-  CheckResult r;
-  r.name = "VFX features install script present (features/install_feature.sh)";
-  const fs::path script = root / "features" / "install_feature.sh";
-  if (fs::exists(script)) {
-    r.ok = true;
-    r.details = "Found: " + script.string();
-  } else {
-    r.ok = false;
-    r.details = "Missing: " + script.string();
-  }
-  return r;
-}
-
-CheckResult CheckArCore(const fs::path& root) {
-  CheckResult r;
-  r.name = "Maxine AR SDK core present (/usr/local/ARSDK)";
-  if (root.empty()) {
-    r.ok = false;
-    r.details = "Root path not set.";
-    return r;
-  }
-  if (!fs::exists(root)) {
-    r.ok = false;
-    r.details = "Not found: " + root.string();
-    return r;
-  }
-  r.ok = true;
-  r.details = "Found: " + root.string();
-  return r;
-}
-
-CheckResult CheckArInstallScript(const fs::path& root) {
-  CheckResult r;
-  r.name = "AR features install script present (features/install_feature.sh)";
-  const fs::path script = root / "features" / "install_feature.sh";
-  if (fs::exists(script)) {
-    r.ok = true;
-    r.details = "Found: " + script.string();
-  } else {
-    r.ok = false;
-    r.details = "Missing: " + script.string();
-  }
-  return r;
-}
-
-CheckResult CheckAfxRoot(const fs::path& root) {
-  CheckResult r;
-  r.name = "Maxine AFX SDK root set (AFX_SDK_ROOT)";
-  if (root.empty()) {
-    r.ok = false;
-    r.details = "AFX_SDK_ROOT not set. Extract AFX core package somewhere and set AFX_SDK_ROOT to that folder.";
-    return r;
-  }
-  if (!fs::exists(root)) {
-    r.ok = false;
-    r.details = "AFX_SDK_ROOT points to missing path: " + root.string();
-    return r;
-  }
-  r.ok = true;
-  r.details = "AFX_SDK_ROOT=" + root.string();
-  return r;
-}
-
-CheckResult CheckAfxFeaturesDir(const fs::path& root) {
-  CheckResult r;
-  r.name = "AFX features directory present (features/)";
-  const fs::path features = root / "features";
-  if (!root.empty() && fs::exists(features) && fs::is_directory(features)) {
-    r.ok = true;
-    r.details = "Found: " + features.string();
-  } else {
-    r.ok = false;
-    r.details = "Missing: " + features.string();
-  }
-  return r;
-}
-
-std::string JsonEscape(const std::string& s) {
-  std::string out;
-  out.reserve(s.size() + 8);
-  for (char c : s) {
-    switch (c) {
-      case '\\': out += "\\\\"; break;
-      case '"': out += "\\\""; break;
-      case '\n': out += "\\n"; break;
-      case '\r': out += "\\r"; break;
-      case '\t': out += "\\t"; break;
-      default:
-        if (static_cast<unsigned char>(c) < 0x20) {
-          out += "?";
-        } else {
-          out += c;
+        std::string KernelString() {
+            utsname u{};
+            if (uname(&u) != 0) return "unknown";
+            std::ostringstream oss;
+            oss << u.sysname << " " << u.release << " (" << u.machine << ")";
+            return oss.str();
         }
+
+        std::optional<Version> ParseVersionLike(const std::string &s) {
+            std::string token;
+            for (size_t i = 0; i < s.size(); ++i) {
+                if (!std::isdigit(static_cast<unsigned char>(s[i]))) continue;
+                size_t j = i;
+                while (j < s.size()) {
+                    const char c = s[j];
+                    if (std::isdigit(static_cast<unsigned char>(c)) || c == '.') {
+                        ++j;
+                    } else {
+                        break;
+                    }
+                }
+                token = s.substr(i, j - i);
+                break;
+            }
+            if (token.empty()) return std::nullopt;
+
+            const auto parts = util::Split(token, '.');
+            if (parts.size() < 2) return std::nullopt;
+
+            Version v;
+            v.original = util::TrimCopy(token);
+            v.major = std::atoi(parts[0].c_str());
+            v.minor = std::atoi(parts[1].c_str());
+            if (parts.size() >= 3) {
+                v.patch = std::atoi(parts[2].c_str());
+                v.has_patch = true;
+            }
+            return v;
+        }
+
+        bool MeetsRequiredDriver(const Version &v) {
+            if (v.major != kRequiredDriverMajor) return v.major > kRequiredDriverMajor;
+            return v.minor >= kRequiredDriverMinor;
+        }
+
+        std::optional<Version> DetectDriverVersion() {
+            // 1) Direct when kernel module is loaded
+            if (auto content = util::ReadTextFile("/proc/driver/nvidia/version")) {
+                if (auto v = ParseVersionLike(*content)) return v;
+            }
+
+            // 2) Fallback to nvidia-smi
+            auto out = util::ExecCapture(
+                "nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null");
+            if (out.exit_code == 0) {
+                const std::string line = util::FirstNonEmptyLine(out.stdout_str);
+                if (!line.empty()) {
+                    if (auto v = ParseVersionLike(line)) return v;
+                }
+            }
+
+            return std::nullopt;
+        }
+
+        std::optional<std::pair<int, int> > ParseComputeCap(const std::string &s) {
+            const auto t = util::TrimCopy(s);
+            const auto parts = util::Split(t, '.');
+            if (parts.size() < 2) return std::nullopt;
+
+            const int major = std::atoi(parts[0].c_str());
+            const int minor = std::atoi(parts[1].c_str());
+            return std::make_pair(major, minor);
+        }
+
+        bool LikelyMeetsTensorCoreRequirement(const std::string &compute_cap_str) {
+            auto cc = ParseComputeCap(compute_cap_str);
+            if (!cc) return false;
+
+            const auto [maj, min] = *cc;
+            if (maj > kMinCcMajor) return true;
+            if (maj < kMinCcMajor) return false;
+            return min >= kMinCcMinor;
+        }
+
+        std::vector<GpuInfo> DetectGpus() {
+            // Prefer querying compute capability too.
+            // nvidia-smi supports: --query-gpu=name,compute_cap (newer drivers) :contentReference[oaicite:1]{index=1}
+            auto out = util::ExecCapture(
+                "nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader 2>/dev/null");
+
+            std::vector<GpuInfo> gpus;
+
+            if (out.exit_code == 0) {
+                for (const auto &lineRaw: util::SplitLines(out.stdout_str)) {
+                    const auto line = util::TrimCopy(lineRaw);
+                    if (line.empty()) continue;
+
+                    // Split on last comma: "<name>, <compute_cap>"
+                    const auto pos = line.rfind(',');
+                    if (pos == std::string::npos) {
+                        gpus.push_back(GpuInfo{line, std::nullopt});
+                        continue;
+                    }
+
+                    auto name = util::TrimCopy(line.substr(0, pos));
+                    auto cap = util::TrimCopy(line.substr(pos + 1));
+                    if (name.empty()) name = line;
+
+                    if (!cap.empty()) {
+                        gpus.push_back(GpuInfo{name, cap});
+                    } else {
+                        gpus.push_back(GpuInfo{name, std::nullopt});
+                    }
+                }
+
+                if (!gpus.empty()) return gpus;
+            }
+
+            // Fallback: names only
+            out = util::ExecCapture("nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null");
+            if (out.exit_code == 0) {
+                for (const auto &lineRaw: util::SplitLines(out.stdout_str)) {
+                    const auto name = util::TrimCopy(lineRaw);
+                    if (!name.empty()) gpus.push_back(GpuInfo{name, std::nullopt});
+                }
+            }
+
+            return gpus;
+        }
+
+        fs::path GetEnvPathAny(std::initializer_list<const char *> names) {
+            for (const char *n: names) {
+                const char *v = std::getenv(n);
+                if (v && *v) return fs::path(v);
+            }
+            return {};
+        }
+
+        CheckResult CheckDriver(const std::optional<Version> &v) {
+            CheckResult r;
+            r.name = "NVIDIA driver >= 570.26 (Maxine requirement)";
+
+            if (!v) {
+                r.ok = false;
+                r.details =
+                        "Driver version not detected (missing driver, kernel module not loaded, or nvidia-smi not available).";
+                return r;
+            }
+
+            r.ok = MeetsRequiredDriver(*v);
+            std::ostringstream oss;
+            oss << "Detected: " << v->original << " | Required: " << kRequiredDriverMajor << "." <<
+                    kRequiredDriverMinor;
+            r.details = oss.str();
+            return r;
+        }
+
+        CheckResult CheckMaxineGpuSupport(const std::vector<GpuInfo> &gpus) {
+            CheckResult r;
+            r.name = "GPU supports Maxine (Tensor Cores required)";
+
+            if (gpus.empty()) {
+                r.ok = false;
+                r.details = "No NVIDIA GPU detected via nvidia-smi.";
+                return r;
+            }
+
+            bool anyHasCap = false;
+            bool anyLikelyOk = false;
+
+            std::ostringstream detected;
+            for (size_t i = 0; i < gpus.size(); ++i) {
+                if (i) detected << "; ";
+                detected << gpus[i].name;
+                if (gpus[i].compute_cap) {
+                    anyHasCap = true;
+                    detected << " (compute_cap " << *gpus[i].compute_cap << ")";
+                    if (LikelyMeetsTensorCoreRequirement(*gpus[i].compute_cap)) anyLikelyOk = true;
+                }
+            }
+
+            if (!anyHasCap) {
+                r.skipped = true;
+                r.details =
+                        "Could not query compute capability. Try: nvidia-smi --query-gpu=name,compute_cap --format=csv";
+                return r;
+            }
+
+            r.ok = anyLikelyOk;
+            if (r.ok) {
+                r.details = "Detected: " + detected.str();
+            } else {
+                r.details =
+                        "Detected: " + detected.str() +
+                        " | Maxine Linux SDKs require Tensor Core GPUs (Turing/Ampere/Ada/Hopper/Blackwell).";
+            }
+            return r;
+        }
+
+        CheckResult CheckSdkCorePresent(const std::string &label, const fs::path &root, const char *hintEnv) {
+            CheckResult r;
+            r.name = label;
+
+            if (root.empty()) {
+                r.skipped = true;
+                r.details = std::string("Root not set. Set ") + hintEnv + " to your extracted SDK core folder.";
+                return r;
+            }
+
+            if (!fs::exists(root)) {
+                r.ok = false;
+                r.details = "Not found: " + root.string() + " (override with " + hintEnv + ")";
+                return r;
+            }
+
+            r.ok = true;
+            r.details = "Found: " + root.string();
+            return r;
+        }
+
+        CheckResult CheckInstallScript(const std::string &label,
+                                       const fs::path &root,
+                                       const fs::path &relScript,
+                                       const char *hintEnv) {
+            CheckResult r;
+            r.name = label;
+
+            if (root.empty()) {
+                r.skipped = true;
+                r.details = std::string("Skipped (root not set). Set ") + hintEnv + " first.";
+                return r;
+            }
+
+            if (!fs::exists(root)) {
+                r.skipped = true;
+                r.details = "Skipped (SDK core not present at " + root.string() + ").";
+                return r;
+            }
+
+            const fs::path script = root / relScript;
+            if (fs::exists(script)) {
+                r.ok = true;
+                r.details = "Found: " + script.string();
+            } else {
+                r.ok = false;
+                r.details = "Missing: " + script.string();
+            }
+
+            return r;
+        }
+
+        std::string JsonEscape(const std::string &s) {
+            std::string out;
+            out.reserve(s.size() + 8);
+            for (char c: s) {
+                switch (c) {
+                    case '\\': out += "\\\\";
+                        break;
+                    case '"': out += "\\\"";
+                        break;
+                    case '\n': out += "\\n";
+                        break;
+                    case '\r': out += "\\r";
+                        break;
+                    case '\t': out += "\\t";
+                        break;
+                    default:
+                        if (static_cast<unsigned char>(c) < 0x20) {
+                            out += "?";
+                        } else {
+                            out += c;
+                        }
+                }
+            }
+            return out;
+        }
+
+        const char *StatusLabel(const CheckResult &c) {
+            if (c.skipped) return "SKIP";
+            return c.ok ? "OK" : "FAIL";
+        }
+
+        std::string StatusJson(const CheckResult &c) {
+            if (c.skipped) return "skip";
+            return c.ok ? "ok" : "fail";
+        }
+    } // namespace
+
+    bool Report::AllChecksPassed() const {
+        for (const auto &c: checks) {
+            if (!c.ok && !c.skipped) return false;
+        }
+        return true;
     }
-  }
-  return out;
-}
 
-}  // namespace
+    std::string Report::ToText() const {
+        std::ostringstream oss;
+        oss << "StudioCast Probe\n";
+        oss << "Version: " << app_version << " (" << app_git_sha << ")\n\n";
 
-bool Report::AllChecksPassed() const {
-  for (const auto& c : checks) {
-    if (!c.ok) return false;
-  }
-  return true;
-}
+        oss << "System\n";
+        oss << "  OS: " << (os_pretty_name.empty() ? "unknown" : os_pretty_name) << "\n";
+        oss << "  Kernel: " << (kernel.empty() ? "unknown" : kernel) << "\n";
+        if (nvidia_driver) {
+            oss << "  NVIDIA Driver: " << nvidia_driver->original << "\n";
+        } else {
+            oss << "  NVIDIA Driver: not detected\n";
+        }
 
-std::string Report::ToText() const {
-  std::ostringstream oss;
-  oss << "StudioCast Probe\n";
-  oss << "Version: " << app_version << " (" << app_git_sha << ")\n\n";
+        if (!gpus.empty()) {
+            oss << "  GPU(s):\n";
+            for (const auto &g: gpus) {
+                if (g.compute_cap) {
+                    oss << "    - " << g.name << " (compute_cap " << *g.compute_cap << ")\n";
+                } else {
+                    oss << "    - " << g.name << "\n";
+                }
+            }
+        } else {
+            oss << "  GPU(s): none detected via nvidia-smi\n";
+        }
 
-  oss << "System\n";
-  oss << "  OS: " << (os_pretty_name.empty() ? "unknown" : os_pretty_name) << "\n";
-  oss << "  Kernel: " << (kernel.empty() ? "unknown" : kernel) << "\n";
-  if (nvidia_driver) {
-    oss << "  NVIDIA Driver: " << nvidia_driver->original << "\n";
-  } else {
-    oss << "  NVIDIA Driver: not detected\n";
-  }
+        oss << "\nChecks\n";
+        for (const auto &c: checks) {
+            oss << "  [" << StatusLabel(c) << "] " << c.name << "\n";
+            if (!c.details.empty()) oss << "       " << c.details << "\n";
+        }
 
-  if (!gpus.empty()) {
-    oss << "  GPU(s):\n";
-    for (const auto& g : gpus) oss << "    - " << g << "\n";
-  } else {
-    oss << "  GPU(s): none detected via nvidia-smi\n";
-  }
+        if (!notes.empty()) {
+            oss << "\nNotes\n";
+            for (const auto &n: notes) oss << "  - " << n << "\n";
+        }
 
-  oss << "\nChecks\n";
-  for (const auto& c : checks) {
-    oss << "  [" << (c.ok ? "OK" : "FAIL") << "] " << c.name << "\n";
-    if (!c.details.empty()) oss << "       " << c.details << "\n";
-  }
+        return oss.str();
+    }
 
-  if (!notes.empty()) {
-    oss << "\nNotes\n";
-    for (const auto& n : notes) oss << "  - " << n << "\n";
-  }
+    std::string Report::ToJson() const {
+        std::ostringstream oss;
+        oss << "{";
+        oss << "\"app_version\":\"" << JsonEscape(app_version) << "\",";
+        oss << "\"app_git_sha\":\"" << JsonEscape(app_git_sha) << "\",";
+        oss << "\"os_pretty_name\":\"" << JsonEscape(os_pretty_name) << "\",";
+        oss << "\"kernel\":\"" << JsonEscape(kernel) << "\",";
 
-  return oss.str();
-}
+        if (nvidia_driver) {
+            oss << "\"nvidia_driver\":\"" << JsonEscape(nvidia_driver->original) << "\",";
+        } else {
+            oss << "\"nvidia_driver\":null,";
+        }
 
-std::string Report::ToJson() const {
-  std::ostringstream oss;
-  oss << "{";
-  oss << "\"app_version\":\"" << JsonEscape(app_version) << "\",";
-  oss << "\"app_git_sha\":\"" << JsonEscape(app_git_sha) << "\",";
-  oss << "\"os_pretty_name\":\"" << JsonEscape(os_pretty_name) << "\",";
-  oss << "\"kernel\":\"" << JsonEscape(kernel) << "\",";
+        oss << "\"gpus\":[";
+        for (size_t i = 0; i < gpus.size(); ++i) {
+            if (i) oss << ",";
+            oss << "{"
+                    << "\"name\":\"" << JsonEscape(gpus[i].name) << "\",";
+            if (gpus[i].compute_cap) {
+                oss << "\"compute_cap\":\"" << JsonEscape(*gpus[i].compute_cap) << "\"";
+            } else {
+                oss << "\"compute_cap\":null";
+            }
+            oss << "}";
+        }
+        oss << "],";
 
-  if (nvidia_driver) {
-    oss << "\"nvidia_driver\":\"" << JsonEscape(nvidia_driver->original) << "\",";
-  } else {
-    oss << "\"nvidia_driver\":null,";
-  }
+        oss << "\"checks\":[";
+        for (size_t i = 0; i < checks.size(); ++i) {
+            if (i) oss << ",";
+            oss << "{"
+                    << "\"name\":\"" << JsonEscape(checks[i].name) << "\","
+                    << "\"status\":\"" << StatusJson(checks[i]) << "\","
+                    << "\"details\":\"" << JsonEscape(checks[i].details) << "\""
+                    << "}";
+        }
+        oss << "],";
 
-  oss << "\"gpus\":[";
-  for (size_t i = 0; i < gpus.size(); ++i) {
-    if (i) oss << ",";
-    oss << "\"" << JsonEscape(gpus[i]) << "\"";
-  }
-  oss << "],";
+        oss << "\"notes\":[";
+        for (size_t i = 0; i < notes.size(); ++i) {
+            if (i) oss << ",";
+            oss << "\"" << JsonEscape(notes[i]) << "\"";
+        }
+        oss << "]";
 
-  oss << "\"checks\":[";
-  for (size_t i = 0; i < checks.size(); ++i) {
-    if (i) oss << ",";
-    oss << "{"
-        << "\"name\":\"" << JsonEscape(checks[i].name) << "\","
-        << "\"ok\":" << (checks[i].ok ? "true" : "false") << ","
-        << "\"details\":\"" << JsonEscape(checks[i].details) << "\""
-        << "}";
-  }
-  oss << "],";
+        oss << "}";
+        return oss.str();
+    }
 
-  oss << "\"notes\":[";
-  for (size_t i = 0; i < notes.size(); ++i) {
-    if (i) oss << ",";
-    oss << "\"" << JsonEscape(notes[i]) << "\"";
-  }
-  oss << "]";
+    Report Run(bool /*verbose*/) {
+        Report rep;
+        rep.app_version = STUDIOCAST_VERSION;
+        rep.app_git_sha = STUDIOCAST_GIT_SHA;
 
-  oss << "}";
-  return oss.str();
-}
+        rep.os_pretty_name = util::ReadOsPrettyName();
+        rep.kernel = KernelString();
 
-Report Run(bool /*verbose*/) {
-  Report rep;
-  rep.app_version = STUDIOCAST_VERSION;
-  rep.app_git_sha = STUDIOCAST_GIT_SHA;
+        rep.nvidia_driver = DetectDriverVersion();
+        rep.gpus = DetectGpus();
 
-  rep.os_pretty_name = util::ReadOsPrettyName();
-  rep.kernel = KernelString();
+        // Roots:
+        // - VFX/AR docs commonly use /usr/local/... but for dev we allow overrides.
+        fs::path vfxRoot = GetEnvPathAny({"STUDIOCAST_VFX_SDK_ROOT"});
+        if (vfxRoot.empty()) vfxRoot = "/usr/local/VideoFX";
 
-  rep.nvidia_driver = DetectDriverVersion();
-  rep.gpus = DetectGpus();
+        fs::path arRoot = GetEnvPathAny({"STUDIOCAST_AR_SDK_ROOT"});
+        if (arRoot.empty()) arRoot = "/usr/local/ARSDK";
 
-  // Standard Linux install locations for Maxine VFX/AR core packages.
-  const fs::path vfxRoot = "/usr/local/VideoFX";
-  const fs::path arRoot  = "/usr/local/ARSDK";
+        fs::path afxRoot = GetEnvPathAny({"AFX_SDK_ROOT", "STUDIOCAST_AFX_SDK_ROOT"});
 
-  // AFX root is user-chosen; we follow NVIDIA's common convention env var.
-  const fs::path afxRoot = GetEnvPathAny({"AFX_SDK_ROOT", "STUDIOCAST_AFX_SDK_ROOT"});
+        rep.checks.push_back(CheckDriver(rep.nvidia_driver));
+        rep.checks.push_back(CheckMaxineGpuSupport(rep.gpus));
 
-  rep.checks.push_back(CheckDriver(rep.nvidia_driver));
-  rep.checks.push_back(CheckVfxCore(vfxRoot));
-  rep.checks.push_back(CheckVfxInstallScript(vfxRoot));
-  rep.checks.push_back(CheckArCore(arRoot));
-  rep.checks.push_back(CheckArInstallScript(arRoot));
-  rep.checks.push_back(CheckAfxRoot(afxRoot));
-  rep.checks.push_back(CheckAfxFeaturesDir(afxRoot));
+        rep.checks.push_back(CheckSdkCorePresent(
+            "Maxine VFX SDK core present", vfxRoot, "STUDIOCAST_VFX_SDK_ROOT"));
+        rep.checks.push_back(CheckInstallScript(
+            "VFX features install script present (features/install_feature.sh)",
+            vfxRoot, fs::path("features") / "install_feature.sh", "STUDIOCAST_VFX_SDK_ROOT"));
 
-  rep.notes.push_back("VFX/AR/AFX SDKs require feature/model packages (not included in core). Use install scripts with an NGC API key.");
-  rep.notes.push_back("These SDKs are documented as optimized for server-side deployment; desktop use is not officially supported.");
+        rep.checks.push_back(CheckSdkCorePresent(
+            "Maxine AR SDK core present", arRoot, "STUDIOCAST_AR_SDK_ROOT"));
+        rep.checks.push_back(CheckInstallScript(
+            "AR features install script present (features/install_feature.sh)",
+            arRoot, fs::path("features") / "install_feature.sh", "STUDIOCAST_AR_SDK_ROOT"));
 
-  return rep;
-}
+        rep.checks.push_back(CheckSdkCorePresent(
+            "Maxine AFX SDK root set", afxRoot, "AFX_SDK_ROOT"));
+        rep.checks.push_back(CheckInstallScript(
+            "AFX features directory present (features/)",
+            afxRoot, fs::path("features"), "AFX_SDK_ROOT"));
 
-}  // namespace studiocast::probe
+        rep.notes.push_back(
+            "Maxine SDKs require feature/model packages (not included in core). Install via the included scripts (NGC API key required).");
+        rep.notes.push_back(
+            "Maxine Linux SDK docs describe server-side optimization; desktop use is not officially supported.");
+
+        return rep;
+    }
+} // namespace studiocast::probe

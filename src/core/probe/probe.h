@@ -14,9 +14,15 @@ namespace studiocast::probe {
         std::string original;
     };
 
+    struct GpuInfo {
+        std::string name;
+        std::optional<std::string> compute_cap;  // e.g. "8.6"
+    };
+
     struct CheckResult {
         std::string name;
         bool ok = false;
+        bool skipped = false;
         std::string details;
     };
 
@@ -28,7 +34,7 @@ namespace studiocast::probe {
         std::string kernel;
 
         std::optional<Version> nvidia_driver;
-        std::vector<std::string> gpus;
+        std::vector<GpuInfo> gpus;
 
         std::vector<CheckResult> checks;
         std::vector<std::string> notes;

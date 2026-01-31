@@ -55,6 +55,12 @@ add_library(studiocast_core
         src/core/util/strings.cpp
 )
 
+set_target_properties(studiocast_core PROPERTIES
+        AUTOMOC OFF
+        AUTOUIC OFF
+        AUTORCC OFF
+)
+
 target_include_directories(studiocast_core PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${STUDIOCAST_GENERATED_DIR}"
@@ -101,6 +107,12 @@ set_target_properties(studiocast PROPERTIES
 # -----------------------------
 add_executable(studiocast-probe
         src/tools/studiocast_probe_main.cpp
+)
+
+set_target_properties(studiocast-probe PROPERTIES
+        AUTOMOC OFF
+        AUTOUIC OFF
+        AUTORCC OFF
 )
 
 target_link_libraries(studiocast-probe PRIVATE studiocast_core)

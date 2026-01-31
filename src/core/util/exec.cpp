@@ -1,29 +1,33 @@
 #include "exec.h"
 
 #include <cstdio>
-#include <memory>
-#include <stdexcept>
+#include <sys/wait.h>
 
 namespace studiocast::util {
 
     ExecResult ExecCapture(const std::string& command) {
         ExecResult r;
 
-        // popen uses /bin/sh -c under the hood.
-        std::unique_ptr<FILE, int (*)(FILE*)> pipe(popen(command.c_str(), "r"), pclose);
+        FILE* pipe = popen(command.c_str(), "r");
         if (!pipe) {
             r.exit_code = -1;
-            r.stdout_str = "";
             return r;
         }
 
         char buffer[4096];
-        while (std::fgets(buffer, sizeof(buffer), pipe.get()) != nullptr) {
+        while (std::fgets(buffer, sizeof(buffer), pipe) != nullptr) {
             r.stdout_str += buffer;
         }
 
-        // pclose return is shell-dependent; we keep it simple:
-        r.exit_code = 0;
+        const int status = pclose(pipe);
+        if (status == -1) {
+            r.exit_code = -1;
+        } else if (WIFEXITED(status)) {
+            r.exit_code = WEXITSTATUS(status);
+        } else {
+            r.exit_code = -1;
+        }
+
         return r;
     }
 
