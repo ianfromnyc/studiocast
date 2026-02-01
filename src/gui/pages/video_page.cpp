@@ -7,6 +7,9 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QImage>
+#include <QPixmap>
+#include <QSizePolicy>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -42,6 +45,19 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
 
   auto* box = new QGroupBox("Processed Camera → Virtual Camera", this);
   auto* boxLayout = new QVBoxLayout(box);
+
+  // Preview
+  auto* previewRow = new QHBoxLayout();
+  previewRow->addWidget(new QLabel("Preview:", box));
+  previewLabel_ = new QLabel(box);
+  previewLabel_->setMinimumSize(640, 360);
+  previewLabel_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  previewLabel_->setAlignment(Qt::AlignCenter);
+  previewLabel_->setStyleSheet("background: #111; border: 1px solid #333; border-radius: 6px;");
+  previewLabel_->setText("Preview will appear when the pipeline is running.");
+  previewLabel_->setScaledContents(false);
+  previewRow->addWidget(previewLabel_, 1);
+  boxLayout->addLayout(previewRow);
 
   // Input row
   auto* inRow = new QHBoxLayout();
@@ -120,11 +136,14 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   connect(pollTimer_, &QTimer::timeout, this, &VideoPage::OnPoll);
   pollTimer_->start();
 
+  pipeline_.SetPreviewEnabled(true);
+
   Refresh();
   UpdateUiEnabled();
 }
 
 VideoPage::~VideoPage() {
+  pipeline_.SetPreviewEnabled(false);
   pipeline_.Stop();
 }
 
@@ -230,17 +249,54 @@ void VideoPage::OnStart() {
     return;
   }
 
+  previewSeq_ = 0;
+  previewRgb_.clear();
+  if (previewLabel_) previewLabel_->setText("Starting preview...");
+
   UpdateStatusText();
   UpdateUiEnabled();
 }
 
 void VideoPage::OnStop() {
   pipeline_.Stop();
+  previewSeq_ = 0;
+  previewRgb_.clear();
+  if (previewLabel_) {
+    previewLabel_->setPixmap(QPixmap());
+    previewLabel_->setText("Preview stopped.");
+  }
   UpdateStatusText();
   UpdateUiEnabled();
 }
 
 void VideoPage::OnPoll() {
+  // Update preview (pull from core; no Qt deps in core).
+  const auto st = pipeline_.Status();
+  if (st.running) {
+    int w = 0, h = 0;
+    std::size_t stride = 0;
+    std::uint64_t seq = 0;
+    if (pipeline_.GetLatestRgbFrame(&previewRgb_, &w, &h, &stride, &seq)) {
+      if (seq != previewSeq_ && w > 0 && h > 0 && stride >= static_cast<std::size_t>(w) * 3u) {
+        previewSeq_ = seq;
+
+        QImage img(previewRgb_.data(), w, h, static_cast<int>(stride), QImage::Format_RGB888);
+        // Make a deep copy so the pixmap doesn't reference previewRgb_ memory.
+        QImage copy = img.copy();
+
+        if (previewLabel_) {
+          const QSize target = previewLabel_->size();
+          previewLabel_->setPixmap(
+              QPixmap::fromImage(copy.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+        }
+      }
+    }
+  } else {
+    if (previewLabel_ && previewSeq_ == 0) {
+      previewLabel_->setText("Preview will appear when the pipeline is running.");
+    }
+  }
+
   UpdateStatusText();
   UpdateUiEnabled();
 }

@@ -41,6 +41,28 @@ void CameraPipeline::SetMirrorEnabled(bool enabled) {
   mirror_.store(enabled);
 }
 
+void CameraPipeline::SetPreviewEnabled(bool enabled) {
+  preview_enabled_.store(enabled);
+}
+
+bool CameraPipeline::GetLatestRgbFrame(std::vector<std::uint8_t>* out_rgb,
+                                      int* out_width,
+                                      int* out_height,
+                                      std::size_t* out_stride,
+                                      std::uint64_t* out_sequence) const {
+  if (!out_rgb || !out_width || !out_height || !out_stride || !out_sequence) return false;
+
+  std::lock_guard<std::mutex> lock(preview_mu_);
+  if (preview_rgb_.empty() || preview_w_ <= 0 || preview_h_ <= 0) return false;
+
+  *out_width = preview_w_;
+  *out_height = preview_h_;
+  *out_stride = preview_stride_;
+  *out_sequence = preview_seq_;
+  *out_rgb = preview_rgb_;
+  return true;
+}
+
 CameraPipelineStatus CameraPipeline::Status() const {
   std::lock_guard<std::mutex> lock(mu_);
   CameraPipelineStatus s;
@@ -234,6 +256,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     if (mirror_.load()) {
       MirrorRgb24InPlace(rgb.data(), capA.width, capA.height, rgbStride);
+    }
+
+    // Preview tap (decimated): capture latest processed RGB frame for GUI.
+    if (preview_enabled_.load() && ((frameIndex % 2) == 0)) {  // ~15 fps at 30 fps capture
+      std::lock_guard<std::mutex> plock(preview_mu_);
+      preview_w_ = capA.width;
+      preview_h_ = capA.height;
+      preview_stride_ = rgbStride;
+      preview_rgb_ = rgb;  // copy
+      ++preview_seq_;
     }
 
     // Pack/write to output format

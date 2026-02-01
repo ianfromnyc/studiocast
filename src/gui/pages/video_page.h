@@ -2,10 +2,13 @@
 
 #include <QWidget>
 #include <string>
+#include <vector>
+#include <cstdint>
 
 #include "core/video/camera_pipeline.h"
 
 class QCheckBox;
+class QLabel;
 class QComboBox;
 class QPlainTextEdit;
 class QPushButton;
@@ -46,12 +49,16 @@ namespace studiocast::gui {
         QPushButton* copyCmdBtn_ = nullptr;
         QPushButton* startBtn_ = nullptr;
         QPushButton* stopBtn_ = nullptr;
+        QLabel* previewLabel_ = nullptr;
 
         QPlainTextEdit* statusText_ = nullptr;
         QTimer* pollTimer_ = nullptr;
 
         QString suggestedCmd_;
         std::string baseStatusText_;
+
+        std::vector<std::uint8_t> previewRgb_;
+        std::uint64_t previewSeq_ = 0;
 
         studiocast::video::CameraPipeline pipeline_;
     };

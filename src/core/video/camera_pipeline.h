@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <cstdint>
 
 #include "core/video/v4l2_capture.h"
 #include "core/video/v4l2_writer.h"
@@ -55,6 +56,18 @@ namespace studiocast::video {
         CameraPipelineStatus Status() const;
 
         void SetMirrorEnabled(bool enabled);
+        // Preview support: GUI can poll for the latest processed RGB frame (after effects, before output packing).
+        // This keeps Qt out of core. Frames are copied into an internal buffer only when preview is enabled.
+        void SetPreviewEnabled(bool enabled);
+
+        // Copies the latest RGB frame into `out_rgb` (Format: packed RGB24, stride = width*3).
+        // Returns true if a frame is available.
+        bool GetLatestRgbFrame(std::vector<std::uint8_t>* out_rgb,
+                               int* out_width,
+                               int* out_height,
+                               std::size_t* out_stride,
+                               std::uint64_t* out_sequence) const;
+
 
     private:
         void ThreadMain(CameraPipelineConfig cfg);
@@ -65,6 +78,16 @@ namespace studiocast::video {
         std::atomic_bool stop_{false};
 
         std::atomic_bool mirror_{false};
+        std::atomic_bool preview_enabled_{false};
+
+        // Last processed RGB frame for preview (owned by core; GUI pulls via GetLatestRgbFrame).
+        mutable std::mutex preview_mu_;
+        std::vector<std::uint8_t> preview_rgb_;
+        int preview_w_ = 0;
+        int preview_h_ = 0;
+        std::size_t preview_stride_ = 0;
+        std::uint64_t preview_seq_ = 0;
+
 
         bool running_ = false;
         bool starting_ = false;
