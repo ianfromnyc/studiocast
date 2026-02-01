@@ -99,6 +99,9 @@ namespace studiocast::video {
         ActualFormat output_{};
         int frame_index_ = 0;
         std::string last_error_;
+
+        V4l2Writer writer_;
+        std::string writer_device_;
     };
 
 }  // namespace studiocast::video

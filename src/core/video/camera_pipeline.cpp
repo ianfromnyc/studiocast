@@ -195,13 +195,29 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
   const auto capA = cap.Actual();
 
-  // Open writer: prefer RGB24 output (avoids RGB->YUYV conversion), fallback to YUYV.
-  V4l2Writer writer;
+  // Open or reuse writer_: prefer RGB24 output (avoids RGB->YUYV conversion), fallback to YUYV.
   {
     std::string werr;
-    if (!writer.Open(outDev, capA.width, capA.height, capA.fps, PixelFormat::rgb24, &werr)) {
+
+    // If we already have a writer open, reuse it only if it's the same output device
+    // and matches the capture geometry/fps. Otherwise, reopen.
+    if (writer_.IsOpen()) {
+      if (writer_device_ != outDev) {
+        writer_.Close();
+        writer_device_.clear();
+      } else {
+        const auto a = writer_.Actual();
+        if (a.width != capA.width || a.height != capA.height || a.fps != capA.fps) {
+          writer_.Close();
+          writer_device_.clear();
+        }
+      }
+    }
+
+    if (!writer_.IsOpen() &&
+        !writer_.Open(outDev, capA.width, capA.height, capA.fps, PixelFormat::rgb24, &werr)) {
       std::string werr2;
-      if (!writer.Open(outDev, capA.width, capA.height, capA.fps, PixelFormat::yuyv, &werr2)) {
+      if (!writer_.Open(outDev, capA.width, capA.height, capA.fps, PixelFormat::yuyv, &werr2)) {
         std::lock_guard<std::mutex> lock(mu_);
         last_error_ = "Failed to open v4l2loopback output " + outDev + ":\n"
                       "Tried rgb24:\n" + werr + "\n\n"
@@ -212,9 +228,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return;
       }
     }
+
+    if (writer_.IsOpen()) writer_device_ = outDev;
   }
 
-  const auto outA = writer.Actual();
+  const auto outA = writer_.Actual();
 
   const std::size_t rgbStride = static_cast<std::size_t>(capA.width) * 3u;
   std::vector<std::uint8_t> rgb(rgbStride * static_cast<std::size_t>(capA.height));
@@ -274,7 +292,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       if (outA.bytes_per_line == wantRow && outA.size_image == rgb.size()) {
         std::string werr;
-        if (!writer.WriteFrame(rgb.data(), rgb.size(), &werr)) {
+        if (!writer_.WriteFrame(rgb.data(), rgb.size(), &werr)) {
           std::lock_guard<std::mutex> lock(mu_);
           last_error_ = "Write failed: " + werr;
           break;
@@ -291,7 +309,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
 
         std::string werr;
-        if (!writer.WriteFrame(outBuf.data(), outBuf.size(), &werr)) {
+        if (!writer_.WriteFrame(outBuf.data(), outBuf.size(), &werr)) {
           std::lock_guard<std::mutex> lock(mu_);
           last_error_ = "Write failed: " + werr;
           break;
@@ -302,7 +320,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       Rgb24ToYuyv(rgb.data(), capA.width, capA.height, rgbStride, outBuf.data(), outA.bytes_per_line);
 
       std::string werr;
-      if (!writer.WriteFrame(outBuf.data(), outBuf.size(), &werr)) {
+      if (!writer_.WriteFrame(outBuf.data(), outBuf.size(), &werr)) {
         std::lock_guard<std::mutex> lock(mu_);
         last_error_ = "Write failed: " + werr;
         break;
