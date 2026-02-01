@@ -1,5 +1,6 @@
 #include "video_page.h"
 
+#include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
 #include <QGuiApplication>
@@ -15,253 +16,286 @@
 
 #include <sstream>
 
-#include "core/video/v4l2_writer.h"
 #include "core/video/v4l2loopback.h"
+#include "core/video/v4l2_writer.h"
 
 namespace studiocast::gui {
-    namespace {
-        QString DeviceLabel(const studiocast::video::VideoDevice &d) {
-            QString label = QString::fromStdString(d.dev_node);
-            if (!d.name.empty()) label += " — " + QString::fromStdString(d.name);
-            if (d.is_loopback) label += " [loopback]";
-            return label;
-        }
-    } // namespace
+namespace {
 
-    VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
-        auto *root = new QVBoxLayout(this);
-        root->setSpacing(12);
+QString DeviceLabel(const studiocast::video::VideoDevice& d) {
+  QString label = QString::fromStdString(d.dev_node);
+  if (!d.name.empty()) label += " — " + QString::fromStdString(d.name);
+  if (!d.driver.empty()) label += " (" + QString::fromStdString(d.driver) + ")";
+  if (d.is_loopback) label += " [loopback]";
+  return label;
+}
 
-        auto *title = new QLabel("Camera", this);
-        title->setStyleSheet("font-size: 20px; font-weight: 600;");
-        root->addWidget(title);
+}  // namespace
 
-        auto *box = new QGroupBox("Virtual Camera (v4l2loopback)", this);
-        auto *boxLayout = new QVBoxLayout(box);
+VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
+  auto* root = new QVBoxLayout(this);
+  root->setSpacing(12);
 
-        // Device row
-        auto *devRow = new QHBoxLayout();
-        devRow->addWidget(new QLabel("Output device:", box));
+  auto* title = new QLabel("Camera", this);
+  title->setStyleSheet("font-size: 20px; font-weight: 600;");
+  root->addWidget(title);
 
-        deviceCombo_ = new QComboBox(box);
-        devRow->addWidget(deviceCombo_, 1);
+  auto* box = new QGroupBox("Processed Camera → Virtual Camera", this);
+  auto* boxLayout = new QVBoxLayout(box);
 
-        refreshBtn_ = new QPushButton("Refresh", box);
-        devRow->addWidget(refreshBtn_);
+  // Input row
+  auto* inRow = new QHBoxLayout();
+  inRow->addWidget(new QLabel("Input camera:", box));
+  inputCombo_ = new QComboBox(box);
+  inRow->addWidget(inputCombo_, 1);
+  refreshBtn_ = new QPushButton("Refresh", box);
+  inRow->addWidget(refreshBtn_);
+  boxLayout->addLayout(inRow);
 
-        boxLayout->addLayout(devRow);
+  // Output row
+  auto* outRow = new QHBoxLayout();
+  outRow->addWidget(new QLabel("Output (v4l2loopback):", box));
+  outputCombo_ = new QComboBox(box);
+  outRow->addWidget(outputCombo_, 1);
+  copyCmdBtn_ = new QPushButton("Copy modprobe command", box);
+  outRow->addWidget(copyCmdBtn_);
+  boxLayout->addLayout(outRow);
 
-        // Format row
-        auto *fmtRow = new QHBoxLayout();
-        fmtRow->addWidget(new QLabel("Format:", box));
+  // Size row
+  auto* sizeRow = new QHBoxLayout();
+  sizeRow->addWidget(new QLabel("Width:", box));
+  widthSpin_ = new QSpinBox(box);
+  widthSpin_->setRange(160, 3840);
+  widthSpin_->setValue(1280);
+  sizeRow->addWidget(widthSpin_);
 
-        formatCombo_ = new QComboBox(box);
-        formatCombo_->addItem("Auto (YUYV then RGB24)", "auto");
-        formatCombo_->addItem("YUYV", "yuyv");
-        formatCombo_->addItem("RGB24", "rgb24");
-        fmtRow->addWidget(formatCombo_, 1);
+  sizeRow->addWidget(new QLabel("Height:", box));
+  heightSpin_ = new QSpinBox(box);
+  heightSpin_->setRange(120, 2160);
+  heightSpin_->setValue(720);
+  sizeRow->addWidget(heightSpin_);
 
-        copyCmdBtn_ = new QPushButton("Copy modprobe command", box);
-        fmtRow->addWidget(copyCmdBtn_);
+  sizeRow->addWidget(new QLabel("FPS:", box));
+  fpsSpin_ = new QSpinBox(box);
+  fpsSpin_->setRange(1, 120);
+  fpsSpin_->setValue(30);
+  sizeRow->addWidget(fpsSpin_);
 
-        boxLayout->addLayout(fmtRow);
+  sizeRow->addStretch(1);
+  boxLayout->addLayout(sizeRow);
 
-        // Size row
-        auto *sizeRow = new QHBoxLayout();
-        sizeRow->addWidget(new QLabel("Width:", box));
-        widthSpin_ = new QSpinBox(box);
-        widthSpin_->setRange(160, 3840);
-        widthSpin_->setValue(1280);
-        sizeRow->addWidget(widthSpin_);
+  // Effects row
+  auto* fxRow = new QHBoxLayout();
+  mirrorCheck_ = new QCheckBox("Mirror (horizontal flip)", box);
+  fxRow->addWidget(mirrorCheck_);
+  fxRow->addStretch(1);
+  boxLayout->addLayout(fxRow);
 
-        sizeRow->addWidget(new QLabel("Height:", box));
-        heightSpin_ = new QSpinBox(box);
-        heightSpin_->setRange(120, 2160);
-        heightSpin_->setValue(720);
-        sizeRow->addWidget(heightSpin_);
+  // Controls row
+  auto* ctlRow = new QHBoxLayout();
+  startBtn_ = new QPushButton("Start", box);
+  stopBtn_ = new QPushButton("Stop", box);
+  ctlRow->addWidget(startBtn_);
+  ctlRow->addWidget(stopBtn_);
+  ctlRow->addStretch(1);
+  boxLayout->addLayout(ctlRow);
 
-        sizeRow->addWidget(new QLabel("FPS:", box));
-        fpsSpin_ = new QSpinBox(box);
-        fpsSpin_->setRange(1, 120);
-        fpsSpin_->setValue(30);
-        sizeRow->addWidget(fpsSpin_);
+  // Status
+  statusText_ = new QPlainTextEdit(box);
+  statusText_->setReadOnly(true);
+  statusText_->setMinimumHeight(280);
+  boxLayout->addWidget(statusText_, 1);
 
-        sizeRow->addStretch(1);
-        boxLayout->addLayout(sizeRow);
+  root->addWidget(box);
+  root->addStretch(1);
 
-        // Controls row
-        auto *ctlRow = new QHBoxLayout();
-        startBtn_ = new QPushButton("Start test pattern", box);
-        stopBtn_ = new QPushButton("Stop", box);
-        ctlRow->addWidget(startBtn_);
-        ctlRow->addWidget(stopBtn_);
-        ctlRow->addStretch(1);
-        boxLayout->addLayout(ctlRow);
+  connect(refreshBtn_, &QPushButton::clicked, this, &VideoPage::Refresh);
+  connect(copyCmdBtn_, &QPushButton::clicked, this, &VideoPage::CopySuggestedCommand);
+  connect(startBtn_, &QPushButton::clicked, this, &VideoPage::OnStart);
+  connect(stopBtn_, &QPushButton::clicked, this, &VideoPage::OnStop);
+  connect(mirrorCheck_, &QCheckBox::toggled, this, &VideoPage::OnMirrorToggled);
 
-        // Status text
-        statusText_ = new QPlainTextEdit(box);
-        statusText_->setReadOnly(true);
-        statusText_->setMinimumHeight(260);
-        boxLayout->addWidget(statusText_, 1);
+  pollTimer_ = new QTimer(this);
+  pollTimer_->setInterval(500);
+  connect(pollTimer_, &QTimer::timeout, this, &VideoPage::OnPoll);
+  pollTimer_->start();
 
-        root->addWidget(box);
-        root->addStretch(1);
+  Refresh();
+  UpdateUiEnabled();
+}
 
-        connect(refreshBtn_, &QPushButton::clicked, this, &VideoPage::Refresh);
-        connect(copyCmdBtn_, &QPushButton::clicked, this, &VideoPage::CopySuggestedCommand);
-        connect(startBtn_, &QPushButton::clicked, this, &VideoPage::OnStartFeed);
-        connect(stopBtn_, &QPushButton::clicked, this, &VideoPage::OnStopFeed);
+VideoPage::~VideoPage() {
+  pipeline_.Stop();
+}
 
-        pollTimer_ = new QTimer(this);
-        pollTimer_->setInterval(500);
-        connect(pollTimer_, &QTimer::timeout, this, &VideoPage::OnPoll);
-        pollTimer_->start();
+void VideoPage::ShowError(const QString& title, const QString& details) {
+  QMessageBox::critical(this, title, details);
+}
 
-        Refresh();
+void VideoPage::Refresh() {
+  const auto rep = studiocast::video::ProbeLoopback();
+  baseStatusText_ = rep.ToText();
+
+  // Preserve selection
+  const QString prevIn = inputCombo_->currentData().toString();
+  const QString prevOut = outputCombo_->currentData().toString();
+
+  inputCombo_->clear();
+  outputCombo_->clear();
+
+  int inSet = -1;
+  int outSet = -1;
+
+  int inAdded = 0;
+  int outAdded = 0;
+
+  for (const auto& d : rep.devices) {
+    const QString deviceNode = QString::fromStdString(d.dev_node);
+    const QString label = DeviceLabel(d);
+
+    if (!d.is_loopback && d.can_read) {
+      inputCombo_->addItem(label, deviceNode);
+      if (!prevIn.isEmpty() && prevIn == deviceNode) inSet = inAdded;
+      ++inAdded;
     }
 
-    VideoPage::~VideoPage() {
-        feed_.Stop();
+    if (d.is_loopback && d.can_write) {
+      outputCombo_->addItem(label, deviceNode);
+      if (!prevOut.isEmpty() && prevOut == deviceNode) outSet = outAdded;
+      ++outAdded;
     }
+  }
 
-    void VideoPage::ShowError(const QString &title, const QString &details) {
-        QMessageBox::critical(this, title, details);
-    }
+  if (inAdded == 0) {
+    inputCombo_->addItem("<no readable camera found>", "");
+    inputCombo_->setEnabled(false);
+  } else {
+    inputCombo_->setEnabled(true);
+    inputCombo_->setCurrentIndex(inSet >= 0 ? inSet : 0);
+  }
 
-    void VideoPage::Refresh() {
-        const auto rep = studiocast::video::ProbeLoopback();
-        baseStatusText_ = rep.ToText();
+  if (outAdded == 0) {
+    outputCombo_->addItem("<no writable v4l2loopback found>", "");
+    outputCombo_->setEnabled(false);
+  } else {
+    outputCombo_->setEnabled(true);
+    outputCombo_->setCurrentIndex(outSet >= 0 ? outSet : 0);
+  }
 
-        // Preserve selection if possible
-        const QString prev = deviceCombo_->currentData().toString();
-        deviceCombo_->clear();
+  suggestedCmd_ = QString::fromStdString(rep.suggested_modprobe_cmd);
+  copyCmdBtn_->setEnabled(!suggestedCmd_.isEmpty());
 
-        int setIndex = -1;
-        int added = 0;
-        for (const auto &d: rep.devices) {
-            if (!d.is_loopback) continue;
+  UpdateStatusText();
+  UpdateUiEnabled();
+}
 
-            const QString label = DeviceLabel(d);
-            const QString nodeData = QString::fromStdString(d.dev_node);
-            deviceCombo_->addItem(label, nodeData);
+void VideoPage::CopySuggestedCommand() {
+  if (suggestedCmd_.isEmpty()) return;
+  if (auto* cb = QGuiApplication::clipboard()) cb->setText(suggestedCmd_);
+}
 
-            if (!prev.isEmpty() && prev == nodeData) setIndex = added;
-            ++added;
-        }
+void VideoPage::OnMirrorToggled(bool checked) {
+  pipeline_.SetMirrorEnabled(checked);
+}
 
-        if (added == 0) {
-            deviceCombo_->addItem("<no v4l2loopback device found>", "");
-            deviceCombo_->setEnabled(false);
-        } else {
-            deviceCombo_->setEnabled(true);
-            deviceCombo_->setCurrentIndex(setIndex >= 0 ? setIndex : 0);
-        }
+void VideoPage::OnStart() {
+  const auto st = pipeline_.Status();
+  if (st.running || st.starting) return;
 
-        suggestedCmd_ = QString::fromStdString(rep.suggested_modprobe_cmd);
-        copyCmdBtn_->setEnabled(!suggestedCmd_.isEmpty());
+  const QString inDev = inputCombo_->currentData().toString();
+  const QString outDev = outputCombo_->currentData().toString();
 
-        UpdateStatusText();
-        UpdateUiEnabled();
-    }
+  if (inDev.isEmpty()) {
+    ShowError("Start failed", "No input camera selected.");
+    return;
+  }
+  if (outDev.isEmpty()) {
+    ShowError("Start failed",
+              "No v4l2loopback output found.\n\nLoad v4l2loopback (use the suggested modprobe command).");
+    return;
+  }
 
-    void VideoPage::CopySuggestedCommand() {
-        if (suggestedCmd_.isEmpty()) return;
-        if (auto *cb = QGuiApplication::clipboard()) {
-            cb->setText(suggestedCmd_);
-        }
-    }
+  studiocast::video::CameraPipelineConfig cfg;
+  cfg.input_device = inDev.toStdString();
+  cfg.output_device = outDev.toStdString();
+  cfg.width = widthSpin_->value();
+  cfg.height = heightSpin_->value();
+  cfg.fps = fpsSpin_->value();
+  cfg.effects.mirror = mirrorCheck_->isChecked();
 
-    void VideoPage::OnStartFeed() {
-        const auto st = feed_.Status();
-        if (st.running || st.starting) return;
+  std::string err;
+  if (!pipeline_.Start(cfg, &err)) {
+    ShowError("Start failed", QString::fromStdString(err));
+    Refresh();
+    return;
+  }
 
-        const QString dev = deviceCombo_->currentData().toString();
-        if (dev.isEmpty()) {
-            ShowError("Virtual Camera",
-                      "No v4l2loopback device found.\n\nUse the modprobe command shown in the status box.");
-            return;
-        }
+  UpdateStatusText();
+  UpdateUiEnabled();
+}
 
-        studiocast::video::FeedConfig cfg;
-        cfg.device = dev.toStdString();
-        cfg.width = widthSpin_->value();
-        cfg.height = heightSpin_->value();
-        cfg.fps = fpsSpin_->value();
+void VideoPage::OnStop() {
+  pipeline_.Stop();
+  UpdateStatusText();
+  UpdateUiEnabled();
+}
 
-        const QString fmt = formatCombo_->currentData().toString();
-        if (fmt == "yuyv") cfg.format = studiocast::video::FeedPixelFormatMode::yuyv;
-        else if (fmt == "rgb24") cfg.format = studiocast::video::FeedPixelFormatMode::rgb24;
-        else cfg.format = studiocast::video::FeedPixelFormatMode::auto_select;
+void VideoPage::OnPoll() {
+  UpdateStatusText();
+  UpdateUiEnabled();
+}
 
-        std::string err;
-        if (!feed_.StartTestPattern(cfg, &err)) {
-            ShowError("Start feed failed", QString::fromStdString(err));
-            Refresh();
-            return;
-        }
+void VideoPage::UpdateUiEnabled() {
+  const auto st = pipeline_.Status();
+  const bool busy = st.running || st.starting;
 
-        UpdateStatusText();
-        UpdateUiEnabled();
-    }
+  refreshBtn_->setEnabled(!busy);
+  copyCmdBtn_->setEnabled(!suggestedCmd_.isEmpty());
 
-    void VideoPage::OnStopFeed() {
-        feed_.Stop();
-        UpdateStatusText();
-        UpdateUiEnabled();
-    }
+  inputCombo_->setEnabled(!busy && inputCombo_->count() > 0 && !inputCombo_->itemData(0).toString().isEmpty());
+  outputCombo_->setEnabled(!busy && outputCombo_->count() > 0 && !outputCombo_->itemData(0).toString().isEmpty());
 
-    void VideoPage::OnPoll() {
-        // Lightweight: do not re-probe devices every tick; just update feed status + enable states.
-        UpdateStatusText();
-        UpdateUiEnabled();
-    }
+  widthSpin_->setEnabled(!busy);
+  heightSpin_->setEnabled(!busy);
+  fpsSpin_->setEnabled(!busy);
 
-    void VideoPage::UpdateUiEnabled() {
-        const auto st = feed_.Status();
-        const bool running = st.running || st.starting;
+  // Mirror can be toggled while running (we update an atomic flag)
+  mirrorCheck_->setEnabled(true);
 
-        startBtn_->setEnabled(
-            !running && deviceCombo_->isEnabled() && !deviceCombo_->currentData().toString().isEmpty());
-        stopBtn_->setEnabled(running);
+  startBtn_->setEnabled(!busy && !inputCombo_->currentData().toString().isEmpty() &&
+                        !outputCombo_->currentData().toString().isEmpty());
+  stopBtn_->setEnabled(busy);
+}
 
-        deviceCombo_->setEnabled(
-            !running && deviceCombo_->count() > 0 && !deviceCombo_->itemData(0).toString().isEmpty());
-        widthSpin_->setEnabled(!running);
-        heightSpin_->setEnabled(!running);
-        fpsSpin_->setEnabled(!running);
-        formatCombo_->setEnabled(!running);
-    }
+void VideoPage::UpdateStatusText() {
+  const auto st = pipeline_.Status();
 
-    void VideoPage::UpdateStatusText() {
-        const auto st = feed_.Status();
+  std::ostringstream oss;
+  oss << baseStatusText_ << "\n\n---\nPipeline\n";
+  if (st.starting) oss << "  state: starting...\n";
+  else if (st.running) oss << "  state: running\n";
+  else oss << "  state: stopped\n";
 
-        std::ostringstream oss;
-        oss << baseStatusText_;
-        oss << "\n\n---\nFeed\n";
+  if (!st.input_device.empty()) oss << "  input:  " << st.input_device << "\n";
+  if (!st.output_device.empty()) oss << "  output: " << st.output_device << "\n";
 
-        if (st.starting) {
-            oss << "  state: starting...\n";
-        } else if (st.running) {
-            oss << "  state: running\n";
-        } else {
-            oss << "  state: stopped\n";
-        }
+  if (st.running || st.starting) {
+    oss << "  capture: " << st.capture.width << "x" << st.capture.height
+        << " @ " << st.capture.fps << " fps (yuyv)\n";
+    oss << "  output:  " << st.output.width << "x" << st.output.height
+        << " @ " << st.output.fps << " fps (" << studiocast::video::PixelFormatName(st.output.format) << ")\n";
+    oss << "  frames:  " << st.frame_index << "\n";
+  }
 
-        if (!st.device.empty()) {
-            oss << "  device: " << st.device << "\n";
-        }
+  if (!st.last_error.empty()) {
+    oss << "  last error: " << st.last_error << "\n";
+  }
 
-        if (st.running || st.starting) {
-            oss << "  actual: " << st.actual.width << "x" << st.actual.height
-                    << " @ " << st.actual.fps << " fps"
-                    << " (" << studiocast::video::PixelFormatName(st.actual.format) << ")\n";
-            oss << "  frames: " << st.frame_index << "\n";
-        }
+  oss << "\nNotes\n"
+      << "  - Internal processing is RGB (CPU) for now; GPU/Maxine effects can slot in later.\n"
+      << "  - v4l2loopback must be loaded before starting.\n";
 
-        if (!st.last_error.empty()) {
-            oss << "  last error: " << st.last_error << "\n";
-        }
+  statusText_->setPlainText(QString::fromStdString(oss.str()));
+}
 
-        statusText_->setPlainText(QString::fromStdString(oss.str()));
-    }
-} // namespace studiocast::gui
+}  // namespace studiocast::gui

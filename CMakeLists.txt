@@ -71,6 +71,13 @@ add_library(studiocast_core
         src/core/video/pattern.cpp
         src/core/video/feed.h
         src/core/video/feed.cpp
+        src/core/video/convert.h
+        src/core/video/convert.cpp
+        src/core/video/v4l2_capture.h
+        src/core/video/v4l2_capture.cpp
+        src/core/video/camera_pipeline.h
+        src/core/video/camera_pipeline.cpp
+
 )
 
 set_target_properties(studiocast_core PROPERTIES

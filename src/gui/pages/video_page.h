@@ -3,8 +3,9 @@
 #include <QWidget>
 #include <string>
 
-#include "core/video/feed.h"
+#include "core/video/camera_pipeline.h"
 
+class QCheckBox;
 class QComboBox;
 class QPlainTextEdit;
 class QPushButton;
@@ -22,8 +23,9 @@ namespace studiocast::gui {
     private slots:
      void Refresh();
         void CopySuggestedCommand();
-        void OnStartFeed();
-        void OnStopFeed();
+        void OnStart();
+        void OnStop();
+        void OnMirrorToggled(bool checked);
         void OnPoll();
 
     private:
@@ -31,11 +33,14 @@ namespace studiocast::gui {
         void UpdateUiEnabled();
         void UpdateStatusText();
 
-        QComboBox* deviceCombo_ = nullptr;
+        QComboBox* inputCombo_ = nullptr;
+        QComboBox* outputCombo_ = nullptr;
+
         QSpinBox* widthSpin_ = nullptr;
         QSpinBox* heightSpin_ = nullptr;
         QSpinBox* fpsSpin_ = nullptr;
-        QComboBox* formatCombo_ = nullptr;
+
+        QCheckBox* mirrorCheck_ = nullptr;
 
         QPushButton* refreshBtn_ = nullptr;
         QPushButton* copyCmdBtn_ = nullptr;
@@ -48,7 +53,7 @@ namespace studiocast::gui {
         QString suggestedCmd_;
         std::string baseStatusText_;
 
-        studiocast::video::VideoFeed feed_;
+        studiocast::video::CameraPipeline pipeline_;
     };
 
 }  // namespace studiocast::gui
