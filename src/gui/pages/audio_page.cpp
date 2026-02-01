@@ -249,7 +249,8 @@ namespace studiocast::gui {
         int firstAvailable = -1;
 
         for (std::size_t i = 0; i < info->ports.size(); ++i) {
-            const auto &p = info->ports[i];
+            const int idx = static_cast<int>(i);
+            const auto& p = info->ports[i];
 
             std::string label = p.description.empty() ? p.name : p.description;
             if (!p.available) label += " (unavailable)";
@@ -257,8 +258,8 @@ namespace studiocast::gui {
             portCombo_->addItem(QString::fromStdString(label),
                                 QVariant(QString::fromStdString(p.name)));
 
-            if (!info->active_port.empty() && p.name == info->active_port) activeIdx = i;
-            if (firstAvailable < 0 && p.available) firstAvailable = i;
+            if (!info->active_port.empty() && p.name == info->active_port) activeIdx = idx;
+            if (firstAvailable < 0 && p.available) firstAvailable = idx;
         }
 
         if (activeIdx >= 0) portCombo_->setCurrentIndex(activeIdx);

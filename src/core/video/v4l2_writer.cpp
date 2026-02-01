@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <optional>
 #include <sstream>
 
 #include <fcntl.h>
@@ -28,12 +29,28 @@ int IoctlRetry(int fd, unsigned long req, void* arg) {
   }
 }
 
+std::string FourccToString(std::uint32_t f) {
+  char s[5];
+  s[0] = static_cast<char>(f & 0xFFu);
+  s[1] = static_cast<char>((f >> 8) & 0xFFu);
+  s[2] = static_cast<char>((f >> 16) & 0xFFu);
+  s[3] = static_cast<char>((f >> 24) & 0xFFu);
+  s[4] = '\0';
+  return std::string(s);
+}
+
 std::uint32_t FourccFor(PixelFormat fmt) {
   switch (fmt) {
     case PixelFormat::yuyv:  return V4L2_PIX_FMT_YUYV;
     case PixelFormat::rgb24: return V4L2_PIX_FMT_RGB24;
   }
   return V4L2_PIX_FMT_YUYV;
+}
+
+std::optional<PixelFormat> PixelFormatFromFourcc(std::uint32_t f) {
+  if (f == V4L2_PIX_FMT_YUYV) return PixelFormat::yuyv;
+  if (f == V4L2_PIX_FMT_RGB24) return PixelFormat::rgb24;
+  return std::nullopt;
 }
 
 std::size_t MinBytesPerLine(int width, PixelFormat fmt) {
@@ -43,6 +60,386 @@ std::size_t MinBytesPerLine(int width, PixelFormat fmt) {
     case PixelFormat::rgb24: return w * 3u;
   }
   return w * 2u;
+}
+
+const char* BufTypeName(__u32 t) {
+  switch (t) {
+    case V4L2_BUF_TYPE_VIDEO_OUTPUT: return "VIDEO_OUTPUT";
+    case V4L2_BUF_TYPE_VIDEO_CAPTURE: return "VIDEO_CAPTURE";
+#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+    case V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE: return "VIDEO_OUTPUT_MPLANE";
+#endif
+#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+    case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE: return "VIDEO_CAPTURE_MPLANE";
+#endif
+    default: return "UNKNOWN";
+  }
+}
+
+struct TypeSpec {
+  __u32 type = 0;
+  bool mplane = false;
+};
+
+std::string CapsToString(__u32 caps) {
+  std::ostringstream oss;
+  oss << "0x" << std::hex << caps << std::dec << " (";
+  bool any = false;
+  auto add = [&](const char* s) {
+    if (any) oss << " ";
+    oss << s;
+    any = true;
+  };
+
+  if (caps & V4L2_CAP_VIDEO_CAPTURE) add("CAPTURE");
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
+  if (caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) add("CAPTURE_MPLANE");
+#endif
+  if (caps & V4L2_CAP_VIDEO_OUTPUT) add("OUTPUT");
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
+  if (caps & V4L2_CAP_VIDEO_OUTPUT_MPLANE) add("OUTPUT_MPLANE");
+#endif
+  if (caps & V4L2_CAP_READWRITE) add("READWRITE");
+  if (caps & V4L2_CAP_STREAMING) add("STREAMING");
+  if (!any) oss << "none";
+  oss << ")";
+  return oss.str();
+}
+
+bool TrySetFmtSinglePlane(int fd,
+                          __u32 bufType,
+                          int width,
+                          int height,
+                          PixelFormat desired,
+                          bool setStrideAndSize,
+                          v4l2_format* outFmt,
+                          std::string* outErr) {
+  v4l2_format f{};
+  f.type = bufType;
+  f.fmt.pix.width = static_cast<__u32>(width);
+  f.fmt.pix.height = static_cast<__u32>(height);
+  f.fmt.pix.pixelformat = FourccFor(desired);
+  f.fmt.pix.field = V4L2_FIELD_ANY;  // more permissive than NONE
+
+  if (setStrideAndSize) {
+    const std::size_t bpl = MinBytesPerLine(width, desired);
+    f.fmt.pix.bytesperline = static_cast<__u32>(bpl);
+    f.fmt.pix.sizeimage = static_cast<__u32>(bpl * static_cast<std::size_t>(height));
+  } else {
+    f.fmt.pix.bytesperline = 0;
+    f.fmt.pix.sizeimage = 0;
+  }
+
+  if (IoctlRetry(fd, VIDIOC_S_FMT, &f) == 0) {
+    if (outFmt) *outFmt = f;
+    return true;
+  }
+
+  if (outErr) {
+    std::ostringstream oss;
+    oss << "VIDIOC_S_FMT(" << BufTypeName(bufType) << ") failed: " << std::strerror(errno);
+    *outErr = oss.str();
+  }
+  return false;
+}
+
+bool TryGetFmtSinglePlane(int fd, __u32 bufType, v4l2_format* outFmt, std::string* outErr) {
+  v4l2_format f{};
+  f.type = bufType;
+
+  if (IoctlRetry(fd, VIDIOC_G_FMT, &f) == 0) {
+    if (outFmt) *outFmt = f;
+    return true;
+  }
+
+  if (outErr) {
+    std::ostringstream oss;
+    oss << "VIDIOC_G_FMT(" << BufTypeName(bufType) << ") failed: " << std::strerror(errno);
+    *outErr = oss.str();
+  }
+  return false;
+}
+
+#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+bool TrySetFmtMPlane(int fd,
+                     __u32 bufType,
+                     int width,
+                     int height,
+                     PixelFormat desired,
+                     bool setStrideAndSize,
+                     v4l2_format* outFmt,
+                     std::string* outErr) {
+  v4l2_format f{};
+  f.type = bufType;
+  f.fmt.pix_mp.width = static_cast<__u32>(width);
+  f.fmt.pix_mp.height = static_cast<__u32>(height);
+  f.fmt.pix_mp.pixelformat = FourccFor(desired);
+  f.fmt.pix_mp.field = V4L2_FIELD_ANY;
+  f.fmt.pix_mp.num_planes = 1;
+
+  if (setStrideAndSize) {
+    const std::size_t bpl = MinBytesPerLine(width, desired);
+    f.fmt.pix_mp.plane_fmt[0].bytesperline = static_cast<__u32>(bpl);
+    f.fmt.pix_mp.plane_fmt[0].sizeimage = static_cast<__u32>(bpl * static_cast<std::size_t>(height));
+  } else {
+    f.fmt.pix_mp.plane_fmt[0].bytesperline = 0;
+    f.fmt.pix_mp.plane_fmt[0].sizeimage = 0;
+  }
+
+  if (IoctlRetry(fd, VIDIOC_S_FMT, &f) == 0) {
+    if (outFmt) *outFmt = f;
+    return true;
+  }
+
+  if (outErr) {
+    std::ostringstream oss;
+    oss << "VIDIOC_S_FMT(" << BufTypeName(bufType) << ") failed: " << std::strerror(errno);
+    *outErr = oss.str();
+  }
+  return false;
+}
+
+bool TryGetFmtMPlane(int fd, __u32 bufType, v4l2_format* outFmt, std::string* outErr) {
+  v4l2_format f{};
+  f.type = bufType;
+
+  if (IoctlRetry(fd, VIDIOC_G_FMT, &f) == 0) {
+    if (outFmt) *outFmt = f;
+    return true;
+  }
+
+  if (outErr) {
+    std::ostringstream oss;
+    oss << "VIDIOC_G_FMT(" << BufTypeName(bufType) << ") failed: " << std::strerror(errno);
+    *outErr = oss.str();
+  }
+  return false;
+}
+#endif
+
+bool TrySetFmtAny(int fd,
+                  const TypeSpec& t,
+                  int width,
+                  int height,
+                  PixelFormat desired,
+                  bool setStrideAndSize,
+                  v4l2_format* outFmt,
+                  std::string* outErr) {
+  if (!t.mplane) {
+    return TrySetFmtSinglePlane(fd, t.type, width, height, desired, setStrideAndSize, outFmt, outErr);
+  }
+#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+  return TrySetFmtMPlane(fd, t.type, width, height, desired, setStrideAndSize, outFmt, outErr);
+#else
+  if (outErr) *outErr = "mplane types not supported by headers";
+  return false;
+#endif
+}
+
+bool TryGetFmtAny(int fd, const TypeSpec& t, v4l2_format* outFmt, std::string* outErr) {
+  if (!t.mplane) {
+    return TryGetFmtSinglePlane(fd, t.type, outFmt, outErr);
+  }
+#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+  return TryGetFmtMPlane(fd, t.type, outFmt, outErr);
+#else
+  if (outErr) *outErr = "mplane types not supported by headers";
+  return false;
+#endif
+}
+
+bool ParseChosenFormat(const v4l2_format& f,
+                       bool mplane,
+                       int fps,
+                       ActualFormat* out,
+                       std::string* outErr) {
+  if (!out) return false;
+
+  int w = 0, h = 0;
+  std::uint32_t fourcc = 0;
+  std::size_t bpl = 0;
+  std::size_t size = 0;
+
+  if (!mplane) {
+    w = static_cast<int>(f.fmt.pix.width);
+    h = static_cast<int>(f.fmt.pix.height);
+    fourcc = f.fmt.pix.pixelformat;
+    bpl = static_cast<std::size_t>(f.fmt.pix.bytesperline);
+    size = static_cast<std::size_t>(f.fmt.pix.sizeimage);
+  } else {
+#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+    w = static_cast<int>(f.fmt.pix_mp.width);
+    h = static_cast<int>(f.fmt.pix_mp.height);
+    fourcc = f.fmt.pix_mp.pixelformat;
+    const __u8 np = f.fmt.pix_mp.num_planes;
+    if (np < 1) {
+      if (outErr) *outErr = "mplane format returned num_planes=0";
+      return false;
+    }
+    bpl = static_cast<std::size_t>(f.fmt.pix_mp.plane_fmt[0].bytesperline);
+    size = static_cast<std::size_t>(f.fmt.pix_mp.plane_fmt[0].sizeimage);
+#else
+    if (outErr) *outErr = "mplane not supported";
+    return false;
+#endif
+  }
+
+  const auto pf = PixelFormatFromFourcc(fourcc);
+  if (!pf) {
+    if (outErr) {
+      *outErr = "Device negotiated unsupported pixel format '" + FourccToString(fourcc) +
+                "'. Supported: YUYV, RGB24.";
+    }
+    return false;
+  }
+
+  ActualFormat a;
+  a.width = w;
+  a.height = h;
+  a.fps = fps;
+  a.format = *pf;
+
+  const std::size_t minBpl = MinBytesPerLine(a.width, a.format);
+  if (bpl < minBpl) bpl = minBpl;
+  a.bytes_per_line = bpl;
+
+  const std::size_t minSize = bpl * static_cast<std::size_t>(a.height);
+  if (size < minSize) size = minSize;
+  a.size_image = size;
+
+  *out = a;
+  return true;
+}
+
+struct NegotiationResult {
+  bool ok = false;
+  ActualFormat actual{};
+  std::string error;
+};
+
+NegotiationResult NegotiateFormat(int fd,
+                                  const std::string& device,
+                                  int width,
+                                  int height,
+                                  int fps,
+                                  PixelFormat desiredFmt) {
+  NegotiationResult res;
+
+  v4l2_capability cap{};
+  if (IoctlRetry(fd, VIDIOC_QUERYCAP, &cap) != 0) {
+    res.error = "VIDIOC_QUERYCAP failed: " + std::string(std::strerror(errno));
+    return res;
+  }
+
+  __u32 caps = cap.capabilities;
+  if (caps & V4L2_CAP_DEVICE_CAPS) caps = cap.device_caps;
+
+  // Prefer output types first; then capture types. Try mplane variants too.
+  const TypeSpec types[] = {
+      {V4L2_BUF_TYPE_VIDEO_OUTPUT, false},
+#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+      {V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, true},
+#endif
+      {V4L2_BUF_TYPE_VIDEO_CAPTURE, false},
+#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+      {V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, true},
+#endif
+  };
+
+  // Try S_FMT (stride then no-stride) across types
+  std::ostringstream attemptLog;
+  v4l2_format chosen{};
+  bool chosenMplane = false;
+  bool ok = false;
+
+  for (const auto& t : types) {
+    std::string e1, e2;
+    v4l2_format f{};
+    if (TrySetFmtAny(fd, t, width, height, desiredFmt, true, &f, &e1) ||
+        TrySetFmtAny(fd, t, width, height, desiredFmt, false, &f, &e2)) {
+      chosen = f;
+      chosenMplane = t.mplane;
+      ok = true;
+      break;
+    }
+
+    attemptLog << "Tried " << BufTypeName(t.type) << " S_FMT(with stride): "
+               << (e1.empty() ? "(no detail)" : e1) << "\n";
+    attemptLog << "Tried " << BufTypeName(t.type) << " S_FMT(no stride):   "
+               << (e2.empty() ? "(no detail)" : e2) << "\n";
+  }
+
+  // If set failed everywhere, try G_FMT
+  if (!ok) {
+    for (const auto& t : types) {
+      std::string ge;
+      v4l2_format f{};
+      if (TryGetFmtAny(fd, t, &f, &ge)) {
+        chosen = f;
+        chosenMplane = t.mplane;
+        ok = true;
+        break;
+      }
+      attemptLog << "Tried " << BufTypeName(t.type) << " G_FMT: "
+                 << (ge.empty() ? "(no detail)" : ge) << "\n";
+    }
+  }
+
+  if (!ok) {
+    std::ostringstream oss;
+    oss << "Failed to set/query format for " << device
+        << " (desired=" << PixelFormatName(desiredFmt) << ", " << width << "x" << height << ")\n"
+        << "querycap.driver=" << cap.driver << " card=" << cap.card << " bus=" << cap.bus_info << "\n"
+        << "querycap.caps=" << CapsToString(caps) << "\n"
+        << attemptLog.str();
+    res.error = oss.str();
+    return res;
+  }
+
+  // Best-effort fps set (ignore failures)
+  v4l2_streamparm p{};
+  p.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+  p.parm.output.timeperframe.numerator = 1;
+  p.parm.output.timeperframe.denominator = static_cast<__u32>(fps);
+  (void)IoctlRetry(fd, VIDIOC_S_PARM, &p);
+
+  std::string perr;
+  ActualFormat a;
+  if (!ParseChosenFormat(chosen, chosenMplane, fps, &a, &perr)) {
+    res.error = "Format negotiation succeeded but parsing failed: " + perr;
+    return res;
+  }
+
+  res.ok = true;
+  res.actual = a;
+  return res;
+}
+
+bool TryOpenNegotiate(const std::string& device,
+                      int openFlags,
+                      int width,
+                      int height,
+                      int fps,
+                      PixelFormat fmt,
+                      int* outFd,
+                      ActualFormat* outActual,
+                      std::string* outErr) {
+  const int fd = ::open(device.c_str(), openFlags | O_CLOEXEC);
+  if (fd < 0) {
+    if (outErr) *outErr = "open() failed: " + std::string(std::strerror(errno));
+    return false;
+  }
+
+  auto neg = NegotiateFormat(fd, device, width, height, fps, fmt);
+  if (!neg.ok) {
+    if (outErr) *outErr = neg.error;
+    ::close(fd);
+    return false;
+  }
+
+  if (outFd) *outFd = fd;
+  if (outActual) *outActual = neg.actual;
+  return true;
 }
 
 }  // namespace
@@ -93,72 +490,33 @@ bool V4l2Writer::Open(const std::string& device,
     return false;
   }
 
-  // v4l2loopback typically works with O_RDWR; O_WRONLY can be flaky on some setups.
-  fd_ = ::open(device.c_str(), O_RDWR | O_CLOEXEC);
-  if (fd_ < 0) {
-    if (error) {
-      *error = "Failed to open " + device + ": " + std::string(std::strerror(errno));
-    }
-    return false;
+  int fd = -1;
+  ActualFormat a{};
+  std::string err1, err2;
+
+  // Prefer O_RDWR (most V4L2 loopback implementations accept it).
+  if (TryOpenNegotiate(device, O_RDWR, width, height, fps, fmt, &fd, &a, &err1)) {
+    fd_ = fd;
+    actual_ = a;
+    return true;
   }
 
-  // Query capabilities (informational; don't be overly strict).
-  v4l2_capability cap{};
-  if (IoctlRetry(fd_, VIDIOC_QUERYCAP, &cap) != 0) {
-    if (error) {
-      *error = "VIDIOC_QUERYCAP failed: " + std::string(std::strerror(errno));
-    }
-    Close();
-    return false;
+  // Fallback: try O_WRONLY (important for some exclusive_caps setups).
+  if (TryOpenNegotiate(device, O_WRONLY, width, height, fps, fmt, &fd, &a, &err2)) {
+    fd_ = fd;
+    actual_ = a;
+    return true;
   }
 
-  // Set format.
-  v4l2_format f{};
-  f.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-  f.fmt.pix.width = static_cast<__u32>(width);
-  f.fmt.pix.height = static_cast<__u32>(height);
-  f.fmt.pix.pixelformat = FourccFor(fmt);
-  f.fmt.pix.field = V4L2_FIELD_NONE;
-
-  // Provide sane defaults to help drivers.
-  const std::size_t minBpl = MinBytesPerLine(width, fmt);
-  f.fmt.pix.bytesperline = static_cast<__u32>(minBpl);
-  f.fmt.pix.sizeimage = static_cast<__u32>(minBpl * static_cast<std::size_t>(height));
-
-  if (IoctlRetry(fd_, VIDIOC_S_FMT, &f) != 0) {
-    if (error) {
-      std::ostringstream oss;
-      oss << "VIDIOC_S_FMT failed for " << device
-          << " (format=" << PixelFormatName(fmt) << ", " << width << "x" << height << "): "
-          << std::strerror(errno);
-      *error = oss.str();
-    }
-    Close();
-    return false;
+  if (error) {
+    std::ostringstream oss;
+    oss << "Failed to open/negotiate V4L2 format for " << device
+        << " (desired=" << PixelFormatName(fmt) << ", " << width << "x" << height << ")\n\n"
+        << "Attempt 1 (O_RDWR):\n" << (err1.empty() ? "(no detail)" : err1) << "\n\n"
+        << "Attempt 2 (O_WRONLY):\n" << (err2.empty() ? "(no detail)" : err2);
+    *error = oss.str();
   }
-
-  // Attempt to set fps (best-effort).
-  v4l2_streamparm p{};
-  p.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-  p.parm.output.timeperframe.numerator = 1;
-  p.parm.output.timeperframe.denominator = static_cast<__u32>(fps);
-  (void)IoctlRetry(fd_, VIDIOC_S_PARM, &p);
-
-  // Capture actuals.
-  actual_.width = static_cast<int>(f.fmt.pix.width);
-  actual_.height = static_cast<int>(f.fmt.pix.height);
-  actual_.fps = fps;
-  actual_.format = fmt;
-
-  actual_.bytes_per_line = static_cast<std::size_t>(f.fmt.pix.bytesperline);
-  const std::size_t minActualBpl = MinBytesPerLine(actual_.width, fmt);
-  if (actual_.bytes_per_line < minActualBpl) actual_.bytes_per_line = minActualBpl;
-
-  actual_.size_image = static_cast<std::size_t>(f.fmt.pix.sizeimage);
-  const std::size_t minSize = actual_.bytes_per_line * static_cast<std::size_t>(actual_.height);
-  if (actual_.size_image < minSize) actual_.size_image = minSize;
-
-  return true;
+  return false;
 }
 
 bool V4l2Writer::WriteFrame(const std::uint8_t* data, std::size_t bytes, std::string* error) {

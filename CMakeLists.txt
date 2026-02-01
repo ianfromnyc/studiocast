@@ -69,6 +69,8 @@ add_library(studiocast_core
         src/core/video/v4l2_writer.cpp
         src/core/video/pattern.h
         src/core/video/pattern.cpp
+        src/core/video/feed.h
+        src/core/video/feed.cpp
 )
 
 set_target_properties(studiocast_core PROPERTIES
