@@ -5,6 +5,6 @@
 
 namespace studiocast::util {
 
-    std::optional<std::string> ReadTextFile(const std::string& path);
+std::optional<std::string> ReadTextFile(const std::string &path);
 
-}  // namespace studiocast::util
+} // namespace studiocast::util

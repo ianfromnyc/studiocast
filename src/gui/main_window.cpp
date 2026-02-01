@@ -16,7 +16,7 @@
 
 namespace studiocast::gui {
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
+MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   setWindowTitle("StudioCast");
   resize(1100, 700);
 
@@ -26,8 +26,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 void MainWindow::BuildUi() {
-  auto* central = new QWidget(this);
-  auto* layout = new QHBoxLayout(central);
+  auto *central = new QWidget(this);
+  auto *layout = new QHBoxLayout(central);
   layout->setContentsMargins(12, 12, 12, 12);
   layout->setSpacing(12);
 
@@ -48,23 +48,25 @@ void MainWindow::BuildUi() {
 }
 
 void MainWindow::BuildMenu() {
-  auto* helpMenu = menuBar()->addMenu("&Help");
+  auto *helpMenu = menuBar()->addMenu("&Help");
 
-  auto* aboutAction = new QAction("&About", this);
+  auto *aboutAction = new QAction("&About", this);
   connect(aboutAction, &QAction::triggered, this, [] {
-    QMessageBox::about(nullptr, "About StudioCast",
-                       QString("StudioCast %1 (%2)\n\n"
-                               "An open-source Linux app with a Broadcast-style UI.\n"
-                               "Not affiliated with NVIDIA.\n")
-                           .arg(STUDIOCAST_VERSION)
-                           .arg(STUDIOCAST_GIT_SHA));
+    QMessageBox::about(
+        nullptr, "About StudioCast",
+        QString("StudioCast %1 (%2)\n\n"
+                "An open-source Linux app with a Broadcast-style UI.\n"
+                "Not affiliated with NVIDIA.\n")
+            .arg(STUDIOCAST_VERSION)
+            .arg(STUDIOCAST_GIT_SHA));
   });
 
   helpMenu->addAction(aboutAction);
 }
 
 void MainWindow::ConnectSignals() {
-  connect(nav_, &QListWidget::currentRowChanged, pages_, &QStackedWidget::setCurrentIndex);
+  connect(nav_, &QListWidget::currentRowChanged, pages_,
+          &QStackedWidget::setCurrentIndex);
 }
 
-}  // namespace studiocast::gui
+} // namespace studiocast::gui

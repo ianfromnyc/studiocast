@@ -4,11 +4,11 @@
 
 namespace studiocast::util {
 
-    struct ExecResult {
-        int exit_code = -1;
-        std::string stdout_str;
-    };
+struct ExecResult {
+  int exit_code = -1;
+  std::string stdout_str;
+};
 
-    ExecResult ExecCapture(const std::string& command);
+ExecResult ExecCapture(const std::string &command);
 
-}  // namespace studiocast::util
+} // namespace studiocast::util

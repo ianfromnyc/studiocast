@@ -6,7 +6,7 @@
 
 namespace studiocast::gui {
 
-void ApplyDarkTheme(QApplication& app) {
+void ApplyDarkTheme(QApplication &app) {
   // Fusion + dark palette gets us close to the Broadcast app aesthetic.
   app.setStyle(QStyleFactory::create("Fusion"));
 
@@ -28,4 +28,4 @@ void ApplyDarkTheme(QApplication& app) {
   app.setPalette(p);
 }
 
-}  // namespace studiocast::gui
+} // namespace studiocast::gui
