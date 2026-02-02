@@ -13,14 +13,12 @@ struct Rgb {
 };
 
 std::uint8_t ClampU8(int v) {
-  if (v < 0)
-    return 0;
-  if (v > 255)
-    return 255;
+  if (v < 0) return 0;
+  if (v > 255) return 255;
   return static_cast<std::uint8_t>(v);
 }
 
-void RgbToYuv(const Rgb &c, std::uint8_t *y, std::uint8_t *u, std::uint8_t *v) {
+void RgbToYuv(const Rgb& c, std::uint8_t* y, std::uint8_t* u, std::uint8_t* v) {
   // Integer approx of BT.601 full range.
   // Y  =  0.299R + 0.587G + 0.114B
   // U' = -0.169R - 0.331G + 0.5B + 128
@@ -41,27 +39,25 @@ void RgbToYuv(const Rgb &c, std::uint8_t *y, std::uint8_t *u, std::uint8_t *v) {
 std::size_t MinBytesPerLine(int width, PixelFormat fmt) {
   const auto w = static_cast<std::size_t>(width);
   switch (fmt) {
-  case PixelFormat::yuyv:
-    return w * 2u;
-  case PixelFormat::rgb24:
-    return w * 3u;
+    case PixelFormat::yuyv:  return w * 2u;
+    case PixelFormat::rgb24: return w * 3u;
   }
   return w * 2u;
 }
 
-} // namespace
+}  // namespace
 
-bool FillMovingColorBars(std::uint8_t *dst, std::size_t dst_size,
-                         const FrameLayout &layout, int frame_index,
-                         std::string *error) {
+bool FillMovingColorBars(std::uint8_t* dst,
+                         std::size_t dst_size,
+                         const FrameLayout& layout,
+                         int frame_index,
+                         std::string* error) {
   if (!dst) {
-    if (error)
-      *error = "dst is null";
+    if (error) *error = "dst is null";
     return false;
   }
   if (layout.width <= 0 || layout.height <= 0) {
-    if (error)
-      *error = "invalid layout width/height";
+    if (error) *error = "invalid layout width/height";
     return false;
   }
 
@@ -70,15 +66,13 @@ bool FillMovingColorBars(std::uint8_t *dst, std::size_t dst_size,
 
   const std::size_t minBpl = MinBytesPerLine(layout.width, layout.format);
   if (layout.bytes_per_line < minBpl) {
-    if (error)
-      *error = "layout.bytes_per_line is smaller than minimum for format";
+    if (error) *error = "layout.bytes_per_line is smaller than minimum for format";
     return false;
   }
 
   const std::size_t required = layout.bytes_per_line * h;
   if (dst_size < required) {
-    if (error)
-      *error = "dst buffer too small for bytes_per_line*height";
+    if (error) *error = "dst buffer too small for bytes_per_line*height";
     return false;
   }
 
@@ -87,26 +81,24 @@ bool FillMovingColorBars(std::uint8_t *dst, std::size_t dst_size,
 
   constexpr std::array<Rgb, 8> kBars = {{
       {255, 255, 255}, // white
-      {255, 255, 0},   // yellow
-      {0, 255, 255},   // cyan
-      {0, 255, 0},     // green
-      {255, 0, 255},   // magenta
-      {255, 0, 0},     // red
-      {0, 0, 255},     // blue
-      {0, 0, 0},       // black
+      {255, 255,   0}, // yellow
+      {  0, 255, 255}, // cyan
+      {  0, 255,   0}, // green
+      {255,   0, 255}, // magenta
+      {255,   0,   0}, // red
+      {  0,   0, 255}, // blue
+      {  0,   0,   0}, // black
   }};
 
-  const std::size_t shift =
-      (w == 0) ? 0u : ((static_cast<std::size_t>(frame_index) * 4u) % w);
+  const std::size_t shift = (w == 0) ? 0u : ((static_cast<std::size_t>(frame_index) * 4u) % w);
 
   if (layout.format == PixelFormat::rgb24) {
     for (std::size_t y = 0; y < h; ++y) {
-      std::uint8_t *row = dst + y * layout.bytes_per_line;
+      std::uint8_t* row = dst + y * layout.bytes_per_line;
       for (std::size_t x = 0; x < w; ++x) {
         const std::size_t xs = (x + shift) % w;
         std::size_t bar = (xs * 8u) / w;
-        if (bar > 7u)
-          bar = 7u;
+        if (bar > 7u) bar = 7u;
 
         const Rgb c = kBars[bar];
         const std::size_t o = x * 3u;
@@ -120,24 +112,19 @@ bool FillMovingColorBars(std::uint8_t *dst, std::size_t dst_size,
 
   // YUYV requires even width because pixels are packed in pairs.
   if ((layout.width % 2) != 0) {
-    if (error)
-      *error = "YUYV requires an even width";
+    if (error) *error = "YUYV requires an even width";
     return false;
   }
 
   for (std::size_t y = 0; y < h; ++y) {
-    std::uint8_t *row = dst + y * layout.bytes_per_line;
+    std::uint8_t* row = dst + y * layout.bytes_per_line;
 
     for (std::size_t x = 0; x < w; x += 2u) {
       const std::size_t xs0 = (x + shift) % w;
       const std::size_t xs1 = ((x + 1u) + shift) % w;
 
-      std::size_t b0 = (xs0 * 8u) / w;
-      if (b0 > 7u)
-        b0 = 7u;
-      std::size_t b1 = (xs1 * 8u) / w;
-      if (b1 > 7u)
-        b1 = 7u;
+      std::size_t b0 = (xs0 * 8u) / w; if (b0 > 7u) b0 = 7u;
+      std::size_t b1 = (xs1 * 8u) / w; if (b1 > 7u) b1 = 7u;
 
       std::uint8_t y0 = 0, u0 = 128, v0 = 128;
       std::uint8_t y1 = 0, u1 = 128, v1 = 128;
@@ -159,4 +146,4 @@ bool FillMovingColorBars(std::uint8_t *dst, std::size_t dst_size,
   return true;
 }
 
-} // namespace studiocast::video
+}  // namespace studiocast::video

@@ -53,6 +53,8 @@ add_library(studiocast_core
         src/core/util/os_release.cpp
         src/core/util/strings.h
         src/core/util/strings.cpp
+        src/core/util/proc.h
+        src/core/util/proc.cpp
         src/core/util/xdg.h
         src/core/util/xdg.cpp
         src/core/maxine/gpu.h
@@ -77,6 +79,8 @@ add_library(studiocast_core
         src/core/video/v4l2_capture.cpp
         src/core/video/camera_pipeline.h
         src/core/video/camera_pipeline.cpp
+        src/core/video/virtual_camera_service.h
+        src/core/video/virtual_camera_service.cpp
 
 )
 
@@ -219,9 +223,38 @@ set_target_properties(studiocast-video PROPERTIES
 
 
 # -----------------------------
+# Background daemon
+# -----------------------------
+add_executable(studiocastd
+        src/daemon/studiocastd_main.cpp
+)
+
+target_link_libraries(studiocastd PRIVATE studiocast_core)
+
+target_include_directories(studiocastd PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${STUDIOCAST_GENERATED_DIR}"
+)
+
+studiocast_set_project_warnings(studiocastd)
+studiocast_enable_sanitizers(studiocastd)
+
+set_target_properties(studiocastd PROPERTIES
+        AUTOMOC OFF
+        AUTOUIC OFF
+        AUTORCC OFF
+        OUTPUT_NAME "studiocastd"
+)
+
+
+# -----------------------------
 # Install step
 # -----------------------------
 include(GNUInstallDirs)
 install(TARGETS studiocast studiocast-probe studiocast-maxine studiocast-audio studiocast-video
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+)
+
+install(TARGETS studiocastd
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )

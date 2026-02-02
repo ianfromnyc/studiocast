@@ -1,5 +1,7 @@
 #include "camera_pipeline.h"
 
+#include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <vector>
 
@@ -9,11 +11,10 @@
 namespace studiocast::video {
 namespace {
 
-std::string ChooseDefaultOutputLoopback(std::string *error) {
+std::string ChooseDefaultOutputLoopback(std::string* error) {
   const auto rep = ProbeLoopback();
-  for (const auto &d : rep.devices) {
-    if (d.is_loopback && d.can_write)
-      return d.dev_node;
+  for (const auto& d : rep.devices) {
+    if (d.is_loopback && d.can_write) return d.dev_node;
   }
   if (error) {
     std::ostringstream oss;
@@ -25,45 +26,79 @@ std::string ChooseDefaultOutputLoopback(std::string *error) {
   return {};
 }
 
-std::string ChooseDefaultInputCamera(std::string *error) {
-  const auto rep = ProbeLoopback();
-  for (const auto &d : rep.devices) {
-    if (!d.is_loopback && d.can_read)
-      return d.dev_node;
+std::string ToLowerAscii(std::string s) {
+  for (char& c : s) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    c = static_cast<char>(std::tolower(uc));
   }
-  if (error)
-    *error = "No readable camera device found (no non-loopback /dev/video* "
-             "with read access).";
-  return {};
+  return s;
 }
 
-} // namespace
+int ParseVideoIndex(const std::string& sys_name) {
+  // sys_name is usually "videoN".
+  if (sys_name.rfind("video", 0) != 0) return -1;
+  const std::string rest = sys_name.substr(5);
+  if (rest.empty()) return -1;
+  int v = 0;
+  for (const char ch : rest) {
+    if (ch < '0' || ch > '9') return -1;
+    v = v * 10 + (ch - '0');
+    if (v > 4096) return -1;
+  }
+  return v;
+}
+
+int ScoreCamera(const VideoDevice& d) {
+  // Heuristic score for "auto" camera selection.
+  // Prefer typical UVC webcams, avoid IR/depth/metadata nodes when possible.
+  int score = 0;
+  if (d.driver == "uvcvideo") score += 10;
+
+  const auto name = ToLowerAscii(d.name);
+  if (name.find("ir") != std::string::npos) score -= 50;
+  if (name.find("depth") != std::string::npos) score -= 50;
+  if (name.find("metadata") != std::string::npos) score -= 50;
+
+  if (name.find("hd") != std::string::npos) score += 5;
+  if (name.find("camera") != std::string::npos) score += 2;
+
+  return score;
+}
+
+std::vector<VideoDevice> ListCandidateCameras() {
+  const auto rep = ProbeLoopback();
+  std::vector<VideoDevice> cams;
+  cams.reserve(rep.devices.size());
+  for (const auto& d : rep.devices) {
+    if (!d.is_loopback && d.can_read) cams.push_back(d);
+  }
+
+  std::sort(cams.begin(), cams.end(), [](const VideoDevice& a, const VideoDevice& b) {
+    const int sa = ScoreCamera(a);
+    const int sb = ScoreCamera(b);
+    if (sa != sb) return sa > sb;
+
+    const int ia = ParseVideoIndex(a.sys_name);
+    const int ib = ParseVideoIndex(b.sys_name);
+    if (ia != ib) {
+      // Prefer lower indices (video0, video1, ...)
+      if (ia < 0) return false;
+      if (ib < 0) return true;
+      return ia < ib;
+    }
+
+    return a.dev_node < b.dev_node;
+  });
+
+  return cams;
+}
+
+}  // namespace
 
 CameraPipeline::~CameraPipeline() { Stop(); }
 
-void CameraPipeline::SetMirrorEnabled(bool enabled) { mirror_.store(enabled); }
-
-void CameraPipeline::SetPreviewEnabled(bool enabled) {
-  preview_enabled_.store(enabled);
-}
-
-bool CameraPipeline::GetLatestRgbFrame(std::vector<std::uint8_t> *out_rgb,
-                                       int *out_width, int *out_height,
-                                       std::size_t *out_stride,
-                                       std::uint64_t *out_sequence) const {
-  if (!out_rgb || !out_width || !out_height || !out_stride || !out_sequence)
-    return false;
-
-  std::lock_guard<std::mutex> lock(preview_mu_);
-  if (preview_rgb_.empty() || preview_w_ <= 0 || preview_h_ <= 0)
-    return false;
-
-  *out_width = preview_w_;
-  *out_height = preview_h_;
-  *out_stride = preview_stride_;
-  *out_sequence = preview_seq_;
-  *out_rgb = preview_rgb_;
-  return true;
+void CameraPipeline::SetMirrorEnabled(bool enabled) {
+  mirror_.store(enabled);
 }
 
 CameraPipelineStatus CameraPipeline::Status() const {
@@ -80,23 +115,19 @@ CameraPipelineStatus CameraPipeline::Status() const {
   return s;
 }
 
-bool CameraPipeline::Start(const CameraPipelineConfig &cfg,
-                           std::string *error) {
+bool CameraPipeline::Start(const CameraPipelineConfig& cfg, std::string* error) {
   if (cfg.width <= 0 || cfg.height <= 0) {
-    if (error)
-      *error = "Invalid width/height.";
+    if (error) *error = "Invalid width/height.";
     return false;
   }
   if (cfg.fps <= 0 || cfg.fps > 240) {
-    if (error)
-      *error = "Invalid fps (1..240).";
+    if (error) *error = "Invalid fps (1..240).";
     return false;
   }
 
   std::unique_lock<std::mutex> lock(mu_);
   if (running_ || starting_) {
-    if (error)
-      *error = "Camera pipeline already running.";
+    if (error) *error = "Camera pipeline already running.";
     return false;
   }
 
@@ -126,17 +157,134 @@ bool CameraPipeline::Start(const CameraPipelineConfig &cfg,
   starting_ = false;
 
   if (!running_) {
-    const std::string err =
-        last_error_.empty() ? "Failed to start camera pipeline." : last_error_;
+    const std::string err = last_error_.empty() ? "Failed to start camera pipeline." : last_error_;
     lock.unlock();
-    if (th_.joinable())
-      th_.join();
-    if (error)
-      *error = err;
+    if (th_.joinable()) th_.join();
+    if (error) *error = err;
     return false;
   }
 
   return true;
+}
+
+bool CameraPipeline::OpenOutputLocked(const std::string& outDev, int width, int height, int fps, std::string* error) {
+  // Try to reuse an existing open writer when possible.
+  if (writer_.IsOpen() && writer_device_ == outDev) {
+    const auto& a = writer_.Actual();
+    if (a.width == width && a.height == height && a.fps == fps) {
+      output_ = a;
+      output_device_ = outDev;
+      return true;
+    }
+
+    // If format/dimensions changed, we need to renegotiate.
+    writer_.Close();
+    writer_device_.clear();
+  } else if (writer_.IsOpen() && writer_device_ != outDev) {
+    writer_.Close();
+    writer_device_.clear();
+  }
+
+  // Open writer: prefer RGB24 output (avoids RGB->YUYV conversion), fallback to YUYV.
+  std::string werr;
+  if (!writer_.Open(outDev, width, height, fps, PixelFormat::rgb24, &werr)) {
+    std::string werr2;
+    if (!writer_.Open(outDev, width, height, fps, PixelFormat::yuyv, &werr2)) {
+      if (error) {
+        *error = "Failed to open v4l2loopback output " + outDev + ":\n" +
+                 "Tried rgb24:\n" + werr + "\n\n" +
+                 "Tried yuyv:\n" + werr2;
+      }
+      return false;
+    }
+  }
+
+  writer_device_ = outDev;
+  output_ = writer_.Actual();
+  output_device_ = outDev;
+  return true;
+}
+
+bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig& cfg, std::string* error) {
+  if (cfg.width <= 0 || cfg.height <= 0) {
+    if (error) *error = "Invalid width/height.";
+    return false;
+  }
+  if (cfg.fps <= 0 || cfg.fps > 240) {
+    if (error) *error = "Invalid fps (1..240).";
+    return false;
+  }
+
+  std::unique_lock<std::mutex> lock(mu_);
+  if (running_ || starting_) {
+    // Output is already open (or will be shortly) as part of Start().
+    return true;
+  }
+
+  std::string outDev = cfg.output_device;
+  if (outDev.empty()) {
+    std::string e;
+    outDev = ChooseDefaultOutputLoopback(&e);
+    if (outDev.empty()) {
+      if (error) *error = e.empty() ? "No output loopback found." : e;
+      return false;
+    }
+  }
+
+  std::string oerr;
+  if (!OpenOutputLocked(outDev, cfg.width, cfg.height, cfg.fps, &oerr)) {
+    if (error) *error = oerr;
+    return false;
+  }
+
+  last_error_.clear();
+
+  // Seed one frame into the loopback so applications can successfully open it
+  // as a capture device even before the heavy camera pipeline starts.
+  //
+  // This is particularly important with v4l2loopback 'exclusive_caps=1':
+  // the device is typically only considered a "real" capture source once a producer
+  // has set a format and provided at least one frame.
+  if (writer_.IsOpen()) {
+    const ActualFormat outA = output_;
+    std::size_t size = outA.size_image;
+    if (size == 0 && outA.bytes_per_line > 0 && outA.height > 0) {
+      size = outA.bytes_per_line * static_cast<std::size_t>(outA.height);
+    }
+
+    if (size > 0) {
+      std::vector<std::uint8_t> buf(size);
+
+      if (outA.format == PixelFormat::rgb24) {
+        std::fill(buf.begin(), buf.end(), 0);
+      } else {
+        // YUYV "black": Y=16, U=128, V=128 (limited range neutral chroma)
+        for (std::size_t i = 0; i + 3 < buf.size(); i += 4) {
+          buf[i + 0] = 16;
+          buf[i + 1] = 128;
+          buf[i + 2] = 16;
+          buf[i + 3] = 128;
+        }
+      }
+
+      std::string werr;
+      if (!writer_.WriteFrame(buf.data(), buf.size(), &werr)) {
+        if (error) *error = "Output opened, but failed to write initial frame: " + werr;
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+void CameraPipeline::CloseOutput() {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (running_ || starting_) return;
+  writer_.Close();
+  writer_device_.clear();
+  output_device_.clear();
+  output_ = ActualFormat{};
 }
 
 void CameraPipeline::Stop() {
@@ -162,13 +310,57 @@ void CameraPipeline::Stop() {
 }
 
 void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
+  // Open input capture.
+  V4l2Capture cap;
   std::string inDev = cfg.input_device;
-  if (inDev.empty()) {
-    std::string e;
-    inDev = ChooseDefaultInputCamera(&e);
-    if (inDev.empty()) {
+  std::ostringstream inAttempts;
+
+  if (!inDev.empty()) {
+    std::string cerr;
+    if (!cap.Open(inDev, cfg.width, cfg.height, cfg.fps, CapturePixelFormat::yuyv, &cerr)) {
       std::lock_guard<std::mutex> lock(mu_);
-      last_error_ = e.empty() ? "No input camera found." : e;
+      last_error_ = "Failed to open capture device " + inDev + ":\n" + cerr;
+      running_ = false;
+      start_notified_ = true;
+      cv_.notify_all();
+      return;
+    }
+  } else {
+    const auto candidates = ListCandidateCameras();
+    if (candidates.empty()) {
+      std::lock_guard<std::mutex> lock(mu_);
+      last_error_ = "No readable camera device found (no non-loopback /dev/video* with read access).";
+      running_ = false;
+      start_notified_ = true;
+      cv_.notify_all();
+      return;
+    }
+
+    bool opened = false;
+    for (const auto& d : candidates) {
+      std::string cerr;
+      if (cap.Open(d.dev_node, cfg.width, cfg.height, cfg.fps, CapturePixelFormat::yuyv, &cerr)) {
+        inDev = d.dev_node;
+        opened = true;
+        break;
+      }
+
+      inAttempts << "  - " << d.dev_node;
+      if (!d.name.empty()) inAttempts << " (" << d.name << ")";
+      inAttempts << ":\n";
+      inAttempts << "    " << cerr << "\n";
+    }
+
+    if (!opened) {
+      std::ostringstream oss;
+      oss << "Failed to auto-select a usable camera (YUYV).\n";
+      oss << "Tried the following devices:\n";
+      oss << inAttempts.str();
+      oss << "\nTip: specify an input explicitly (e.g. studiocastd --input /dev/video0)\n";
+      oss << "     or try a smaller resolution like 640x480 (many laptop webcams only expose YUYV at lower resolutions).\n";
+
+      std::lock_guard<std::mutex> lock(mu_);
+      last_error_ = oss.str();
       running_ = false;
       start_notified_ = true;
       cv_.notify_all();
@@ -190,13 +382,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   }
 
-  V4l2Capture cap;
+  const auto capA = cap.Actual();
+
+  // Open (or reuse) writer to v4l2loopback output.
   {
-    std::string cerr;
-    if (!cap.Open(inDev, cfg.width, cfg.height, cfg.fps,
-                  CapturePixelFormat::yuyv, &cerr)) {
-      std::lock_guard<std::mutex> lock(mu_);
-      last_error_ = "Failed to open capture device " + inDev + ":\n" + cerr;
+    std::lock_guard<std::mutex> lock(mu_);
+    std::string oerr;
+    if (!OpenOutputLocked(outDev, capA.width, capA.height, capA.fps, &oerr)) {
+      last_error_ = oerr;
       running_ = false;
       start_notified_ = true;
       cv_.notify_all();
@@ -204,59 +397,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   }
 
-  const auto capA = cap.Actual();
-
-  // Open or reuse writer_: prefer RGB24 output (avoids RGB->YUYV conversion),
-  // fallback to YUYV.
-  {
-    std::string werr;
-
-    // If we already have a writer open, reuse it only if it's the same output
-    // device and matches the capture geometry/fps. Otherwise, reopen.
-    if (writer_.IsOpen()) {
-      if (writer_device_ != outDev) {
-        writer_.Close();
-        writer_device_.clear();
-      } else {
-        const auto a = writer_.Actual();
-        if (a.width != capA.width || a.height != capA.height ||
-            a.fps != capA.fps) {
-          writer_.Close();
-          writer_device_.clear();
-        }
-      }
-    }
-
-    if (!writer_.IsOpen() &&
-        !writer_.Open(outDev, capA.width, capA.height, capA.fps,
-                      PixelFormat::rgb24, &werr)) {
-      std::string werr2;
-      if (!writer_.Open(outDev, capA.width, capA.height, capA.fps,
-                        PixelFormat::yuyv, &werr2)) {
-        std::lock_guard<std::mutex> lock(mu_);
-        last_error_ = "Failed to open v4l2loopback output " + outDev +
-                      ":\n"
-                      "Tried rgb24:\n" +
-                      werr +
-                      "\n\n"
-                      "Tried yuyv:\n" +
-                      werr2;
-        running_ = false;
-        start_notified_ = true;
-        cv_.notify_all();
-        return;
-      }
-    }
-
-    if (writer_.IsOpen())
-      writer_device_ = outDev;
-  }
-
   const auto outA = writer_.Actual();
 
   const std::size_t rgbStride = static_cast<std::size_t>(capA.width) * 3u;
-  std::vector<std::uint8_t> rgb(rgbStride *
-                                static_cast<std::size_t>(capA.height));
+  std::vector<std::uint8_t> rgb(rgbStride * static_cast<std::size_t>(capA.height));
 
   std::vector<std::uint8_t> outBuf(outA.size_image);
 
@@ -281,33 +425,20 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     std::string ferr;
     if (!cap.AcquireFrame(&f, 1000, &ferr)) {
       // timeouts can happen; treat as recoverable unless stop requested
-      if (stop_.load())
-        break;
+      if (stop_.load()) break;
       std::lock_guard<std::mutex> lock(mu_);
       last_error_ = "Capture acquire failed: " + ferr;
       break;
     }
 
     // Convert capture YUYV -> internal RGB (tight stride)
-    YuyvToRgb24(f.data, capA.width, capA.height, capA.bytes_per_line,
-                rgb.data(), rgbStride);
+    YuyvToRgb24(f.data, capA.width, capA.height, capA.bytes_per_line, rgb.data(), rgbStride);
 
     std::string rerr;
     (void)cap.ReleaseFrame(f, &rerr);
 
     if (mirror_.load()) {
       MirrorRgb24InPlace(rgb.data(), capA.width, capA.height, rgbStride);
-    }
-
-    // Preview tap (decimated): capture latest processed RGB frame for GUI.
-    if (preview_enabled_.load() &&
-        ((frameIndex % 2) == 0)) { // ~15 fps at 30 fps capture
-      std::lock_guard<std::mutex> plock(preview_mu_);
-      preview_w_ = capA.width;
-      preview_h_ = capA.height;
-      preview_stride_ = rgbStride;
-      preview_rgb_ = rgb; // copy
-      ++preview_seq_;
     }
 
     // Pack/write to output format
@@ -324,16 +455,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       } else {
         // Copy into padded output buffer
         for (int y = 0; y < capA.height; ++y) {
-          const std::uint8_t *srcRow =
-              rgb.data() + static_cast<std::size_t>(y) * rgbStride;
-          std::uint8_t *dstRow =
-              outBuf.data() + static_cast<std::size_t>(y) * outA.bytes_per_line;
+          const std::uint8_t* srcRow = rgb.data() + static_cast<std::size_t>(y) * rgbStride;
+          std::uint8_t* dstRow = outBuf.data() + static_cast<std::size_t>(y) * outA.bytes_per_line;
 
-          for (std::size_t i = 0; i < wantRow; ++i)
-            dstRow[i] = srcRow[i];
+          for (std::size_t i = 0; i < wantRow; ++i) dstRow[i] = srcRow[i];
           // zero any padding
-          for (std::size_t i = wantRow; i < outA.bytes_per_line; ++i)
-            dstRow[i] = 0;
+          for (std::size_t i = wantRow; i < outA.bytes_per_line; ++i) dstRow[i] = 0;
         }
 
         std::string werr;
@@ -345,8 +472,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
     } else {
       // Output is YUYV; convert RGB -> YUYV into outBuf with output stride.
-      Rgb24ToYuyv(rgb.data(), capA.width, capA.height, rgbStride, outBuf.data(),
-                  outA.bytes_per_line);
+      Rgb24ToYuyv(rgb.data(), capA.width, capA.height, rgbStride, outBuf.data(), outA.bytes_per_line);
 
       std::string werr;
       if (!writer_.WriteFrame(outBuf.data(), outBuf.size(), &werr)) {
@@ -375,4 +501,4 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   }
 }
 
-} // namespace studiocast::video
+}  // namespace studiocast::video

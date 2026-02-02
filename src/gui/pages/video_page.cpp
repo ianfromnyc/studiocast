@@ -3,70 +3,48 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
-#include <QGroupBox>
 #include <QGuiApplication>
+#include <QGroupBox>
 #include <QHBoxLayout>
-#include <QImage>
 #include <QLabel>
 #include <QMessageBox>
-#include <QPixmap>
 #include <QPlainTextEdit>
 #include <QPushButton>
-#include <QSizePolicy>
 #include <QSpinBox>
 #include <QTimer>
 #include <QVBoxLayout>
 
-#include <cstring> // memcpy
-
 #include <sstream>
 
-#include "core/video/v4l2_writer.h"
 #include "core/video/v4l2loopback.h"
+#include "core/video/v4l2_writer.h"
 
 namespace studiocast::gui {
 namespace {
 
-QString DeviceLabel(const studiocast::video::VideoDevice &d) {
+QString DeviceLabel(const studiocast::video::VideoDevice& d) {
   QString label = QString::fromStdString(d.dev_node);
-  if (!d.name.empty())
-    label += " — " + QString::fromStdString(d.name);
-  if (!d.driver.empty())
-    label += " (" + QString::fromStdString(d.driver) + ")";
-  if (d.is_loopback)
-    label += " [loopback]";
+  if (!d.name.empty()) label += " — " + QString::fromStdString(d.name);
+  if (!d.driver.empty()) label += " (" + QString::fromStdString(d.driver) + ")";
+  if (d.is_loopback) label += " [loopback]";
   return label;
 }
 
-} // namespace
+}  // namespace
 
-VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
-  auto *root = new QVBoxLayout(this);
+VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
+  auto* root = new QVBoxLayout(this);
   root->setSpacing(12);
 
-  auto *title = new QLabel("Camera", this);
+  auto* title = new QLabel("Camera", this);
   title->setStyleSheet("font-size: 20px; font-weight: 600;");
   root->addWidget(title);
 
-  auto *box = new QGroupBox("Processed Camera → Virtual Camera", this);
-  auto *boxLayout = new QVBoxLayout(box);
-
-  // Preview
-  auto *previewRow = new QHBoxLayout();
-  previewRow->addWidget(new QLabel("Preview:", box));
-  previewLabel_ = new QLabel(box);
-  previewLabel_->setMinimumSize(640, 360);
-  previewLabel_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-  previewLabel_->setAlignment(Qt::AlignCenter);
-  previewLabel_->setStyleSheet(
-      "background: #111; border: 1px solid #333; border-radius: 6px;");
-  previewLabel_->setText("Preview will appear when the pipeline is running.");
-  previewLabel_->setScaledContents(false);
-  previewRow->addWidget(previewLabel_, 1);
-  boxLayout->addLayout(previewRow);
+  auto* box = new QGroupBox("Processed Camera → Virtual Camera", this);
+  auto* boxLayout = new QVBoxLayout(box);
 
   // Input row
-  auto *inRow = new QHBoxLayout();
+  auto* inRow = new QHBoxLayout();
   inRow->addWidget(new QLabel("Input camera:", box));
   inputCombo_ = new QComboBox(box);
   inRow->addWidget(inputCombo_, 1);
@@ -75,7 +53,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   boxLayout->addLayout(inRow);
 
   // Output row
-  auto *outRow = new QHBoxLayout();
+  auto* outRow = new QHBoxLayout();
   outRow->addWidget(new QLabel("Output (v4l2loopback):", box));
   outputCombo_ = new QComboBox(box);
   outRow->addWidget(outputCombo_, 1);
@@ -84,7 +62,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   boxLayout->addLayout(outRow);
 
   // Size row
-  auto *sizeRow = new QHBoxLayout();
+  auto* sizeRow = new QHBoxLayout();
   sizeRow->addWidget(new QLabel("Width:", box));
   widthSpin_ = new QSpinBox(box);
   widthSpin_->setRange(160, 3840);
@@ -107,14 +85,14 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   boxLayout->addLayout(sizeRow);
 
   // Effects row
-  auto *fxRow = new QHBoxLayout();
+  auto* fxRow = new QHBoxLayout();
   mirrorCheck_ = new QCheckBox("Mirror (horizontal flip)", box);
   fxRow->addWidget(mirrorCheck_);
   fxRow->addStretch(1);
   boxLayout->addLayout(fxRow);
 
   // Controls row
-  auto *ctlRow = new QHBoxLayout();
+  auto* ctlRow = new QHBoxLayout();
   startBtn_ = new QPushButton("Start", box);
   stopBtn_ = new QPushButton("Stop", box);
   ctlRow->addWidget(startBtn_);
@@ -132,8 +110,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   root->addStretch(1);
 
   connect(refreshBtn_, &QPushButton::clicked, this, &VideoPage::Refresh);
-  connect(copyCmdBtn_, &QPushButton::clicked, this,
-          &VideoPage::CopySuggestedCommand);
+  connect(copyCmdBtn_, &QPushButton::clicked, this, &VideoPage::CopySuggestedCommand);
   connect(startBtn_, &QPushButton::clicked, this, &VideoPage::OnStart);
   connect(stopBtn_, &QPushButton::clicked, this, &VideoPage::OnStop);
   connect(mirrorCheck_, &QCheckBox::toggled, this, &VideoPage::OnMirrorToggled);
@@ -143,24 +120,15 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   connect(pollTimer_, &QTimer::timeout, this, &VideoPage::OnPoll);
   pollTimer_->start();
 
-  // Preview timer (separate from status polling)
-  previewTimer_ = new QTimer(this);
-  previewTimer_->setInterval(33); // ~30 fps UI refresh
-  connect(previewTimer_, &QTimer::timeout, this, &VideoPage::OnPreviewTick);
-  previewTimer_->start();
-
-  pipeline_.SetPreviewEnabled(true);
-
   Refresh();
   UpdateUiEnabled();
 }
 
 VideoPage::~VideoPage() {
-  pipeline_.SetPreviewEnabled(false);
   pipeline_.Stop();
 }
 
-void VideoPage::ShowError(const QString &title, const QString &details) {
+void VideoPage::ShowError(const QString& title, const QString& details) {
   QMessageBox::critical(this, title, details);
 }
 
@@ -181,21 +149,19 @@ void VideoPage::Refresh() {
   int inAdded = 0;
   int outAdded = 0;
 
-  for (const auto &d : rep.devices) {
+  for (const auto& d : rep.devices) {
     const QString deviceNode = QString::fromStdString(d.dev_node);
     const QString label = DeviceLabel(d);
 
     if (!d.is_loopback && d.can_read) {
       inputCombo_->addItem(label, deviceNode);
-      if (!prevIn.isEmpty() && prevIn == deviceNode)
-        inSet = inAdded;
+      if (!prevIn.isEmpty() && prevIn == deviceNode) inSet = inAdded;
       ++inAdded;
     }
 
     if (d.is_loopback && d.can_write) {
       outputCombo_->addItem(label, deviceNode);
-      if (!prevOut.isEmpty() && prevOut == deviceNode)
-        outSet = outAdded;
+      if (!prevOut.isEmpty() && prevOut == deviceNode) outSet = outAdded;
       ++outAdded;
     }
   }
@@ -224,10 +190,8 @@ void VideoPage::Refresh() {
 }
 
 void VideoPage::CopySuggestedCommand() {
-  if (suggestedCmd_.isEmpty())
-    return;
-  if (auto *cb = QGuiApplication::clipboard())
-    cb->setText(suggestedCmd_);
+  if (suggestedCmd_.isEmpty()) return;
+  if (auto* cb = QGuiApplication::clipboard()) cb->setText(suggestedCmd_);
 }
 
 void VideoPage::OnMirrorToggled(bool checked) {
@@ -236,8 +200,7 @@ void VideoPage::OnMirrorToggled(bool checked) {
 
 void VideoPage::OnStart() {
   const auto st = pipeline_.Status();
-  if (st.running || st.starting)
-    return;
+  if (st.running || st.starting) return;
 
   const QString inDev = inputCombo_->currentData().toString();
   const QString outDev = outputCombo_->currentData().toString();
@@ -248,8 +211,7 @@ void VideoPage::OnStart() {
   }
   if (outDev.isEmpty()) {
     ShowError("Start failed",
-              "No v4l2loopback output found.\n\nLoad v4l2loopback (use the "
-              "suggested modprobe command).");
+              "No v4l2loopback output found.\n\nLoad v4l2loopback (use the suggested modprobe command).");
     return;
   }
 
@@ -268,25 +230,12 @@ void VideoPage::OnStart() {
     return;
   }
 
-  previewSeq_ = 0;
-  previewRgb_.clear();
-  previewImage_ = QImage();
-  if (previewLabel_)
-    previewLabel_->setText("Starting preview...");
-
   UpdateStatusText();
   UpdateUiEnabled();
 }
 
 void VideoPage::OnStop() {
   pipeline_.Stop();
-  previewSeq_ = 0;
-  previewRgb_.clear();
-  previewImage_ = QImage();
-  if (previewLabel_) {
-    previewLabel_->setPixmap(QPixmap());
-    previewLabel_->setText("Preview stopped.");
-  }
   UpdateStatusText();
   UpdateUiEnabled();
 }
@@ -296,55 +245,6 @@ void VideoPage::OnPoll() {
   UpdateUiEnabled();
 }
 
-void VideoPage::OnPreviewTick() {
-  const auto st = pipeline_.Status();
-  if (!st.running)
-    return;
-  if (!previewLabel_)
-    return;
-
-  int w = 0, h = 0;
-  std::size_t stride = 0;
-  std::uint64_t seq = 0;
-
-  if (!pipeline_.GetLatestRgbFrame(&previewRgb_, &w, &h, &stride, &seq))
-    return;
-  if (seq == previewSeq_)
-    return;
-  if (w <= 0 || h <= 0)
-    return;
-  if (stride < static_cast<std::size_t>(w) * 3u)
-    return;
-
-  previewSeq_ = seq;
-
-  // Allocate/resize preview image if needed
-  if (previewImage_.isNull() || previewImage_.width() != w ||
-      previewImage_.height() != h) {
-    previewImage_ = QImage(w, h, QImage::Format_RGB888);
-  }
-
-  // Copy rows into QImage's owned buffer (avoids img.copy() allocations every
-  // frame)
-  const int dstStride = previewImage_.bytesPerLine();
-  for (int y = 0; y < h; ++y) {
-    const std::uint8_t *src =
-        previewRgb_.data() + static_cast<std::size_t>(y) * stride;
-    std::uint8_t *dst = previewImage_.scanLine(y);
-    std::memcpy(dst, src, static_cast<std::size_t>(w) * 3u);
-    // If dstStride > w*3, the extra bytes are padding; leaving them as-is is
-    // fine.
-    (void)dstStride;
-  }
-
-  const QSize target = previewLabel_->size();
-  // FastTransformation keeps preview smooth; you can switch to Smooth later if
-  // desired.
-  const QImage scaled =
-      previewImage_.scaled(target, Qt::KeepAspectRatio, Qt::FastTransformation);
-  previewLabel_->setPixmap(QPixmap::fromImage(scaled));
-}
-
 void VideoPage::UpdateUiEnabled() {
   const auto st = pipeline_.Status();
   const bool busy = st.running || st.starting;
@@ -352,10 +252,8 @@ void VideoPage::UpdateUiEnabled() {
   refreshBtn_->setEnabled(!busy);
   copyCmdBtn_->setEnabled(!suggestedCmd_.isEmpty());
 
-  inputCombo_->setEnabled(!busy && inputCombo_->count() > 0 &&
-                          !inputCombo_->itemData(0).toString().isEmpty());
-  outputCombo_->setEnabled(!busy && outputCombo_->count() > 0 &&
-                           !outputCombo_->itemData(0).toString().isEmpty());
+  inputCombo_->setEnabled(!busy && inputCombo_->count() > 0 && !inputCombo_->itemData(0).toString().isEmpty());
+  outputCombo_->setEnabled(!busy && outputCombo_->count() > 0 && !outputCombo_->itemData(0).toString().isEmpty());
 
   widthSpin_->setEnabled(!busy);
   heightSpin_->setEnabled(!busy);
@@ -364,8 +262,7 @@ void VideoPage::UpdateUiEnabled() {
   // Mirror can be toggled while running (we update an atomic flag)
   mirrorCheck_->setEnabled(true);
 
-  startBtn_->setEnabled(!busy &&
-                        !inputCombo_->currentData().toString().isEmpty() &&
+  startBtn_->setEnabled(!busy && !inputCombo_->currentData().toString().isEmpty() &&
                         !outputCombo_->currentData().toString().isEmpty());
   stopBtn_->setEnabled(busy);
 }
@@ -375,24 +272,18 @@ void VideoPage::UpdateStatusText() {
 
   std::ostringstream oss;
   oss << baseStatusText_ << "\n\n---\nPipeline\n";
-  if (st.starting)
-    oss << "  state: starting...\n";
-  else if (st.running)
-    oss << "  state: running\n";
-  else
-    oss << "  state: stopped\n";
+  if (st.starting) oss << "  state: starting...\n";
+  else if (st.running) oss << "  state: running\n";
+  else oss << "  state: stopped\n";
 
-  if (!st.input_device.empty())
-    oss << "  input:  " << st.input_device << "\n";
-  if (!st.output_device.empty())
-    oss << "  output: " << st.output_device << "\n";
+  if (!st.input_device.empty()) oss << "  input:  " << st.input_device << "\n";
+  if (!st.output_device.empty()) oss << "  output: " << st.output_device << "\n";
 
   if (st.running || st.starting) {
     oss << "  capture: " << st.capture.width << "x" << st.capture.height
         << " @ " << st.capture.fps << " fps (yuyv)\n";
-    oss << "  output:  " << st.output.width << "x" << st.output.height << " @ "
-        << st.output.fps << " fps ("
-        << studiocast::video::PixelFormatName(st.output.format) << ")\n";
+    oss << "  output:  " << st.output.width << "x" << st.output.height
+        << " @ " << st.output.fps << " fps (" << studiocast::video::PixelFormatName(st.output.format) << ")\n";
     oss << "  frames:  " << st.frame_index << "\n";
   }
 
@@ -401,11 +292,10 @@ void VideoPage::UpdateStatusText() {
   }
 
   oss << "\nNotes\n"
-      << "  - Internal processing is RGB (CPU) for now; GPU/Maxine effects can "
-         "slot in later.\n"
+      << "  - Internal processing is RGB (CPU) for now; GPU/Maxine effects can slot in later.\n"
       << "  - v4l2loopback must be loaded before starting.\n";
 
   statusText_->setPlainText(QString::fromStdString(oss.str()));
 }
 
-} // namespace studiocast::gui
+}  // namespace studiocast::gui

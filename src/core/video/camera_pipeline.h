@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <condition_variable>
-#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -13,93 +12,87 @@
 
 namespace studiocast::video {
 
-struct CameraEffects {
-  bool mirror = false;
-};
+    struct CameraEffects {
+        bool mirror = false;
+    };
 
-struct CameraPipelineConfig {
-  std::string input_device;  // e.g. /dev/video0
-  std::string output_device; // e.g. /dev/video10 (v4l2loopback)
+    struct CameraPipelineConfig {
+        std::string input_device;   // e.g. /dev/video0
+        std::string output_device;  // e.g. /dev/video10 (v4l2loopback)
 
-  int width = 1280;
-  int height = 720;
-  int fps = 30;
+        int width = 1280;
+        int height = 720;
+        int fps = 30;
 
-  CameraEffects effects{};
-};
+        CameraEffects effects{};
+    };
 
-struct CameraPipelineStatus {
-  bool running = false;
-  bool starting = false;
+    struct CameraPipelineStatus {
+        bool running = false;
+        bool starting = false;
 
-  std::string input_device;
-  std::string output_device;
+        std::string input_device;
+        std::string output_device;
 
-  CaptureFormat capture{};
-  ActualFormat output{};
+        CaptureFormat capture{};
+        ActualFormat output{};
 
-  int frame_index = 0;
-  std::string last_error;
-};
+        int frame_index = 0;
+        std::string last_error;
+    };
 
-class CameraPipeline final {
-public:
-  CameraPipeline() = default;
-  ~CameraPipeline();
+    class CameraPipeline final {
+    public:
+        CameraPipeline() = default;
+        ~CameraPipeline();
 
-  CameraPipeline(const CameraPipeline &) = delete;
-  CameraPipeline &operator=(const CameraPipeline &) = delete;
+        CameraPipeline(const CameraPipeline&) = delete;
+        CameraPipeline& operator=(const CameraPipeline&) = delete;
 
-  bool Start(const CameraPipelineConfig &cfg, std::string *error);
-  void Stop();
+        bool Start(const CameraPipelineConfig& cfg, std::string* error);
+        void Stop();
 
-  CameraPipelineStatus Status() const;
+        // Opens (and keeps open) the v4l2loopback output device without starting
+        // camera capture / processing.
+        //
+        // This is important when v4l2loopback is loaded with exclusive_caps=1:
+        // many applications will not list the device as a capture source unless a
+        // producer has it open.
+        bool EnsureOutputOpen(const CameraPipelineConfig& cfg, std::string* error);
+        void CloseOutput();
 
-  void SetMirrorEnabled(bool enabled);
-  // Preview support: GUI can poll for the latest processed RGB frame (after
-  // effects, before output packing). This keeps Qt out of core. Frames are
-  // copied into an internal buffer only when preview is enabled.
-  void SetPreviewEnabled(bool enabled);
+        CameraPipelineStatus Status() const;
 
-  // Copies the latest RGB frame into `out_rgb` (Format: packed RGB24, stride =
-  // width*3). Returns true if a frame is available.
-  bool GetLatestRgbFrame(std::vector<std::uint8_t> *out_rgb, int *out_width,
-                         int *out_height, std::size_t *out_stride,
-                         std::uint64_t *out_sequence) const;
+        void SetMirrorEnabled(bool enabled);
 
-private:
-  void ThreadMain(CameraPipelineConfig cfg);
+    private:
+        bool OpenOutputLocked(const std::string& outDev, int width, int height, int fps, std::string* error);
 
-  mutable std::mutex mu_;
-  std::condition_variable cv_;
-  std::thread th_;
-  std::atomic_bool stop_{false};
+        void ThreadMain(CameraPipelineConfig cfg);
 
-  std::atomic_bool mirror_{false};
-  std::atomic_bool preview_enabled_{false};
+        mutable std::mutex mu_;
+        std::condition_variable cv_;
+        std::thread th_;
+        std::atomic_bool stop_{false};
 
-  // Last processed RGB frame for preview (owned by core; GUI pulls via
-  // GetLatestRgbFrame).
-  mutable std::mutex preview_mu_;
-  std::vector<std::uint8_t> preview_rgb_;
-  int preview_w_ = 0;
-  int preview_h_ = 0;
-  std::size_t preview_stride_ = 0;
-  std::uint64_t preview_seq_ = 0;
+        std::atomic_bool mirror_{false};
 
-  bool running_ = false;
-  bool starting_ = false;
-  bool start_notified_ = false;
+        bool running_ = false;
+        bool starting_ = false;
+        bool start_notified_ = false;
 
-  std::string input_device_;
-  std::string output_device_;
-  CaptureFormat capture_{};
-  ActualFormat output_{};
-  int frame_index_ = 0;
-  std::string last_error_;
+        std::string input_device_;
+        std::string output_device_;
+        CaptureFormat capture_{};
+        ActualFormat output_{};
+        int frame_index_ = 0;
+        std::string last_error_;
 
-  V4l2Writer writer_;
-  std::string writer_device_;
-};
+        // Keep the output open across starts/stops to avoid v4l2loopback edge
+        // cases (especially with exclusive_caps=1) and to make the virtual
+        // camera visible to apps even when we're idle.
+        V4l2Writer writer_;
+        std::string writer_device_;
+    };
 
-} // namespace studiocast::video
+}  // namespace studiocast::video

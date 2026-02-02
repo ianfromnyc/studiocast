@@ -7,104 +7,88 @@
 namespace fs = std::filesystem;
 
 namespace studiocast::util {
-namespace {
+    namespace {
 
-fs::path GetEnvPath(const char *name) {
-  const char *v = std::getenv(name);
-  if (!v || !*v)
-    return {};
-  return fs::path(v);
-}
+        fs::path GetEnvPath(const char* name) {
+            const char* v = std::getenv(name);
+            if (!v || !*v) return {};
+            return fs::path(v);
+        }
 
-} // namespace
+    }  // namespace
 
-fs::path HomeDir() {
-  if (auto p = GetEnvPath("HOME"); !p.empty())
-    return p;
+    fs::path HomeDir() {
+        if (auto p = GetEnvPath("HOME"); !p.empty()) return p;
 
-  passwd *pw = getpwuid(getuid());
-  if (pw && pw->pw_dir && *pw->pw_dir)
-    return fs::path(pw->pw_dir);
+        passwd* pw = getpwuid(getuid());
+        if (pw && pw->pw_dir && *pw->pw_dir) return fs::path(pw->pw_dir);
 
-  return {};
-}
+        return {};
+    }
 
-fs::path XdgDataHome() {
-  if (auto p = GetEnvPath("XDG_DATA_HOME"); !p.empty())
-    return p;
+    fs::path XdgDataHome() {
+        if (auto p = GetEnvPath("XDG_DATA_HOME"); !p.empty()) return p;
 
-  const auto home = HomeDir();
-  if (home.empty())
-    return {};
-  return home / ".local" / "share";
-}
+        const auto home = HomeDir();
+        if (home.empty()) return {};
+        return home / ".local" / "share";
+    }
 
-fs::path XdgConfigHome() {
-  if (auto p = GetEnvPath("XDG_CONFIG_HOME"); !p.empty())
-    return p;
+    fs::path XdgConfigHome() {
+        if (auto p = GetEnvPath("XDG_CONFIG_HOME"); !p.empty()) return p;
 
-  const auto home = HomeDir();
-  if (home.empty())
-    return {};
-  return home / ".config";
-}
+        const auto home = HomeDir();
+        if (home.empty()) return {};
+        return home / ".config";
+    }
 
-fs::path StudioCastDataDir() {
-  const auto dataHome = XdgDataHome();
-  if (dataHome.empty())
-    return {};
-  return dataHome / "studiocast";
-}
+    fs::path StudioCastDataDir() {
+        const auto dataHome = XdgDataHome();
+        if (dataHome.empty()) return {};
+        return dataHome / "studiocast";
+    }
 
-fs::path StudioCastConfigDir() {
-  const auto configHome = XdgConfigHome();
-  if (configHome.empty())
-    return {};
-  return configHome / "studiocast";
-}
+    fs::path StudioCastConfigDir() {
+        const auto configHome = XdgConfigHome();
+        if (configHome.empty()) return {};
+        return configHome / "studiocast";
+    }
 
-fs::path StudioCastMaxineDir() {
-  const auto dataDir = StudioCastDataDir();
-  if (dataDir.empty())
-    return {};
-  return dataDir / "maxine";
-}
+    fs::path StudioCastMaxineDir() {
+        const auto dataDir = StudioCastDataDir();
+        if (dataDir.empty()) return {};
+        return dataDir / "maxine";
+    }
 
-fs::path DefaultVfxRoot() {
-  const auto base = StudioCastMaxineDir();
-  if (base.empty())
-    return {};
-  return base / "VideoFX";
-}
+    fs::path DefaultVfxRoot() {
+        const auto base = StudioCastMaxineDir();
+        if (base.empty()) return {};
+        return base / "VideoFX";
+    }
 
-fs::path DefaultArRoot() {
-  const auto base = StudioCastMaxineDir();
-  if (base.empty())
-    return {};
-  return base / "ARSDK";
-}
+    fs::path DefaultArRoot() {
+        const auto base = StudioCastMaxineDir();
+        if (base.empty()) return {};
+        return base / "ARSDK";
+    }
 
-fs::path DefaultAfxRoot() {
-  const auto base = StudioCastMaxineDir();
-  if (base.empty())
-    return {};
-  return base / "Audio_Effects_SDK";
-}
+    fs::path DefaultAfxRoot() {
+        const auto base = StudioCastMaxineDir();
+        if (base.empty()) return {};
+        return base / "Audio_Effects_SDK";
+    }
 
-fs::path XdgStateHome() {
-  if (auto p = GetEnvPath("XDG_STATE_HOME"); !p.empty())
-    return p;
+    fs::path XdgStateHome() {
+        if (auto p = GetEnvPath("XDG_STATE_HOME"); !p.empty()) return p;
 
-  const auto home = HomeDir();
-  if (home.empty())
-    return {};
-  return home / ".local" / "state";
-}
+        const auto home = HomeDir();
+        if (home.empty()) return {};
+        return home / ".local" / "state";
+    }
 
-fs::path StudioCastStateDir() {
-  const auto stateHome = XdgStateHome();
-  if (stateHome.empty())
-    return {};
-  return stateHome / "studiocast";
-}
-} // namespace studiocast::util
+    fs::path StudioCastStateDir() {
+        const auto stateHome = XdgStateHome();
+        if (stateHome.empty()) return {};
+        return stateHome / "studiocast";
+    }
+}  // namespace studiocast::util

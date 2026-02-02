@@ -7,46 +7,49 @@
 
 namespace studiocast::video {
 
-enum class PixelFormat {
-  yuyv,
-  rgb24,
-};
+    enum class PixelFormat {
+        yuyv,
+        rgb24,
+      };
 
-std::string PixelFormatName(PixelFormat fmt);
-std::optional<PixelFormat> ParsePixelFormat(const std::string &s);
+    std::string PixelFormatName(PixelFormat fmt);
+    std::optional<PixelFormat> ParsePixelFormat(const std::string& s);
 
-struct ActualFormat {
-  int width = 0;
-  int height = 0;
-  int fps = 0;
-  PixelFormat format = PixelFormat::yuyv;
+    struct ActualFormat {
+        int width = 0;
+        int height = 0;
+        int fps = 0;
+        PixelFormat format = PixelFormat::yuyv;
 
-  std::size_t bytes_per_line = 0;
-  std::size_t size_image = 0;
-};
+        std::size_t bytes_per_line = 0;
+        std::size_t size_image = 0;
+    };
 
-class V4l2Writer final {
-public:
-  V4l2Writer() = default;
-  ~V4l2Writer();
+    class V4l2Writer final {
+    public:
+        V4l2Writer() = default;
+        ~V4l2Writer();
 
-  V4l2Writer(const V4l2Writer &) = delete;
-  V4l2Writer &operator=(const V4l2Writer &) = delete;
+        V4l2Writer(const V4l2Writer&) = delete;
+        V4l2Writer& operator=(const V4l2Writer&) = delete;
 
-  bool Open(const std::string &device, int width, int height, int fps,
-            PixelFormat fmt, std::string *error);
+        bool Open(const std::string& device,
+                  int width,
+                  int height,
+                  int fps,
+                  PixelFormat fmt,
+                  std::string* error);
 
-  void Close();
+        void Close();
 
-  bool WriteFrame(const std::uint8_t *data, std::size_t bytes,
-                  std::string *error);
+        bool WriteFrame(const std::uint8_t* data, std::size_t bytes, std::string* error);
 
-  bool IsOpen() const { return fd_ >= 0; }
-  const ActualFormat &Actual() const { return actual_; }
+        bool IsOpen() const { return fd_ >= 0; }
+        const ActualFormat& Actual() const { return actual_; }
 
-private:
-  int fd_ = -1;
-  ActualFormat actual_{};
-};
+    private:
+        int fd_ = -1;
+        ActualFormat actual_{};
+    };
 
-} // namespace studiocast::video
+}  // namespace studiocast::video

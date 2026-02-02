@@ -9,51 +9,46 @@
 
 namespace fs = std::filesystem;
 
-static void Usage(const char *argv0) {
-  std::cout << "StudioCast Maxine Helper\n\n"
-            << "Usage:\n"
-            << "  " << argv0 << " paths\n"
-            << "  " << argv0 << " init\n"
-            << "  " << argv0 << " doctor\n"
-            << "  " << argv0 << " gpu list\n"
-            << "  " << argv0 << " gpu select --auto\n"
-            << "  " << argv0 << " gpu select --index <N>\n"
-            << "  " << argv0 << " gpu select --uuid <GPU-UUID>\n"
-            << "  " << argv0 << " install-hints\n";
+static void Usage(const char* argv0) {
+  std::cout
+      << "StudioCast Maxine Helper\n\n"
+      << "Usage:\n"
+      << "  " << argv0 << " paths\n"
+      << "  " << argv0 << " init\n"
+      << "  " << argv0 << " doctor\n"
+      << "  " << argv0 << " gpu list\n"
+      << "  " << argv0 << " gpu select --auto\n"
+      << "  " << argv0 << " gpu select --index <N>\n"
+      << "  " << argv0 << " gpu select --uuid <GPU-UUID>\n"
+      << "  " << argv0 << " install-hints\n";
 }
 
-static void PrintGpus(const studiocast::probe::Report &rep) {
+static void PrintGpus(const studiocast::probe::Report& rep) {
   if (rep.gpus.empty()) {
     std::cout << "No GPUs detected via nvidia-smi.\n";
     return;
   }
 
-  for (const auto &g : rep.gpus) {
+  for (const auto& g : rep.gpus) {
     std::cout << "[" << g.index << "] " << g.name;
-    if (!g.uuid.empty())
-      std::cout << " (" << g.uuid << ")";
-    if (g.compute_cap)
-      std::cout << " cc " << *g.compute_cap;
+    if (!g.uuid.empty()) std::cout << " (" << g.uuid << ")";
+    if (g.compute_cap) std::cout << " cc " << *g.compute_cap;
     std::cout << (g.likely_supported ? " [supported]" : " [unsupported]");
-    if (g.maxine_gpu_arg)
-      std::cout << " (maxine --gpu " << *g.maxine_gpu_arg << ")";
+    if (g.maxine_gpu_arg) std::cout << " (maxine --gpu " << *g.maxine_gpu_arg << ")";
     std::cout << "\n";
   }
 }
 
-static std::set<std::string>
-UniqueMaxineGpuArgs(const studiocast::probe::Report &rep) {
+static std::set<std::string> UniqueMaxineGpuArgs(const studiocast::probe::Report& rep) {
   std::set<std::string> out;
-  for (const auto &g : rep.gpus) {
-    if (!g.likely_supported)
-      continue;
-    if (g.maxine_gpu_arg)
-      out.insert(*g.maxine_gpu_arg);
+  for (const auto& g : rep.gpus) {
+    if (!g.likely_supported) continue;
+    if (g.maxine_gpu_arg) out.insert(*g.maxine_gpu_arg);
   }
   return out;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   if (argc < 2) {
     Usage(argv[0]);
     return 1;
@@ -62,14 +57,13 @@ int main(int argc, char **argv) {
   const std::string cmd = argv[1];
 
   const fs::path base = studiocast::util::StudioCastMaxineDir();
-  const fs::path vfx = studiocast::util::DefaultVfxRoot();
-  const fs::path ar = studiocast::util::DefaultArRoot();
-  const fs::path afx = studiocast::util::DefaultAfxRoot();
+  const fs::path vfx  = studiocast::util::DefaultVfxRoot();
+  const fs::path ar   = studiocast::util::DefaultArRoot();
+  const fs::path afx  = studiocast::util::DefaultAfxRoot();
 
   if (cmd == "paths") {
     std::cout << "StudioCast Paths\n";
-    std::cout << "  Settings: " << studiocast::config::SettingsPath().string()
-              << "\n";
+    std::cout << "  Settings: " << studiocast::config::SettingsPath().string() << "\n";
     std::cout << "  Maxine base: " << base.string() << "\n";
     std::cout << "  VFX : " << vfx.string() << "\n";
     std::cout << "  AR  : " << ar.string() << "\n";
@@ -159,8 +153,7 @@ int main(int argc, char **argv) {
         return 3;
       }
 
-      std::cout << "Saved GPU selection to: "
-                << studiocast::config::SettingsPath().string() << "\n";
+      std::cout << "Saved GPU selection to: " << studiocast::config::SettingsPath().string() << "\n";
       const auto rep = studiocast::probe::Run(false);
       std::cout << "\n" << rep.ToText() << "\n";
       return rep.AllChecksPassed() ? 0 : 4;
@@ -178,28 +171,22 @@ int main(int argc, char **argv) {
     std::cout << "Maxine base:\n  " << base.string() << "\n\n";
 
     std::cout << "GPU policy:\n";
-    std::cout << "  settings: " << studiocast::config::SettingsPath().string()
-              << "\n";
+    std::cout << "  settings: " << studiocast::config::SettingsPath().string() << "\n";
     std::cout << "  mode: " << rep.gpu_selection_mode << "\n";
-    if (rep.selected_gpu_index)
-      std::cout << "  selected index: " << *rep.selected_gpu_index << "\n";
-    if (!rep.selected_gpu_uuid.empty())
-      std::cout << "  selected uuid: " << rep.selected_gpu_uuid << "\n\n";
+    if (rep.selected_gpu_index) std::cout << "  selected index: " << *rep.selected_gpu_index << "\n";
+    if (!rep.selected_gpu_uuid.empty()) std::cout << "  selected uuid: " << rep.selected_gpu_uuid << "\n\n";
 
     std::cout << "Detected GPUs:\n";
     PrintGpus(rep);
     std::cout << "\n";
 
-    std::cout << "VFX core (extract so that '" << vfx.string()
-              << "' exists):\n";
+    std::cout << "VFX core (extract so that '" << vfx.string() << "' exists):\n";
     std::cout << "  mkdir -p \"" << base.string() << "\"\n";
-    std::cout << "  tar -xvf NVIDIA_VFX_SDK_linux_<version>.tar.gz -C \""
-              << base.string() << "\"\n\n";
+    std::cout << "  tar -xvf NVIDIA_VFX_SDK_linux_<version>.tar.gz -C \"" << base.string() << "\"\n\n";
 
     std::cout << "AR core (extract so that '" << ar.string() << "' exists):\n";
     std::cout << "  mkdir -p \"" << base.string() << "\"\n";
-    std::cout << "  tar -xvf NVIDIA_AR_SDK_linux_<version>.tar.gz -C \""
-              << base.string() << "\"\n\n";
+    std::cout << "  tar -xvf NVIDIA_AR_SDK_linux_<version>.tar.gz -C \"" << base.string() << "\"\n\n";
 
     std::cout << "AFX core (create '" << afx.string() << "'):\n";
     std::cout << "  mkdir -p \"" << base.string() << "\"\n";
@@ -208,19 +195,15 @@ int main(int argc, char **argv) {
 
     if (args.empty()) {
       std::cout << "VFX/AR feature install:\n";
-      std::cout
-          << "  No supported GPUs with known --gpu mapping were detected.\n";
+      std::cout << "  No supported GPUs with known --gpu mapping were detected.\n";
       std::cout << "  Run this on a Tensor Core GPU machine (Turing+).\n\n";
     } else {
-      std::cout
-          << "VFX/AR feature install (run once per unique --gpu value):\n";
+      std::cout << "VFX/AR feature install (run once per unique --gpu value):\n";
       std::cout << "  export NGC_CLI_API_KEY=\"<your_api_key>\"\n";
-      for (const auto &a : args) {
-        std::cout << "  cd \"" << vfx.string()
-                  << "/features\" && ./install_feature.sh --gpu " << a
+      for (const auto& a : args) {
+        std::cout << "  cd \"" << vfx.string() << "/features\" && ./install_feature.sh --gpu " << a
                   << " --feature all --ngc-org nvidia --ngc-team maxine\n";
-        std::cout << "  cd \"" << ar.string()
-                  << "/features\" && ./install_feature.sh --gpu " << a
+        std::cout << "  cd \"" << ar.string() << "/features\" && ./install_feature.sh --gpu " << a
                   << " --feature all --ngc-org nvidia --ngc-team maxine\n";
       }
       std::cout << "\n";
@@ -228,8 +211,7 @@ int main(int argc, char **argv) {
 
     std::cout << "AFX features:\n";
     std::cout << "  export NGC_API_KEY=\"<your_api_key>\"\n";
-    std::cout << "  cd \"" << afx.string()
-              << "/features\" && ./download_features.sh\n";
+    std::cout << "  cd \"" << afx.string() << "/features\" && ./download_features.sh\n";
 
     return 0;
   }

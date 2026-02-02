@@ -1,0 +1,14 @@
+[Unit]
+Description=StudioCast background service
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/studiocastd
+Restart=on-failure
+RestartSec=1s
+
+# Optional: put logs in the journal. For file logs, add a FileHandler in the daemon later.
+
+[Install]
+WantedBy=default.target

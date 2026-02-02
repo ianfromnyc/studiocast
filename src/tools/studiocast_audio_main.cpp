@@ -6,18 +6,18 @@
 
 namespace {
 
-void Usage(const char *argv0) {
-  std::cout << "StudioCast Audio Tool\n\n"
-            << "Usage:\n"
-            << "  " << argv0 << " status\n"
-            << "  " << argv0 << " create\n"
-            << "  " << argv0 << " destroy\n"
-            << "  " << argv0
-            << " loopback-start [--source <name>] [--latency-ms <n>]\n"
-            << "  " << argv0 << " loopback-stop\n";
+void Usage(const char* argv0) {
+  std::cout
+      << "StudioCast Audio Tool\n\n"
+      << "Usage:\n"
+      << "  " << argv0 << " status\n"
+      << "  " << argv0 << " create\n"
+      << "  " << argv0 << " destroy\n"
+      << "  " << argv0 << " loopback-start [--source <name>] [--latency-ms <n>]\n"
+      << "  " << argv0 << " loopback-stop\n";
 }
 
-std::string GetArgValue(int argc, char **argv, std::string_view key) {
+std::string GetArgValue(int argc, char** argv, std::string_view key) {
   for (int i = 1; i + 1 < argc; ++i) {
     if (argv[i] && std::string_view(argv[i]) == key) {
       return argv[i + 1] ? std::string(argv[i + 1]) : "";
@@ -26,16 +26,15 @@ std::string GetArgValue(int argc, char **argv, std::string_view key) {
   return "";
 }
 
-int GetArgInt(int argc, char **argv, std::string_view key, int fallback) {
+int GetArgInt(int argc, char** argv, std::string_view key, int fallback) {
   const auto v = GetArgValue(argc, argv, key);
-  if (v.empty())
-    return fallback;
+  if (v.empty()) return fallback;
   return std::atoi(v.c_str());
 }
 
-} // namespace
+}  // namespace
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   if (argc < 2) {
     Usage(argv[0]);
     return 1;
@@ -78,8 +77,7 @@ int main(int argc, char **argv) {
       return 2;
     }
 
-    std::cout << "Loopback started (source="
-              << (source.empty() ? "<default>" : source)
+    std::cout << "Loopback started (source=" << (source.empty() ? "<default>" : source)
               << ", latency_ms=" << latency << ").\n";
     return 0;
   }

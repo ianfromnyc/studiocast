@@ -10,69 +10,72 @@
 
 namespace studiocast::video {
 
-enum class FeedPixelFormatMode {
-  auto_select,
-  yuyv,
-  rgb24,
-};
+    enum class FeedPixelFormatMode {
+        auto_select,
+        yuyv,
+        rgb24,
+      };
 
-struct FeedConfig {
-  // If empty, auto-select first writable v4l2loopback device from
-  // ProbeLoopback().
-  std::string device;
+    struct FeedConfig {
+        // If empty, auto-select first writable v4l2loopback device from ProbeLoopback().
+        std::string device;
 
-  int width = 1280;
-  int height = 720;
-  int fps = 30;
+        int width = 1280;
+        int height = 720;
+        int fps = 30;
 
-  FeedPixelFormatMode format = FeedPixelFormatMode::auto_select;
-};
+        FeedPixelFormatMode format = FeedPixelFormatMode::auto_select;
+    };
 
-struct FeedStatus {
-  bool running = false;
-  bool starting = false;
+    struct FeedStatus {
+        bool running = false;
+        bool starting = false;
 
-  std::string device;
-  ActualFormat actual{};
-  int frame_index = 0;
+        std::string device;
+        ActualFormat actual{};
+        int frame_index = 0;
 
-  std::string last_error;
-};
+        std::string last_error;
+    };
 
-class VideoFeed final {
-public:
-  VideoFeed() = default;
-  ~VideoFeed();
+    class VideoFeed final {
+    public:
+        VideoFeed() = default;
+        ~VideoFeed();
 
-  VideoFeed(const VideoFeed &) = delete;
-  VideoFeed &operator=(const VideoFeed &) = delete;
+        VideoFeed(const VideoFeed&) = delete;
+        VideoFeed& operator=(const VideoFeed&) = delete;
 
-  bool StartTestPattern(const FeedConfig &cfg, std::string *error);
-  void Stop();
+        bool StartTestPattern(const FeedConfig& cfg, std::string* error);
+        void Stop();
 
-  FeedStatus Status() const;
+        FeedStatus Status() const;
 
-private:
-  void ThreadMain(FeedConfig cfg);
+    private:
+        void ThreadMain(FeedConfig cfg);
 
-  static bool OpenWriterWithMode(V4l2Writer *writer, const std::string &device,
-                                 int width, int height, int fps,
-                                 FeedPixelFormatMode mode, std::string *error);
+        static bool OpenWriterWithMode(V4l2Writer* writer,
+                                      const std::string& device,
+                                      int width,
+                                      int height,
+                                      int fps,
+                                      FeedPixelFormatMode mode,
+                                      std::string* error);
 
-  mutable std::mutex mu_;
-  std::condition_variable cv_;
-  std::thread th_;
-  std::atomic_bool stop_{false};
+        mutable std::mutex mu_;
+        std::condition_variable cv_;
+        std::thread th_;
+        std::atomic_bool stop_{false};
 
-  // guarded by mu_
-  bool running_ = false;
-  bool starting_ = false;
-  bool start_notified_ = false;
+        // guarded by mu_
+        bool running_ = false;
+        bool starting_ = false;
+        bool start_notified_ = false;
 
-  std::string device_;
-  ActualFormat actual_{};
-  int frame_index_ = 0;
-  std::string last_error_;
-};
+        std::string device_;
+        ActualFormat actual_{};
+        int frame_index_ = 0;
+        std::string last_error_;
+    };
 
-} // namespace studiocast::video
+}  // namespace studiocast::video
