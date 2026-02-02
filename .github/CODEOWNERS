@@ -1,0 +1,7 @@
+# Everything requires review by repo admin
+* @mexicantexan
+
+# Extra focus areas (redundant if you use the wildcard above, but explicit)
+.github/workflows/ @mexicantexan
+scripts/ @mexicantexan
+CMakeLists.txt @mexicantexan
