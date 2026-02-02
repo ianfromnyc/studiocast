@@ -259,8 +259,8 @@ void VirtualCameraService::ThreadMain() {
         const auto now = std::chrono::steady_clock::now();
         if (consumerPresent) lastConsumerSeen = now;
 
-        // Apply live toggles (mirror) regardless of consumer state.
-        pipeline_.SetMirrorEnabled(cfg.pipeline.effects.mirror);
+        // Apply effects live regardless of consumer state.
+        pipeline_.SetEffects(cfg.pipeline.effects);
 
         const bool wantRun = cfg.enabled && (cfg.always_on || consumerPresent);
         const auto pst = pipeline_.Status();

@@ -1,5 +1,6 @@
 #include "daemon_config.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -9,6 +10,7 @@
 #include "core/util/fs.h"
 #include "core/util/strings.h"
 #include "core/util/xdg.h"
+#include "core/video/effects/effect_types.h"
 
 namespace fs = std::filesystem;
 
@@ -85,6 +87,16 @@ DaemonConfig LoadDaemonConfig() {
         s.video_mirror = ParseBool(it->second, s.video_mirror);
       }
 
+      if (auto it = kv.find("video.background"); it != kv.end()) {
+        s.video_background = it->second;
+      }
+      if (auto it = kv.find("video.background_backend"); it != kv.end()) {
+        s.video_background_backend = it->second;
+      }
+      if (auto it = kv.find("video.background_strength"); it != kv.end()) {
+        s.video_background_strength = ParseInt(it->second, s.video_background_strength);
+      }
+
       if (auto it = kv.find("service.consumer_poll_ms"); it != kv.end()) {
         s.consumer_poll_ms = ParseInt(it->second, s.consumer_poll_ms);
       }
@@ -131,6 +143,10 @@ bool SaveDaemonConfig(const DaemonConfig& s, std::string* error) {
   out << "video.fps = " << s.video_fps << "\n";
   out << "video.mirror = " << (s.video_mirror ? "true" : "false") << "\n\n";
 
+  out << "video.background = " << s.video_background << "\n";
+  out << "video.background_backend = " << s.video_background_backend << "\n";
+  out << "video.background_strength = " << s.video_background_strength << "\n\n";
+
   out << "service.consumer_poll_ms = " << s.consumer_poll_ms << "\n";
   out << "service.stop_grace_ms = " << s.stop_grace_ms << "\n";
   out << "service.always_on = " << (s.always_on ? "true" : "false") << "\n";
@@ -148,6 +164,21 @@ studiocast::video::VirtualCameraServiceConfig ToVideoServiceConfig(const DaemonC
   cfg.pipeline.fps = s.video_fps;
   cfg.pipeline.effects.mirror = s.video_mirror;
 
+  // Parse the persisted string fields into the strongly-typed effect config.
+  {
+    studiocast::video::effects::BackgroundEffect bg = studiocast::video::effects::BackgroundEffect::none;
+    if (studiocast::video::effects::ParseBackgroundEffect(s.video_background, &bg)) {
+      cfg.pipeline.effects.background = bg;
+    }
+
+    studiocast::video::effects::EffectBackend be = studiocast::video::effects::EffectBackend::auto_select;
+    if (studiocast::video::effects::ParseEffectBackend(s.video_background_backend, &be)) {
+      cfg.pipeline.effects.background_backend = be;
+    }
+
+    cfg.pipeline.effects.background_strength = std::max(1, std::min(64, s.video_background_strength));
+  }
+
   cfg.consumer_poll_ms = s.consumer_poll_ms;
   cfg.stop_grace_ms = s.stop_grace_ms;
   cfg.always_on = s.always_on;
@@ -164,6 +195,10 @@ void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCamer
   out->video_height = cfg.pipeline.height;
   out->video_fps = cfg.pipeline.fps;
   out->video_mirror = cfg.pipeline.effects.mirror;
+
+  out->video_background = studiocast::video::effects::ToString(cfg.pipeline.effects.background);
+  out->video_background_backend = studiocast::video::effects::ToString(cfg.pipeline.effects.background_backend);
+  out->video_background_strength = cfg.pipeline.effects.background_strength;
 
   out->consumer_poll_ms = cfg.consumer_poll_ms;
   out->stop_grace_ms = cfg.stop_grace_ms;

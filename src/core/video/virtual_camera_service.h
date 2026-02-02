@@ -58,7 +58,7 @@ namespace studiocast::video {
         bool Start(const VirtualCameraServiceConfig& cfg, std::string* error);
         void Stop();
 
-        // Thread-safe update of config. Mirror changes apply live; device/size/fps changes cause
+        // Thread-safe update of config. Effect changes apply live; device/size/fps changes cause
         // a restart on the next poll cycle.
         void UpdateConfig(const VirtualCameraServiceConfig& cfg);
 

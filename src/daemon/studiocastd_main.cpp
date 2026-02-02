@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -13,6 +14,7 @@
 #include "core/config/daemon_config.h"
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
+#include "core/video/effects/effect_types.h"
 #include "core/video/virtual_camera_service.h"
 #include "core/video/v4l2loopback.h"
 #include "studiocast/version.h"
@@ -59,6 +61,9 @@ void Usage(const char* argv0) {
         << "  --height N               Requested height (default: 720)\n"
         << "  --fps N                  Requested fps (default: 30)\n"
         << "  --mirror                 Enable mirror (horizontal flip)\n"
+        << "  --background MODE         Background effect: none|blur|remove|auto_frame (default: none)\n"
+        << "  --background-backend B    Background backend: auto|cpu|maxine (default: auto)\n"
+        << "  --background-strength N   Intensity knob (CPU blur radius; default: 8)\n"
         << "  --poll-ms N              Consumer poll interval (default: 250)\n"
         << "  --stop-grace-ms N        Stop after N ms without consumers (default: 1000)\n"
         << "  --always-on              Run pipeline even with no consumers\n"
@@ -172,11 +177,16 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"height\":" << cfg.pipeline.height << ",";
     oss << "\"fps\":" << cfg.pipeline.fps << ",";
     oss << "\"mirror\":" << BoolJson(cfg.pipeline.effects.mirror) << ",";
+    oss << "\"background\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.background)) << "\",";
+    oss << "\"background_backend\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.background_backend)) << "\",";
+    oss << "\"background_strength\":" << cfg.pipeline.effects.background_strength << ",";
 
     oss << "\"pipeline\":{";
     oss << "\"running\":" << BoolJson(st.pipeline.running) << ",";
     oss << "\"starting\":" << BoolJson(st.pipeline.starting) << ",";
-    oss << "\"frame_index\":" << st.pipeline.frame_index;
+    oss << "\"frame_index\":" << st.pipeline.frame_index << ",";
+    oss << "\"effects_backends\":\"" << JsonEscape(st.pipeline.effects_backends) << "\",";
+    oss << "\"effects_note\":\"" << JsonEscape(st.pipeline.effects_note) << "\"";
     oss << "},";
 
     oss << "\"last_error\":\"" << JsonEscape(st.last_error) << "\"";
@@ -198,7 +208,10 @@ std::string ConfigToJson(const studiocast::video::VirtualCameraServiceConfig& cf
     oss << "\"width\":" << cfg.pipeline.width << ",";
     oss << "\"height\":" << cfg.pipeline.height << ",";
     oss << "\"fps\":" << cfg.pipeline.fps << ",";
-    oss << "\"mirror\":" << BoolJson(cfg.pipeline.effects.mirror);
+    oss << "\"mirror\":" << BoolJson(cfg.pipeline.effects.mirror) << ",";
+    oss << "\"background\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.background)) << "\",";
+    oss << "\"background_backend\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.background_backend)) << "\",";
+    oss << "\"background_strength\":" << cfg.pipeline.effects.background_strength;
     oss << "}";
     return oss.str();
 }
@@ -234,6 +247,26 @@ int main(int argc, char** argv) {
     cfg.pipeline.fps = GetArgInt(argc, argv, "--fps", cfg.pipeline.fps);
 
     if (HasArg(argc, argv, "--mirror")) cfg.pipeline.effects.mirror = true;
+
+    if (const auto v = GetArgValue(argc, argv, "--background"); !v.empty()) {
+        studiocast::video::effects::BackgroundEffect bg{};
+        if (studiocast::video::effects::ParseBackgroundEffect(v, &bg)) {
+            cfg.pipeline.effects.background = bg;
+        } else {
+            std::cerr << "WARN: unknown --background value: " << v << "\n";
+        }
+    }
+    if (const auto v = GetArgValue(argc, argv, "--background-backend"); !v.empty()) {
+        studiocast::video::effects::EffectBackend be{};
+        if (studiocast::video::effects::ParseEffectBackend(v, &be)) {
+            cfg.pipeline.effects.background_backend = be;
+        } else {
+            std::cerr << "WARN: unknown --background-backend value: " << v << "\n";
+        }
+    }
+    if (const int v = GetArgInt(argc, argv, "--background-strength", -1); v > 0) {
+        cfg.pipeline.effects.background_strength = std::max(1, std::min(64, v));
+    }
 
     if (const int v = GetArgInt(argc, argv, "--poll-ms", -1); v > 0) cfg.consumer_poll_ms = v;
     if (const int v = GetArgInt(argc, argv, "--stop-grace-ms", -1); v > 0) cfg.stop_grace_ms = v;
@@ -355,6 +388,30 @@ int main(int argc, char** argv) {
                                       return std::string("ERR ") + ErrorJson("mirror must be 0|1");
                                   }
                                   newCfg.pipeline.effects.mirror = mirror;
+                              }
+
+                              if (auto it = pc.kv.find("background"); it != pc.kv.end()) {
+                                  studiocast::video::effects::BackgroundEffect bg{};
+                                  if (!studiocast::video::effects::ParseBackgroundEffect(it->second, &bg)) {
+                                      return std::string("ERR ") + ErrorJson("background must be none|blur|remove|auto_frame");
+                                  }
+                                  newCfg.pipeline.effects.background = bg;
+                              }
+
+                              if (auto it = pc.kv.find("background_backend"); it != pc.kv.end()) {
+                                  studiocast::video::effects::EffectBackend be{};
+                                  if (!studiocast::video::effects::ParseEffectBackend(it->second, &be)) {
+                                      return std::string("ERR ") + ErrorJson("background_backend must be auto|cpu|maxine");
+                                  }
+                                  newCfg.pipeline.effects.background_backend = be;
+                              }
+
+                              if (auto it = pc.kv.find("background_strength"); it != pc.kv.end()) {
+                                  const int v = std::atoi(it->second.c_str());
+                                  if (v <= 0) {
+                                      return std::string("ERR ") + ErrorJson("background_strength must be a positive integer");
+                                  }
+                                  newCfg.pipeline.effects.background_strength = std::max(1, std::min(64, v));
                               }
 
                               svc.UpdateConfig(newCfg);

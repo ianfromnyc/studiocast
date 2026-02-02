@@ -55,6 +55,13 @@ struct DaemonVideoStatus {
   int fps = 0;
   bool mirror = false;
 
+  QString background;
+  QString background_backend;
+  int background_strength = 0;
+
+  QString effects_backends;
+  QString effects_note;
+
   QString input_device;
   QString output_device;
   QString last_error;
@@ -88,6 +95,10 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
   out->fps = video.value("fps").toInt(0);
   out->mirror = video.value("mirror").toBool(false);
 
+  out->background = video.value("background").toString();
+  out->background_backend = video.value("background_backend").toString();
+  out->background_strength = video.value("background_strength").toInt(0);
+
   out->input_device = video.value("input_device").toString();
   out->output_device = video.value("output_device").toString();
 
@@ -95,6 +106,9 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
   out->pipeline_running = pipe.value("running").toBool(false);
   out->pipeline_starting = pipe.value("starting").toBool(false);
   out->frame_index = static_cast<long long>(pipe.value("frame_index").toDouble(0));
+
+  out->effects_backends = pipe.value("effects_backends").toString();
+  out->effects_note = pipe.value("effects_note").toString();
 
   out->last_error = video.value("last_error").toString();
   return true;
@@ -108,6 +122,9 @@ bool ParseDaemonConfigJson(const std::string& json,
                           int* height,
                           int* fps,
                           bool* mirror,
+                          QString* background,
+                          QString* background_backend,
+                          int* background_strength,
                           QString* error) {
   QJsonParseError perr;
   const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(json), &perr);
@@ -124,6 +141,10 @@ bool ParseDaemonConfigJson(const std::string& json,
   if (height) *height = root.value("height").toInt(0);
   if (fps) *fps = root.value("fps").toInt(0);
   if (mirror) *mirror = root.value("mirror").toBool(false);
+
+  if (background) *background = root.value("background").toString();
+  if (background_backend) *background_backend = root.value("background_backend").toString();
+  if (background_strength) *background_strength = root.value("background_strength").toInt(0);
   return true;
 }
 
@@ -211,6 +232,33 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   fxRow->addStretch(1);
   boxLayout->addLayout(fxRow);
 
+  // NVIDIA Broadcast-style background effects (CPU placeholders for now; Maxine-ready).
+  auto* bgRow = new QHBoxLayout();
+  bgRow->addWidget(new QLabel("Background:", box));
+
+  backgroundCombo_ = new QComboBox(box);
+  backgroundCombo_->addItem("None", "none");
+  backgroundCombo_->addItem("Background Blur (CPU placeholder)", "blur");
+  backgroundCombo_->addItem("Background Removal (CPU placeholder)", "remove");
+  backgroundCombo_->addItem("Auto Frame (coming soon)", "auto_frame");
+  bgRow->addWidget(backgroundCombo_, 1);
+
+  bgRow->addWidget(new QLabel("Strength:", box));
+  backgroundStrengthSpin_ = new QSpinBox(box);
+  backgroundStrengthSpin_->setRange(1, 64);
+  backgroundStrengthSpin_->setValue(8);
+  bgRow->addWidget(backgroundStrengthSpin_);
+
+  bgRow->addWidget(new QLabel("Backend:", box));
+  backgroundBackendCombo_ = new QComboBox(box);
+  backgroundBackendCombo_->addItem("Auto", "auto");
+  backgroundBackendCombo_->addItem("CPU", "cpu");
+  backgroundBackendCombo_->addItem("Maxine (future)", "maxine");
+  bgRow->addWidget(backgroundBackendCombo_);
+
+  bgRow->addStretch(1);
+  boxLayout->addLayout(bgRow);
+
   // Controls row
   auto* ctlRow = new QHBoxLayout();
   startBtn_ = new QPushButton("Start", box);
@@ -234,6 +282,12 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   connect(startBtn_, &QPushButton::clicked, this, &VideoPage::OnStart);
   connect(stopBtn_, &QPushButton::clicked, this, &VideoPage::OnStop);
   connect(mirrorCheck_, &QCheckBox::toggled, this, &VideoPage::OnMirrorToggled);
+  connect(backgroundCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, &VideoPage::OnBackgroundChanged);
+  connect(backgroundBackendCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, &VideoPage::OnBackgroundBackendChanged);
+  connect(backgroundStrengthSpin_, QOverload<int>::of(&QSpinBox::valueChanged),
+          this, &VideoPage::OnBackgroundStrengthChanged);
 
   pollTimer_ = new QTimer(this);
   pollTimer_->setInterval(500);
@@ -342,9 +396,23 @@ bool VideoPage::SyncFromDaemonConfig() {
   QString output;
   int w = 0, h = 0, fps = 0;
   bool mirror = false;
+  QString background;
+  QString background_backend;
+  int background_strength = 0;
 
   QString parseErr;
-  if (!ParseDaemonConfigJson(json, &enabled, &input, &output, &w, &h, &fps, &mirror, &parseErr)) {
+  if (!ParseDaemonConfigJson(json,
+                             &enabled,
+                             &input,
+                             &output,
+                             &w,
+                             &h,
+                             &fps,
+                             &mirror,
+                             &background,
+                             &background_backend,
+                             &background_strength,
+                             &parseErr)) {
     return false;
   }
 
@@ -364,6 +432,33 @@ bool VideoPage::SyncFromDaemonConfig() {
   mirrorCheck_->blockSignals(true);
   mirrorCheck_->setChecked(mirror);
   mirrorCheck_->blockSignals(false);
+
+  if (backgroundCombo_) {
+    backgroundCombo_->blockSignals(true);
+    const QString key = background.isEmpty() ? "none" : background;
+    const int idx = backgroundCombo_->findData(key);
+    if (idx >= 0) backgroundCombo_->setCurrentIndex(idx);
+    backgroundCombo_->blockSignals(false);
+  }
+
+  if (backgroundBackendCombo_) {
+    backgroundBackendCombo_->blockSignals(true);
+    const QString key = background_backend.isEmpty() ? "auto" : background_backend;
+    const int idx = backgroundBackendCombo_->findData(key);
+    if (idx >= 0) backgroundBackendCombo_->setCurrentIndex(idx);
+    backgroundBackendCombo_->blockSignals(false);
+  }
+
+  if (backgroundStrengthSpin_ && background_strength > 0) {
+    backgroundStrengthSpin_->blockSignals(true);
+    backgroundStrengthSpin_->setValue(background_strength);
+    backgroundStrengthSpin_->blockSignals(false);
+  }
+
+  // Enable strength only for blur.
+  if (backgroundStrengthSpin_ && backgroundCombo_) {
+    backgroundStrengthSpin_->setEnabled(backgroundCombo_->currentData().toString() == "blur");
+  }
 
   return true;
 }
@@ -397,11 +492,29 @@ bool VideoPage::SendDaemonVideoConfig() {
   return true;
 }
 
-bool VideoPage::SendDaemonMirror(bool enabled) {
-  std::string req = std::string("SET_VIDEO_EFFECTS mirror=") + (enabled ? "1" : "0");
+bool VideoPage::SendDaemonVideoEffects() {
+  std::ostringstream req;
+  req << "SET_VIDEO_EFFECTS";
+
+  req << " mirror=" << (mirrorCheck_ && mirrorCheck_->isChecked() ? "1" : "0");
+
+  const QString bg = backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  if (!bg.isEmpty()) {
+    req << " background=" << bg.toStdString();
+  }
+
+  const QString backend = backgroundBackendCombo_ ? backgroundBackendCombo_->currentData().toString() : QString();
+  if (!backend.isEmpty()) {
+    req << " background_backend=" << backend.toStdString();
+  }
+
+  if (backgroundStrengthSpin_) {
+    req << " background_strength=" << backgroundStrengthSpin_->value();
+  }
+
   QString err;
-  if (!DaemonRequest(req, nullptr, &err)) {
-    ShowError("Mirror update failed", err);
+  if (!DaemonRequest(req.str(), nullptr, &err)) {
+    ShowError("Effects update failed", err);
     return false;
   }
   return true;
@@ -418,7 +531,25 @@ bool VideoPage::SendDaemonEnabled(bool enabled) {
 }
 
 void VideoPage::OnMirrorToggled(bool checked) {
-  (void)SendDaemonMirror(checked);
+  (void)checked;
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnBackgroundChanged(int /*index*/) {
+  // Enable strength only for blur.
+  if (backgroundStrengthSpin_ && backgroundCombo_) {
+    const QString bg = backgroundCombo_->currentData().toString();
+    backgroundStrengthSpin_->setEnabled(bg == "blur");
+  }
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnBackgroundBackendChanged(int /*index*/) {
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnBackgroundStrengthChanged(int /*value*/) {
+  (void)SendDaemonVideoEffects();
 }
 
 void VideoPage::OnStart() {
@@ -428,7 +559,7 @@ void VideoPage::OnStart() {
     return;
   }
 
-  (void)SendDaemonMirror(mirrorCheck_->isChecked());
+  (void)SendDaemonVideoEffects();
   (void)SendDaemonEnabled(true);
 
   StartPreview();
@@ -564,6 +695,13 @@ void VideoPage::UpdateUiEnabled() {
   // Mirror can be toggled while running.
   mirrorCheck_->setEnabled(daemonReachable_);
 
+  // Background effects can also be toggled live.
+  if (backgroundCombo_) backgroundCombo_->setEnabled(daemonReachable_);
+  if (backgroundBackendCombo_) backgroundBackendCombo_->setEnabled(daemonReachable_);
+  if (backgroundStrengthSpin_ && backgroundCombo_) {
+    backgroundStrengthSpin_->setEnabled(daemonReachable_ && backgroundCombo_->currentData().toString() == "blur");
+  }
+
   startBtn_->setEnabled(daemonReachable_ && !enabled && outSelectable && !outputCombo_->currentData().toString().isEmpty());
   stopBtn_->setEnabled(daemonReachable_ && enabled);
 
@@ -612,6 +750,21 @@ void VideoPage::UpdateStatusText() {
   oss << "  output:     " << st.output_device.toStdString() << "\n";
   oss << "  requested:  " << st.width << "x" << st.height << " @ " << st.fps << " fps\n";
   oss << "  mirror:     " << (st.mirror ? "on" : "off") << "\n";
+  oss << "  background: " << st.background.toStdString();
+  if (!st.background_backend.isEmpty()) {
+    oss << " (backend " << st.background_backend.toStdString() << ")";
+  }
+  if (st.background_strength > 0) {
+    oss << " strength=" << st.background_strength;
+  }
+  oss << "\n";
+
+  if (!st.effects_backends.isEmpty()) {
+    oss << "  effects:    " << st.effects_backends.toStdString() << "\n";
+  }
+  if (!st.effects_note.isEmpty()) {
+    oss << "  fx note:    " << st.effects_note.toStdString() << "\n";
+  }
   oss << "  frames:     " << st.frame_index << "\n";
 
   if (!st.last_error.isEmpty()) {

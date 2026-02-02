@@ -15,12 +15,13 @@ void Usage(const char* argv0) {
       << "  " << argv0 << " config\n"
       << "  " << argv0 << " enable <0|1>\n"
       << "  " << argv0 << " video set [input=/dev/videoX|auto] [output=/dev/videoY|auto] [width=N] [height=N] [fps=N]\n"
-      << "  " << argv0 << " video effects [mirror=0|1]\n\n"
+      << "  " << argv0 << " video effects [mirror=0|1] [background=none|blur|remove|auto_frame] "
+      << "[background_backend=auto|cpu|maxine] [background_strength=N]\n\n"
       << "Examples:\n"
       << "  " << argv0 << " status\n"
       << "  " << argv0 << " enable 1\n"
       << "  " << argv0 << " video set input=/dev/video0 output=/dev/video10 width=1280 height=720 fps=30\n"
-      << "  " << argv0 << " video effects mirror=1\n";
+      << "  " << argv0 << " video effects mirror=1 background=blur background_strength=10\n";
 }
 
 bool CallOrDie(const std::string& req) {

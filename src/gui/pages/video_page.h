@@ -29,6 +29,9 @@ namespace studiocast::gui {
         void OnStart();
         void OnStop();
         void OnMirrorToggled(bool checked);
+        void OnBackgroundChanged(int index);
+        void OnBackgroundBackendChanged(int index);
+        void OnBackgroundStrengthChanged(int value);
         void OnPoll();
 
     private:
@@ -38,7 +41,7 @@ namespace studiocast::gui {
         bool SyncFromDaemonConfig();
 
         bool SendDaemonVideoConfig();
-        bool SendDaemonMirror(bool enabled);
+        bool SendDaemonVideoEffects();
         bool SendDaemonEnabled(bool enabled);
 
         void StartPreview();
@@ -53,6 +56,10 @@ namespace studiocast::gui {
         QSpinBox* fpsSpin_ = nullptr;
 
         QCheckBox* mirrorCheck_ = nullptr;
+
+        QComboBox* backgroundCombo_ = nullptr;
+        QComboBox* backgroundBackendCombo_ = nullptr;
+        QSpinBox* backgroundStrengthSpin_ = nullptr;
 
         QPushButton* refreshBtn_ = nullptr;
         QPushButton* copyCmdBtn_ = nullptr;

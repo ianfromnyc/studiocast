@@ -63,6 +63,8 @@ add_library(studiocast_core
         src/core/config/settings.cpp
         src/core/maxine/gpu.h
         src/core/maxine/gpu.cpp
+        src/core/maxine/availability.h
+        src/core/maxine/availability.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
         src/core/audio/virtual_mic_state.h
@@ -79,6 +81,19 @@ add_library(studiocast_core
         src/core/video/feed.cpp
         src/core/video/convert.h
         src/core/video/convert.cpp
+        src/core/video/effects/effect_types.h
+        src/core/video/effects/effect_types.cpp
+        src/core/video/effects/effect.h
+        src/core/video/effects/effect_chain.h
+        src/core/video/effects/effect_chain.cpp
+        src/core/video/effects/mirror_effect.h
+        src/core/video/effects/mirror_effect.cpp
+        src/core/video/effects/box_blur.h
+        src/core/video/effects/box_blur.cpp
+        src/core/video/effects/background_blur_cpu.h
+        src/core/video/effects/background_blur_cpu.cpp
+        src/core/video/effects/background_remove_cpu.h
+        src/core/video/effects/background_remove_cpu.cpp
         src/core/video/v4l2_capture.h
         src/core/video/v4l2_capture.cpp
         src/core/video/camera_pipeline.h

@@ -19,6 +19,18 @@ struct DaemonConfig {
   int video_fps = 30;
   bool video_mirror = false;
 
+  // NVIDIA Broadcast-style effects (video).
+  //
+  // These are persisted as strings to keep the config file human-readable and
+  // stable as we add more effects/backends.
+  //
+  // video.background: none|blur|remove|auto_frame
+  // video.background_backend: auto|cpu|maxine
+  // video.background_strength: integer intensity knob (blur radius for CPU placeholder)
+  std::string video_background = "none";
+  std::string video_background_backend = "auto";
+  int video_background_strength = 8;
+
   // Service behavior
   int consumer_poll_ms = 250;
   int stop_grace_ms = 1000;

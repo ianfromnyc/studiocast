@@ -2,10 +2,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <memory>
 #include <sstream>
 #include <vector>
 
+#include "core/maxine/availability.h"
 #include "core/video/convert.h"
+#include "core/video/effects/background_blur_cpu.h"
+#include "core/video/effects/background_remove_cpu.h"
+#include "core/video/effects/effect_chain.h"
+#include "core/video/effects/mirror_effect.h"
 #include "core/video/v4l2loopback.h"
 
 namespace studiocast::video {
@@ -98,7 +104,13 @@ std::vector<VideoDevice> ListCandidateCameras() {
 CameraPipeline::~CameraPipeline() { Stop(); }
 
 void CameraPipeline::SetMirrorEnabled(bool enabled) {
-  mirror_.store(enabled);
+  std::lock_guard<std::mutex> lock(effects_mu_);
+  effects_.mirror = enabled;
+}
+
+void CameraPipeline::SetEffects(const CameraEffects& effects) {
+  std::lock_guard<std::mutex> lock(effects_mu_);
+  effects_ = effects;
 }
 
 CameraPipelineStatus CameraPipeline::Status() const {
@@ -111,6 +123,8 @@ CameraPipelineStatus CameraPipeline::Status() const {
   s.capture = capture_;
   s.output = output_;
   s.frame_index = frame_index_;
+  s.effects_backends = effects_backends_;
+  s.effects_note = effects_note_;
   s.last_error = last_error_;
   return s;
 }
@@ -138,7 +152,11 @@ bool CameraPipeline::Start(const CameraPipelineConfig& cfg, std::string* error) 
   }
 
   stop_.store(false);
-  mirror_.store(cfg.effects.mirror);
+
+  {
+    std::lock_guard<std::mutex> fxLock(effects_mu_);
+    effects_ = cfg.effects;
+  }
 
   last_error_.clear();
   input_device_.clear();
@@ -146,6 +164,9 @@ bool CameraPipeline::Start(const CameraPipelineConfig& cfg, std::string* error) 
   capture_ = CaptureFormat{};
   output_ = ActualFormat{};
   frame_index_ = 0;
+
+  effects_backends_.clear();
+  effects_note_.clear();
 
   starting_ = true;
   running_ = false;
@@ -420,6 +441,93 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
   int frameIndex = 0;
 
+  // Build a modular effect chain (Maxine-ready). This can be rebuilt live when
+  // the GUI/daemon updates effect settings.
+  studiocast::video::effects::EffectChain chain;
+  CameraEffects appliedFx{};
+
+  auto rebuildChain = [&](const CameraEffects& fx) {
+    chain.Clear();
+
+    std::string note;
+
+    // Mirror
+    if (fx.mirror) {
+      chain.Add(std::make_unique<studiocast::video::effects::MirrorEffect>());
+    }
+
+    // Background effects (CPU placeholder today; Maxine later).
+    if (fx.background == studiocast::video::effects::BackgroundEffect::blur) {
+      bool wantMaxine = (fx.background_backend == studiocast::video::effects::EffectBackend::maxine);
+      bool autoMaxine = (fx.background_backend == studiocast::video::effects::EffectBackend::auto_select);
+
+      std::string reason;
+      const bool maxineAvail = studiocast::maxine::RuntimeAvailable(&reason);
+
+      if (wantMaxine || (autoMaxine && maxineAvail)) {
+        // Not implemented yet; fall back to CPU placeholder.
+        if (!maxineAvail) {
+          note = "Maxine requested but unavailable";
+          if (!reason.empty()) note += " (" + reason + ")";
+          note += "; using CPU placeholder.";
+        } else {
+          note = "Maxine backend not implemented yet; using CPU placeholder.";
+        }
+      }
+
+      chain.Add(std::make_unique<studiocast::video::effects::BackgroundBlurCpuEffect>(fx.background_strength));
+
+      if (note.empty()) {
+        note = "CPU placeholder: center-focus mask (no AI segmentation yet).";
+      }
+
+    } else if (fx.background == studiocast::video::effects::BackgroundEffect::remove) {
+      bool wantMaxine = (fx.background_backend == studiocast::video::effects::EffectBackend::maxine);
+      bool autoMaxine = (fx.background_backend == studiocast::video::effects::EffectBackend::auto_select);
+
+      std::string reason;
+      const bool maxineAvail = studiocast::maxine::RuntimeAvailable(&reason);
+
+      if (wantMaxine || (autoMaxine && maxineAvail)) {
+        if (!maxineAvail) {
+          note = "Maxine requested but unavailable";
+          if (!reason.empty()) note += " (" + reason + ")";
+          note += "; using CPU placeholder.";
+        } else {
+          note = "Maxine backend not implemented yet; using CPU placeholder.";
+        }
+      }
+
+      chain.Add(std::make_unique<studiocast::video::effects::BackgroundRemoveCpuEffect>());
+
+      if (note.empty()) {
+        note = "CPU placeholder: center-focus mask (no AI segmentation yet).";
+      }
+
+    } else if (fx.background == studiocast::video::effects::BackgroundEffect::auto_frame) {
+      // Not implemented yet.
+      note = "Auto Frame is not implemented yet.";
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      effects_backends_ = chain.BackendSummary();
+      effects_note_ = note;
+    }
+
+    appliedFx = fx;
+  };
+
+  // Initial chain based on config at pipeline start.
+  {
+    CameraEffects fx;
+    {
+      std::lock_guard<std::mutex> fxLock(effects_mu_);
+      fx = effects_;
+    }
+    rebuildChain(fx);
+  }
+
   while (!stop_.load()) {
     CapturedFrameView f{};
     std::string ferr;
@@ -437,8 +545,24 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     std::string rerr;
     (void)cap.ReleaseFrame(f, &rerr);
 
-    if (mirror_.load()) {
-      MirrorRgb24InPlace(rgb.data(), capA.width, capA.height, rgbStride);
+    // Apply effects (in-place on RGB buffer).
+    {
+      CameraEffects fx;
+      {
+        std::lock_guard<std::mutex> fxLock(effects_mu_);
+        fx = effects_;
+      }
+      if (fx != appliedFx) {
+        rebuildChain(fx);
+      }
+
+      studiocast::video::effects::Rgb24FrameView view;
+      view.data = rgb.data();
+      view.width = capA.width;
+      view.height = capA.height;
+      view.stride_bytes = rgbStride;
+
+      chain.Apply(view);
     }
 
     // Pack/write to output format

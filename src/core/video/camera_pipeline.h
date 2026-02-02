@@ -7,14 +7,37 @@
 #include <thread>
 #include <vector>
 
+#include "core/video/effects/effect_types.h"
 #include "core/video/v4l2_capture.h"
 #include "core/video/v4l2_writer.h"
 
 namespace studiocast::video {
 
     struct CameraEffects {
+        // Basic camera transform
         bool mirror = false;
+
+        // NVIDIA Broadcast-style background effects.
+        // These are implemented as CPU placeholders for now, but the config shape
+        // is intended to remain stable when Maxine/GPU backends are added.
+        studiocast::video::effects::BackgroundEffect background =
+            studiocast::video::effects::BackgroundEffect::none;
+        studiocast::video::effects::EffectBackend background_backend =
+            studiocast::video::effects::EffectBackend::auto_select;
+
+        // Used by background blur (and future AI effects) as an intensity knob.
+        // Interpreted as a blur radius for the CPU placeholder.
+        int background_strength = 8;
     };
+
+    inline bool operator==(const CameraEffects& a, const CameraEffects& b) {
+        return a.mirror == b.mirror &&
+               a.background == b.background &&
+               a.background_backend == b.background_backend &&
+               a.background_strength == b.background_strength;
+    }
+
+    inline bool operator!=(const CameraEffects& a, const CameraEffects& b) { return !(a == b); }
 
     struct CameraPipelineConfig {
         std::string input_device;   // e.g. /dev/video0
@@ -38,6 +61,11 @@ namespace studiocast::video {
         ActualFormat output{};
 
         int frame_index = 0;
+
+        // Debug/status for effects.
+        std::string effects_backends;  // e.g. "mirror:cpu,background_blur:cpu"
+        std::string effects_note;      // e.g. "Maxine requested but unavailable; using CPU placeholder"
+
         std::string last_error;
     };
 
@@ -63,6 +91,10 @@ namespace studiocast::video {
 
         CameraPipelineStatus Status() const;
 
+        // Live update of effects while running.
+        void SetEffects(const CameraEffects& effects);
+
+        // Convenience for legacy callers.
         void SetMirrorEnabled(bool enabled);
 
     private:
@@ -75,8 +107,6 @@ namespace studiocast::video {
         std::thread th_;
         std::atomic_bool stop_{false};
 
-        std::atomic_bool mirror_{false};
-
         bool running_ = false;
         bool starting_ = false;
         bool start_notified_ = false;
@@ -86,6 +116,15 @@ namespace studiocast::video {
         CaptureFormat capture_{};
         ActualFormat output_{};
         int frame_index_ = 0;
+
+        // Effects: updated live by SetEffects.
+        mutable std::mutex effects_mu_;
+        CameraEffects effects_{};
+
+        // Effect runtime info (written by pipeline thread when effects chain changes).
+        std::string effects_backends_;
+        std::string effects_note_;
+
         std::string last_error_;
 
         // Keep the output open across starts/stops to avoid v4l2loopback edge
