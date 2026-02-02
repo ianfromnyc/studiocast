@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <pwd.h>
+#include <string>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -42,6 +43,20 @@ namespace studiocast::util {
         return home / ".config";
     }
 
+    fs::path XdgRuntimeDir() {
+        // XDG_RUNTIME_DIR is expected to be set in most desktop sessions.
+        // It points to a user-private, tmpfs-backed directory like /run/user/$UID.
+        if (auto p = GetEnvPath("XDG_RUNTIME_DIR"); !p.empty()) return p;
+
+        // Fallback for non-systemd / atypical environments.
+        // Use a per-user subdir under /tmp.
+        std::error_code ec;
+        const auto tmp = fs::temp_directory_path(ec);
+        if (ec) return {};
+
+        return tmp / (std::string("studiocast-runtime-") + std::to_string(::getuid()));
+    }
+
     fs::path StudioCastDataDir() {
         const auto dataHome = XdgDataHome();
         if (dataHome.empty()) return {};
@@ -58,6 +73,12 @@ namespace studiocast::util {
         const auto dataDir = StudioCastDataDir();
         if (dataDir.empty()) return {};
         return dataDir / "maxine";
+    }
+
+    fs::path StudioCastRuntimeDir() {
+        const auto rt = XdgRuntimeDir();
+        if (rt.empty()) return {};
+        return rt / "studiocast";
     }
 
     fs::path DefaultVfxRoot() {

@@ -57,6 +57,8 @@ add_library(studiocast_core
         src/core/util/proc.cpp
         src/core/util/xdg.h
         src/core/util/xdg.cpp
+        src/core/config/daemon_config.h
+        src/core/config/daemon_config.cpp
         src/core/maxine/gpu.h
         src/core/maxine/gpu.cpp
         src/core/audio/pulse/pactl.h
@@ -81,6 +83,13 @@ add_library(studiocast_core
         src/core/video/camera_pipeline.cpp
         src/core/video/virtual_camera_service.h
         src/core/video/virtual_camera_service.cpp
+
+        src/core/ipc/daemon_socket.h
+        src/core/ipc/daemon_socket.cpp
+        src/core/ipc/daemon_client.h
+        src/core/ipc/daemon_client.cpp
+        src/core/ipc/daemon_server.h
+        src/core/ipc/daemon_server.cpp
 
 )
 
@@ -223,6 +232,31 @@ set_target_properties(studiocast-video PROPERTIES
 
 
 # -----------------------------
+# Daemon control CLI (studiocastctl)
+# -----------------------------
+add_executable(studiocastctl
+        src/tools/studiocastctl_main.cpp
+)
+
+target_link_libraries(studiocastctl PRIVATE studiocast_core)
+
+target_include_directories(studiocastctl PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${STUDIOCAST_GENERATED_DIR}"
+)
+
+studiocast_set_project_warnings(studiocastctl)
+studiocast_enable_sanitizers(studiocastctl)
+
+set_target_properties(studiocastctl PROPERTIES
+        AUTOMOC OFF
+        AUTOUIC OFF
+        AUTORCC OFF
+        OUTPUT_NAME "studiocastctl"
+)
+
+
+# -----------------------------
 # Background daemon
 # -----------------------------
 add_executable(studiocastd
@@ -251,7 +285,7 @@ set_target_properties(studiocastd PROPERTIES
 # Install step
 # -----------------------------
 include(GNUInstallDirs)
-install(TARGETS studiocast studiocast-probe studiocast-maxine studiocast-audio studiocast-video
+install(TARGETS studiocast studiocast-probe studiocast-maxine studiocast-audio studiocast-video studiocastctl
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
 

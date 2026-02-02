@@ -2,14 +2,17 @@
 
 #include <QWidget>
 #include <string>
+#include <vector>
 
-#include "core/video/camera_pipeline.h"
+#include "core/ipc/daemon_client.h"
+#include "core/video/v4l2_capture.h"
 
 class QCheckBox;
 class QComboBox;
 class QPlainTextEdit;
 class QPushButton;
 class QSpinBox;
+class QLabel;
 class QTimer;
 
 namespace studiocast::gui {
@@ -32,6 +35,15 @@ namespace studiocast::gui {
         void ShowError(const QString& title, const QString& details);
         void UpdateUiEnabled();
         void UpdateStatusText();
+        bool SyncFromDaemonConfig();
+
+        bool SendDaemonVideoConfig();
+        bool SendDaemonMirror(bool enabled);
+        bool SendDaemonEnabled(bool enabled);
+
+        void StartPreview();
+        void StopPreview();
+        void OnPreviewTick();
 
         QComboBox* inputCombo_ = nullptr;
         QComboBox* outputCombo_ = nullptr;
@@ -47,13 +59,25 @@ namespace studiocast::gui {
         QPushButton* startBtn_ = nullptr;
         QPushButton* stopBtn_ = nullptr;
 
+        QLabel* previewLabel_ = nullptr;
+        QTimer* previewTimer_ = nullptr;
+
         QPlainTextEdit* statusText_ = nullptr;
         QTimer* pollTimer_ = nullptr;
 
         QString suggestedCmd_;
         std::string baseStatusText_;
 
-        studiocast::video::CameraPipeline pipeline_;
+        bool daemonReachable_ = false;
+        std::string daemonLastStatusJson_;
+
+        // Preview is implemented by opening the virtual camera (output device)
+        // as a consumer and rendering frames inside the GUI.
+        studiocast::video::V4l2Capture previewCapture_;
+        std::vector<uint8_t> previewRgb_;
+        int previewW_ = 0;
+        int previewH_ = 0;
+        int previewBpl_ = 0;
     };
 
 }  // namespace studiocast::gui

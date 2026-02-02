@@ -14,6 +14,11 @@ namespace studiocast::video {
         // Underlying processing pipeline config.
         CameraPipelineConfig pipeline;
 
+        // If false, processing will never start even if a consumer opens the
+        // virtual camera. The v4l2loopback output is still kept open so the
+        // device stays discoverable.
+        bool enabled = true;
+
         // How often we scan for consumers of the virtual camera.
         int consumer_poll_ms = 250;
 
@@ -56,6 +61,9 @@ namespace studiocast::video {
         // Thread-safe update of config. Mirror changes apply live; device/size/fps changes cause
         // a restart on the next poll cycle.
         void UpdateConfig(const VirtualCameraServiceConfig& cfg);
+
+        // Returns the most recently applied configuration (thread-safe snapshot).
+        VirtualCameraServiceConfig Config() const;
 
         VirtualCameraServiceStatus Status() const;
 

@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <optional>
 #include <sstream>
 
 #include <fcntl.h>
@@ -26,8 +27,30 @@ int IoctlRetry(int fd, unsigned long req, void* arg) {
 std::uint32_t FourccFor(CapturePixelFormat fmt) {
   switch (fmt) {
     case CapturePixelFormat::yuyv: return V4L2_PIX_FMT_YUYV;
+    case CapturePixelFormat::rgb24: return V4L2_PIX_FMT_RGB24;
   }
   return V4L2_PIX_FMT_YUYV;
+}
+
+std::string CapturePixelFormatLabel(CapturePixelFormat fmt) {
+  switch (fmt) {
+    case CapturePixelFormat::yuyv: return "YUYV";
+    case CapturePixelFormat::rgb24: return "RGB24";
+  }
+  return "UNKNOWN";
+}
+
+bool ParseCapturePixelFormat(std::uint32_t fourcc, CapturePixelFormat* out) {
+  if (!out) return false;
+  if (fourcc == V4L2_PIX_FMT_YUYV) {
+    *out = CapturePixelFormat::yuyv;
+    return true;
+  }
+  if (fourcc == V4L2_PIX_FMT_RGB24) {
+    *out = CapturePixelFormat::rgb24;
+    return true;
+  }
+  return false;
 }
 
 struct TypeSpec {
@@ -87,11 +110,18 @@ bool ParseChosenCaptureFmt(const v4l2_format& f, bool mplane, int fps, CaptureFo
   std::size_t bpl = 0;
   std::size_t size = 0;
 
+  CapturePixelFormat parsedFmt{};
+
   if (!mplane) {
     w = static_cast<int>(f.fmt.pix.width);
     h = static_cast<int>(f.fmt.pix.height);
     bpl = static_cast<std::size_t>(f.fmt.pix.bytesperline);
     size = static_cast<std::size_t>(f.fmt.pix.sizeimage);
+
+    if (!ParseCapturePixelFormat(f.fmt.pix.pixelformat, &parsedFmt)) {
+      if (outErr) *outErr = "Unsupported capture pixel format";
+      return false;
+    }
   } else {
 #ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
     w = static_cast<int>(f.fmt.pix_mp.width);
@@ -102,6 +132,11 @@ bool ParseChosenCaptureFmt(const v4l2_format& f, bool mplane, int fps, CaptureFo
     }
     bpl = static_cast<std::size_t>(f.fmt.pix_mp.plane_fmt[0].bytesperline);
     size = static_cast<std::size_t>(f.fmt.pix_mp.plane_fmt[0].sizeimage);
+
+    if (!ParseCapturePixelFormat(f.fmt.pix_mp.pixelformat, &parsedFmt)) {
+      if (outErr) *outErr = "Unsupported capture pixel format (mplane)";
+      return false;
+    }
 #else
     if (outErr) *outErr = "mplane capture not supported by headers";
     return false;
@@ -112,10 +147,11 @@ bool ParseChosenCaptureFmt(const v4l2_format& f, bool mplane, int fps, CaptureFo
   a.width = w;
   a.height = h;
   a.fps = fps;
-  a.format = CapturePixelFormat::yuyv;
+  a.format = parsedFmt;
 
   // Provide conservative minima.
-  const std::size_t minBpl = static_cast<std::size_t>(a.width) * 2u;
+  const std::size_t bpp = (a.format == CapturePixelFormat::rgb24) ? 3u : 2u;
+  const std::size_t minBpl = static_cast<std::size_t>(a.width) * bpp;
   if (bpl < minBpl) bpl = minBpl;
   a.bytes_per_line = bpl;
 
@@ -197,7 +233,8 @@ bool V4l2Capture::Open(const std::string& device,
   if (!ok) {
     if (error) {
       std::ostringstream oss;
-      oss << "Failed to set capture format to YUYV on " << device << ".\n"
+      oss << "Failed to set capture format to " << CapturePixelFormatLabel(fmt)
+          << " on " << device << ".\n"
           << attempts.str()
           << "Tip: check supported formats with:\n"
           << "  v4l2-ctl --device " << device << " --list-formats-ext\n";

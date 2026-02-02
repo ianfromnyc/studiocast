@@ -7,10 +7,14 @@ namespace studiocast::util {
     std::filesystem::path HomeDir();
     std::filesystem::path XdgDataHome();
     std::filesystem::path XdgConfigHome();
+    std::filesystem::path XdgRuntimeDir();
 
     std::filesystem::path StudioCastDataDir();     // ~/.local/share/studiocast (by default)
     std::filesystem::path StudioCastConfigDir();   // ~/.config/studiocast (by default)
     std::filesystem::path StudioCastMaxineDir();   // ~/.local/share/studiocast/maxine (by default)
+
+    // Runtime dir (typically in /run/user/$UID). Used for sockets and other ephemeral IPC.
+    std::filesystem::path StudioCastRuntimeDir();
 
     // Canonical Maxine roots in the user-local layout
     std::filesystem::path DefaultVfxRoot();  // .../maxine/VideoFX

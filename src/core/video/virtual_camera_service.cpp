@@ -153,6 +153,11 @@ VirtualCameraServiceStatus VirtualCameraService::Status() const {
     return s;
 }
 
+VirtualCameraServiceConfig VirtualCameraService::Config() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return cfg_;
+}
+
 void VirtualCameraService::ThreadMain() {
     const int selfPid = static_cast<int>(::getpid());
 
@@ -257,7 +262,7 @@ void VirtualCameraService::ThreadMain() {
         // Apply live toggles (mirror) regardless of consumer state.
         pipeline_.SetMirrorEnabled(cfg.pipeline.effects.mirror);
 
-        const bool wantRun = cfg.always_on || consumerPresent;
+        const bool wantRun = cfg.enabled && (cfg.always_on || consumerPresent);
         const auto pst = pipeline_.Status();
 
         // Restart if config changed and we are running.

@@ -10,6 +10,7 @@ namespace studiocast::video {
 
   enum class CapturePixelFormat {
     yuyv,
+    rgb24,
   };
 
   struct CaptureFormat {

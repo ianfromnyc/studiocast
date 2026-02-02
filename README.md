@@ -22,6 +22,23 @@ cmake --build build
 - Formatting: `./scripts/format.sh`
 - Version: `./build/studiocast --version`
 
+## Daemon mode (studiocastd)
+
+StudioCast includes a background daemon (`studiocastd`) that keeps the virtual camera available and only
+starts heavy video processing when a consumer opens the v4l2loopback device (OBS/Zoom/etc.).
+
+During development you can run it manually:
+
+```bash
+./build/studiocastd
+./build/studiocastctl status
+```
+
+The GUI (`studiocast`) acts as a thin controller by talking to the daemon over a Unix socket in
+`$XDG_RUNTIME_DIR/studiocast/studiocastd.sock`.
+
+There is also a systemd user service template in `packaging/systemd/user/studiocastd.service` (installation/packaging step).
+
 ## Next steps (Phase 1)
 - Add Maxine SDK probing tooling (no redistribution of proprietary SDK assets)
-- Define IPC boundary between GUI and future audio/video services
+- Expand daemon control plane to audio (PipeWire-Pulse) and add more CPU/GPU effects
