@@ -59,6 +59,8 @@ add_library(studiocast_core
         src/core/util/xdg.cpp
         src/core/config/daemon_config.h
         src/core/config/daemon_config.cpp
+        src/core/config/settings.h
+        src/core/config/settings.cpp
         src/core/maxine/gpu.h
         src/core/maxine/gpu.cpp
         src/core/audio/pulse/pactl.h
@@ -121,8 +123,6 @@ add_executable(studiocast
         src/gui/pages/video_page.h
         src/gui/pages/video_page.cpp
         src/core/probe/probe.h
-        src/core/config/settings.h
-        src/core/config/settings.cpp
 )
 
 target_link_libraries(studiocast PRIVATE
