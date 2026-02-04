@@ -1,0 +1,77 @@
+# Installing Maxine SDK + features
+
+`studiocast-maxine` prints the **authoritative** install commands for your machine.
+
+Build and run:
+
+```bash
+cmake --build <build-dir> --target studiocast-maxine
+./<build-dir>/studiocast-maxine install-hints
+```
+
+The tool prints the exact paths it expects (based on XDG dirs), plus copy/paste commands.
+
+## Expected on-disk layout (defaults)
+
+By default the base directory is:
+
+* `$XDG_DATA_HOME/studiocast/maxine` (typically `~/.local/share/studiocast/maxine`)
+
+And the canonical SDK roots are:
+
+* VFX: `.../maxine/VideoFX`
+* AR: `.../maxine/ARSDK`
+* AFX: `.../maxine/Audio_Effects_SDK`
+
+`studiocast-maxine install-hints` prints these as absolute paths for your user.
+
+## Commands (as printed by `install-hints`)
+
+### VFX core
+
+Extract so that `.../maxine/VideoFX` exists:
+
+```bash
+mkdir -p "<Maxine base>"
+tar -xvf NVIDIA_VFX_SDK_linux_<version>.tar.gz -C "<Maxine base>"
+```
+
+### AR core
+
+Extract so that `.../maxine/ARSDK` exists:
+
+```bash
+mkdir -p "<Maxine base>"
+tar -xvf NVIDIA_AR_SDK_linux_<version>.tar.gz -C "<Maxine base>"
+```
+
+### AFX core
+
+Create `.../maxine/Audio_Effects_SDK`:
+
+```bash
+mkdir -p "<Maxine base>"
+cd "<Maxine base>"
+tar xvf --one-top-level Audio_Effects_SDK.tar.gz
+```
+
+### VFX/AR feature install
+
+On a supported Tensor Core GPU machine (Turing+), `install-hints` prints the `--gpu` values and the exact
+commands to run once per unique `--gpu` value:
+
+```bash
+export NGC_CLI_API_KEY="<your_api_key>"
+cd "<VFX root>/features" && ./install_feature.sh --gpu <gpu> --feature all --ngc-org nvidia --ngc-team maxine
+cd "<AR root>/features" && ./install_feature.sh --gpu <gpu> --feature all --ngc-org nvidia --ngc-team maxine
+```
+
+If no supported GPU mapping is detected, the tool prints a message explaining that feature installation
+must be run on a Tensor Core GPU machine.
+
+### AFX features
+
+```bash
+export NGC_API_KEY="<your_api_key>"
+cd "<AFX root>/features" && ./download_features.sh
+```

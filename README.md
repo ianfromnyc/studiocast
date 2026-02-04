@@ -21,6 +21,7 @@ cmake --build build
 ## Dev tooling
 - Formatting: `./scripts/format.sh`
 - Version: `./build/studiocast --version`
+- Maxine install (SDK + features): see `docs/maxine_install.md` (or run `studiocast-maxine install-hints` for authoritative commands)
 
 ## Daemon mode (studiocastd)
 
