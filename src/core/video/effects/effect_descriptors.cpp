@@ -75,6 +75,21 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     d.required_components = {RequiredComponent::maxine_vfx};
     d.mutex_groups = {"virtual_background_mode", "background_or_auto_frame"};
     d.pipeline_order = 40;
+    d.params = {
+        ParamDescriptor{.id = "greenscreen_mode",
+                        .display_name = "Mode",
+                        .type = ParamType::integer,
+                        .min = 0,
+                        .max = 8,
+                        .step = 1,
+                        .default_int = 0,
+                        .default_string = ""},
+        ParamDescriptor{.id = "greenscreen_temporal",
+                        .display_name = "Temporal consistency",
+                        .type = ParamType::boolean,
+                        .default_bool = true,
+                        .default_string = ""},
+    };
     out.push_back(d);
   }
   {
@@ -86,6 +101,19 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     d.pipeline_order = 40;
     d.params = {
         ParamDescriptor{.id = "replace_path", .display_name = "Image", .type = ParamType::string, .default_string = ""},
+        ParamDescriptor{.id = "greenscreen_mode",
+                        .display_name = "Mode",
+                        .type = ParamType::integer,
+                        .min = 0,
+                        .max = 8,
+                        .step = 1,
+                        .default_int = 0,
+                        .default_string = ""},
+        ParamDescriptor{.id = "greenscreen_temporal",
+                        .display_name = "Temporal consistency",
+                        .type = ParamType::boolean,
+                        .default_bool = true,
+                        .default_string = ""},
     };
     out.push_back(d);
   }

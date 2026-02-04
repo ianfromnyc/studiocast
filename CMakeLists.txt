@@ -76,6 +76,8 @@ add_library(studiocast_core
         src/core/maxine/ar_api.cpp
         src/core/maxine/effects/maxine_effect.h
         src/core/maxine/effects/maxine_effect.cpp
+        src/core/maxine/effects/vfx_green_screen_effect.h
+        src/core/maxine/effects/vfx_green_screen_effect.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
         src/core/audio/virtual_mic_state.h
@@ -98,6 +100,8 @@ add_library(studiocast_core
         src/core/video/effects/effect.h
         src/core/video/effects/effect_chain.h
         src/core/video/effects/effect_chain.cpp
+        src/core/video/effects/effect_descriptors.h
+        src/core/video/effects/effect_descriptors.cpp
         src/core/video/effects/mirror_effect.h
         src/core/video/effects/mirror_effect.cpp
         src/core/video/effects/box_blur.h

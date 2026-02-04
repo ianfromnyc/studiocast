@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -28,13 +29,26 @@ namespace studiocast::video {
         // Used by background blur (and future AI effects) as an intensity knob.
         // Interpreted as a blur radius for the CPU placeholder.
         int background_strength = 8;
+
+        // Green screen (matte generation) parameters used by Maxine VFX.
+        // Stored as raw values to avoid build-time dependency on NVIDIA headers.
+        struct GreenScreenSettings {
+            // NVVFX_MODE: quality/perf mode (numeric value defined by NVIDIA).
+            std::uint32_t mode = 0;
+            // NVVFX_TEMPORAL: enable temporal consistency.
+            bool temporal = true;
+        };
+
+        GreenScreenSettings green_screen{};
     };
 
     inline bool operator==(const CameraEffects& a, const CameraEffects& b) {
         return a.mirror == b.mirror &&
                a.background == b.background &&
                a.background_backend == b.background_backend &&
-               a.background_strength == b.background_strength;
+               a.background_strength == b.background_strength &&
+               a.green_screen.mode == b.green_screen.mode &&
+               a.green_screen.temporal == b.green_screen.temporal;
     }
 
     inline bool operator!=(const CameraEffects& a, const CameraEffects& b) { return !(a == b); }
