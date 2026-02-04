@@ -81,6 +81,49 @@ namespace {
         expectVecEq("SplitLines", SplitLines("a\r\nb\n\nc"), {"a", "b", "", "c"});
         expectEq("FirstNonEmptyLine", FirstNonEmptyLine("\n  \n x \n"), "x");
 
+        // Canonical effects model sanity: CPU backend must never be persisted/returned as a real option.
+        {
+            studiocast::video::CameraEffects legacy;
+            legacy.background_backend = studiocast::video::effects::EffectBackend::cpu;
+
+            const auto bfx = studiocast::video::ToBroadcastCameraEffects(legacy);
+            expectTrue("ToBroadcastCameraEffects maps legacy cpu backend -> engine auto",
+                       bfx.engine == studiocast::video::effects::EffectsEnginePreference::auto_select);
+
+            const auto roundtrip = studiocast::video::ToLegacyCameraEffects(bfx);
+            expectTrue("ToLegacyCameraEffects never returns cpu backend",
+                       roundtrip.background_backend != studiocast::video::effects::EffectBackend::cpu);
+        }
+
+        {
+            studiocast::video::effects::EffectsEnginePreference ep{};
+            expectTrue("ParseEffectsEnginePreference(maxine)",
+                       studiocast::video::effects::ParseEffectsEnginePreference("maxine", &ep) &&
+                           ep == studiocast::video::effects::EffectsEnginePreference::maxine);
+            expectTrue("ParseEffectsEnginePreference rejects cpu",
+                       !studiocast::video::effects::ParseEffectsEnginePreference("cpu", &ep));
+        }
+
+        {
+            studiocast::video::effects::BroadcastCameraEffects parsed;
+            studiocast::video::effects::BroadcastEffectsJsonParseOptions options;
+            options.allow_unknown_keys = true;
+            options.allow_compat_keys = true;
+            std::vector<std::string> warnings;
+            std::string perr;
+
+            expectTrue("ParseBroadcastCameraEffectsJsonText engine=maxine",
+                       studiocast::video::effects::ParseBroadcastCameraEffectsJsonText(
+                           "{\"engine\":\"maxine\"}", &parsed, options, &warnings, &perr) &&
+                           parsed.engine == studiocast::video::effects::EffectsEnginePreference::maxine);
+
+            warnings.clear();
+            perr.clear();
+            expectTrue("ParseBroadcastCameraEffectsJsonText rejects engine=cpu",
+                       !studiocast::video::effects::ParseBroadcastCameraEffectsJsonText(
+                           "{\"engine\":\"cpu\"}", &parsed, options, &warnings, &perr));
+        }
+
         {
             studiocast::maxine::NvcvApi api;
             std::string err;

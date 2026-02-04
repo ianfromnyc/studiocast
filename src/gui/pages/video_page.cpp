@@ -621,7 +621,8 @@ void VideoPage::CopySuggestedCommand() {
 bool VideoPage::SyncFromDaemonConfig() {
   std::string json;
   QString err;
-  if (!DaemonRequest("GET_CONFIG", &json, &err)) {
+  // `GET_CONFIG` is canonical effects-only; GUI sync uses `GET_STATUS` for full video config.
+  if (!DaemonRequest("GET_STATUS", &json, &err)) {
     daemonReachable_ = false;
     return false;
   }
@@ -634,13 +635,17 @@ bool VideoPage::SyncFromDaemonConfig() {
     return false;
   }
 
-  const QString input = root.value("input_device").toString();
-  const QString output = root.value("output_device").toString();
-  const int w = root.value("width").toInt(0);
-  const int h = root.value("height").toInt(0);
-  const int fps = root.value("fps").toInt(0);
+  // Prefer `GET_STATUS.video` shape; keep best-effort fallback for older daemons.
+  const QJsonObject video = root.value("video").toObject();
+  const QJsonObject src = video.isEmpty() ? root : video;
 
-  const QJsonObject fx = root.value("video_effects").toObject();
+  const QString input = src.value("input_device").toString();
+  const QString output = src.value("output_device").toString();
+  const int w = src.value("width").toInt(0);
+  const int h = src.value("height").toInt(0);
+  const int fps = src.value("fps").toInt(0);
+
+  const QJsonObject fx = src.value("video_effects").toObject();
 
   // Canonical contract: effect IDs are keys; each effect is an object with params.
   // Keep best-effort legacy fallback for older daemons.
@@ -653,7 +658,7 @@ bool VideoPage::SyncFromDaemonConfig() {
     } else if (!mv.isUndefined()) {
       mirror = mv.toBool(false);
     } else {
-      mirror = root.value("mirror").toBool(false);
+      mirror = src.value("mirror").toBool(false);
     }
   }
 
@@ -703,10 +708,10 @@ bool VideoPage::SyncFromDaemonConfig() {
       vbRemoveColor = vb.value("remove_color").toString();
       vbReplacePath = vb.value("replace_path").toString();
     } else {
-      vbMode = root.value("background").toString("none");
-      vbStrength = root.value("background_strength").toInt(8);
-      vbRemoveColor = root.value("background_remove_color").toString();
-      vbReplacePath = root.value("background_replace_image").toString();
+      vbMode = src.value("background").toString("none");
+      vbStrength = src.value("background_strength").toInt(8);
+      vbRemoveColor = src.value("background_remove_color").toString();
+      vbReplacePath = src.value("background_replace_image").toString();
     }
   }
 
@@ -746,11 +751,11 @@ bool VideoPage::SyncFromDaemonConfig() {
     virtualKeyLightPan = vkl.value("direction_pan_degrees").toInt(vkl.value("pan").toInt(0));
     virtualKeyLightHdri = vkl.value("hdri_path").toString();
   } else {
-    virtualKeyLight = root.value("virtual_key_light").toBool(false);
-    virtualKeyLightIntensity = root.value("virtual_key_light_intensity").toInt(70);
-    virtualKeyLightTemp = root.value("virtual_key_light_temperature").toString("neutral");
-    virtualKeyLightPan = root.value("virtual_key_light_pan").toInt(0);
-    virtualKeyLightHdri = root.value("virtual_key_light_hdri").toString();
+    virtualKeyLight = src.value("virtual_key_light").toBool(false);
+    virtualKeyLightIntensity = src.value("virtual_key_light_intensity").toInt(70);
+    virtualKeyLightTemp = src.value("virtual_key_light_temperature").toString("neutral");
+    virtualKeyLightPan = src.value("virtual_key_light_pan").toInt(0);
+    virtualKeyLightHdri = src.value("virtual_key_light_hdri").toString();
   }
 
   // Vignette
@@ -763,9 +768,9 @@ bool VideoPage::SyncFromDaemonConfig() {
     vignetteIntensity = vg.value("intensity").toInt(35);
     vignetteCenterOnFace = vg.value("center_on_tracked_face").toBool(vg.value("center_on_face").toBool(true));
   } else {
-    vignette = root.value("vignette").toBool(false);
-    vignetteIntensity = root.value("vignette_intensity").toInt(35);
-    vignetteCenterOnFace = root.value("vignette_center_on_face").toBool(true);
+    vignette = src.value("vignette").toBool(false);
+    vignetteIntensity = src.value("vignette_intensity").toInt(35);
+    vignetteCenterOnFace = src.value("vignette_center_on_face").toBool(true);
   }
 
   // Apply to UI (best-effort; ignore if device not found in combo).
