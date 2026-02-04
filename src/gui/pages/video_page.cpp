@@ -3,6 +3,8 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
+#include <QCoreApplication>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -16,9 +18,12 @@
 #include <QPixmap>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QProcess>
 #include <QPushButton>
+#include <QSlider>
 #include <QSpinBox>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <sstream>
@@ -73,7 +78,11 @@ struct DaemonVideoStatus {
 
   // Maxine runtime diagnostics (from daemon GET_STATUS)
   bool maxine_ok = false;
+  bool maxine_supported = false;
   QString maxine_summary;
+  QString maxine_blocked_reason;
+  QStringList maxine_blocked_details;
+  QStringList maxine_available_effects;
   bool virtual_key_light_available = false;
 
   QString effects_backends;
@@ -138,13 +147,25 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
   const QJsonObject maxine = root.value("maxine").toObject();
   if (!maxine.isEmpty()) {
     out->maxine_ok = maxine.value("ok").toBool(false);
+    out->maxine_supported = maxine.value("supported").toBool(out->maxine_ok);
     out->maxine_summary = maxine.value("summary").toString();
+    out->maxine_blocked_reason = maxine.value("blocked_reason").toString();
+
+    out->maxine_blocked_details.clear();
+    const auto blocked = maxine.value("blocked_details").toArray();
+    for (const auto& v : blocked) {
+      const QString s = v.toString();
+      if (!s.isEmpty()) out->maxine_blocked_details.push_back(s);
+    }
+
+    out->maxine_available_effects.clear();
     out->virtual_key_light_available = false;
     const auto arr = maxine.value("available_effects").toArray();
     for (const auto& v : arr) {
-      if (v.toString() == "virtual_key_light") {
+      const QString id = v.toString();
+      if (!id.isEmpty()) out->maxine_available_effects.push_back(id);
+      if (id == "virtual_key_light") {
         out->virtual_key_light_available = true;
-        break;
       }
     }
   }
@@ -153,28 +174,7 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
   return true;
 }
 
-bool ParseDaemonConfigJson(const std::string& json,
-                          bool* enabled,
-                          QString* input,
-                          QString* output,
-                          int* width,
-                          int* height,
-                          int* fps,
-                          bool* mirror,
-                          QString* background,
-                          QString* background_backend,
-                          int* background_strength,
-                          QString* background_remove_color,
-                          QString* background_replace_image,
-                          bool* virtual_key_light,
-                          int* virtual_key_light_intensity,
-                          QString* virtual_key_light_temperature,
-                          int* virtual_key_light_pan,
-                          QString* virtual_key_light_hdri,
-                          bool* vignette,
-                          int* vignette_intensity,
-                          bool* vignette_center_on_face,
-                          QString* error) {
+bool ParseJsonObject(const std::string& json, QJsonObject* outRoot, QString* error) {
   QJsonParseError perr;
   const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(json), &perr);
   if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
@@ -182,30 +182,7 @@ bool ParseDaemonConfigJson(const std::string& json,
     return false;
   }
 
-  const QJsonObject root = doc.object();
-  if (enabled) *enabled = root.value("enabled").toBool(false);
-  if (input) *input = root.value("input_device").toString();
-  if (output) *output = root.value("output_device").toString();
-  if (width) *width = root.value("width").toInt(0);
-  if (height) *height = root.value("height").toInt(0);
-  if (fps) *fps = root.value("fps").toInt(0);
-  if (mirror) *mirror = root.value("mirror").toBool(false);
-
-  if (background) *background = root.value("background").toString();
-  if (background_backend) *background_backend = root.value("background_backend").toString();
-  if (background_strength) *background_strength = root.value("background_strength").toInt(0);
-  if (background_remove_color) *background_remove_color = root.value("background_remove_color").toString();
-  if (background_replace_image) *background_replace_image = root.value("background_replace_image").toString();
-
-  if (virtual_key_light) *virtual_key_light = root.value("virtual_key_light").toBool(false);
-  if (virtual_key_light_intensity) *virtual_key_light_intensity = root.value("virtual_key_light_intensity").toInt(0);
-  if (virtual_key_light_temperature) *virtual_key_light_temperature = root.value("virtual_key_light_temperature").toString();
-  if (virtual_key_light_pan) *virtual_key_light_pan = root.value("virtual_key_light_pan").toInt(0);
-  if (virtual_key_light_hdri) *virtual_key_light_hdri = root.value("virtual_key_light_hdri").toString();
-
-  if (vignette) *vignette = root.value("vignette").toBool(false);
-  if (vignette_intensity) *vignette_intensity = root.value("vignette_intensity").toInt(0);
-  if (vignette_center_on_face) *vignette_center_on_face = root.value("vignette_center_on_face").toBool(true);
+  if (outRoot) *outRoot = doc.object();
   return true;
 }
 
@@ -286,65 +263,134 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   sizeRow->addStretch(1);
   boxLayout->addLayout(sizeRow);
 
-  // Effects row
+  // Effect engine (Maxine-only UX)
+  auto* engineRow = new QHBoxLayout();
+  engineRow->addWidget(new QLabel("Effect engine:", box));
+  effectEngineValue_ = new QLabel("Maxine", box);
+  effectEngineValue_->setStyleSheet("font-weight: 600;");
+  engineRow->addWidget(effectEngineValue_);
+  engineRow->addStretch(1);
+  boxLayout->addLayout(engineRow);
+
+  maxineBanner_ = new QLabel(box);
+  maxineBanner_->setWordWrap(true);
+  maxineBanner_->setStyleSheet(
+      "background: #3a1414; border: 1px solid #663333; color: #f0d0d0; padding: 8px; border-radius: 4px;");
+  maxineBanner_->setVisible(false);
+  boxLayout->addWidget(maxineBanner_);
+
+  // Mirror
   auto* fxRow = new QHBoxLayout();
   mirrorCheck_ = new QCheckBox("Mirror (horizontal flip)", box);
   fxRow->addWidget(mirrorCheck_);
   fxRow->addStretch(1);
   boxLayout->addLayout(fxRow);
 
-  // NVIDIA Broadcast-style background effects (CPU placeholders for now; Maxine-ready).
-  auto* bgRow = new QHBoxLayout();
-  bgRow->addWidget(new QLabel("Background:", box));
+  // Virtual Background
+  auto* vbBox = new QGroupBox("Virtual Background", box);
+  auto* vbLayout = new QVBoxLayout(vbBox);
 
-  backgroundCombo_ = new QComboBox(box);
+  auto* vbRow = new QHBoxLayout();
+  vbRow->addWidget(new QLabel("Mode:", vbBox));
+  backgroundCombo_ = new QComboBox(vbBox);
   backgroundCombo_->addItem("None", "none");
-  backgroundCombo_->addItem("Background Blur", "blur");
-  backgroundCombo_->addItem("Background Removal", "remove");
-  backgroundCombo_->addItem("Background Replace", "replace");
-  backgroundCombo_->addItem("Auto Frame (coming soon)", "auto_frame");
-  bgRow->addWidget(backgroundCombo_, 1);
+  backgroundCombo_->addItem("Blur", "blur");
+  backgroundCombo_->addItem("Remove", "remove");
+  backgroundCombo_->addItem("Replace", "replace");
+  vbRow->addWidget(backgroundCombo_, 1);
+  vbRow->addSpacing(12);
+  vbRow->addWidget(new QLabel("Blur strength:", vbBox));
+  backgroundStrengthSpin_ = new QSpinBox(vbBox);
+  backgroundStrengthSpin_->setRange(0, 100);
+  backgroundStrengthSpin_->setValue(50);
+  backgroundStrengthSpin_->setSuffix("%");
+  backgroundStrengthSpin_->setMaximumWidth(90);
+  vbRow->addWidget(backgroundStrengthSpin_);
+  vbLayout->addLayout(vbRow);
 
-  bgRow->addWidget(new QLabel("Strength:", box));
-  backgroundStrengthSpin_ = new QSpinBox(box);
-  backgroundStrengthSpin_->setRange(1, 64);
-  backgroundStrengthSpin_->setValue(8);
-  bgRow->addWidget(backgroundStrengthSpin_);
-
-  bgRow->addWidget(new QLabel("Backend:", box));
-  backgroundBackendCombo_ = new QComboBox(box);
-  backgroundBackendCombo_->addItem("Auto", "auto");
-  backgroundBackendCombo_->addItem("CPU (debug)", "cpu");
-  backgroundBackendCombo_->addItem("Maxine", "maxine");
-  bgRow->addWidget(backgroundBackendCombo_);
-
-  bgRow->addStretch(1);
-  boxLayout->addLayout(bgRow);
-
-  // Background parameters.
-  auto* bgParamRow = new QHBoxLayout();
-  bgParamRow->addWidget(new QLabel("Remove color (#RRGGBB):", box));
-  backgroundRemoveColorEdit_ = new QLineEdit(box);
+  auto* vbParamRow = new QHBoxLayout();
+  vbParamRow->addWidget(new QLabel("Remove color (#RRGGBB):", vbBox));
+  backgroundRemoveColorEdit_ = new QLineEdit(vbBox);
   backgroundRemoveColorEdit_->setPlaceholderText("#000000");
   backgroundRemoveColorEdit_->setMaximumWidth(110);
-  bgParamRow->addWidget(backgroundRemoveColorEdit_);
+  vbParamRow->addWidget(backgroundRemoveColorEdit_);
 
-  bgParamRow->addSpacing(12);
-  bgParamRow->addWidget(new QLabel("Replace image (PPM/P6):", box));
-  backgroundReplaceImageEdit_ = new QLineEdit(box);
-  bgParamRow->addWidget(backgroundReplaceImageEdit_, 1);
-  browseReplaceImageBtn_ = new QPushButton("Browse…", box);
-  bgParamRow->addWidget(browseReplaceImageBtn_);
-  boxLayout->addLayout(bgParamRow);
+  vbParamRow->addSpacing(12);
+  vbParamRow->addWidget(new QLabel("Replace image:", vbBox));
+  backgroundReplaceImageEdit_ = new QLineEdit(vbBox);
+  vbParamRow->addWidget(backgroundReplaceImageEdit_, 1);
+  browseReplaceImageBtn_ = new QPushButton("Browse…", vbBox);
+  vbParamRow->addWidget(browseReplaceImageBtn_);
+  vbLayout->addLayout(vbParamRow);
 
-  // Virtual Key Light (Maxine Video Relighting).
+  boxLayout->addWidget(vbBox);
+
+  // Auto Frame
+  auto* afBox = new QGroupBox("Auto Frame", box);
+  auto* afLayout = new QHBoxLayout(afBox);
+  autoFrameCheck_ = new QCheckBox("Enable", afBox);
+  afLayout->addWidget(autoFrameCheck_);
+  afLayout->addSpacing(12);
+  afLayout->addWidget(new QLabel("Zoom:", afBox));
+  autoFrameZoomSlider_ = new QSlider(Qt::Horizontal, afBox);
+  autoFrameZoomSlider_->setRange(0, 100);
+  autoFrameZoomSlider_->setValue(50);
+  afLayout->addWidget(autoFrameZoomSlider_, 1);
+  autoFrameZoomValue_ = new QLabel("50%", afBox);
+  autoFrameZoomValue_->setMinimumWidth(44);
+  autoFrameZoomValue_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  afLayout->addWidget(autoFrameZoomValue_);
+  boxLayout->addWidget(afBox);
+
+  // Eye Contact
+  auto* ecBox = new QGroupBox("Eye Contact", box);
+  auto* ecLayout = new QHBoxLayout(ecBox);
+  eyeContactCheck_ = new QCheckBox("Enable", ecBox);
+  ecLayout->addWidget(eyeContactCheck_);
+  ecLayout->addSpacing(12);
+  ecLayout->addWidget(new QLabel("Strength:", ecBox));
+  eyeContactStrengthSlider_ = new QSlider(Qt::Horizontal, ecBox);
+  eyeContactStrengthSlider_->setRange(0, 100);
+  eyeContactStrengthSlider_->setValue(50);
+  ecLayout->addWidget(eyeContactStrengthSlider_, 1);
+  eyeContactStrengthValue_ = new QLabel("50%", ecBox);
+  eyeContactStrengthValue_->setMinimumWidth(44);
+  eyeContactStrengthValue_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  ecLayout->addWidget(eyeContactStrengthValue_);
+  ecLayout->addSpacing(12);
+  eyeContactLookAwayCheck_ = new QCheckBox("Allow look-away", ecBox);
+  eyeContactLookAwayCheck_->setChecked(true);
+  ecLayout->addWidget(eyeContactLookAwayCheck_);
+  boxLayout->addWidget(ecBox);
+
+  // Video Noise Removal
+  auto* dnBox = new QGroupBox("Video Noise Removal", box);
+  auto* dnLayout = new QHBoxLayout(dnBox);
+  denoiseCheck_ = new QCheckBox("Enable", dnBox);
+  dnLayout->addWidget(denoiseCheck_);
+  dnLayout->addSpacing(12);
+  dnLayout->addWidget(new QLabel("Strength:", dnBox));
+  denoiseStrengthSlider_ = new QSlider(Qt::Horizontal, dnBox);
+  denoiseStrengthSlider_->setRange(0, 100);
+  denoiseStrengthSlider_->setValue(50);
+  dnLayout->addWidget(denoiseStrengthSlider_, 1);
+  denoiseStrengthValue_ = new QLabel("50%", dnBox);
+  denoiseStrengthValue_->setMinimumWidth(44);
+  denoiseStrengthValue_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  dnLayout->addWidget(denoiseStrengthValue_);
+  boxLayout->addWidget(dnBox);
+
+  // Virtual Key Light
+  auto* vklBox = new QGroupBox("Virtual Key Light", box);
+  auto* vklLayout = new QVBoxLayout(vklBox);
+
   auto* vklRow = new QHBoxLayout();
-  virtualKeyLightCheck_ = new QCheckBox("Virtual Key Light (Maxine)", box);
+  virtualKeyLightCheck_ = new QCheckBox("Enable", vklBox);
   vklRow->addWidget(virtualKeyLightCheck_);
   vklRow->addSpacing(12);
 
-  vklRow->addWidget(new QLabel("Intensity:", box));
-  virtualKeyLightIntensitySpin_ = new QSpinBox(box);
+  vklRow->addWidget(new QLabel("Intensity:", vklBox));
+  virtualKeyLightIntensitySpin_ = new QSpinBox(vklBox);
   virtualKeyLightIntensitySpin_->setRange(0, 100);
   virtualKeyLightIntensitySpin_->setValue(70);
   virtualKeyLightIntensitySpin_->setSuffix("%");
@@ -352,16 +398,16 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   vklRow->addWidget(virtualKeyLightIntensitySpin_);
 
   vklRow->addSpacing(12);
-  vklRow->addWidget(new QLabel("Temp:", box));
-  virtualKeyLightTempCombo_ = new QComboBox(box);
+  vklRow->addWidget(new QLabel("Temp:", vklBox));
+  virtualKeyLightTempCombo_ = new QComboBox(vklBox);
   virtualKeyLightTempCombo_->addItem("Neutral", "neutral");
   virtualKeyLightTempCombo_->addItem("Warm", "warm");
   virtualKeyLightTempCombo_->addItem("Cool", "cool");
   vklRow->addWidget(virtualKeyLightTempCombo_);
 
   vklRow->addSpacing(12);
-  vklRow->addWidget(new QLabel("Pan:", box));
-  virtualKeyLightPanSpin_ = new QSpinBox(box);
+  vklRow->addWidget(new QLabel("Pan:", vklBox));
+  virtualKeyLightPanSpin_ = new QSpinBox(vklBox);
   virtualKeyLightPanSpin_->setRange(-180, 180);
   virtualKeyLightPanSpin_->setValue(0);
   virtualKeyLightPanSpin_->setSuffix("°");
@@ -369,37 +415,57 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   vklRow->addWidget(virtualKeyLightPanSpin_);
 
   vklRow->addStretch(1);
-  boxLayout->addLayout(vklRow);
+  vklLayout->addLayout(vklRow);
 
   auto* vklRow2 = new QHBoxLayout();
-  vklRow2->addWidget(new QLabel("HDRI (optional):", box));
-  virtualKeyLightHdriEdit_ = new QLineEdit(box);
+  vklRow2->addWidget(new QLabel("HDRI (optional):", vklBox));
+  virtualKeyLightHdriEdit_ = new QLineEdit(vklBox);
   vklRow2->addWidget(virtualKeyLightHdriEdit_, 1);
-  browseVirtualKeyLightHdriBtn_ = new QPushButton("Browse…", box);
+  browseVirtualKeyLightHdriBtn_ = new QPushButton("Browse…", vklBox);
   vklRow2->addWidget(browseVirtualKeyLightHdriBtn_);
-  boxLayout->addLayout(vklRow2);
+  vklLayout->addLayout(vklRow2);
 
-  // Vignette (GPU post-process).
-  auto* vigRow = new QHBoxLayout();
-  vignetteCheck_ = new QCheckBox("Vignette (GPU)", box);
-  vigRow->addWidget(vignetteCheck_);
-  vigRow->addSpacing(12);
+  boxLayout->addWidget(vklBox);
 
-  vigRow->addWidget(new QLabel("Intensity:", box));
-  vignetteIntensitySpin_ = new QSpinBox(box);
-  vignetteIntensitySpin_->setRange(0, 100);
-  vignetteIntensitySpin_->setValue(35);
-  vignetteIntensitySpin_->setSuffix("%");
-  vignetteIntensitySpin_->setMaximumWidth(90);
-  vigRow->addWidget(vignetteIntensitySpin_);
-
-  vigRow->addSpacing(12);
-  vignetteCenterOnFaceCheck_ = new QCheckBox("Center on Auto Frame subject", box);
+  // Vignette
+  auto* vigBox = new QGroupBox("Vignette", box);
+  auto* vigLayout = new QHBoxLayout(vigBox);
+  vignetteCheck_ = new QCheckBox("Enable", vigBox);
+  vigLayout->addWidget(vignetteCheck_);
+  vigLayout->addSpacing(12);
+  vigLayout->addWidget(new QLabel("Intensity:", vigBox));
+  vignetteIntensitySlider_ = new QSlider(Qt::Horizontal, vigBox);
+  vignetteIntensitySlider_->setRange(0, 100);
+  vignetteIntensitySlider_->setValue(35);
+  vigLayout->addWidget(vignetteIntensitySlider_, 1);
+  vignetteIntensityValue_ = new QLabel("35%", vigBox);
+  vignetteIntensityValue_->setMinimumWidth(44);
+  vignetteIntensityValue_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  vigLayout->addWidget(vignetteIntensityValue_);
+  vigLayout->addSpacing(12);
+  vignetteCenterOnFaceCheck_ = new QCheckBox("Center on Auto Frame subject", vigBox);
   vignetteCenterOnFaceCheck_->setChecked(true);
-  vigRow->addWidget(vignetteCenterOnFaceCheck_);
+  vigLayout->addWidget(vignetteCenterOnFaceCheck_);
+  boxLayout->addWidget(vigBox);
 
-  vigRow->addStretch(1);
-  boxLayout->addLayout(vigRow);
+  // Diagnostics expander
+  auto* diagBox = new QGroupBox("Diagnostics", box);
+  diagBox->setCheckable(true);
+  diagBox->setChecked(false);
+  auto* diagLayout = new QVBoxLayout(diagBox);
+  openInstallHintsBtn_ = new QPushButton("Open install hints", diagBox);
+  openInstallHintsBtn_->setVisible(false);
+  diagLayout->addWidget(openInstallHintsBtn_, 0, Qt::AlignLeft);
+  diagnosticsText_ = new QPlainTextEdit(diagBox);
+  diagnosticsText_->setReadOnly(true);
+  diagnosticsText_->setMinimumHeight(120);
+  diagnosticsText_->setVisible(false);
+  diagLayout->addWidget(diagnosticsText_, 1);
+  connect(diagBox, &QGroupBox::toggled, this, [this](bool on) {
+    if (openInstallHintsBtn_) openInstallHintsBtn_->setVisible(on);
+    if (diagnosticsText_) diagnosticsText_->setVisible(on);
+  });
+  boxLayout->addWidget(diagBox);
 
   // Controls row
   auto* ctlRow = new QHBoxLayout();
@@ -426,14 +492,24 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   connect(mirrorCheck_, &QCheckBox::toggled, this, &VideoPage::OnMirrorToggled);
   connect(backgroundCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
           this, &VideoPage::OnBackgroundChanged);
-  connect(backgroundBackendCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
-          this, &VideoPage::OnBackgroundBackendChanged);
   connect(backgroundStrengthSpin_, QOverload<int>::of(&QSpinBox::valueChanged),
           this, &VideoPage::OnBackgroundStrengthChanged);
 
   connect(backgroundRemoveColorEdit_, &QLineEdit::editingFinished, this, &VideoPage::OnBackgroundRemoveColorChanged);
   connect(backgroundReplaceImageEdit_, &QLineEdit::editingFinished, this, &VideoPage::OnBackgroundReplaceImageChanged);
   connect(browseReplaceImageBtn_, &QPushButton::clicked, this, &VideoPage::OnBrowseReplaceImage);
+
+  connect(autoFrameCheck_, &QCheckBox::toggled, this, &VideoPage::OnAutoFrameToggled);
+  connect(autoFrameZoomSlider_, &QSlider::valueChanged, this, &VideoPage::OnAutoFrameZoomChanged);
+
+  connect(eyeContactCheck_, &QCheckBox::toggled, this, &VideoPage::OnEyeContactToggled);
+  connect(eyeContactStrengthSlider_, &QSlider::valueChanged, this, &VideoPage::OnEyeContactStrengthChanged);
+  connect(eyeContactLookAwayCheck_, &QCheckBox::toggled, this, &VideoPage::OnEyeContactLookAwayToggled);
+
+  connect(denoiseCheck_, &QCheckBox::toggled, this, &VideoPage::OnDenoiseToggled);
+  connect(denoiseStrengthSlider_, &QSlider::valueChanged, this, &VideoPage::OnDenoiseStrengthChanged);
+
+  connect(openInstallHintsBtn_, &QPushButton::clicked, this, &VideoPage::OnOpenInstallHints);
 
   connect(virtualKeyLightCheck_, &QCheckBox::toggled, this, &VideoPage::OnVirtualKeyLightToggled);
   connect(virtualKeyLightIntensitySpin_, QOverload<int>::of(&QSpinBox::valueChanged),
@@ -446,7 +522,7 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   connect(browseVirtualKeyLightHdriBtn_, &QPushButton::clicked, this, &VideoPage::OnBrowseVirtualKeyLightHdri);
 
   connect(vignetteCheck_, &QCheckBox::toggled, this, &VideoPage::OnVignetteToggled);
-  connect(vignetteIntensitySpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, &VideoPage::OnVignetteIntensityChanged);
+  connect(vignetteIntensitySlider_, &QSlider::valueChanged, this, &VideoPage::OnVignetteIntensityChanged);
   connect(vignetteCenterOnFaceCheck_, &QCheckBox::toggled, this, &VideoPage::OnVignetteCenterOnFaceToggled);
 
   pollTimer_ = new QTimer(this);
@@ -551,51 +627,103 @@ bool VideoPage::SyncFromDaemonConfig() {
 
   daemonReachable_ = true;
 
-  bool enabled = false;
-  QString input;
-  QString output;
-  int w = 0, h = 0, fps = 0;
-  bool mirror = false;
-  QString background;
-  QString background_backend;
-  int background_strength = 0;
-  QString background_remove_color;
-  QString background_replace_image;
-
-  bool virtual_key_light = false;
-  int virtual_key_light_intensity = 0;
-  QString virtual_key_light_temperature;
-  int virtual_key_light_pan = 0;
-  QString virtual_key_light_hdri;
-
-  bool vignette = false;
-  int vignette_intensity = 0;
-  bool vignette_center_on_face = true;
-
+  QJsonObject root;
   QString parseErr;
-  if (!ParseDaemonConfigJson(json,
-                             &enabled,
-                             &input,
-                             &output,
-                             &w,
-                             &h,
-                             &fps,
-                             &mirror,
-                             &background,
-                             &background_backend,
-                             &background_strength,
-                             &background_remove_color,
-                             &background_replace_image,
-                             &virtual_key_light,
-                             &virtual_key_light_intensity,
-                             &virtual_key_light_temperature,
-                             &virtual_key_light_pan,
-                             &virtual_key_light_hdri,
-                             &vignette,
-                             &vignette_intensity,
-                             &vignette_center_on_face,
-                             &parseErr)) {
+  if (!ParseJsonObject(json, &root, &parseErr)) {
     return false;
+  }
+
+  const QString input = root.value("input_device").toString();
+  const QString output = root.value("output_device").toString();
+  const int w = root.value("width").toInt(0);
+  const int h = root.value("height").toInt(0);
+  const int fps = root.value("fps").toInt(0);
+
+  const QJsonObject fx = root.value("video_effects").toObject();
+
+  const bool mirror = fx.isEmpty() ? root.value("mirror").toBool(false) : fx.value("mirror").toBool(false);
+
+  // Virtual Background
+  QString vbMode = "none";
+  int vbBlurStrength = 50;
+  QString vbRemoveColor;
+  QString vbReplacePath;
+  const QJsonObject vb = fx.value("virtual_background").toObject();
+  if (!vb.isEmpty()) {
+    vbMode = vb.value("mode").toString("none");
+    vbBlurStrength = vb.value("blur_strength").toInt(50);
+    vbRemoveColor = vb.value("remove_color").toString();
+    vbReplacePath = vb.value("replace_path").toString();
+  } else {
+    vbMode = root.value("background").toString("none");
+    vbBlurStrength = root.value("background_strength").toInt(50);
+    vbRemoveColor = root.value("background_remove_color").toString();
+    vbReplacePath = root.value("background_replace_image").toString();
+  }
+
+  // Auto Frame
+  bool autoFrame = false;
+  int autoFrameZoom = 50;
+  const QJsonObject af = fx.value("auto_frame").toObject();
+  if (!af.isEmpty()) {
+    autoFrame = af.value("enabled").toBool(false);
+    autoFrameZoom = af.value("zoom").toInt(50);
+  }
+
+  // Eye Contact
+  bool eyeContact = false;
+  int eyeContactStrength = 50;
+  bool eyeContactLookAway = true;
+  const QJsonObject ec = fx.value("eye_contact").toObject();
+  if (!ec.isEmpty()) {
+    eyeContact = ec.value("enabled").toBool(false);
+    eyeContactStrength = ec.value("strength").toInt(50);
+    eyeContactLookAway = ec.value("look_away").toBool(true);
+  }
+
+  // Video Noise Removal
+  bool denoise = false;
+  int denoiseStrength = 50;
+  const QJsonObject dn = fx.value("video_noise_removal").toObject();
+  if (!dn.isEmpty()) {
+    denoise = dn.value("enabled").toBool(false);
+    denoiseStrength = dn.value("strength").toInt(50);
+  }
+
+  // Virtual Key Light
+  bool virtualKeyLight = false;
+  int virtualKeyLightIntensity = 70;
+  QString virtualKeyLightTemp = "neutral";
+  int virtualKeyLightPan = 0;
+  QString virtualKeyLightHdri;
+  const QJsonObject vkl = fx.value("virtual_key_light").toObject();
+  if (!vkl.isEmpty()) {
+    virtualKeyLight = vkl.value("enabled").toBool(false);
+    virtualKeyLightIntensity = vkl.value("intensity").toInt(70);
+    virtualKeyLightTemp = vkl.value("temperature").toString("neutral");
+    virtualKeyLightPan = vkl.value("pan").toInt(0);
+    virtualKeyLightHdri = vkl.value("hdri_path").toString();
+  } else {
+    virtualKeyLight = root.value("virtual_key_light").toBool(false);
+    virtualKeyLightIntensity = root.value("virtual_key_light_intensity").toInt(70);
+    virtualKeyLightTemp = root.value("virtual_key_light_temperature").toString("neutral");
+    virtualKeyLightPan = root.value("virtual_key_light_pan").toInt(0);
+    virtualKeyLightHdri = root.value("virtual_key_light_hdri").toString();
+  }
+
+  // Vignette
+  bool vignette = false;
+  int vignetteIntensity = 35;
+  bool vignetteCenterOnFace = true;
+  const QJsonObject vg = fx.value("vignette").toObject();
+  if (!vg.isEmpty()) {
+    vignette = vg.value("enabled").toBool(false);
+    vignetteIntensity = vg.value("intensity").toInt(35);
+    vignetteCenterOnFace = vg.value("center_on_face").toBool(true);
+  } else {
+    vignette = root.value("vignette").toBool(false);
+    vignetteIntensity = root.value("vignette_intensity").toInt(35);
+    vignetteCenterOnFace = root.value("vignette_center_on_face").toBool(true);
   }
 
   // Apply to UI (best-effort; ignore if device not found in combo).
@@ -617,66 +745,101 @@ bool VideoPage::SyncFromDaemonConfig() {
 
   if (backgroundCombo_) {
     backgroundCombo_->blockSignals(true);
-    const QString key = background.isEmpty() ? "none" : background;
+    const QString key = vbMode.isEmpty() ? "none" : vbMode;
     const int idx = backgroundCombo_->findData(key);
     if (idx >= 0) backgroundCombo_->setCurrentIndex(idx);
     backgroundCombo_->blockSignals(false);
   }
 
-  if (backgroundBackendCombo_) {
-    backgroundBackendCombo_->blockSignals(true);
-    const QString key = background_backend.isEmpty() ? "auto" : background_backend;
-    const int idx = backgroundBackendCombo_->findData(key);
-    if (idx >= 0) backgroundBackendCombo_->setCurrentIndex(idx);
-    backgroundBackendCombo_->blockSignals(false);
-  }
-
-  if (backgroundStrengthSpin_ && background_strength > 0) {
+  if (backgroundStrengthSpin_) {
     backgroundStrengthSpin_->blockSignals(true);
-    backgroundStrengthSpin_->setValue(background_strength);
+    backgroundStrengthSpin_->setValue(std::max(0, std::min(100, vbBlurStrength)));
     backgroundStrengthSpin_->blockSignals(false);
   }
 
   if (backgroundRemoveColorEdit_) {
     backgroundRemoveColorEdit_->blockSignals(true);
-    if (!background_remove_color.isEmpty()) {
-      backgroundRemoveColorEdit_->setText(background_remove_color);
-    }
+    backgroundRemoveColorEdit_->setText(vbRemoveColor);
     backgroundRemoveColorEdit_->blockSignals(false);
   }
   if (backgroundReplaceImageEdit_) {
     backgroundReplaceImageEdit_->blockSignals(true);
-    if (!background_replace_image.isEmpty()) {
-      backgroundReplaceImageEdit_->setText(background_replace_image);
-    }
+    backgroundReplaceImageEdit_->setText(vbReplacePath);
     backgroundReplaceImageEdit_->blockSignals(false);
+  }
+
+  if (autoFrameCheck_) {
+    autoFrameCheck_->blockSignals(true);
+    autoFrameCheck_->setChecked(autoFrame);
+    autoFrameCheck_->blockSignals(false);
+  }
+  if (autoFrameZoomSlider_) {
+    autoFrameZoomSlider_->blockSignals(true);
+    autoFrameZoomSlider_->setValue(std::max(0, std::min(100, autoFrameZoom)));
+    autoFrameZoomSlider_->blockSignals(false);
+  }
+  if (autoFrameZoomValue_ && autoFrameZoomSlider_) {
+    autoFrameZoomValue_->setText(QString::number(autoFrameZoomSlider_->value()) + "%");
+  }
+
+  if (eyeContactCheck_) {
+    eyeContactCheck_->blockSignals(true);
+    eyeContactCheck_->setChecked(eyeContact);
+    eyeContactCheck_->blockSignals(false);
+  }
+  if (eyeContactStrengthSlider_) {
+    eyeContactStrengthSlider_->blockSignals(true);
+    eyeContactStrengthSlider_->setValue(std::max(0, std::min(100, eyeContactStrength)));
+    eyeContactStrengthSlider_->blockSignals(false);
+  }
+  if (eyeContactStrengthValue_ && eyeContactStrengthSlider_) {
+    eyeContactStrengthValue_->setText(QString::number(eyeContactStrengthSlider_->value()) + "%");
+  }
+  if (eyeContactLookAwayCheck_) {
+    eyeContactLookAwayCheck_->blockSignals(true);
+    eyeContactLookAwayCheck_->setChecked(eyeContactLookAway);
+    eyeContactLookAwayCheck_->blockSignals(false);
+  }
+
+  if (denoiseCheck_) {
+    denoiseCheck_->blockSignals(true);
+    denoiseCheck_->setChecked(denoise);
+    denoiseCheck_->blockSignals(false);
+  }
+  if (denoiseStrengthSlider_) {
+    denoiseStrengthSlider_->blockSignals(true);
+    denoiseStrengthSlider_->setValue(std::max(0, std::min(100, denoiseStrength)));
+    denoiseStrengthSlider_->blockSignals(false);
+  }
+  if (denoiseStrengthValue_ && denoiseStrengthSlider_) {
+    denoiseStrengthValue_->setText(QString::number(denoiseStrengthSlider_->value()) + "%");
   }
 
   if (virtualKeyLightCheck_) {
     virtualKeyLightCheck_->blockSignals(true);
-    virtualKeyLightCheck_->setChecked(virtual_key_light);
+    virtualKeyLightCheck_->setChecked(virtualKeyLight);
     virtualKeyLightCheck_->blockSignals(false);
   }
   if (virtualKeyLightIntensitySpin_) {
     virtualKeyLightIntensitySpin_->blockSignals(true);
-    virtualKeyLightIntensitySpin_->setValue(std::max(0, std::min(100, virtual_key_light_intensity)));
+    virtualKeyLightIntensitySpin_->setValue(std::max(0, std::min(100, virtualKeyLightIntensity)));
     virtualKeyLightIntensitySpin_->blockSignals(false);
   }
   if (virtualKeyLightTempCombo_) {
     virtualKeyLightTempCombo_->blockSignals(true);
-    const QString key = virtual_key_light_temperature.isEmpty() ? "neutral" : virtual_key_light_temperature;
+    const QString key = virtualKeyLightTemp.isEmpty() ? "neutral" : virtualKeyLightTemp;
     const int idx = virtualKeyLightTempCombo_->findData(key);
     if (idx >= 0) virtualKeyLightTempCombo_->setCurrentIndex(idx);
     virtualKeyLightTempCombo_->blockSignals(false);
   }
   if (virtualKeyLightPanSpin_) {
     virtualKeyLightPanSpin_->blockSignals(true);
-    virtualKeyLightPanSpin_->setValue(std::max(-180, std::min(180, virtual_key_light_pan)));
+    virtualKeyLightPanSpin_->setValue(std::max(-180, std::min(180, virtualKeyLightPan)));
     virtualKeyLightPanSpin_->blockSignals(false);
   }
   if (virtualKeyLightHdriEdit_) {
     virtualKeyLightHdriEdit_->blockSignals(true);
-    virtualKeyLightHdriEdit_->setText(virtual_key_light_hdri);
+    virtualKeyLightHdriEdit_->setText(virtualKeyLightHdri);
     virtualKeyLightHdriEdit_->blockSignals(false);
   }
 
@@ -685,14 +848,17 @@ bool VideoPage::SyncFromDaemonConfig() {
     vignetteCheck_->setChecked(vignette);
     vignetteCheck_->blockSignals(false);
   }
-  if (vignetteIntensitySpin_) {
-    vignetteIntensitySpin_->blockSignals(true);
-    vignetteIntensitySpin_->setValue(std::max(0, std::min(100, vignette_intensity)));
-    vignetteIntensitySpin_->blockSignals(false);
+  if (vignetteIntensitySlider_) {
+    vignetteIntensitySlider_->blockSignals(true);
+    vignetteIntensitySlider_->setValue(std::max(0, std::min(100, vignetteIntensity)));
+    vignetteIntensitySlider_->blockSignals(false);
+  }
+  if (vignetteIntensityValue_ && vignetteIntensitySlider_) {
+    vignetteIntensityValue_->setText(QString::number(vignetteIntensitySlider_->value()) + "%");
   }
   if (vignetteCenterOnFaceCheck_) {
     vignetteCenterOnFaceCheck_->blockSignals(true);
-    vignetteCenterOnFaceCheck_->setChecked(vignette_center_on_face);
+    vignetteCenterOnFaceCheck_->setChecked(vignetteCenterOnFace);
     vignetteCenterOnFaceCheck_->blockSignals(false);
   }
 
@@ -702,6 +868,11 @@ bool VideoPage::SyncFromDaemonConfig() {
   if (backgroundRemoveColorEdit_) backgroundRemoveColorEdit_->setEnabled(bgMode == "remove");
   if (backgroundReplaceImageEdit_) backgroundReplaceImageEdit_->setEnabled(bgMode == "replace");
   if (browseReplaceImageBtn_) browseReplaceImageBtn_->setEnabled(bgMode == "replace");
+
+  if (autoFrameZoomSlider_ && autoFrameCheck_) autoFrameZoomSlider_->setEnabled(autoFrameCheck_->isChecked());
+  if (eyeContactStrengthSlider_ && eyeContactCheck_) eyeContactStrengthSlider_->setEnabled(eyeContactCheck_->isChecked());
+  if (eyeContactLookAwayCheck_ && eyeContactCheck_) eyeContactLookAwayCheck_->setEnabled(eyeContactCheck_->isChecked());
+  if (denoiseStrengthSlider_ && denoiseCheck_) denoiseStrengthSlider_->setEnabled(denoiseCheck_->isChecked());
 
   return true;
 }
@@ -739,26 +910,13 @@ bool VideoPage::SendDaemonVideoEffects() {
   QJsonObject effects;
   effects.insert("mirror", mirrorCheck_ && mirrorCheck_->isChecked());
 
-  const QString backend = backgroundBackendCombo_ ? backgroundBackendCombo_->currentData().toString() : QString();
-  if (backend == "maxine") {
-    effects.insert("engine", "maxine");
-  } else if (!backend.isEmpty()) {
-    // Production rule: no CPU fallback in the pipeline. Treat other values as auto.
-    effects.insert("engine", "auto");
-  }
+  // Product rule: Maxine is the only production effect engine.
+  effects.insert("engine", "maxine");
 
   const QString bg = backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
   {
     QJsonObject vb;
-    if (bg == "auto_frame") {
-      // Canonical model: auto-frame is separate from virtual background.
-      QJsonObject af;
-      af.insert("enabled", true);
-      effects.insert("auto_frame", af);
-      vb.insert("mode", "none");
-    } else if (!bg.isEmpty()) {
-      vb.insert("mode", bg);
-    }
+    if (!bg.isEmpty()) vb.insert("mode", bg);
     if (backgroundStrengthSpin_) vb.insert("blur_strength", backgroundStrengthSpin_->value());
 
     if (backgroundRemoveColorEdit_) {
@@ -773,6 +931,31 @@ bool VideoPage::SendDaemonVideoEffects() {
     if (!vb.isEmpty()) effects.insert("virtual_background", vb);
   }
 
+  // Auto Frame
+  if (autoFrameCheck_ || autoFrameZoomSlider_) {
+    QJsonObject af;
+    if (autoFrameCheck_) af.insert("enabled", autoFrameCheck_->isChecked());
+    if (autoFrameZoomSlider_) af.insert("zoom", autoFrameZoomSlider_->value());
+    if (!af.isEmpty()) effects.insert("auto_frame", af);
+  }
+
+  // Eye Contact
+  if (eyeContactCheck_ || eyeContactStrengthSlider_ || eyeContactLookAwayCheck_) {
+    QJsonObject ec;
+    if (eyeContactCheck_) ec.insert("enabled", eyeContactCheck_->isChecked());
+    if (eyeContactStrengthSlider_) ec.insert("strength", eyeContactStrengthSlider_->value());
+    if (eyeContactLookAwayCheck_) ec.insert("look_away", eyeContactLookAwayCheck_->isChecked());
+    if (!ec.isEmpty()) effects.insert("eye_contact", ec);
+  }
+
+  // Video Noise Removal
+  if (denoiseCheck_ || denoiseStrengthSlider_) {
+    QJsonObject dn;
+    if (denoiseCheck_) dn.insert("enabled", denoiseCheck_->isChecked());
+    if (denoiseStrengthSlider_) dn.insert("strength", denoiseStrengthSlider_->value());
+    if (!dn.isEmpty()) effects.insert("video_noise_removal", dn);
+  }
+
   // Virtual Key Light (Maxine relighting)
   if (virtualKeyLightCheck_ || virtualKeyLightIntensitySpin_ || virtualKeyLightTempCombo_ ||
       virtualKeyLightPanSpin_ || virtualKeyLightHdriEdit_) {
@@ -781,7 +964,7 @@ bool VideoPage::SendDaemonVideoEffects() {
     if (virtualKeyLightIntensitySpin_) vkl.insert("intensity", virtualKeyLightIntensitySpin_->value());
     if (virtualKeyLightTempCombo_) {
       const QString t = virtualKeyLightTempCombo_->currentData().toString();
-      if (!t.isEmpty()) vkl.insert("temperature_preset", t);
+      if (!t.isEmpty()) vkl.insert("temperature", t);
     }
     if (virtualKeyLightPanSpin_) vkl.insert("pan", virtualKeyLightPanSpin_->value());
     if (virtualKeyLightHdriEdit_) {
@@ -792,10 +975,10 @@ bool VideoPage::SendDaemonVideoEffects() {
   }
 
   // Vignette (GPU post-process)
-  if (vignetteCheck_ || vignetteIntensitySpin_ || vignetteCenterOnFaceCheck_) {
+  if (vignetteCheck_ || vignetteIntensitySlider_ || vignetteCenterOnFaceCheck_) {
     QJsonObject vg;
     if (vignetteCheck_) vg.insert("enabled", vignetteCheck_->isChecked());
-    if (vignetteIntensitySpin_) vg.insert("intensity", vignetteIntensitySpin_->value());
+    if (vignetteIntensitySlider_) vg.insert("intensity", vignetteIntensitySlider_->value());
     if (vignetteCenterOnFaceCheck_) vg.insert("center_on_face", vignetteCenterOnFaceCheck_->isChecked());
     if (!vg.isEmpty()) effects.insert("vignette", vg);
   }
@@ -836,10 +1019,6 @@ void VideoPage::OnBackgroundChanged(int /*index*/) {
   (void)SendDaemonVideoEffects();
 }
 
-void VideoPage::OnBackgroundBackendChanged(int /*index*/) {
-  (void)SendDaemonVideoEffects();
-}
-
 void VideoPage::OnBackgroundStrengthChanged(int /*value*/) {
   (void)SendDaemonVideoEffects();
 }
@@ -860,6 +1039,66 @@ void VideoPage::OnBrowseReplaceImage() {
   if (file.isEmpty()) return;
   if (backgroundReplaceImageEdit_) backgroundReplaceImageEdit_->setText(file);
   (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnAutoFrameToggled(bool /*checked*/) {
+  UpdateUiEnabled();
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnAutoFrameZoomChanged(int value) {
+  if (autoFrameZoomValue_) autoFrameZoomValue_->setText(QString::number(value) + "%");
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnEyeContactToggled(bool /*checked*/) {
+  UpdateUiEnabled();
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnEyeContactStrengthChanged(int value) {
+  if (eyeContactStrengthValue_) eyeContactStrengthValue_->setText(QString::number(value) + "%");
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnEyeContactLookAwayToggled(bool /*checked*/) {
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnDenoiseToggled(bool /*checked*/) {
+  UpdateUiEnabled();
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnDenoiseStrengthChanged(int value) {
+  if (denoiseStrengthValue_) denoiseStrengthValue_->setText(QString::number(value) + "%");
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnOpenInstallHints() {
+  QString program = QCoreApplication::applicationDirPath() + "/studiocast-maxine";
+  if (!QFileInfo::exists(program)) {
+    program = "studiocast-maxine";
+  }
+
+  QProcess p;
+  p.setProgram(program);
+  p.setArguments({"install-hints"});
+  p.start();
+  if (!p.waitForFinished(15000)) {
+    p.kill();
+    p.waitForFinished(2000);
+  }
+
+  const QString out = QString::fromUtf8(p.readAllStandardOutput());
+  const QString err = QString::fromUtf8(p.readAllStandardError());
+  const QString text = (out + (err.isEmpty() ? "" : ("\n" + err))).trimmed();
+
+  QMessageBox mb(this);
+  mb.setWindowTitle("Maxine install hints");
+  mb.setText(text.isEmpty() ? "No output." : "See details.");
+  mb.setDetailedText(text.isEmpty() ? QString() : text);
+  mb.exec();
 }
 
 void VideoPage::OnVirtualKeyLightToggled(bool /*checked*/) {
@@ -899,7 +1138,7 @@ void VideoPage::OnVignetteToggled(bool checked) {
 }
 
 void VideoPage::OnVignetteIntensityChanged(int value) {
-  (void)value;
+  if (vignetteIntensityValue_) vignetteIntensityValue_->setText(QString::number(value) + "%");
   (void)SendDaemonVideoEffects();
 }
 
@@ -1035,6 +1274,7 @@ void VideoPage::UpdateUiEnabled() {
   }
 
   const bool enabled = daemonReachable_ ? st.enabled : false;
+  const bool maxineSupported = daemonReachable_ && st.maxine_supported;
 
   refreshBtn_->setEnabled(!enabled);
   copyCmdBtn_->setEnabled(!suggestedCmd_.isEmpty());
@@ -1048,26 +1288,82 @@ void VideoPage::UpdateUiEnabled() {
   heightSpin_->setEnabled(!enabled);
   fpsSpin_->setEnabled(!enabled);
 
-  // Mirror can be toggled while running.
-  mirrorCheck_->setEnabled(daemonReachable_);
+  // Maxine blocking banner + diagnostics (best-effort)
+  if (maxineBanner_) {
+    if (daemonReachable_ && !st.maxine_supported) {
+      QString msg = "Maxine unavailable.";
+      if (!st.maxine_blocked_reason.isEmpty()) msg += "\n" + st.maxine_blocked_reason;
+      if (!st.maxine_blocked_details.isEmpty()) {
+        msg += "\n\n";
+        for (const auto& d : st.maxine_blocked_details) {
+          msg += "• " + d + "\n";
+        }
+      }
+      msg += "\nEffects are disabled. Open Diagnostics for install/path hints.";
+      maxineBanner_->setText(msg.trimmed());
+      maxineBanner_->setVisible(true);
+    } else {
+      maxineBanner_->setVisible(false);
+    }
+  }
 
-  // Background effects can also be toggled live.
-  if (backgroundCombo_) backgroundCombo_->setEnabled(daemonReachable_);
-  if (backgroundBackendCombo_) backgroundBackendCombo_->setEnabled(daemonReachable_);
+  if (diagnosticsText_ && daemonReachable_ && !daemonLastStatusJson_.empty()) {
+    QJsonObject root;
+    QString perr;
+    if (ParseJsonObject(daemonLastStatusJson_, &root, &perr)) {
+      const QJsonObject maxine = root.value("maxine").toObject();
+      diagnosticsText_->setPlainText(QString::fromUtf8(QJsonDocument(maxine).toJson(QJsonDocument::Indented)));
+    } else {
+      diagnosticsText_->setPlainText("(failed to parse status JSON)\n" + perr);
+    }
+  }
+
+  // Effects are only editable when Maxine is supported.
+  const bool fxAvail = maxineSupported;
+  auto hasFx = [&](const QString& id) {
+    if (!fxAvail) return false;
+    if (st.maxine_available_effects.isEmpty()) return true;  // treat as unknown → allow
+    return st.maxine_available_effects.contains(id);
+  };
+
+  // Mirror
+  if (mirrorCheck_) mirrorCheck_->setEnabled(fxAvail);
+
+  // Virtual Background
+  if (backgroundCombo_) backgroundCombo_->setEnabled(fxAvail);
   if (backgroundStrengthSpin_ && backgroundCombo_) {
-    backgroundStrengthSpin_->setEnabled(daemonReachable_ && backgroundCombo_->currentData().toString() == "blur");
+    backgroundStrengthSpin_->setEnabled(fxAvail && backgroundCombo_->currentData().toString() == "blur");
   }
   if (backgroundRemoveColorEdit_ && backgroundCombo_) {
-    backgroundRemoveColorEdit_->setEnabled(daemonReachable_ && backgroundCombo_->currentData().toString() == "remove");
+    backgroundRemoveColorEdit_->setEnabled(fxAvail && backgroundCombo_->currentData().toString() == "remove");
   }
   if (backgroundReplaceImageEdit_ && backgroundCombo_) {
-    const bool on = daemonReachable_ && backgroundCombo_->currentData().toString() == "replace";
+    const bool on = fxAvail && backgroundCombo_->currentData().toString() == "replace";
     backgroundReplaceImageEdit_->setEnabled(on);
     if (browseReplaceImageBtn_) browseReplaceImageBtn_->setEnabled(on);
   }
 
+  // Auto Frame
+  const bool afAvail = hasFx("auto_frame");
+  const bool afOn = autoFrameCheck_ ? autoFrameCheck_->isChecked() : false;
+  if (autoFrameCheck_) autoFrameCheck_->setEnabled(afAvail);
+  if (autoFrameZoomSlider_) autoFrameZoomSlider_->setEnabled(afAvail && afOn);
+
+  // Eye Contact
+  const bool ecAvail = hasFx("eye_contact");
+  const bool ecOn = eyeContactCheck_ ? eyeContactCheck_->isChecked() : false;
+  if (eyeContactCheck_) eyeContactCheck_->setEnabled(ecAvail);
+  if (eyeContactStrengthSlider_) eyeContactStrengthSlider_->setEnabled(ecAvail && ecOn);
+  if (eyeContactLookAwayCheck_) eyeContactLookAwayCheck_->setEnabled(ecAvail && ecOn);
+
+  // Video Noise Removal
+  const bool dnAvail = hasFx("video_noise_removal");
+  const bool dnOn = denoiseCheck_ ? denoiseCheck_->isChecked() : false;
+  if (denoiseCheck_) denoiseCheck_->setEnabled(dnAvail);
+  if (denoiseStrengthSlider_) denoiseStrengthSlider_->setEnabled(dnAvail && dnOn);
+
   // Virtual Key Light gating based on Maxine diagnostics.
-  const bool vklAvail = daemonReachable_ && st.virtual_key_light_available;
+  const bool vklAvail = fxAvail && st.virtual_key_light_available;
   const bool vklOn = virtualKeyLightCheck_ ? virtualKeyLightCheck_->isChecked() : false;
 
   if (virtualKeyLightCheck_) virtualKeyLightCheck_->setEnabled(vklAvail);
@@ -1077,11 +1373,11 @@ void VideoPage::UpdateUiEnabled() {
   if (virtualKeyLightHdriEdit_) virtualKeyLightHdriEdit_->setEnabled(vklAvail && vklOn);
   if (browseVirtualKeyLightHdriBtn_) browseVirtualKeyLightHdriBtn_->setEnabled(vklAvail && vklOn);
 
-  // Vignette requires the GPU pipeline (we gate on Maxine being OK).
-  const bool vigAvail = daemonReachable_ && st.maxine_ok;
+  // Vignette runs in the GPU pipeline; we only expose it when Maxine is supported.
+  const bool vigAvail = fxAvail;
   const bool vigOn = vignetteCheck_ ? vignetteCheck_->isChecked() : false;
   if (vignetteCheck_) vignetteCheck_->setEnabled(vigAvail);
-  if (vignetteIntensitySpin_) vignetteIntensitySpin_->setEnabled(vigAvail && vigOn);
+  if (vignetteIntensitySlider_) vignetteIntensitySlider_->setEnabled(vigAvail && vigOn);
   if (vignetteCenterOnFaceCheck_) vignetteCenterOnFaceCheck_->setEnabled(vigAvail && vigOn);
 
   startBtn_->setEnabled(daemonReachable_ && !enabled && outSelectable && !outputCombo_->currentData().toString().isEmpty());

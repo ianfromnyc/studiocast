@@ -9,6 +9,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QSlider;
 class QPlainTextEdit;
 class QPushButton;
 class QSpinBox;
@@ -31,11 +32,22 @@ namespace studiocast::gui {
         void OnStop();
         void OnMirrorToggled(bool checked);
         void OnBackgroundChanged(int index);
-        void OnBackgroundBackendChanged(int index);
         void OnBackgroundStrengthChanged(int value);
         void OnBackgroundRemoveColorChanged();
         void OnBackgroundReplaceImageChanged();
         void OnBrowseReplaceImage();
+
+        void OnAutoFrameToggled(bool checked);
+        void OnAutoFrameZoomChanged(int value);
+
+        void OnEyeContactToggled(bool checked);
+        void OnEyeContactStrengthChanged(int value);
+        void OnEyeContactLookAwayToggled(bool checked);
+
+        void OnDenoiseToggled(bool checked);
+        void OnDenoiseStrengthChanged(int value);
+
+        void OnOpenInstallHints();
 
         void OnVirtualKeyLightToggled(bool checked);
         void OnVirtualKeyLightIntensityChanged(int value);
@@ -74,12 +86,27 @@ namespace studiocast::gui {
         QCheckBox* mirrorCheck_ = nullptr;
 
         QComboBox* backgroundCombo_ = nullptr;
-        QComboBox* backgroundBackendCombo_ = nullptr;
         QSpinBox* backgroundStrengthSpin_ = nullptr;
 
         QLineEdit* backgroundRemoveColorEdit_ = nullptr;   // #RRGGBB
         QLineEdit* backgroundReplaceImageEdit_ = nullptr;  // path (PPM/P6 for now)
         QPushButton* browseReplaceImageBtn_ = nullptr;
+
+        // Auto Frame (Maxine AR)
+        QCheckBox* autoFrameCheck_ = nullptr;
+        QSlider* autoFrameZoomSlider_ = nullptr;
+        QLabel* autoFrameZoomValue_ = nullptr;
+
+        // Eye Contact (Maxine AR)
+        QCheckBox* eyeContactCheck_ = nullptr;
+        QSlider* eyeContactStrengthSlider_ = nullptr;
+        QLabel* eyeContactStrengthValue_ = nullptr;
+        QCheckBox* eyeContactLookAwayCheck_ = nullptr;
+
+        // Video Noise Removal (Maxine VFX)
+        QCheckBox* denoiseCheck_ = nullptr;
+        QSlider* denoiseStrengthSlider_ = nullptr;
+        QLabel* denoiseStrengthValue_ = nullptr;
 
         // Virtual Key Light (Maxine relighting)
         QCheckBox* virtualKeyLightCheck_ = nullptr;
@@ -91,8 +118,15 @@ namespace studiocast::gui {
 
         // Vignette (GPU post-process)
         QCheckBox* vignetteCheck_ = nullptr;
-        QSpinBox* vignetteIntensitySpin_ = nullptr;          // 0..100
+        QSlider* vignetteIntensitySlider_ = nullptr;         // 0..100
+        QLabel* vignetteIntensityValue_ = nullptr;
         QCheckBox* vignetteCenterOnFaceCheck_ = nullptr;
+
+        QLabel* effectEngineValue_ = nullptr;
+        QLabel* maxineBanner_ = nullptr;
+
+        QPushButton* openInstallHintsBtn_ = nullptr;
+        QPlainTextEdit* diagnosticsText_ = nullptr;
 
         QPushButton* refreshBtn_ = nullptr;
         QPushButton* copyCmdBtn_ = nullptr;
