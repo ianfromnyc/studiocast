@@ -31,4 +31,22 @@ namespace studiocast::video {
                           int height,
                           std::size_t stride);
 
+  // Swap RGB<->BGR channel order.
+  // The conversion is symmetric, so the same implementation works both ways.
+  void Rgb24ToBgr24(const std::uint8_t* src,
+                    std::uint8_t* dst,
+                    int width,
+                    int height,
+                    std::size_t src_stride,
+                    std::size_t dst_stride);
+
+  inline void Bgr24ToRgb24(const std::uint8_t* src,
+                           std::uint8_t* dst,
+                           int width,
+                           int height,
+                           std::size_t src_stride,
+                           std::size_t dst_stride) {
+    Rgb24ToBgr24(src, dst, width, height, src_stride, dst_stride);
+  }
+
 }  // namespace studiocast::video

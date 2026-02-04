@@ -2,11 +2,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 #include <memory>
 #include <sstream>
 #include <vector>
 
 #include "core/maxine/availability.h"
+#include "core/maxine/effects/vfx_background_blur_effect.h"
+#include "core/maxine/effects/vfx_green_screen_effect.h"
+#include "core/maxine/nvcv_api.h"
+#include "core/maxine/vfx_api.h"
 #include "core/video/convert.h"
 #include "core/video/effects/background_blur_cpu.h"
 #include "core/video/effects/background_remove_cpu.h"
@@ -446,38 +451,302 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   studiocast::video::effects::EffectChain chain;
   CameraEffects appliedFx{};
 
+  struct MaxineBackgroundBlurContext {
+    bool initialized = false;
+    bool enabled = false;
+    std::string last_error;
+
+    studiocast::maxine::vfx::VfxApi vfx;
+    studiocast::maxine::NvcvApi nvcv;
+
+    std::filesystem::path model_dir;
+
+    std::unique_ptr<studiocast::maxine::effects::VfxGreenScreenEffect> greenscreen;
+    std::unique_ptr<studiocast::maxine::effects::VfxBackgroundBlurEffect> blur;
+
+    std::vector<std::uint8_t> bgr_in;
+    std::vector<std::uint8_t> bgr_out;
+    studiocast::maxine::NvCVImage cpu_bgr_in{};
+    studiocast::maxine::NvCVImage cpu_bgr_out{};
+
+    studiocast::maxine::NvCVImage gpu_bgr{};
+    bool gpu_bgr_allocated = false;
+
+    ~MaxineBackgroundBlurContext() { Destroy(); }
+
+    void Destroy() {
+      greenscreen.reset();
+      blur.reset();
+
+      if (gpu_bgr_allocated && nvcv.IsInitialized() && nvcv.f().NvCVImage_Dealloc) {
+        (void)nvcv.f().NvCVImage_Dealloc(&gpu_bgr);
+      }
+      gpu_bgr = studiocast::maxine::NvCVImage{};
+      gpu_bgr_allocated = false;
+
+      bgr_in.clear();
+      bgr_out.clear();
+      cpu_bgr_in = studiocast::maxine::NvCVImage{};
+      cpu_bgr_out = studiocast::maxine::NvCVImage{};
+
+      initialized = false;
+      enabled = false;
+    }
+
+    static std::filesystem::path InferModelsDirFromLibrary(const std::filesystem::path& lib) {
+      std::error_code ec;
+      std::filesystem::path p = lib.parent_path();
+      for (int i = 0; i < 5 && !p.empty(); ++i) {
+        const auto cand = p / "models";
+        if (std::filesystem::exists(cand, ec) && std::filesystem::is_directory(cand, ec)) {
+          return cand;
+        }
+        p = p.parent_path();
+      }
+      return {};
+    }
+
+    bool EnsureInitialized(int width, int height, const CameraEffects& fx, std::string* error) {
+      last_error.clear();
+
+      if (initialized) {
+        // Effects can be reconfigured live.
+        std::string cfg_err;
+        if (greenscreen && !greenscreen->Configure(fx, &cfg_err)) {
+          if (error) *error = cfg_err;
+          return false;
+        }
+        if (blur && !blur->Configure(fx, &cfg_err)) {
+          if (error) *error = cfg_err;
+          return false;
+        }
+        return true;
+      }
+
+      std::string err;
+      if (!vfx.Initialize(&err)) {
+        last_error = "Maxine VFX runtime unavailable: " + err;
+        if (error) *error = last_error;
+        return false;
+      }
+      if (!nvcv.Initialize(studiocast::maxine::NvcvApi::Requirement::VfxCompat, &err)) {
+        last_error = "NvCVImage runtime unavailable: " + err;
+        if (error) *error = last_error;
+        return false;
+      }
+      if (model_dir.empty()) {
+        model_dir = InferModelsDirFromLibrary(vfx.library_path());
+      }
+
+      // Allocate CPU-side BGR staging buffers and wrap with NvCVImage_Init.
+      const std::size_t stride = static_cast<std::size_t>(width) * 3u;
+      bgr_in.resize(stride * static_cast<std::size_t>(height));
+      bgr_out.resize(stride * static_cast<std::size_t>(height));
+
+      if (!nvcv.f().NvCVImage_Init) {
+        last_error = "NvCVImage_Init missing from NvCVImage runtime.";
+        if (error) *error = last_error;
+        return false;
+      }
+
+      auto st = nvcv.f().NvCVImage_Init(&cpu_bgr_in,
+                                       static_cast<unsigned>(width),
+                                       static_cast<unsigned>(height),
+                                       static_cast<int>(stride),
+                                       bgr_in.data(),
+                                       studiocast::maxine::NVCV_BGR,
+                                       studiocast::maxine::NVCV_U8,
+                                       studiocast::maxine::NVCV_CHUNKY,
+                                       studiocast::maxine::NVCV_CPU);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        last_error = "NvCVImage_Init(cpu BGR in) failed: " + std::to_string(st);
+        if (error) *error = last_error;
+        return false;
+      }
+
+      st = nvcv.f().NvCVImage_Init(&cpu_bgr_out,
+                                  static_cast<unsigned>(width),
+                                  static_cast<unsigned>(height),
+                                  static_cast<int>(stride),
+                                  bgr_out.data(),
+                                  studiocast::maxine::NVCV_BGR,
+                                  studiocast::maxine::NVCV_U8,
+                                  studiocast::maxine::NVCV_CHUNKY,
+                                  studiocast::maxine::NVCV_CPU);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        last_error = "NvCVImage_Init(cpu BGR out) failed: " + std::to_string(st);
+        if (error) *error = last_error;
+        return false;
+      }
+
+      // Allocate GPU input image.
+      st = nvcv.f().NvCVImage_Alloc(&gpu_bgr,
+                                   static_cast<unsigned>(width),
+                                   static_cast<unsigned>(height),
+                                   studiocast::maxine::NVCV_BGR,
+                                   studiocast::maxine::NVCV_U8,
+                                   studiocast::maxine::NVCV_CHUNKY,
+                                   studiocast::maxine::NVCV_GPU,
+                                   /*alignment=*/0);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        last_error = "NvCVImage_Alloc(gpu BGR) failed: " + std::to_string(st);
+        if (error) *error = last_error;
+        return false;
+      }
+      gpu_bgr_allocated = true;
+
+      greenscreen = std::make_unique<studiocast::maxine::effects::VfxGreenScreenEffect>(&vfx, &nvcv, model_dir);
+      blur = std::make_unique<studiocast::maxine::effects::VfxBackgroundBlurEffect>(&vfx, &nvcv, model_dir);
+
+      if (!greenscreen->Configure(fx, &err) || !blur->Configure(fx, &err)) {
+        last_error = "Maxine effect Configure failed: " + err;
+        if (error) *error = last_error;
+        Destroy();
+        return false;
+      }
+      if (!greenscreen->Initialize(&err)) {
+        last_error = "Maxine green screen Initialize failed: " + err;
+        if (error) *error = last_error;
+        Destroy();
+        return false;
+      }
+      if (!blur->Initialize(&err)) {
+        last_error = "Maxine background blur Initialize failed: " + err;
+        if (error) *error = last_error;
+        Destroy();
+        return false;
+      }
+
+      initialized = true;
+      return true;
+    }
+
+    bool ApplyRgbInPlace(std::uint8_t* rgb,
+                         int width,
+                         int height,
+                         std::size_t rgb_stride,
+                         const CameraEffects& fx,
+                         std::string* error) {
+      if (!initialized || !greenscreen || !blur) {
+        if (error) *error = "Maxine background blur not initialized.";
+        return false;
+      }
+      if (!rgb || width <= 0 || height <= 0 || rgb_stride == 0) {
+        if (error) *error = "Invalid RGB buffer.";
+        return false;
+      }
+
+      // RGB -> BGR staging
+      studiocast::video::Rgb24ToBgr24(rgb,
+                                     bgr_in.data(),
+                                     width,
+                                     height,
+                                     rgb_stride,
+                                     rgb_stride);
+
+      // Upload CPU->GPU.
+      const auto up = nvcv.f().NvCVImage_Transfer(&cpu_bgr_in, &gpu_bgr, 1.0f, greenscreen->cuda_stream(), nullptr);
+      if (up != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = "NvCVImage_Transfer(cpu->gpu) failed: " + std::to_string(up);
+        return false;
+      }
+
+      studiocast::video::GpuFrame frame;
+      frame.width = width;
+      frame.height = height;
+      frame.nvcv_gpu = &gpu_bgr;
+      frame.cuda_stream = greenscreen->cuda_stream();
+
+      std::string cfg_err;
+      if (!greenscreen->Configure(fx, &cfg_err) || !blur->Configure(fx, &cfg_err)) {
+        if (error) *error = cfg_err;
+        return false;
+      }
+
+      std::string proc_err;
+      const auto st = greenscreen->Process(frame, &proc_err);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = proc_err.empty() ? std::to_string(st) : proc_err;
+        return false;
+      }
+
+      const auto* matte = greenscreen->MatteGpu();
+      if (!matte) {
+        if (error) *error = "Green Screen did not produce a matte.";
+        return false;
+      }
+
+      frame.matte_gpu = matte;
+
+      const auto st2 = blur->Process(frame, &proc_err);
+      if (st2 != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = proc_err.empty() ? std::to_string(st2) : proc_err;
+        return false;
+      }
+
+      const auto* out_gpu = blur->OutputGpu();
+      if (!out_gpu) {
+        if (error) *error = "Background Blur did not produce an output image.";
+        return false;
+      }
+
+      const auto down = nvcv.f().NvCVImage_Transfer(out_gpu, &cpu_bgr_out, 1.0f, blur->cuda_stream(), nullptr);
+      if (down != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(down);
+        return false;
+      }
+
+      // BGR -> RGB back into the pipeline buffer.
+      studiocast::video::Bgr24ToRgb24(bgr_out.data(),
+                                     rgb,
+                                     width,
+                                     height,
+                                     rgb_stride,
+                                     rgb_stride);
+      return true;
+    }
+  } maxine_bg_blur;
+
+  bool want_maxine_bg_blur = false;
+  bool have_maxine_bg_blur = false;
+
   auto rebuildChain = [&](const CameraEffects& fx) {
     chain.Clear();
 
     std::string note;
+
+    want_maxine_bg_blur = false;
+    have_maxine_bg_blur = false;
 
     // Mirror
     if (fx.mirror) {
       chain.Add(std::make_unique<studiocast::video::effects::MirrorEffect>());
     }
 
-    // Background effects (CPU placeholder today; Maxine later).
+    // Background effects.
     if (fx.background == studiocast::video::effects::BackgroundEffect::blur) {
       bool wantMaxine = (fx.background_backend == studiocast::video::effects::EffectBackend::maxine);
       bool autoMaxine = (fx.background_backend == studiocast::video::effects::EffectBackend::auto_select);
 
-      std::string reason;
-      const bool maxineAvail = studiocast::maxine::RuntimeAvailable(&reason);
+      if (wantMaxine || autoMaxine) {
+        want_maxine_bg_blur = true;
 
-      if (wantMaxine || (autoMaxine && maxineAvail)) {
-        // Not implemented yet; fall back to CPU placeholder.
-        if (!maxineAvail) {
-          note = "Maxine requested but unavailable";
-          if (!reason.empty()) note += " (" + reason + ")";
-          note += "; using CPU placeholder.";
+        std::string mx_err;
+        if (maxine_bg_blur.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
+          have_maxine_bg_blur = true;
+          note = "Maxine VFX: Green Screen matte + Background Blur.";
         } else {
-          note = "Maxine backend not implemented yet; using CPU placeholder.";
+          // No CPU fallback.
+          note = "Maxine background blur unavailable: " + mx_err;
+
+          // If Maxine was explicitly requested, stop processing (leave loopback alive).
+          if (wantMaxine) {
+            stop_.store(true);
+          }
         }
-      }
-
-      chain.Add(std::make_unique<studiocast::video::effects::BackgroundBlurCpuEffect>(fx.background_strength));
-
-      if (note.empty()) {
+      } else {
+        // CPU backend explicitly selected: keep placeholder for now.
+        chain.Add(std::make_unique<studiocast::video::effects::BackgroundBlurCpuEffect>(fx.background_strength));
         note = "CPU placeholder: center-focus mask (no AI segmentation yet).";
       }
 
@@ -485,22 +754,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       bool wantMaxine = (fx.background_backend == studiocast::video::effects::EffectBackend::maxine);
       bool autoMaxine = (fx.background_backend == studiocast::video::effects::EffectBackend::auto_select);
 
-      std::string reason;
-      const bool maxineAvail = studiocast::maxine::RuntimeAvailable(&reason);
-
-      if (wantMaxine || (autoMaxine && maxineAvail)) {
-        if (!maxineAvail) {
-          note = "Maxine requested but unavailable";
-          if (!reason.empty()) note += " (" + reason + ")";
-          note += "; using CPU placeholder.";
-        } else {
-          note = "Maxine backend not implemented yet; using CPU placeholder.";
+      if (wantMaxine || autoMaxine) {
+        note = "Maxine background remove not implemented yet.";
+        if (wantMaxine) {
+          stop_.store(true);
         }
-      }
-
-      chain.Add(std::make_unique<studiocast::video::effects::BackgroundRemoveCpuEffect>());
-
-      if (note.empty()) {
+      } else {
+        chain.Add(std::make_unique<studiocast::video::effects::BackgroundRemoveCpuEffect>());
         note = "CPU placeholder: center-focus mask (no AI segmentation yet).";
       }
 
@@ -511,7 +771,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     {
       std::lock_guard<std::mutex> lock(mu_);
-      effects_backends_ = chain.BackendSummary();
+      std::string backends = chain.BackendSummary();
+      if (have_maxine_bg_blur) {
+        if (!backends.empty()) backends += ",";
+        backends += "virtual_background.blur:maxine";
+      }
+      effects_backends_ = backends;
       effects_note_ = note;
     }
 
@@ -546,6 +811,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     (void)cap.ReleaseFrame(f, &rerr);
 
     // Apply effects (in-place on RGB buffer).
+    bool fx_failed = false;
     {
       CameraEffects fx;
       {
@@ -563,6 +829,22 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       view.stride_bytes = rgbStride;
 
       chain.Apply(view);
+
+      // Maxine Virtual Background = Blur (GPU): Green Screen matte -> Background Blur.
+      if (have_maxine_bg_blur) {
+        std::string mx_err;
+        if (!maxine_bg_blur.ApplyRgbInPlace(rgb.data(), capA.width, capA.height, rgbStride, fx, &mx_err)) {
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            last_error_ = "Maxine background blur failed: " + mx_err;
+          }
+          fx_failed = true;
+        }
+      }
+    }
+
+    if (fx_failed) {
+      break;
     }
 
     // Pack/write to output format

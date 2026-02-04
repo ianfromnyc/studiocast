@@ -48,6 +48,11 @@ struct GpuFrame {
   // The image may be used as input and/or output depending on the effect.
   studiocast::maxine::NvCVImage* nvcv_gpu = nullptr;
 
+  // Optional: matte image (Au8) on GPU used by effects that consume a mask
+  // (e.g. VFX Background Blur). The pipeline/effect graph is responsible for
+  // ensuring the pointed-to image outlives the `Process()` call.
+  const studiocast::maxine::NvCVImage* matte_gpu = nullptr;
+
   // Optional: CPU-side NvCVImage view (commonly `memSpace = NVCV_CPU`) describing
   // the same backing memory as `cpu` (useful for NvCV transfers).
   studiocast::maxine::NvCVImage* nvcv_cpu = nullptr;

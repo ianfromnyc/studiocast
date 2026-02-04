@@ -23,6 +23,9 @@ inline constexpr const char* NVVFX_TEMPORAL = "temporal";
 inline constexpr const char* NVVFX_STATE = "state";
 
 inline constexpr const char* NVVFX_INPUT_IMAGE = "srcImage";
+// Matte / mask input (Au8). Some Maxine/VFX builds use different selector
+// strings; callers may probe alternatives if needed.
+inline constexpr const char* NVVFX_INPUT_MATTE = "srcMatte";
 inline constexpr const char* NVVFX_OUTPUT_IMAGE = "dstImage";
 
 // Runtime-loaded NvVFX API.

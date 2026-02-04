@@ -78,6 +78,8 @@ add_library(studiocast_core
         src/core/maxine/effects/maxine_effect.cpp
         src/core/maxine/effects/vfx_green_screen_effect.h
         src/core/maxine/effects/vfx_green_screen_effect.cpp
+        src/core/maxine/effects/vfx_background_blur_effect.h
+        src/core/maxine/effects/vfx_background_blur_effect.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
         src/core/audio/virtual_mic_state.h

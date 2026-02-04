@@ -6,6 +6,7 @@
 
 #include "core/config/settings.h"
 #include "core/maxine/effects/vfx_green_screen_effect.h"
+#include "core/maxine/effects/vfx_background_blur_effect.h"
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
 #include "core/probe/probe.h"
@@ -490,6 +491,231 @@ int main(int argc, char** argv) {
     }
 
     (void)nvcv_api.f().NvCVImage_Dealloc(&cpu_matte);
+    (void)nvcv_api.f().NvCVImage_Dealloc(&gpu_bgr);
+    cap.Close();
+    return 0;
+  }
+
+  if (cmd == "background-blur-smoke") {
+    // Defaults.
+    std::string device = "/dev/video0";
+    int width = 640;
+    int height = 480;
+    int fps = 30;
+    int frames = 1;
+    std::uint32_t mode = 0;
+    bool temporal = true;
+    int strength = 32;  // UI knob [1..64]
+    fs::path model_dir = vfx / "models";
+
+    for (int i = 2; i < argc; ++i) {
+      const std::string a = argv[i];
+      if (a == "--device" && i + 1 < argc) {
+        device = argv[++i];
+      } else if (a == "--width" && i + 1 < argc) {
+        width = ParseIntArg(argv[++i], width);
+      } else if (a == "--height" && i + 1 < argc) {
+        height = ParseIntArg(argv[++i], height);
+      } else if (a == "--fps" && i + 1 < argc) {
+        fps = ParseIntArg(argv[++i], fps);
+      } else if (a == "--frames" && i + 1 < argc) {
+        frames = ParseIntArg(argv[++i], frames);
+      } else if (a == "--mode" && i + 1 < argc) {
+        mode = static_cast<std::uint32_t>(ParseIntArg(argv[++i], static_cast<int>(mode)));
+      } else if (a == "--temporal" && i + 1 < argc) {
+        temporal = ParseIntArg(argv[++i], temporal ? 1 : 0) != 0;
+      } else if (a == "--strength" && i + 1 < argc) {
+        strength = ParseIntArg(argv[++i], strength);
+      } else if (a == "--model-dir" && i + 1 < argc) {
+        model_dir = argv[++i];
+      }
+    }
+
+    studiocast::maxine::vfx::VfxApi vfx_api;
+    studiocast::maxine::NvcvApi nvcv_api;
+
+    std::string err;
+    if (!vfx_api.Initialize(&err)) {
+      std::cerr << "Maxine VFX runtime unavailable: " << err << "\n";
+      std::cerr << "Hint: run '" << argv[0] << " install-hints' and ensure VFX SDK + features are installed.\n";
+      return 3;
+    }
+    if (!nvcv_api.Initialize(studiocast::maxine::NvcvApi::Requirement::VfxCompat, &err)) {
+      std::cerr << "NvCVImage runtime unavailable: " << err << "\n";
+      return 4;
+    }
+
+    studiocast::maxine::effects::VfxGreenScreenEffect gs(&vfx_api, &nvcv_api, model_dir);
+    studiocast::maxine::effects::VfxBackgroundBlurEffect bgblur(&vfx_api, &nvcv_api, model_dir);
+
+    studiocast::video::CameraEffects settings;
+    settings.green_screen.mode = mode;
+    settings.green_screen.temporal = temporal;
+    settings.background_strength = strength;
+
+    if (!gs.Configure(settings, &err) || !bgblur.Configure(settings, &err)) {
+      std::cerr << "Configure failed: " << err << "\n";
+      return 5;
+    }
+    if (!gs.Initialize(&err)) {
+      std::cerr << "Green Screen Initialize failed: " << err << "\n";
+      return 6;
+    }
+    if (!bgblur.Initialize(&err)) {
+      std::cerr << "Background Blur Initialize failed: " << err << "\n";
+      return 7;
+    }
+
+    // Attempt to capture from V4L2; fall back to synthetic.
+    studiocast::video::V4l2Capture cap;
+    bool have_camera = false;
+    if (cap.Open(device, width, height, fps, studiocast::video::CapturePixelFormat::yuyv, &err)) {
+      have_camera = true;
+      width = cap.Actual().width;
+      height = cap.Actual().height;
+      fps = cap.Actual().fps;
+    } else {
+      std::cerr << "Warning: failed to open capture device '" << device << "': " << err << "\n";
+      std::cerr << "         using a synthetic frame instead.\n";
+    }
+
+    const std::size_t rgb_stride = static_cast<std::size_t>(width) * 3u;
+    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(height) * rgb_stride);
+    std::vector<std::uint8_t> bgr(static_cast<std::size_t>(height) * rgb_stride);
+    std::vector<std::uint8_t> out_bgr(static_cast<std::size_t>(height) * rgb_stride);
+
+    // CPU BGR image view (wraps `bgr` memory).
+    if (!nvcv_api.f().NvCVImage_Init) {
+      std::cerr << "NvCVImage_Init missing from NvCVImage runtime (unexpected).\n";
+      return 8;
+    }
+
+    studiocast::maxine::NvCVImage cpu_bgr{};
+    {
+      const auto st = nvcv_api.f().NvCVImage_Init(&cpu_bgr,
+                                                 static_cast<unsigned>(width),
+                                                 static_cast<unsigned>(height),
+                                                 static_cast<int>(rgb_stride),
+                                                 bgr.data(),
+                                                 studiocast::maxine::NVCV_BGR,
+                                                 studiocast::maxine::NVCV_U8,
+                                                 studiocast::maxine::NVCV_CHUNKY,
+                                                 studiocast::maxine::NVCV_CPU);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        std::cerr << "NvCVImage_Init(cpu BGR) failed: " << st << "\n";
+        return 9;
+      }
+    }
+
+    studiocast::maxine::NvCVImage cpu_out_bgr{};
+    {
+      const auto st = nvcv_api.f().NvCVImage_Init(&cpu_out_bgr,
+                                                 static_cast<unsigned>(width),
+                                                 static_cast<unsigned>(height),
+                                                 static_cast<int>(rgb_stride),
+                                                 out_bgr.data(),
+                                                 studiocast::maxine::NVCV_BGR,
+                                                 studiocast::maxine::NVCV_U8,
+                                                 studiocast::maxine::NVCV_CHUNKY,
+                                                 studiocast::maxine::NVCV_CPU);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        std::cerr << "NvCVImage_Init(cpu out BGR) failed: " << st << "\n";
+        return 10;
+      }
+    }
+
+    // GPU input image (allocated).
+    studiocast::maxine::NvCVImage gpu_bgr{};
+    {
+      const auto st = nvcv_api.f().NvCVImage_Alloc(&gpu_bgr,
+                                                  static_cast<unsigned>(width),
+                                                  static_cast<unsigned>(height),
+                                                  studiocast::maxine::NVCV_BGR,
+                                                  studiocast::maxine::NVCV_U8,
+                                                  studiocast::maxine::NVCV_CHUNKY,
+                                                  studiocast::maxine::NVCV_GPU,
+                                                  0);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        std::cerr << "NvCVImage_Alloc(gpu BGR) failed: " << st << "\n";
+        return 11;
+      }
+    }
+
+    for (int fi = 0; fi < frames; ++fi) {
+      if (have_camera) {
+        studiocast::video::CapturedFrameView fv;
+        if (!cap.AcquireFrame(&fv, /*timeout_ms=*/1000, &err)) {
+          std::cerr << "Capture AcquireFrame failed: " << err << "\n";
+          have_camera = false;
+          FillSyntheticBgr(bgr.data(), width, height, rgb_stride);
+        } else {
+          studiocast::video::YuyvToRgb24(fv.data,
+                                        width,
+                                        height,
+                                        cap.Actual().bytes_per_line,
+                                        rgb.data(),
+                                        rgb_stride);
+          (void)cap.ReleaseFrame(fv, &err);
+          Rgb24ToBgr24(rgb.data(), bgr.data(), width, height, rgb_stride, rgb_stride);
+        }
+      } else {
+        FillSyntheticBgr(bgr.data(), width, height, rgb_stride);
+      }
+
+      // Upload CPU->GPU.
+      const auto up = nvcv_api.f().NvCVImage_Transfer(&cpu_bgr, &gpu_bgr, 1.0f, gs.cuda_stream(), nullptr);
+      if (up != studiocast::maxine::NVCV_SUCCESS) {
+        std::cerr << "NvCVImage_Transfer(cpu->gpu) failed: " << up << "\n";
+        break;
+      }
+
+      studiocast::video::GpuFrame frame;
+      frame.width = width;
+      frame.height = height;
+      frame.nvcv_gpu = &gpu_bgr;
+      frame.cuda_stream = gs.cuda_stream();
+
+      err.clear();
+      const auto st = gs.Process(frame, &err);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        std::cerr << "Green Screen Process failed: " << (err.empty() ? std::to_string(st) : err) << "\n";
+        break;
+      }
+
+      const auto* matte_gpu = gs.MatteGpu();
+      if (!matte_gpu) {
+        std::cerr << "No matte produced.\n";
+        break;
+      }
+
+      frame.matte_gpu = matte_gpu;
+
+      err.clear();
+      const auto st2 = bgblur.Process(frame, &err);
+      if (st2 != studiocast::maxine::NVCV_SUCCESS) {
+        std::cerr << "Background Blur Process failed: " << (err.empty() ? std::to_string(st2) : err) << "\n";
+        break;
+      }
+
+      const auto* out_gpu = bgblur.OutputGpu();
+      if (!out_gpu) {
+        std::cerr << "No output produced.\n";
+        break;
+      }
+
+      const auto down = nvcv_api.f().NvCVImage_Transfer(out_gpu, &cpu_out_bgr, 1.0f, bgblur.cuda_stream(), nullptr);
+      if (down != studiocast::maxine::NVCV_SUCCESS) {
+        std::cerr << "NvCVImage_Transfer(gpu->cpu) failed: " << down << "\n";
+        break;
+      }
+
+      // Compute a quick checksum-like stat on the output.
+      std::uint64_t sum = 0;
+      for (const auto v : out_bgr) sum += v;
+      const double mean = static_cast<double>(sum) / static_cast<double>(out_bgr.size());
+      std::cout << "Frame " << fi << ": output mean byte=" << mean << "\n";
+    }
+
     (void)nvcv_api.f().NvCVImage_Dealloc(&gpu_bgr);
     cap.Close();
     return 0;
