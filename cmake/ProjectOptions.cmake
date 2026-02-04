@@ -5,7 +5,7 @@ option(STUDIOCAST_ENABLE_SANITIZERS "Enable sanitizers (ASan/UBSan) on supported
 option(STUDIOCAST_ENABLE_LTO "Enable link-time optimization (IPO/LTO) if supported" OFF)
 
 function(studiocast_setup_options)
-  # Intentionally light in Phase 0; expand later.
+  # Intentionally light for now; expand later
 endfunction()
 
 function(studiocast_global_options)

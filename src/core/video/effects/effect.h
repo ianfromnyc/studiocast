@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 
+// NOTE: This is a CPU-only prototype effect interface operating on RGB24 frames.
+// The production path for StudioCast camera effects will use GPU/Maxine effects
+// (see `core/maxine/effects/maxine_effect.h`) operating on `studiocast::video::GpuFrame`.
 namespace studiocast::video::effects {
 
 struct Rgb24FrameView {

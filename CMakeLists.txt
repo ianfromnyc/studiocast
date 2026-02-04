@@ -74,6 +74,8 @@ add_library(studiocast_core
         src/core/maxine/vfx_api.cpp
         src/core/maxine/ar_api.h
         src/core/maxine/ar_api.cpp
+        src/core/maxine/effects/maxine_effect.h
+        src/core/maxine/effects/maxine_effect.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
         src/core/audio/virtual_mic_state.h
@@ -84,6 +86,7 @@ add_library(studiocast_core
         src/core/video/v4l2loopback.cpp
         src/core/video/v4l2_writer.h
         src/core/video/v4l2_writer.cpp
+        src/core/video/gpu_frame.h
         src/core/video/pattern.h
         src/core/video/pattern.cpp
         src/core/video/feed.h
