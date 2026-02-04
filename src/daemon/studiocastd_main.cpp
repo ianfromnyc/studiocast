@@ -20,6 +20,7 @@
 #include "core/ipc/daemon_socket.h"
 #include "core/maxine/maxine_manager.h"
 #include "core/video/broadcast_camera_effects_json.h"
+#include "core/video/effects/broadcast_effect_rules.h"
 #include "core/video/virtual_camera_service.h"
 #include "core/video/v4l2loopback.h"
 #include "studiocast/version.h"
@@ -269,7 +270,30 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"starting\":" << BoolJson(st.pipeline.starting) << ",";
     oss << "\"frame_index\":" << st.pipeline.frame_index << ",";
     oss << "\"effects_backends\":\"" << JsonEscape(st.pipeline.effects_backends) << "\",";
-    oss << "\"effects_note\":\"" << JsonEscape(st.pipeline.effects_note) << "\"";
+    oss << "\"effects_note\":\"" << JsonEscape(st.pipeline.effects_note) << "\",";
+
+    // Deterministic effect ordering + rule-based disable reasons.
+    const auto plan = studiocast::video::effects::BuildBroadcastEffectsPlan(cfg.pipeline.effects);
+    oss << "\"effects_plan\":{";
+    oss << "\"ordered\":[";
+    for (std::size_t i = 0; i < plan.ordered_effect_ids.size(); ++i) {
+        if (i) oss << ",";
+        oss << "\"" << JsonEscape(plan.ordered_effect_ids[i]) << "\"";
+    }
+    oss << "],";
+
+    oss << "\"vignette_attach_to\":\"" << JsonEscape(plan.vignette_attach_to_effect_id) << "\",";
+
+    oss << "\"disabled\":[";
+    for (std::size_t i = 0; i < plan.disabled.size(); ++i) {
+        if (i) oss << ",";
+        oss << "{";
+        oss << "\"id\":\"" << JsonEscape(plan.disabled[i].id) << "\",";
+        oss << "\"reason\":\"" << JsonEscape(plan.disabled[i].reason) << "\"";
+        oss << "}";
+    }
+    oss << "]";
+    oss << "}";
     oss << "},";
 
     oss << "\"last_error\":\"" << JsonEscape(st.last_error) << "\"";

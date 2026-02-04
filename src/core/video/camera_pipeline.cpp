@@ -24,6 +24,7 @@
 #include "core/video/image_ppm.h"
 #include "core/video/effects/effect_chain.h"
 #include "core/video/effects/broadcast_effect_contract.h"
+#include "core/video/effects/broadcast_effect_rules.h"
 #include "core/video/effects/mirror_effect.h"
 #include "core/video/v4l2loopback.h"
 
@@ -493,6 +494,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   // the GUI/daemon updates effect settings.
   studiocast::video::effects::EffectChain chain;
   studiocast::video::effects::BroadcastCameraEffects appliedFx{};
+  studiocast::video::effects::BroadcastEffectsPlan appliedPlan{};
 
   struct MaxineBackgroundBlurContext {
     bool initialized = false;
@@ -2355,7 +2357,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   auto rebuildChain = [&](const studiocast::video::effects::BroadcastCameraEffects& fx) {
     chain.Clear();
 
+    const auto plan = studiocast::video::effects::BuildBroadcastEffectsPlan(fx);
+    appliedPlan = plan;
+
     std::string note;
+
+    if (!plan.disabled.empty()) {
+      note += "Effect rules:";
+      for (const auto& d : plan.disabled) {
+        note += "\n - " + d.id + ": " + d.reason;
+      }
+    }
 
     auto finalize_note_and_backends = [&] {
       std::lock_guard<std::mutex> lock(mu_);
@@ -2381,14 +2393,27 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     want_maxine_vignette_only = false;
     have_maxine_vignette_only = false;
 
+    auto planned = [&] {
+      std::set<std::string> s;
+      for (const auto& id : plan.ordered_effect_ids) s.insert(id);
+      return s;
+    }();
+
+    const auto has = [&](std::string_view id) {
+      return planned.count(std::string(id)) != 0;
+    };
+
     // If Maxine-backed effects are requested but are not available, stop the
     // pipeline with a canonical, actionable message.
     const bool wants_vfx =
-        (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::blur ||
-         fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::remove ||
-         fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::replace) ||
-        fx.video_noise_removal.enabled || fx.virtual_key_light.enabled;
-    const bool wants_ar = fx.eye_contact.enabled || fx.auto_frame.enabled;
+        has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) ||
+        has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove) ||
+        has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace) ||
+        has(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) ||
+        has(studiocast::video::effects::contract::kEffectIdVirtualKeyLight);
+    const bool wants_ar =
+        has(studiocast::video::effects::contract::kEffectIdEyeContact) ||
+        has(studiocast::video::effects::contract::kEffectIdAutoFrame);
 
     if (wants_vfx || wants_ar) {
       studiocast::maxine::MaxineManager mgr;
@@ -2405,34 +2430,34 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       };
 
       // AR effects.
-      if (!stop_.load() && fx.eye_contact.enabled &&
+      if (!stop_.load() && has(studiocast::video::effects::contract::kEffectIdEyeContact) &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdEyeContact))) {
         set_blocked(studiocast::maxine::MaxineNeed::ar);
       }
       if (!stop_.load() &&
-          fx.auto_frame.enabled &&
+          has(studiocast::video::effects::contract::kEffectIdAutoFrame) &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdAutoFrame))) {
         set_blocked(studiocast::maxine::MaxineNeed::ar);
       }
 
       // VFX effects.
-      if (!stop_.load() && (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::blur) &&
+      if (!stop_.load() && has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
-      if (!stop_.load() && (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::remove) &&
+      if (!stop_.load() && has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove) &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
-      if (!stop_.load() && (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::replace) &&
+      if (!stop_.load() && has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace) &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
-      if (!stop_.load() && fx.video_noise_removal.enabled &&
+      if (!stop_.load() && has(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
-      if (!stop_.load() && fx.virtual_key_light.enabled &&
+      if (!stop_.load() && has(studiocast::video::effects::contract::kEffectIdVirtualKeyLight) &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualKeyLight))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
@@ -2445,7 +2470,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
 
     // Eye Contact (AR)
-    if (fx.eye_contact.enabled) {
+    if (has(studiocast::video::effects::contract::kEffectIdEyeContact)) {
       want_maxine_eye_contact = true;
 
       std::string mx_err;
@@ -2462,9 +2487,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
 
     // Background effects.
-    if (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::blur ||
-        fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::remove ||
-        fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::replace) {
+    if (has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) ||
+        has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove) ||
+        has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace)) {
 
       // Maxine-only. (auto_select means "use Maxine if available; otherwise unavailable").
       // StudioCast no longer runs CPU placeholder background effects in the camera pipeline.
@@ -2490,7 +2515,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         stop_.store(true);
       }
 
-    } else if (fx.auto_frame.enabled) {
+    } else if (has(studiocast::video::effects::contract::kEffectIdAutoFrame)) {
       // Auto Frame is Maxine-only (AR + GPU crop/scale).
       want_maxine_auto_frame = true;
 
@@ -2508,7 +2533,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
 
     // Virtual Key Light (Maxine-only).
-    if (fx.virtual_key_light.enabled) {
+    if (has(studiocast::video::effects::contract::kEffectIdVirtualKeyLight)) {
       want_maxine_relight = true;
       std::string mx_err;
       if (maxine_relight.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
@@ -2525,7 +2550,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     // Vignette-only stage.
     // If no other GPU stage is active, run a minimal GPU upload -> vignette kernel -> download.
-    if (fx.vignette.enabled && (Clamp01FromPercent(fx.vignette.intensity) > 0.0001f)) {
+    if (has(studiocast::video::effects::contract::kEffectIdVignette) &&
+        plan.vignette_attach_to_effect_id.empty()) {
       const bool have_any_maxine_gpu_stage =
           have_maxine_eye_contact || have_maxine_bg_blur || have_maxine_relight || have_maxine_auto_frame;
 
@@ -2546,7 +2572,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
 
     // Mirror (CPU) last.
-    if (fx.mirror) {
+    if (has(studiocast::video::effects::contract::kEffectIdMirror)) {
       chain.Add(std::make_unique<studiocast::video::effects::MirrorEffect>());
     }
 
@@ -2629,125 +2655,154 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       const float vignette_center_x_px = static_cast<float>(capA.width) * 0.5f;
       const float vignette_center_y_px = static_cast<float>(capA.height) * 0.5f;
 
-      const bool vignette_requested =
-          fx.vignette.enabled && (Clamp01FromPercent(fx.vignette.intensity) > 0.0001f);
-      const bool have_any_maxine_gpu_stage =
-          have_maxine_eye_contact || have_maxine_bg_blur || have_maxine_relight || have_maxine_auto_frame;
+      const auto& plan = appliedPlan;
 
-      // Apply vignette exactly once, by attaching it to the last active Maxine GPU stage.
+      const auto has_stage = [&](std::string_view id) {
+        return std::find(plan.ordered_effect_ids.begin(),
+                         plan.ordered_effect_ids.end(),
+                         std::string(id)) != plan.ordered_effect_ids.end();
+      };
+
+      const bool vignette_requested = has_stage(studiocast::video::effects::contract::kEffectIdVignette);
+      const std::string& vig_attach = plan.vignette_attach_to_effect_id;
+
+      // Apply vignette exactly once, either attached to the planned last GPU stage,
+      // or as a standalone GPU stage when no other GPU stage is active.
       const bool apply_vignette_on_eye_contact =
-          vignette_requested && have_any_maxine_gpu_stage && have_maxine_eye_contact && !have_maxine_relight &&
-          !have_maxine_bg_blur && !have_maxine_auto_frame;
+          vignette_requested && (vig_attach == studiocast::video::effects::contract::kEffectIdEyeContact);
       const bool apply_vignette_on_relight =
-          vignette_requested && have_any_maxine_gpu_stage && have_maxine_relight && !have_maxine_bg_blur &&
-          !have_maxine_auto_frame;
-      const bool apply_vignette_on_bg_blur =
-          vignette_requested && have_any_maxine_gpu_stage && have_maxine_bg_blur && !have_maxine_auto_frame;
+          vignette_requested && (vig_attach == studiocast::video::effects::contract::kEffectIdVirtualKeyLight);
+      const bool apply_vignette_on_bg =
+          vignette_requested && (vig_attach == studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur ||
+                                 vig_attach == studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove ||
+                                 vig_attach == studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace);
       const bool apply_vignette_on_auto_frame =
-          vignette_requested && have_any_maxine_gpu_stage && have_maxine_auto_frame;
+          vignette_requested && (vig_attach == studiocast::video::effects::contract::kEffectIdAutoFrame);
 
-      // Maxine AR Eye Contact (GPU): Gaze Redirection.
-      if (have_maxine_eye_contact) {
-        std::string mx_err;
-        if (!maxine_eye_contact.ApplyRgbInPlace(rgb.data(),
-                                                capA.width,
-                                                capA.height,
-                                                rgbStride,
-                                                fx,
-                                                apply_vignette_on_eye_contact,
-                                                vignette_center_x_px,
-                                                vignette_center_y_px,
-                                                &mx_err)) {
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            last_error_ = "Maxine eye contact failed: " + mx_err;
-          }
-          fx_failed = true;
+      auto apply_stage = [&](const std::string& stage_id) {
+        // Note: video noise removal exists in the effect schema but is not
+        // currently applied in the pipeline.
+        if (stage_id == studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) {
+          return;
         }
-      }
 
-      // Maxine Virtual Key Light (GPU): Green Screen matte -> Video Relighting -> Composite.
-      if (have_maxine_relight) {
-        std::string mx_err;
-        if (!maxine_relight.ApplyRgbInPlace(rgb.data(),
-                                            capA.width,
-                                            capA.height,
-                                            rgbStride,
-                                            fx,
-                                            apply_vignette_on_relight,
-                                            vignette_center_x_px,
-                                            vignette_center_y_px,
-                                            &mx_err)) {
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            last_error_ = "Maxine relighting failed: " + mx_err;
+        if (stage_id == studiocast::video::effects::contract::kEffectIdEyeContact) {
+          if (!have_maxine_eye_contact) return;
+          std::string mx_err;
+          if (!maxine_eye_contact.ApplyRgbInPlace(rgb.data(),
+                                                  capA.width,
+                                                  capA.height,
+                                                  rgbStride,
+                                                  fx,
+                                                  apply_vignette_on_eye_contact,
+                                                  vignette_center_x_px,
+                                                  vignette_center_y_px,
+                                                  &mx_err)) {
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              last_error_ = "Maxine eye contact failed: " + mx_err;
+            }
+            fx_failed = true;
           }
-          fx_failed = true;
+          return;
         }
-      }
 
-      // Maxine Virtual Background (GPU): Green Screen matte -> Background Blur / Composite.
-      if (have_maxine_bg_blur) {
-        std::string mx_err;
-        if (!maxine_bg_blur.ApplyRgbInPlace(rgb.data(),
-                                            capA.width,
-                                            capA.height,
-                                            rgbStride,
-                                            fx,
-                                            apply_vignette_on_bg_blur,
-                                            vignette_center_x_px,
-                                            vignette_center_y_px,
-                                            &mx_err)) {
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            last_error_ = "Maxine virtual background failed: " + mx_err;
+        if (stage_id == studiocast::video::effects::contract::kEffectIdVirtualKeyLight) {
+          if (!have_maxine_relight) return;
+          std::string mx_err;
+          if (!maxine_relight.ApplyRgbInPlace(rgb.data(),
+                                              capA.width,
+                                              capA.height,
+                                              rgbStride,
+                                              fx,
+                                              apply_vignette_on_relight,
+                                              vignette_center_x_px,
+                                              vignette_center_y_px,
+                                              &mx_err)) {
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              last_error_ = "Maxine relighting failed: " + mx_err;
+            }
+            fx_failed = true;
           }
-          fx_failed = true;
+          return;
         }
-      }
 
-      // Maxine Auto Frame (GPU): AR bbox tracking -> GPU crop/scale.
-      // Apply last so we frame the final image.
-      if (have_maxine_auto_frame) {
-        std::string mx_err;
-        if (!maxine_auto_frame.ApplyRgbInPlace(rgb.data(),
-                                               capA.width,
-                                               capA.height,
-                                               rgbStride,
-                                               fx,
-                                               apply_vignette_on_auto_frame,
-                                               vignette_center_x_px,
-                                               vignette_center_y_px,
-                                               &mx_err)) {
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            last_error_ = "Maxine auto frame failed: " + mx_err;
+        if (stage_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur ||
+            stage_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove ||
+            stage_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace) {
+          if (!have_maxine_bg_blur) return;
+          std::string mx_err;
+          if (!maxine_bg_blur.ApplyRgbInPlace(rgb.data(),
+                                              capA.width,
+                                              capA.height,
+                                              rgbStride,
+                                              fx,
+                                              apply_vignette_on_bg,
+                                              vignette_center_x_px,
+                                              vignette_center_y_px,
+                                              &mx_err)) {
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              last_error_ = "Maxine virtual background failed: " + mx_err;
+            }
+            fx_failed = true;
           }
-          fx_failed = true;
+          return;
         }
-      }
 
-      // Standalone vignette stage (only when no other Maxine GPU stage is active).
-      if (have_maxine_vignette_only) {
-        std::string mx_err;
-        if (!vignette_only.ApplyRgbInPlace(rgb.data(),
-                                           capA.width,
-                                           capA.height,
-                                           rgbStride,
-                                           fx,
-                                           vignette_center_x_px,
-                                           vignette_center_y_px,
-                                           &mx_err)) {
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            last_error_ = "CUDA vignette failed: " + mx_err;
+        if (stage_id == studiocast::video::effects::contract::kEffectIdAutoFrame) {
+          if (!have_maxine_auto_frame) return;
+          std::string mx_err;
+          if (!maxine_auto_frame.ApplyRgbInPlace(rgb.data(),
+                                                 capA.width,
+                                                 capA.height,
+                                                 rgbStride,
+                                                 fx,
+                                                 apply_vignette_on_auto_frame,
+                                                 vignette_center_x_px,
+                                                 vignette_center_y_px,
+                                                 &mx_err)) {
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              last_error_ = "Maxine auto frame failed: " + mx_err;
+            }
+            fx_failed = true;
           }
-          fx_failed = true;
+          return;
         }
+
+        if (stage_id == studiocast::video::effects::contract::kEffectIdVignette) {
+          if (!have_maxine_vignette_only) return;
+          std::string mx_err;
+          if (!vignette_only.ApplyRgbInPlace(rgb.data(),
+                                             capA.width,
+                                             capA.height,
+                                             rgbStride,
+                                             fx,
+                                             vignette_center_x_px,
+                                             vignette_center_y_px,
+                                             &mx_err)) {
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              last_error_ = "CUDA vignette failed: " + mx_err;
+            }
+            fx_failed = true;
+          }
+          return;
+        }
+      };
+
+      for (const auto& stage_id : plan.ordered_effect_ids) {
+        if (stage_id == studiocast::video::effects::contract::kEffectIdMirror) continue;
+        apply_stage(stage_id);
+        if (fx_failed) break;
       }
 
       // CPU-only tail effects (e.g. mirror) run last.
-      chain.Apply(view);
+      if (!fx_failed) {
+        chain.Apply(view);
+      }
     }
 
     if (fx_failed) {

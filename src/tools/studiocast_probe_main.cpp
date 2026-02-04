@@ -19,6 +19,8 @@
 #include "core/util/json.h"
 #include "core/util/strings.h"
 #include "core/video/broadcast_camera_effects_json.h"
+#include "core/video/effects/broadcast_effect_contract.h"
+#include "core/video/effects/broadcast_effect_rules.h"
 #include "core/video/effects/broadcast_effects_json.h"
 #include "core/video/image_ppm.h"
 #include "core/video/effects/effect_types.h"
@@ -93,6 +95,79 @@ namespace {
             const auto roundtrip = studiocast::video::ToLegacyCameraEffects(bfx);
             expectTrue("ToLegacyCameraEffects never returns cpu backend",
                        roundtrip.background_backend != studiocast::video::effects::EffectBackend::cpu);
+        }
+
+        // Effect ordering + compatibility rules (single source of truth).
+        {
+            using studiocast::video::effects::BuildBroadcastEffectsPlan;
+            using studiocast::video::effects::BroadcastCameraEffects;
+            using studiocast::video::effects::VirtualBackgroundMode;
+
+            const auto disabledHas = [](const studiocast::video::effects::BroadcastEffectsPlan& plan,
+                                        std::string_view id) {
+                for (const auto& d : plan.disabled) {
+                    if (d.id == id) return true;
+                }
+                return false;
+            };
+
+            // VB replace requires replace_path.
+            {
+                BroadcastCameraEffects fx;
+                fx.virtual_background.mode = VirtualBackgroundMode::replace;
+                fx.virtual_background.replace_path.clear();
+
+                const auto plan = BuildBroadcastEffectsPlan(fx);
+                expectVecEq("EffectPlan: vb replace missing path -> no stages", plan.ordered_effect_ids, {});
+                expectTrue("EffectPlan: vb replace missing path -> disabled list contains vb.replace",
+                           disabledHas(plan, studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace));
+            }
+
+            // Auto Frame and Virtual Background are mutually exclusive; Auto Frame wins.
+            {
+                BroadcastCameraEffects fx;
+                fx.auto_frame.enabled = true;
+                fx.virtual_background.mode = VirtualBackgroundMode::blur;
+
+                const auto plan = BuildBroadcastEffectsPlan(fx);
+                expectVecEq("EffectPlan: auto_frame wins over vb.blur",
+                            plan.ordered_effect_ids,
+                            {std::string(studiocast::video::effects::contract::kEffectIdAutoFrame)});
+                expectTrue("EffectPlan: vb.blur disabled when auto_frame enabled",
+                           disabledHas(plan, studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur));
+            }
+
+            // Ordering + vignette attachment target.
+            {
+                BroadcastCameraEffects fx;
+                fx.eye_contact.enabled = true;
+                fx.virtual_background.mode = VirtualBackgroundMode::blur;
+                fx.vignette.enabled = true;
+                fx.vignette.intensity = 50;
+                fx.mirror = true;
+
+                const auto plan = BuildBroadcastEffectsPlan(fx);
+                expectVecEq("EffectPlan: ordering eye_contact -> vb.blur -> vignette -> mirror",
+                            plan.ordered_effect_ids,
+                            {std::string(studiocast::video::effects::contract::kEffectIdEyeContact),
+                             std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur),
+                             std::string(studiocast::video::effects::contract::kEffectIdVignette),
+                             std::string(studiocast::video::effects::contract::kEffectIdMirror)});
+                expectEq("EffectPlan: vignette attaches to last GPU stage (vb.blur)",
+                         plan.vignette_attach_to_effect_id,
+                         std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur));
+            }
+
+            // Standalone vignette when no other GPU stage is enabled.
+            {
+                BroadcastCameraEffects fx;
+                fx.vignette.enabled = true;
+                fx.vignette.intensity = 25;
+                const auto plan = BuildBroadcastEffectsPlan(fx);
+                expectVecEq("EffectPlan: vignette-only stage", plan.ordered_effect_ids,
+                            {std::string(studiocast::video::effects::contract::kEffectIdVignette)});
+                expectEq("EffectPlan: vignette-only attach target empty", plan.vignette_attach_to_effect_id, "");
+            }
         }
 
         {
@@ -384,11 +459,12 @@ namespace {
 
                 const auto vc = studiocast::config::ToVideoServiceConfig(dc);
                 expectTrue("ToVideoServiceConfig mirror", vc.pipeline.effects.mirror);
-                expectTrue("ToVideoServiceConfig background blur",
-                           vc.pipeline.effects.background == studiocast::video::effects::BackgroundEffect::blur);
-                expectIntEq("ToVideoServiceConfig background_strength", vc.pipeline.effects.background_strength, 13);
-                expectTrue("ToVideoServiceConfig background_backend not cpu",
-                           vc.pipeline.effects.background_backend != studiocast::video::effects::EffectBackend::cpu);
+                expectTrue("ToVideoServiceConfig vb blur",
+                           vc.pipeline.effects.virtual_background.mode ==
+                               studiocast::video::effects::VirtualBackgroundMode::blur);
+                expectIntEq("ToVideoServiceConfig vb strength", vc.pipeline.effects.virtual_background.strength, 13);
+                expectTrue("ToVideoServiceConfig engine auto_select",
+                           vc.pipeline.effects.engine == studiocast::video::effects::EffectsEnginePreference::auto_select);
                 expectTrue("ToVideoServiceConfig eye_contact enabled", vc.pipeline.effects.eye_contact.enabled);
 
                 // New schema should round-trip through Save/Load.
@@ -412,9 +488,10 @@ namespace {
 
                     const auto dc2 = studiocast::config::LoadDaemonConfig();
                     const auto vc2 = studiocast::config::ToVideoServiceConfig(dc2);
-                    expectTrue("roundtrip background blur",
-                               vc2.pipeline.effects.background == studiocast::video::effects::BackgroundEffect::blur);
-                    expectIntEq("roundtrip background_strength", vc2.pipeline.effects.background_strength, 13);
+                    expectTrue("roundtrip vb blur",
+                               vc2.pipeline.effects.virtual_background.mode ==
+                                   studiocast::video::effects::VirtualBackgroundMode::blur);
+                    expectIntEq("roundtrip vb strength", vc2.pipeline.effects.virtual_background.strength, 13);
                     expectTrue("roundtrip eye_contact enabled", vc2.pipeline.effects.eye_contact.enabled);
                     expectTrue("roundtrip key_light enabled", vc2.pipeline.effects.virtual_key_light.enabled);
                 }
@@ -432,8 +509,7 @@ namespace {
                 expectTrue("daemon_config migrate auto_frame enabled", dc_af.video_effects.auto_frame.enabled);
                 expectIntEq("daemon_config migrate auto_frame zoom", dc_af.video_effects.auto_frame.strength, 88);
                 const auto vc_af = studiocast::config::ToVideoServiceConfig(dc_af);
-                expectTrue("ToVideoServiceConfig auto_frame",
-                           vc_af.pipeline.effects.background == studiocast::video::effects::BackgroundEffect::auto_frame);
+                expectTrue("ToVideoServiceConfig auto_frame enabled", vc_af.pipeline.effects.auto_frame.enabled);
 
                 // Restore env.
                 if (oldXdg) {
