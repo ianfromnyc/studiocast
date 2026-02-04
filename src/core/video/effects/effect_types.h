@@ -19,9 +19,11 @@ enum class BackgroundEffect {
 
 // Backend preference for an effect.
 //
-// - auto_select: choose Maxine if available, otherwise CPU
-// - cpu: force CPU path
-// - maxine: force Maxine path (falls back if unavailable)
+// StudioCast production rule: Maxine is the only supported effect engine.
+//
+// - auto_select: choose Maxine if available, otherwise mark the effect unavailable
+// - cpu: legacy/development-only (not supported by the production camera pipeline)
+// - maxine: force Maxine path (effect is unavailable if Maxine is unavailable)
 
 enum class EffectBackend {
   auto_select = 0,

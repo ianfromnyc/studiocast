@@ -20,15 +20,16 @@ namespace studiocast::video {
         bool mirror = false;
 
         // NVIDIA Broadcast-style background effects.
-        // These are implemented as CPU placeholders for now, but the config shape
-        // is intended to remain stable when Maxine/GPU backends are added.
+        //
+        // Product rule: Maxine is the only production effect engine.
+        // If Maxine is unavailable/unsupported, these effects are unavailable
+        // (no CPU fallback in the camera pipeline).
         studiocast::video::effects::BackgroundEffect background =
             studiocast::video::effects::BackgroundEffect::none;
         studiocast::video::effects::EffectBackend background_backend =
             studiocast::video::effects::EffectBackend::auto_select;
 
         // Used by background blur (and future AI effects) as an intensity knob.
-        // Interpreted as a blur radius for the CPU placeholder.
         int background_strength = 8;
 
         // Auto Frame (Maxine AR bounding boxes + GPU crop/scale).

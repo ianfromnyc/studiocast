@@ -20,8 +20,6 @@
 #include "core/maxine/vfx_api.h"
 #include "core/video/convert.h"
 #include "core/video/image_ppm.h"
-#include "core/video/effects/background_blur_cpu.h"
-#include "core/video/effects/background_remove_cpu.h"
 #include "core/video/effects/effect_chain.h"
 #include "core/video/effects/mirror_effect.h"
 #include "core/video/v4l2loopback.h"
@@ -2309,11 +2307,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     want_maxine_vignette_only = false;
     have_maxine_vignette_only = false;
 
-    // Mirror
-    if (fx.mirror) {
-      chain.Add(std::make_unique<studiocast::video::effects::MirrorEffect>());
-    }
-
     // Eye Contact (AR)
     if (fx.eye_contact.enabled) {
       want_maxine_eye_contact = true;
@@ -2336,47 +2329,33 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         fx.background == studiocast::video::effects::BackgroundEffect::remove ||
         fx.background == studiocast::video::effects::BackgroundEffect::replace) {
 
-      const bool forceCpu = (fx.background_backend == studiocast::video::effects::EffectBackend::cpu);
+      // Maxine-only. (auto_select means "use Maxine if available; otherwise unavailable").
+      // StudioCast no longer runs CPU placeholder background effects in the camera pipeline.
+      want_maxine_bg_blur = true;
 
-      if (!forceCpu) {
-        // Maxine-only (auto_select means "use Maxine if available; otherwise unavailable").
-        want_maxine_bg_blur = true;
+      if (fx.background_backend == studiocast::video::effects::EffectBackend::cpu) {
+        if (!note.empty()) note += "\n";
+        note += "CPU backend requested for virtual background, but is not supported; attempting Maxine.";
+      }
 
-        std::string mx_err;
-        if (maxine_bg_blur.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
-          have_maxine_bg_blur = true;
-          if (fx.background == studiocast::video::effects::BackgroundEffect::blur) {
-            if (!note.empty()) note += "\n";
-            note += "Maxine VFX: Green Screen matte + Background Blur.";
-          } else if (fx.background == studiocast::video::effects::BackgroundEffect::remove) {
-            if (!note.empty()) note += "\n";
-            note += "Maxine VFX: Green Screen matte + Composite (remove).";
-          } else {
-            if (!note.empty()) note += "\n";
-            note += "Maxine VFX: Green Screen matte + Composite (replace).";
-          }
-        } else {
-          if (!note.empty()) note += "\n";
-          note += "Maxine virtual background unavailable: " + mx_err;
-          // No CPU fallback when Maxine is not available.
-          stop_.store(true);
-        }
-
-      } else {
-        // CPU backend explicitly selected: keep placeholders only where they exist.
+      std::string mx_err;
+      if (maxine_bg_blur.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
+        have_maxine_bg_blur = true;
         if (fx.background == studiocast::video::effects::BackgroundEffect::blur) {
-          chain.Add(std::make_unique<studiocast::video::effects::BackgroundBlurCpuEffect>(fx.background_strength));
           if (!note.empty()) note += "\n";
-          note += "CPU placeholder: center-focus mask (no AI segmentation yet).";
+          note += "Maxine VFX: Green Screen matte + Background Blur.";
         } else if (fx.background == studiocast::video::effects::BackgroundEffect::remove) {
-          chain.Add(std::make_unique<studiocast::video::effects::BackgroundRemoveCpuEffect>());
           if (!note.empty()) note += "\n";
-          note += "CPU placeholder: center-focus mask (no AI segmentation yet).";
+          note += "Maxine VFX: Green Screen matte + Composite (remove).";
         } else {
           if (!note.empty()) note += "\n";
-          note += "CPU background replace not supported.";
-          stop_.store(true);
+          note += "Maxine VFX: Green Screen matte + Composite (replace).";
         }
+      } else {
+        if (!note.empty()) note += "\n";
+        note += "Maxine virtual background unavailable: " + mx_err;
+        // No CPU fallback when Maxine is not available.
+        stop_.store(true);
       }
 
     } else if (fx.background == studiocast::video::effects::BackgroundEffect::auto_frame) {
@@ -2432,6 +2411,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           stop_.store(true);
         }
       }
+    }
+
+    // Mirror (CPU) last.
+    if (fx.mirror) {
+      chain.Add(std::make_unique<studiocast::video::effects::MirrorEffect>());
     }
 
     {
@@ -2509,8 +2493,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       view.height = capA.height;
       view.stride_bytes = rgbStride;
 
-      chain.Apply(view);
-
       const float vignette_center_x_px = static_cast<float>(capA.width) * 0.5f;
       const float vignette_center_y_px = static_cast<float>(capA.height) * 0.5f;
 
@@ -2520,13 +2502,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       // Apply vignette exactly once, by attaching it to the last active Maxine GPU stage.
       const bool apply_vignette_on_eye_contact =
-          vignette_requested && have_any_maxine_gpu_stage && have_maxine_eye_contact &&
-          !have_maxine_bg_blur && !have_maxine_relight && !have_maxine_auto_frame;
-      const bool apply_vignette_on_bg_blur =
-          vignette_requested && have_any_maxine_gpu_stage && have_maxine_bg_blur &&
-          !have_maxine_relight && !have_maxine_auto_frame;
+          vignette_requested && have_any_maxine_gpu_stage && have_maxine_eye_contact && !have_maxine_relight &&
+          !have_maxine_bg_blur && !have_maxine_auto_frame;
       const bool apply_vignette_on_relight =
-          vignette_requested && have_any_maxine_gpu_stage && have_maxine_relight && !have_maxine_auto_frame;
+          vignette_requested && have_any_maxine_gpu_stage && have_maxine_relight && !have_maxine_bg_blur &&
+          !have_maxine_auto_frame;
+      const bool apply_vignette_on_bg_blur =
+          vignette_requested && have_any_maxine_gpu_stage && have_maxine_bg_blur && !have_maxine_auto_frame;
       const bool apply_vignette_on_auto_frame =
           vignette_requested && have_any_maxine_gpu_stage && have_maxine_auto_frame;
 
@@ -2550,26 +2532,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
       }
 
-      // Maxine Virtual Background = Blur (GPU): Green Screen matte -> Background Blur.
-      if (have_maxine_bg_blur) {
-        std::string mx_err;
-        if (!maxine_bg_blur.ApplyRgbInPlace(rgb.data(),
-                                            capA.width,
-                                            capA.height,
-                                            rgbStride,
-                                            fx,
-                                            apply_vignette_on_bg_blur,
-                                            vignette_center_x_px,
-                                            vignette_center_y_px,
-                                            &mx_err)) {
-          {
-            std::lock_guard<std::mutex> lock(mu_);
-            last_error_ = "Maxine background blur failed: " + mx_err;
-          }
-          fx_failed = true;
-        }
-      }
-
       // Maxine Virtual Key Light (GPU): Green Screen matte -> Video Relighting -> Composite.
       if (have_maxine_relight) {
         std::string mx_err;
@@ -2585,6 +2547,26 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           {
             std::lock_guard<std::mutex> lock(mu_);
             last_error_ = "Maxine relighting failed: " + mx_err;
+          }
+          fx_failed = true;
+        }
+      }
+
+      // Maxine Virtual Background (GPU): Green Screen matte -> Background Blur / Composite.
+      if (have_maxine_bg_blur) {
+        std::string mx_err;
+        if (!maxine_bg_blur.ApplyRgbInPlace(rgb.data(),
+                                            capA.width,
+                                            capA.height,
+                                            rgbStride,
+                                            fx,
+                                            apply_vignette_on_bg_blur,
+                                            vignette_center_x_px,
+                                            vignette_center_y_px,
+                                            &mx_err)) {
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            last_error_ = "Maxine virtual background failed: " + mx_err;
           }
           fx_failed = true;
         }
@@ -2629,6 +2611,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           fx_failed = true;
         }
       }
+
+      // CPU-only tail effects (e.g. mirror) run last.
+      chain.Apply(view);
     }
 
     if (fx_failed) {
