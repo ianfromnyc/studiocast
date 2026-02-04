@@ -1,10 +1,14 @@
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "core/config/daemon_config.h"
 #include "core/maxine/ar_api.h"
 #include "core/maxine/effects/ar_auto_frame_tracker.h"
 #include "core/maxine/nvcv_api.h"
@@ -12,6 +16,7 @@
 #include "core/probe/probe.h"
 #include "core/util/strings.h"
 #include "core/video/image_ppm.h"
+#include "core/video/effects/effect_types.h"
 #include "studiocast/version.h"
 
 namespace {
@@ -47,6 +52,18 @@ namespace {
         using studiocast::util::Split;
         using studiocast::util::SplitLines;
         using studiocast::util::TrimCopy;
+
+        auto expectTrue = [&](const char* name, bool v) {
+            if (v) return;
+            ++failures;
+            std::printf("[FAIL] %s\n", name);
+        };
+
+        auto expectIntEq = [&](const char* name, int got, int want) {
+            if (got == want) return;
+            ++failures;
+            std::printf("[FAIL] %s\n  got:  %d\n  want: %d\n", name, got, want);
+        };
 
         expectEq("TrimCopy", TrimCopy("  hi \n"), "hi");
         expectVecEq("Split", Split("a,b,,c", ','), {"a", "b", "", "c"});
@@ -250,6 +267,111 @@ namespace {
                         ++failures;
                         std::printf("[FAIL] ArApi.StatusToString returned empty message for status=%d\n", st);
                     }
+                }
+            }
+        }
+
+        // Daemon config schema migration + round-trip.
+        {
+            namespace fs = std::filesystem;
+
+            const char* oldXdg = std::getenv("XDG_CONFIG_HOME");
+            const std::string oldXdgStr = oldXdg ? std::string(oldXdg) : std::string();
+
+            char tmpl[] = "/tmp/studiocast_selftest_conf_XXXXXX";
+            char* dir = ::mkdtemp(tmpl);
+            if (!dir) {
+                ++failures;
+                std::printf("[FAIL] mkdtemp failed\n");
+            } else {
+                ::setenv("XDG_CONFIG_HOME", dir, 1);
+
+                std::error_code ec;
+                fs::create_directories(fs::path(dir) / "studiocast", ec);
+                if (ec) {
+                    ++failures;
+                    std::printf("[FAIL] create_directories: %s\n", ec.message().c_str());
+                }
+
+                const fs::path confPath = fs::path(dir) / "studiocast" / "daemon.conf";
+
+                // Legacy background keys should migrate to `video.effects.*`.
+                {
+                    std::ofstream out(confPath);
+                    out << "video.mirror = true\n";
+                    out << "video.background = blur\n";
+                    out << "video.background_backend = cpu\n";
+                    out << "video.background_strength = 13\n";
+                    out << "video.background_remove_color = #112233\n";
+                    out << "video.background_replace_image = /tmp/x.ppm\n";
+                    out << "video.eye_contact = true\n";
+                    out << "video.eye_contact_strength = 77\n";
+                    out << "video.eye_contact_look_away = false\n";
+                    out << "video.virtual_key_light = true\n";
+                    out << "video.virtual_key_light_intensity = 42\n";
+                    out << "video.virtual_key_light_temperature = warm\n";
+                    out << "video.vignette = true\n";
+                    out << "video.vignette_intensity = 9\n";
+                    out << "video.vignette_center_on_face = false\n";
+                }
+
+                const auto dc = studiocast::config::LoadDaemonConfig();
+                expectEq("daemon_config migrate vb mode", dc.video_effects_virtual_background_mode, "blur");
+                expectIntEq("daemon_config migrate vb blur_strength", dc.video_effects_virtual_background_blur_strength, 13);
+                expectEq("daemon_config migrate vb remove_color", dc.video_effects_virtual_background_remove_color, "#112233");
+                expectEq("daemon_config migrate vb replace_path", dc.video_effects_virtual_background_replace_path, "/tmp/x.ppm");
+                expectTrue("daemon_config migrate mirror", dc.video_mirror);
+                expectTrue("daemon_config migrate eye_contact enabled", dc.video_effects_eye_contact_enabled);
+                expectIntEq("daemon_config migrate eye_contact strength", dc.video_effects_eye_contact_strength, 77);
+                expectTrue("daemon_config migrate key_light enabled", dc.video_effects_virtual_key_light_enabled);
+                expectIntEq("daemon_config migrate key_light intensity", dc.video_effects_virtual_key_light_intensity, 42);
+
+                const auto vc = studiocast::config::ToVideoServiceConfig(dc);
+                expectTrue("ToVideoServiceConfig mirror", vc.pipeline.effects.mirror);
+                expectTrue("ToVideoServiceConfig background blur",
+                           vc.pipeline.effects.background == studiocast::video::effects::BackgroundEffect::blur);
+                expectIntEq("ToVideoServiceConfig background_strength", vc.pipeline.effects.background_strength, 13);
+                expectTrue("ToVideoServiceConfig background_backend not cpu",
+                           vc.pipeline.effects.background_backend != studiocast::video::effects::EffectBackend::cpu);
+                expectTrue("ToVideoServiceConfig eye_contact enabled", vc.pipeline.effects.eye_contact.enabled);
+
+                // New schema should round-trip through Save/Load.
+                {
+                    std::string err;
+                    if (!studiocast::config::SaveDaemonConfig(dc, &err)) {
+                        ++failures;
+                        std::printf("[FAIL] SaveDaemonConfig: %s\n", err.c_str());
+                    }
+                    const auto dc2 = studiocast::config::LoadDaemonConfig();
+                    const auto vc2 = studiocast::config::ToVideoServiceConfig(dc2);
+                    expectTrue("roundtrip background blur",
+                               vc2.pipeline.effects.background == studiocast::video::effects::BackgroundEffect::blur);
+                    expectIntEq("roundtrip background_strength", vc2.pipeline.effects.background_strength, 13);
+                    expectTrue("roundtrip eye_contact enabled", vc2.pipeline.effects.eye_contact.enabled);
+                    expectTrue("roundtrip key_light enabled", vc2.pipeline.effects.virtual_key_light.enabled);
+                }
+
+                // Legacy auto_frame should migrate to `video.effects.auto_frame.*`.
+                {
+                    std::ofstream out(confPath);
+                    out << "video.background = auto_frame\n";
+                    out << "video.auto_frame_strength = 88\n";
+                    out << "video.auto_frame_smoothing = 12\n";
+                    out << "video.auto_frame_headroom = 0.33\n";
+                }
+
+                const auto dc_af = studiocast::config::LoadDaemonConfig();
+                expectTrue("daemon_config migrate auto_frame enabled", dc_af.video_effects_auto_frame_enabled);
+                expectIntEq("daemon_config migrate auto_frame zoom", dc_af.video_effects_auto_frame_zoom, 88);
+                const auto vc_af = studiocast::config::ToVideoServiceConfig(dc_af);
+                expectTrue("ToVideoServiceConfig auto_frame",
+                           vc_af.pipeline.effects.background == studiocast::video::effects::BackgroundEffect::auto_frame);
+
+                // Restore env.
+                if (oldXdg) {
+                    ::setenv("XDG_CONFIG_HOME", oldXdgStr.c_str(), 1);
+                } else {
+                    ::unsetenv("XDG_CONFIG_HOME");
                 }
             }
         }

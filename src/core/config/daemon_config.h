@@ -19,62 +19,68 @@ struct DaemonConfig {
   int video_fps = 30;
   bool video_mirror = false;
 
-  // NVIDIA Broadcast-style effects (video).
+  // Broadcast-style camera effects (video), persisted under a stable `video.effects.*` namespace.
   //
-  // These are persisted as strings to keep the config file human-readable and
-  // stable as we add more effects/backends.
+  // Product rule: Maxine is the only supported effect engine in production.
+  // Legacy/CPU backend selections are ignored.
   //
-  // video.background: none|blur|remove|replace|auto_frame
-  // video.background_backend: auto|cpu|maxine
-  // video.background_strength: integer intensity knob (blur radius for CPU placeholder)
-  // video.background_remove_color: #RRGGBB (used when video.background=remove)
-  // video.background_replace_image: filesystem path (used when video.background=replace)
-  std::string video_background = "none";
-  std::string video_background_backend = "auto";
-  int video_background_strength = 8;
+  // Engine preference (Maxine-only):
+  // - video.effects.engine: auto|maxine
+  std::string video_effects_engine = "auto";
 
-  // Auto Frame knobs (used when video.background=auto_frame)
-  //
-  // video.auto_frame_strength: 0..100 (percent)
-  // video.auto_frame_smoothing: 0..100 (percent)
-  // video.auto_frame_headroom: 0..1 (fraction)
-  int video_auto_frame_strength = 50;
-  int video_auto_frame_smoothing = 70;
-  float video_auto_frame_headroom = 0.15f;
+  // Virtual background:
+  // - video.effects.virtual_background.mode: none|blur|remove|replace
+  // - video.effects.virtual_background.blur_strength: integer strength (1..64-ish)
+  // - video.effects.virtual_background.remove_color: #RRGGBB (used when mode=remove)
+  // - video.effects.virtual_background.replace_path: filesystem path (used when mode=replace)
+  std::string video_effects_virtual_background_mode = "none";
+  int video_effects_virtual_background_blur_strength = 8;
+  std::string video_effects_virtual_background_remove_color = "#000000";
+  std::string video_effects_virtual_background_replace_path;
 
-  std::string video_background_remove_color = "#000000";
-  std::string video_background_replace_image;
+  // Auto Frame:
+  // - video.effects.auto_frame.enabled: true|false
+  // - video.effects.auto_frame.zoom: 0..100 (percent-like)
+  // - video.effects.auto_frame.smoothing: 0..100 (percent-like)
+  // - video.effects.auto_frame.headroom: 0..1 (fraction)
+  bool video_effects_auto_frame_enabled = false;
+  int video_effects_auto_frame_zoom = 50;
+  int video_effects_auto_frame_smoothing = 70;
+  float video_effects_auto_frame_headroom = 0.15f;
 
-  // Virtual Key Light (Video Relighting)
-  //
-  // video.virtual_key_light: true|false
-  // video.virtual_key_light_intensity: 0..100 (percent)
-  // video.virtual_key_light_temperature: neutral|warm|cool
-  // video.virtual_key_light_pan: degrees (integer)
-  // video.virtual_key_light_hdri: filesystem path (optional override)
-  bool video_virtual_key_light = false;
-  int video_virtual_key_light_intensity = 70;
-  std::string video_virtual_key_light_temperature = "neutral";
-  int video_virtual_key_light_pan = 0;
-  std::string video_virtual_key_light_hdri;
+  // Eye Contact:
+  // - video.effects.eye_contact.enabled: true|false
+  // - video.effects.eye_contact.strength: 0..100 (percent)
+  // - video.effects.eye_contact.look_away: true|false
+  bool video_effects_eye_contact_enabled = false;
+  int video_effects_eye_contact_strength = 50;
+  bool video_effects_eye_contact_look_away = true;
 
-  // Eye Contact (Maxine AR Gaze Redirection)
-  //
-  // video.eye_contact: true|false
-  // video.eye_contact_strength: 0..100 (percent)
-  // video.eye_contact_look_away: true|false
-  bool video_eye_contact = false;
-  int video_eye_contact_strength = 50;
-  bool video_eye_contact_look_away = true;
+  // Video Noise Removal:
+  // - video.effects.video_noise_removal.enabled: true|false
+  // - video.effects.video_noise_removal.strength: 0..100 (percent)
+  bool video_effects_video_noise_removal_enabled = false;
+  int video_effects_video_noise_removal_strength = 50;
 
-  // Vignette (CUDA GPU post-process)
-  //
-  // video.vignette: true|false
-  // video.vignette_intensity: 0..100 (percent)
-  // video.vignette_center_on_face: true|false
-  bool video_vignette = false;
-  int video_vignette_intensity = 35;
-  bool video_vignette_center_on_face = true;
+  // Virtual Key Light:
+  // - video.effects.virtual_key_light.enabled: true|false
+  // - video.effects.virtual_key_light.intensity: 0..100 (percent)
+  // - video.effects.virtual_key_light.temperature_preset: neutral|warm|cool
+  // - video.effects.virtual_key_light.pan: degrees (integer)
+  // - video.effects.virtual_key_light.hdri_path: filesystem path (optional override)
+  bool video_effects_virtual_key_light_enabled = false;
+  int video_effects_virtual_key_light_intensity = 70;
+  std::string video_effects_virtual_key_light_temperature_preset = "neutral";
+  int video_effects_virtual_key_light_pan = 0;
+  std::string video_effects_virtual_key_light_hdri_path;
+
+  // Vignette:
+  // - video.effects.vignette.enabled: true|false
+  // - video.effects.vignette.intensity: 0..100 (percent)
+  // - video.effects.vignette.center_on_face: true|false
+  bool video_effects_vignette_enabled = false;
+  int video_effects_vignette_intensity = 35;
+  bool video_effects_vignette_center_on_face = true;
 
   // Service behavior
   int consumer_poll_ms = 250;
