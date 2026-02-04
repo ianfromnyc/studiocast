@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "core/maxine/availability.h"
 #include "core/maxine/ar_api.h"
 #include "core/maxine/paths.h"
 #include "core/maxine/vfx_api.h"
@@ -99,7 +100,7 @@ bool HasAnyFeatureMarker(const fs::path &features_dir,
 }
 
 bool MeetsMinDriverVersion(const studiocast::probe::Version &v) {
-  // Developer note (docs/PHASE1_MAXINE_INSTALL.md): Maxine Linux requires
+  // Developer note (docs/maxine_install.md): Maxine Linux requires
   // 570.26+.
   if (v.major > 570)
     return true;
@@ -487,29 +488,24 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
   // Blocked reason/details for stable GUI behavior.
   if (d.supported) {
     d.blocked_reason = "none";
-  } else if (!d.driver.ok) {
-    d.blocked_reason = "driver";
-  } else if (!d.gpu.ok) {
-    d.blocked_reason = "gpu";
-  } else if (!vfx_ready && !ar_ready) {
-    d.blocked_reason = "sdk";
-  } else {
-    d.blocked_reason = "features";
-  }
-
-  d.blocked_details = d.problems;
-  d.blocked_details.insert(d.blocked_details.end(), d.hints.begin(),
-                           d.hints.end());
-  DedupPreserveOrder(&d.blocked_details);
-
-  if (d.ok) {
-    d.summary = "Maxine available (" +
-                std::to_string(d.available_effects.size()) +
+    d.blocked_details.clear();
+    d.summary = "Maxine available (" + std::to_string(d.available_effects.size()) +
                 " effect(s) available).";
   } else {
-    if (!d.problems.empty()) {
-      d.summary = "Maxine unavailable: " + d.problems.front();
+    if (!d.gpu.ok) {
+      d.blocked_reason = "gpu";
+    } else if (!d.driver.ok) {
+      d.blocked_reason = "driver";
+    } else if (!vfx_ready || !ar_ready) {
+      d.blocked_reason = "sdk";
     } else {
+      d.blocked_reason = "features";
+    }
+
+    const auto msg = BuildCanonicalMaxineBlockedCopy(d, MaxineNeed::any);
+    d.summary = msg.summary;
+    d.blocked_details = msg.steps;
+    if (d.summary.empty()) {
       d.summary = "Maxine unavailable (no effects reported available).";
     }
   }

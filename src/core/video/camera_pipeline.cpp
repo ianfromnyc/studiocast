@@ -4,10 +4,12 @@
 #include <cctype>
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <vector>
 
 #include "core/maxine/availability.h"
+#include "core/maxine/maxine_manager.h"
 #include "core/maxine/effects/ar_eye_contact_effect.h"
 #include "core/maxine/effects/ar_auto_frame_tracker.h"
 #include "core/maxine/effects/vfx_background_blur_effect.h"
@@ -2292,6 +2294,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     std::string note;
 
+    auto finalize_note_and_backends = [&] {
+      std::lock_guard<std::mutex> lock(mu_);
+      effects_backends_ = chain.BackendSummary();
+      effects_note_ = note;
+      if (!note.empty()) {
+        last_error_ = note;
+      }
+    };
+
     want_maxine_bg_blur = false;
     have_maxine_bg_blur = false;
 
@@ -2307,6 +2318,69 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     want_maxine_vignette_only = false;
     have_maxine_vignette_only = false;
 
+    // If Maxine-backed effects are requested but are not available, stop the
+    // pipeline with a canonical, actionable message.
+    const bool wants_vfx =
+        (fx.background == studiocast::video::effects::BackgroundEffect::blur ||
+         fx.background == studiocast::video::effects::BackgroundEffect::remove ||
+         fx.background == studiocast::video::effects::BackgroundEffect::replace) ||
+        fx.denoise || fx.virtual_key_light.enabled;
+    const bool wants_ar = fx.eye_contact.enabled ||
+                          (fx.background == studiocast::video::effects::BackgroundEffect::auto_frame);
+
+    if (wants_vfx || wants_ar) {
+      studiocast::maxine::MaxineManager mgr;
+      const auto diag = mgr.Diagnose(false);
+      const std::set<std::string> avail(diag.available_effects.begin(), diag.available_effects.end());
+
+      auto set_blocked = [&](studiocast::maxine::MaxineNeed need) {
+        const auto c = studiocast::maxine::BuildCanonicalMaxineBlockedCopy(diag, need);
+        note = studiocast::maxine::FormatCanonicalMaxineBlockedCopy(c);
+        if (note.empty()) {
+          note = c.summary;
+        }
+        stop_.store(true);
+      };
+
+      // AR effects.
+      if (!stop_.load() && fx.eye_contact.enabled && !avail.count("eye_contact")) {
+        set_blocked(studiocast::maxine::MaxineNeed::ar);
+      }
+      if (!stop_.load() &&
+          fx.background == studiocast::video::effects::BackgroundEffect::auto_frame &&
+          !avail.count("auto_frame")) {
+        set_blocked(studiocast::maxine::MaxineNeed::ar);
+      }
+
+      // VFX effects.
+      if (!stop_.load() && (fx.background == studiocast::video::effects::BackgroundEffect::blur) &&
+          !avail.count("virtual_background.blur")) {
+        set_blocked(studiocast::maxine::MaxineNeed::vfx);
+      }
+      if (!stop_.load() && (fx.background == studiocast::video::effects::BackgroundEffect::remove) &&
+          !avail.count("virtual_background.remove")) {
+        set_blocked(studiocast::maxine::MaxineNeed::vfx);
+      }
+      if (!stop_.load() && (fx.background == studiocast::video::effects::BackgroundEffect::replace) &&
+          !avail.count("virtual_background.replace")) {
+        set_blocked(studiocast::maxine::MaxineNeed::vfx);
+      }
+      if (!stop_.load() && fx.denoise &&
+          !avail.count("video_noise_removal")) {
+        set_blocked(studiocast::maxine::MaxineNeed::vfx);
+      }
+      if (!stop_.load() && fx.virtual_key_light.enabled &&
+          !avail.count("virtual_key_light")) {
+        set_blocked(studiocast::maxine::MaxineNeed::vfx);
+      }
+
+      if (stop_.load()) {
+        finalize_note_and_backends();
+        appliedFx = fx;
+        return;
+      }
+    }
+
     // Eye Contact (AR)
     if (fx.eye_contact.enabled) {
       want_maxine_eye_contact = true;
@@ -2318,7 +2392,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         note += "Maxine AR: Eye Contact.";
       } else {
         if (!note.empty()) note += "\n";
-        note += "Maxine Eye Contact unavailable: " + mx_err;
+        note += mx_err;
         // No CPU fallback when Maxine is not available.
         stop_.store(true);
       }
@@ -2353,7 +2427,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
       } else {
         if (!note.empty()) note += "\n";
-        note += "Maxine virtual background unavailable: " + mx_err;
+        note += mx_err;
         // No CPU fallback when Maxine is not available.
         stop_.store(true);
       }
@@ -2369,7 +2443,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         note += "Maxine AR: Auto Frame (FaceBoxDetection + CUDA crop/scale).";
       } else {
         if (!note.empty()) note += "\n";
-        note += "Auto Frame unavailable: " + mx_err;
+        note += mx_err;
         // No fallback.
         stop_.store(true);
       }
@@ -2385,7 +2459,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         note += "Maxine VFX: Video Relighting (Virtual Key Light).";
       } else {
         if (!note.empty()) note += " ";
-        note += "Virtual Key Light unavailable: " + mx_err;
+        note += mx_err;
         // No fallback.
         stop_.store(true);
       }

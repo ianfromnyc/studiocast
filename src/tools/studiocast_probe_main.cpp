@@ -9,8 +9,10 @@
 #include <vector>
 
 #include "core/config/daemon_config.h"
+#include "core/maxine/availability.h"
 #include "core/maxine/ar_api.h"
 #include "core/maxine/effects/ar_auto_frame_tracker.h"
+#include "core/maxine/maxine_manager.h"
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
 #include "core/probe/probe.h"
@@ -36,6 +38,12 @@ namespace {
             if (got == want) return;
             ++failures;
             std::printf("[FAIL] %s\n  got:  '%s'\n  want: '%s'\n", name, got.c_str(), want.c_str());
+        };
+
+        auto expectContains = [&](const char* name, const std::string& got, const std::string& needle) {
+            if (got.find(needle) != std::string::npos) return;
+            ++failures;
+            std::printf("[FAIL] %s\n  did not find: '%s'\n  in: '%s'\n", name, needle.c_str(), got.c_str());
         };
 
         auto expectVecEq = [&](const char* name,
@@ -444,6 +452,98 @@ namespace {
             }
             expectTrue("CameraEffectsToJson roundtrip background", fx2.background == fx.background);
             expectEq("CameraEffectsToJson roundtrip path", fx2.background_replace_image.string(), fx.background_replace_image.string());
+        }
+
+        // Canonical Maxine blocked messaging copy (Task 25).
+        {
+            const char* oldHome = std::getenv("HOME");
+            const std::string oldHomeStr = oldHome ? std::string(oldHome) : std::string();
+
+            // Force a deterministic HOME so we can validate "~/.local/share/..." rendering.
+            ::setenv("HOME", "/home/studiocast_selftest_home", 1);
+
+            const auto mkDiag = [&] {
+                studiocast::maxine::MaxineDiagnostics d;
+                d.gpu.ok = true;
+                d.driver.ok = true;
+                return d;
+            };
+
+            // 1) No GPU.
+            {
+                auto d = mkDiag();
+                d.gpu.ok = false;
+                const auto c = studiocast::maxine::BuildCanonicalMaxineBlockedCopy(d);
+                expectEq("maxine_copy no_gpu summary", c.summary,
+                         "Maxine unavailable: no supported NVIDIA GPU detected.");
+            }
+
+            // 2) Driver too old.
+            {
+                auto d = mkDiag();
+                d.driver.ok = false;
+                d.driver.version = "560.0";
+                const auto c = studiocast::maxine::BuildCanonicalMaxineBlockedCopy(d);
+                expectEq("maxine_copy driver_old summary", c.summary,
+                         "Maxine unavailable: NVIDIA driver too old (need R570+).");
+                const std::string s = studiocast::maxine::FormatCanonicalMaxineBlockedCopy(c);
+                expectContains("maxine_copy driver_old has probe", s,
+                               "Run `studiocast-probe` to verify GPU/driver.");
+            }
+
+            // 3) VFX SDK missing: must show exact expected paths.
+            {
+                auto d = mkDiag();
+                d.vfx.root_source = "xdg";
+                d.vfx.root_exists = false;
+                d.vfx.library_exists = false;
+                d.vfx.candidate_roots.push_back(
+                    "/home/studiocast_selftest_home/.local/share/studiocast/maxine/VideoFX");
+
+                const auto c = studiocast::maxine::BuildCanonicalMaxineBlockedCopy(
+                    d, studiocast::maxine::MaxineNeed::vfx);
+                expectEq("maxine_copy vfx_missing summary", c.summary,
+                         "Maxine unavailable: VFX SDK not found (expected: ~/.local/share/studiocast/maxine/VideoFX or /usr/local/VideoFX).");
+                const std::string s = studiocast::maxine::FormatCanonicalMaxineBlockedCopy(c);
+                expectContains("maxine_copy vfx_missing has libnvvfx hint", s, "Ensure `libnvvfx.so` is under `<VFX_ROOT>/lib/`");
+            }
+
+            // 4) AR SDK missing.
+            {
+                auto d = mkDiag();
+                d.ar.root_source = "xdg";
+                d.ar.root_exists = false;
+                d.ar.library_exists = false;
+                d.ar.candidate_roots.push_back(
+                    "/home/studiocast_selftest_home/.local/share/studiocast/maxine/ARSDK");
+
+                const auto c = studiocast::maxine::BuildCanonicalMaxineBlockedCopy(
+                    d, studiocast::maxine::MaxineNeed::ar);
+                expectEq("maxine_copy ar_missing summary", c.summary,
+                         "Maxine unavailable: AR SDK not found (needed for Eye Contact / Auto Frame).");
+                const std::string s = studiocast::maxine::FormatCanonicalMaxineBlockedCopy(c);
+                expectContains("maxine_copy ar_missing shows expected root", s,
+                               "Expected AR SDK root: ~/.local/share/studiocast/maxine/ARSDK or /usr/local/ARSDK.");
+            }
+
+            // 5) Features missing.
+            {
+                auto d = mkDiag();
+                d.vfx.ok = true;
+                d.vfx.library_loadable = true;
+                d.ar.ok = true;
+                d.ar.library_loadable = true;
+                const auto c = studiocast::maxine::BuildCanonicalMaxineBlockedCopy(d);
+                expectEq("maxine_copy features summary", c.summary,
+                         "Maxine unavailable: feature libraries not installed (run install_feature.sh).");
+            }
+
+            // Restore env.
+            if (oldHome) {
+                ::setenv("HOME", oldHomeStr.c_str(), 1);
+            } else {
+                ::unsetenv("HOME");
+            }
         }
 
         if (failures == 0) {
