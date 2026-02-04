@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace studiocast::video::effects {
@@ -35,10 +36,23 @@ struct VirtualBackgroundSettings {
 
     // Used when mode==replace.
     std::string replace_path;
+
+    // Used when mode==remove or mode==replace.
+    // Stored as a string to keep this type Qt-free and easy to serialize.
+    // Canonical form: "#RRGGBB".
+    std::string remove_color = "#000000";
+
+    // Green screen / matte parameters used by Maxine VFX.
+    // Stored as raw values to avoid build-time dependency on NVIDIA headers.
+    std::uint32_t greenscreen_mode = 0;
+    bool greenscreen_temporal = true;
 };
 
 inline bool operator==(const VirtualBackgroundSettings& a, const VirtualBackgroundSettings& b) {
-    return a.mode == b.mode && a.strength == b.strength && a.replace_path == b.replace_path;
+    return a.mode == b.mode && a.strength == b.strength && a.replace_path == b.replace_path &&
+           a.remove_color == b.remove_color &&
+           a.greenscreen_mode == b.greenscreen_mode &&
+           a.greenscreen_temporal == b.greenscreen_temporal;
 }
 
 inline bool operator!=(const VirtualBackgroundSettings& a, const VirtualBackgroundSettings& b) { return !(a == b); }
@@ -51,10 +65,14 @@ struct AutoFrameSettings {
 
     // 0..100-ish smoothing (implementation-defined).
     int smoothing = 50;
+
+    // Fractional extra headroom above the detected subject (0..1).
+    float headroom = 0.15f;
 };
 
 inline bool operator==(const AutoFrameSettings& a, const AutoFrameSettings& b) {
-    return a.enabled == b.enabled && a.strength == b.strength && a.smoothing == b.smoothing;
+    return a.enabled == b.enabled && a.strength == b.strength && a.smoothing == b.smoothing &&
+           a.headroom == b.headroom;
 }
 
 inline bool operator!=(const AutoFrameSettings& a, const AutoFrameSettings& b) { return !(a == b); }
@@ -88,10 +106,24 @@ struct VirtualKeyLightSettings {
 
     // In Kelvin (roughly). UI may map presets.
     int temperature = 4500;
+
+    // Preset for contract/IPC (neutral/warm/cool). Stored as numeric code to
+    // keep comparisons simple and match the legacy pipeline settings.
+    // 0 = neutral, 1 = warm, 2 = cool.
+    int temperature_preset = 0;
+
+    // Optional direction control (pan angle, degrees).
+    int direction_pan_degrees = 0;
+
+    // Optional HDRI override. Empty = auto/default.
+    std::string hdri_path;
 };
 
 inline bool operator==(const VirtualKeyLightSettings& a, const VirtualKeyLightSettings& b) {
-    return a.enabled == b.enabled && a.intensity == b.intensity && a.temperature == b.temperature;
+    return a.enabled == b.enabled && a.intensity == b.intensity && a.temperature == b.temperature &&
+           a.temperature_preset == b.temperature_preset &&
+           a.direction_pan_degrees == b.direction_pan_degrees &&
+           a.hdri_path == b.hdri_path;
 }
 
 inline bool operator!=(const VirtualKeyLightSettings& a, const VirtualKeyLightSettings& b) { return !(a == b); }
@@ -99,10 +131,13 @@ inline bool operator!=(const VirtualKeyLightSettings& a, const VirtualKeyLightSe
 struct VignetteSettings {
     bool enabled = false;
     int intensity = 25;
+
+    bool center_on_tracked_face = true;
 };
 
 inline bool operator==(const VignetteSettings& a, const VignetteSettings& b) {
-    return a.enabled == b.enabled && a.intensity == b.intensity;
+    return a.enabled == b.enabled && a.intensity == b.intensity &&
+           a.center_on_tracked_face == b.center_on_tracked_face;
 }
 
 inline bool operator!=(const VignetteSettings& a, const VignetteSettings& b) { return !(a == b); }

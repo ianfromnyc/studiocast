@@ -13,6 +13,13 @@
 
 namespace studiocast::video {
 
+    // DEPRECATED (Task 3): Legacy `CameraEffects` patching/serialization.
+    //
+    // The canonical effects model is now `studiocast::video::effects::BroadcastCameraEffects`,
+    // implemented in `core/video/broadcast_camera_effects_json.{h,cpp}`.
+    // This file is kept only for historical reference during the migration and
+    // is no longer used by the daemon/CLI/probe code paths.
+
     namespace {
         using studiocast::util::json::Value;
 

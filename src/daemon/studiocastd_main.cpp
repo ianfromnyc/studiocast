@@ -19,7 +19,7 @@
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
 #include "core/maxine/maxine_manager.h"
-#include "core/video/camera_effects_json.h"
+#include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/effects/effect_types.h"
 #include "core/video/virtual_camera_service.h"
 #include "core/video/v4l2loopback.h"
@@ -307,7 +307,9 @@ std::string ConfigToJson(const studiocast::video::VirtualCameraServiceConfig& cf
     oss << "\"vignette_center_on_face\":" << BoolJson(cfg.pipeline.effects.vignette.center_on_tracked_face) << ",";
 
     // Canonical, nested effects model (safe for file paths with spaces).
-    oss << "\"video_effects\":" << studiocast::video::CameraEffectsToJson(cfg.pipeline.effects);
+    oss << "\"video_effects\":"
+        << studiocast::video::BroadcastCameraEffectsContractToJson(
+               studiocast::video::ToBroadcastCameraEffects(cfg.pipeline.effects));
     oss << "}";
     return oss.str();
 }
@@ -531,9 +533,11 @@ int main(int argc, char** argv) {
                               auto newCfg = svc.Config();
 
                               std::string jerr;
-                              if (!studiocast::video::ApplyCameraEffectsPatchJsonText(jsonText, &newCfg.pipeline.effects, &jerr)) {
+                              auto bfx = studiocast::video::ToBroadcastCameraEffects(newCfg.pipeline.effects);
+                              if (!studiocast::video::ApplyBroadcastCameraEffectsPatchJsonText(jsonText, &bfx, &jerr)) {
                                   return std::string("ERR ") + ErrorJson(jerr.empty() ? "invalid effects JSON" : jerr);
                               }
+                              newCfg.pipeline.effects = studiocast::video::ToLegacyCameraEffects(bfx);
 
                               svc.UpdateConfig(newCfg);
 

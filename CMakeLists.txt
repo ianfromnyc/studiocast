@@ -145,8 +145,8 @@ add_library(studiocast_core
         src/core/video/v4l2_capture.cpp
         src/core/video/camera_pipeline.h
         src/core/video/camera_pipeline.cpp
-        src/core/video/camera_effects_json.h
-        src/core/video/camera_effects_json.cpp
+        src/core/video/broadcast_camera_effects_json.h
+        src/core/video/broadcast_camera_effects_json.cpp
         src/core/video/virtual_camera_service.h
         src/core/video/virtual_camera_service.cpp
 

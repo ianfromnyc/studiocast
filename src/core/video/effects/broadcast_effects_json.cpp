@@ -1,5 +1,6 @@
 #include "core/video/effects/broadcast_effects_json.h"
 
+#include <algorithm>
 #include <cmath>
 #include <optional>
 #include <set>
@@ -171,6 +172,26 @@ bool ValidateNoBackgroundConflict(const BroadcastCameraEffects& fx, std::string*
     return true;
 }
 
+int ClampInt(int v, int lo, int hi) {
+    return std::max(lo, std::min(hi, v));
+}
+
+bool TryGetFloat(const Value::Object& obj,
+                 std::string_view path,
+                 std::string_view key,
+                 bool* found,
+                 float* out,
+                 std::string* error) {
+    *found = false;
+    const Value* v = Find(obj, std::string(key));
+    if (!v) return true;
+    const double* n = v->AsNumber();
+    if (!n) return Fail(error, JoinPath(path, key) + " must be a number");
+    *found = true;
+    *out = static_cast<float>(*n);
+    return true;
+}
+
 }  // namespace
 
 std::string BroadcastCameraEffectsToJson(const BroadcastCameraEffects& effects) {
@@ -184,14 +205,18 @@ std::string BroadcastCameraEffectsToJson(const BroadcastCameraEffects& effects) 
     oss << "\"virtual_background\":{";
     oss << "\"mode\":\"" << studiocast::util::json::EscapeString(ToString(effects.virtual_background.mode)) << "\",";
     oss << "\"strength\":" << effects.virtual_background.strength << ",";
-    oss << "\"replace_path\":\"" << studiocast::util::json::EscapeString(effects.virtual_background.replace_path) << "\"";
+    oss << "\"replace_path\":\"" << studiocast::util::json::EscapeString(effects.virtual_background.replace_path) << "\",";
+    oss << "\"remove_color\":\"" << studiocast::util::json::EscapeString(effects.virtual_background.remove_color) << "\",";
+    oss << "\"greenscreen_mode\":" << effects.virtual_background.greenscreen_mode << ",";
+    oss << "\"greenscreen_temporal\":" << (effects.virtual_background.greenscreen_temporal ? "true" : "false");
     oss << "},";
 
     // Auto frame.
     oss << "\"auto_frame\":{";
     oss << "\"enabled\":" << (effects.auto_frame.enabled ? "true" : "false") << ",";
     oss << "\"strength\":" << effects.auto_frame.strength << ",";
-    oss << "\"smoothing\":" << effects.auto_frame.smoothing;
+    oss << "\"smoothing\":" << effects.auto_frame.smoothing << ",";
+    oss << "\"headroom\":" << effects.auto_frame.headroom;
     oss << "},";
 
     // Eye contact.
@@ -211,13 +236,17 @@ std::string BroadcastCameraEffectsToJson(const BroadcastCameraEffects& effects) 
     oss << "\"virtual_key_light\":{";
     oss << "\"enabled\":" << (effects.virtual_key_light.enabled ? "true" : "false") << ",";
     oss << "\"intensity\":" << effects.virtual_key_light.intensity << ",";
-    oss << "\"temperature\":" << effects.virtual_key_light.temperature;
+    oss << "\"temperature\":" << effects.virtual_key_light.temperature << ",";
+    oss << "\"temperature_preset\":" << effects.virtual_key_light.temperature_preset << ",";
+    oss << "\"direction_pan_degrees\":" << effects.virtual_key_light.direction_pan_degrees << ",";
+    oss << "\"hdri_path\":\"" << studiocast::util::json::EscapeString(effects.virtual_key_light.hdri_path) << "\"";
     oss << "},";
 
     // Vignette.
     oss << "\"vignette\":{";
     oss << "\"enabled\":" << (effects.vignette.enabled ? "true" : "false") << ",";
-    oss << "\"intensity\":" << effects.vignette.intensity;
+    oss << "\"intensity\":" << effects.vignette.intensity << ",";
+    oss << "\"center_on_tracked_face\":" << (effects.vignette.center_on_tracked_face ? "true" : "false");
     oss << "}";
 
     oss << "}";
@@ -295,7 +324,17 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
 
     // Virtual background.
     if (const auto* vb = GetObj(*obj, "", "virtual_background", error)) {
-        if (!CheckUnknownKeys(*vb, {"mode", "strength", "replace_path"}, "virtual_background", options, warnings, error)) {
+        if (!CheckUnknownKeys(*vb,
+                              {"mode",
+                               "strength",
+                               "replace_path",
+                               "remove_color",
+                               "greenscreen_mode",
+                               "greenscreen_temporal"},
+                              "virtual_background",
+                              options,
+                              warnings,
+                              error)) {
             return false;
         }
 
@@ -327,6 +366,18 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
         if (!TryGetString(*vb, "virtual_background", "replace_path", &found, &rp, error)) return false;
         if (found) out->virtual_background.replace_path = rp;
 
+        std::string rc;
+        if (!TryGetString(*vb, "virtual_background", "remove_color", &found, &rc, error)) return false;
+        if (found) out->virtual_background.remove_color = rc;
+
+        int gsm = static_cast<int>(out->virtual_background.greenscreen_mode);
+        if (!TryGetInt(*vb, "virtual_background", "greenscreen_mode", &found, &gsm, error)) return false;
+        if (found) out->virtual_background.greenscreen_mode = static_cast<std::uint32_t>(std::max(0, gsm));
+
+        bool gst = out->virtual_background.greenscreen_temporal;
+        if (!TryGetBool(*vb, "virtual_background", "greenscreen_temporal", &found, &gst, error)) return false;
+        if (found) out->virtual_background.greenscreen_temporal = gst;
+
         if (out->virtual_background.mode == VirtualBackgroundMode::replace &&
             out->virtual_background.replace_path.empty()) {
             return Fail(error, "virtual_background.replace_path is required when mode is 'replace'");
@@ -340,7 +391,7 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
 
     // Auto frame.
     if (const auto* af = GetObj(*obj, "", "auto_frame", error)) {
-        if (!CheckUnknownKeys(*af, {"enabled", "strength", "smoothing"}, "auto_frame", options, warnings, error)) return false;
+        if (!CheckUnknownKeys(*af, {"enabled", "strength", "smoothing", "headroom"}, "auto_frame", options, warnings, error)) return false;
 
         bool en = out->auto_frame.enabled;
         if (!TryGetBool(*af, "auto_frame", "enabled", &found, &en, error)) return false;
@@ -358,6 +409,18 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
         if (found) {
             if (!RequireRangeInt("auto_frame.smoothing", smoothing, 0, 100, error)) return false;
             out->auto_frame.smoothing = smoothing;
+        }
+
+        float headroom = out->auto_frame.headroom;
+        if (!TryGetFloat(*af, "auto_frame", "headroom", &found, &headroom, error)) return false;
+        if (found) {
+            if (headroom < contract::kAutoFrameHeadroomMin || headroom > contract::kAutoFrameHeadroomMax) {
+                return Fail(error,
+                            "auto_frame.headroom must be in range " +
+                                std::to_string(contract::kAutoFrameHeadroomMin) + ".." +
+                                std::to_string(contract::kAutoFrameHeadroomMax));
+            }
+            out->auto_frame.headroom = headroom;
         }
     }
 
@@ -400,7 +463,12 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
     // Virtual key light.
     if (const auto* vkl = GetObj(*obj, "", "virtual_key_light", error)) {
         if (!CheckUnknownKeys(*vkl,
-                              {"enabled", "intensity", "temperature", "temperature_preset"},
+                              {"enabled",
+                               "intensity",
+                               "temperature",
+                               "temperature_preset",
+                               "direction_pan_degrees",
+                               "hdri_path"},
                               "virtual_key_light",
                               options,
                               warnings,
@@ -424,22 +492,53 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
         if (found) {
             if (!RequireRangeInt("virtual_key_light.temperature", tempK, 1000, 10000, error)) return false;
             out->virtual_key_light.temperature = tempK;
-        } else if (options.allow_compat_keys) {
-            std::string preset;
-            if (!TryGetString(*vkl, "virtual_key_light", "temperature_preset", &found, &preset, error)) return false;
-            if (found) {
-                const auto k = KelvinFromPreset(preset);
-                if (!k) return Fail(error, "virtual_key_light.temperature_preset must be 'neutral', 'warm', or 'cool'");
-                AddWarning(warnings,
-                           "virtual_key_light.temperature_preset is deprecated; use integer virtual_key_light.temperature (Kelvin)");
-                out->virtual_key_light.temperature = *k;
+            if (out->virtual_key_light.temperature == 3200) out->virtual_key_light.temperature_preset = 1;
+            if (out->virtual_key_light.temperature == 6500) out->virtual_key_light.temperature_preset = 2;
+            if (out->virtual_key_light.temperature == 4500) out->virtual_key_light.temperature_preset = 0;
+        }
+
+        // Optional preset (deprecated in favor of temperature, but preserved for contract/IPC).
+        if (const Value* tp = Find(*vkl, "temperature_preset")) {
+            if (const auto* s = tp->AsString()) {
+                if (options.allow_compat_keys) {
+                    const auto k = KelvinFromPreset(*s);
+                    if (!k) return Fail(error, "virtual_key_light.temperature_preset must be 'neutral', 'warm', or 'cool'");
+                    AddWarning(warnings,
+                               "virtual_key_light.temperature_preset is deprecated; use integer virtual_key_light.temperature (Kelvin)");
+                    out->virtual_key_light.temperature = *k;
+                    out->virtual_key_light.temperature_preset = (*s == "warm") ? 1 : (*s == "cool") ? 2 : 0;
+                } else {
+                    return Fail(error, "virtual_key_light.temperature_preset must be an integer (0..2)");
+                }
+            } else if (const double* n = tp->AsNumber()) {
+                const int r = static_cast<int>(std::lround(*n));
+                out->virtual_key_light.temperature_preset = ClampInt(r, 0, 2);
+            } else {
+                return Fail(error, "virtual_key_light.temperature_preset must be a string or number");
             }
         }
+
+        int pan = out->virtual_key_light.direction_pan_degrees;
+        if (!TryGetInt(*vkl, "virtual_key_light", "direction_pan_degrees", &found, &pan, error)) return false;
+        if (found) {
+            if (!RequireRangeInt("virtual_key_light.direction_pan_degrees",
+                                 pan,
+                                 contract::kVirtualKeyLightPanMin,
+                                 contract::kVirtualKeyLightPanMax,
+                                 error)) {
+                return false;
+            }
+            out->virtual_key_light.direction_pan_degrees = pan;
+        }
+
+        std::string hp;
+        if (!TryGetString(*vkl, "virtual_key_light", "hdri_path", &found, &hp, error)) return false;
+        if (found) out->virtual_key_light.hdri_path = hp;
     }
 
     // Vignette.
     if (const auto* vg = GetObj(*obj, "", "vignette", error)) {
-        if (!CheckUnknownKeys(*vg, {"enabled", "intensity"}, "vignette", options, warnings, error)) return false;
+        if (!CheckUnknownKeys(*vg, {"enabled", "intensity", "center_on_tracked_face"}, "vignette", options, warnings, error)) return false;
 
         bool en = out->vignette.enabled;
         if (!TryGetBool(*vg, "vignette", "enabled", &found, &en, error)) return false;
@@ -451,6 +550,10 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
             if (!RequireRangeInt("vignette.intensity", intensity, 0, 100, error)) return false;
             out->vignette.intensity = intensity;
         }
+
+        bool center = out->vignette.center_on_tracked_face;
+        if (!TryGetBool(*vg, "vignette", "center_on_tracked_face", &found, &center, error)) return false;
+        if (found) out->vignette.center_on_tracked_face = center;
     }
 
     if (!ValidateNoBackgroundConflict(*out, error)) return false;
