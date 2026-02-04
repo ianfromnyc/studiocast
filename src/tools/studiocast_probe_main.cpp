@@ -13,6 +13,7 @@
 #include "core/maxine/ar_api.h"
 #include "core/maxine/effects/ar_auto_frame_tracker.h"
 #include "core/maxine/maxine_manager.h"
+#include "core/maxine/reason_codes.h"
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
 #include "core/probe/probe.h"
@@ -805,7 +806,7 @@ namespace {
                 d.ok = true;
                 d.supported = true;
                 d.available_effects = {"auto_frame"};
-                d.missing_effects["eye_contact"] = {"AR feature 'gaze_redirection' not installed."};
+                d.missing_effects["eye_contact"] = {studiocast::maxine::reasons::MissingArFeature("gaze_redirection")};
 
                 const std::string js = d.ToJson();
                 expectContains("maxine_tojson has available_effects", js,
@@ -813,7 +814,7 @@ namespace {
                 expectContains("maxine_tojson has missing_effects", js,
                                "\"missing_effects\":{");
                 expectContains("maxine_tojson has eye_contact reasons", js,
-                               "\"eye_contact\":[\"AR feature 'gaze_redirection' not installed.\"]");
+                               "\"eye_contact\":[\"missing_ar_feature:gaze_redirection\"]");
             }
 
             // Restore env.

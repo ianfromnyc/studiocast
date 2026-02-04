@@ -69,6 +69,8 @@ add_library(studiocast_core
         src/core/maxine/gpu.cpp
         src/core/maxine/availability.h
         src/core/maxine/availability.cpp
+        src/core/maxine/reason_codes.h
+        src/core/maxine/reason_codes.cpp
         src/core/maxine/paths.h
         src/core/maxine/paths.cpp
         src/core/maxine/maxine_manager.h

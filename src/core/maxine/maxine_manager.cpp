@@ -12,6 +12,7 @@
 #include "core/maxine/availability.h"
 #include "core/maxine/ar_api.h"
 #include "core/maxine/paths.h"
+#include "core/maxine/reason_codes.h"
 #include "core/maxine/vfx_api.h"
 #include "core/probe/probe.h"
 #include "core/util/dynlib.h"
@@ -157,6 +158,111 @@ FindSelectedGpu(const studiocast::probe::Report &rep) {
     }
   }
   return std::nullopt;
+}
+
+std::string DriverBlockedReason(const studiocast::maxine::MaxineDiagnostics &d) {
+  using namespace studiocast::maxine::reasons;
+  return d.driver.version.empty() ? std::string(kDriverMissing)
+                                  : std::string(kDriverTooOld);
+}
+
+std::string GpuBlockedReason(const studiocast::maxine::MaxineDiagnostics &d) {
+  using namespace studiocast::maxine::reasons;
+  if (!d.gpus.empty()) {
+    if (!d.gpu.selected_index.has_value()) {
+      return std::string(kGpuNotSelected);
+    }
+    if (!d.gpu.ok && !d.gpu.selected_name.empty()) {
+      return std::string(kGpuUnsupported);
+    }
+    return std::string(kGpuSelectionFailed);
+  }
+  return std::string(kGpuMissing);
+}
+
+std::string ComponentBlockedReason(const studiocast::maxine::ComponentDiagnostics &c,
+                                   const char *component_code) {
+  using namespace studiocast::maxine::reasons;
+  const std::string comp = component_code ? std::string(component_code) : std::string();
+
+  if (c.component == "VFX") {
+    if (!c.root_exists || !c.library_exists) {
+      return std::string(kMissingVfxSdk);
+    }
+  }
+  if (c.component == "AR") {
+    if (!c.root_exists || !c.library_exists) {
+      return std::string(kMissingArSdk);
+    }
+  }
+
+  if (c.library_exists && !c.library_loadable) {
+    const std::string err = ToLowerCopy(c.library_dlopen_error);
+
+    bool looks_like_symbol = (err.find("symbol") != std::string::npos);
+    if (!looks_like_symbol) {
+      for (const auto &p : c.problems) {
+        const std::string lp = ToLowerCopy(p);
+        if (lp.find("symbol") != std::string::npos) {
+          looks_like_symbol = true;
+          break;
+        }
+      }
+    }
+
+    const std::string base = looks_like_symbol ? std::string(kSymbolMissing)
+                                                : std::string(kDlopenFailed);
+    return comp.empty() ? base : (base + ":" + comp);
+  }
+
+  return std::string(kUnknown);
+}
+
+int RankReasonCode(const std::string &code) {
+  using namespace studiocast::maxine::reasons;
+  auto starts_with = [&](std::string_view prefix) {
+    return code.rfind(std::string(prefix), 0) == 0;
+  };
+
+  if (starts_with(kGpuMissing) || starts_with(kGpuNotSelected) ||
+      starts_with(kGpuUnsupported) || starts_with(kGpuSelectionFailed)) {
+    return 10;
+  }
+  if (starts_with(kDriverMissing) || starts_with(kDriverTooOld)) {
+    return 20;
+  }
+  if (code == kMissingVfxSdk || code == kMissingArSdk) {
+    return 30;
+  }
+  if (starts_with(kSymbolMissing)) {
+    return 40;
+  }
+  if (starts_with(kDlopenFailed)) {
+    return 50;
+  }
+  if (starts_with(kMissingVfxFeaturePrefix) || starts_with(kMissingArFeaturePrefix)) {
+    return 60;
+  }
+  if (code == kUnknown) {
+    return 90;
+  }
+  return 80;
+}
+
+std::string PickTopReasonFromMissingEffects(
+    const std::map<std::string, std::vector<std::string>> &missing_effects) {
+  std::string best;
+  int best_rank = 999;
+  for (const auto &kv : missing_effects) {
+    for (const auto &r : kv.second) {
+      const int rank = RankReasonCode(r);
+      if (best.empty() || rank < best_rank || (rank == best_rank && r < best)) {
+        best = r;
+        best_rank = rank;
+      }
+    }
+  }
+  return best;
 }
 
 } // namespace
@@ -362,22 +468,28 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
                                 d.available_effects.end());
 
     auto add_reasons_from_component = [&](const ComponentDiagnostics &c,
-                                          const std::string &label,
+                                          const char *component_code,
                                           std::vector<std::string> *out) {
       if (!out)
         return;
-      if (!c.root_exists)
-        out->push_back(label + " SDK root not found.");
-      if (!c.library_exists)
-        out->push_back(label + " library not found.");
-      if (c.library_exists && !c.library_loadable) {
-        out->push_back(label + " library exists but could not be loaded." +
-                       (c.library_dlopen_error.empty()
-                            ? ""
-                            : " (" + c.library_dlopen_error + ")"));
+
+      // For the UI/CLI contract, emit stable reason codes (not English sentences).
+      // Human-actionable details are provided via top-level `blocked_details`.
+      if (c.component == "VFX") {
+        if (!c.root_exists || !c.library_exists) {
+          out->push_back(std::string(reasons::kMissingVfxSdk));
+          return;
+        }
       }
-      for (const auto &p : c.problems) {
-        out->push_back(p);
+      if (c.component == "AR") {
+        if (!c.root_exists || !c.library_exists) {
+          out->push_back(std::string(reasons::kMissingArSdk));
+          return;
+        }
+      }
+
+      if (c.library_exists && !c.library_loadable) {
+        out->push_back(ComponentBlockedReason(c, component_code));
       }
     };
 
@@ -385,35 +497,43 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
                                       std::vector<std::string> *out) {
       if (!out)
         return;
-      // VFX
-      if (effect_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove ||
-          effect_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace) {
-        if (!vfx_has("greenscreen"))
-          out->push_back("VFX feature 'greenscreen' not installed.");
-      } else if (effect_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) {
-        if (!vfx_has("greenscreen"))
-          out->push_back("VFX feature 'greenscreen' not installed.");
-        if (!vfx_has("bgblur"))
-          out->push_back("VFX feature 'bgblur' not installed.");
-      } else if (effect_id == studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) {
-        if (!vfx_has("denoise"))
-          out->push_back("VFX feature 'denoise' not installed.");
-      } else if (effect_id == studiocast::video::effects::contract::kEffectIdVirtualKeyLight) {
-        if (!vfx_has("relighting"))
-          out->push_back("VFX feature 'relighting' not installed.");
+
+      // VFX features are only meaningful when the VFX component is runnable.
+      if (vfx_ready) {
+        if (effect_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove ||
+            effect_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace) {
+          if (!vfx_has("greenscreen"))
+            out->push_back(reasons::MissingVfxFeature("greenscreen"));
+        } else if (effect_id ==
+                   studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) {
+          if (!vfx_has("greenscreen"))
+            out->push_back(reasons::MissingVfxFeature("greenscreen"));
+          if (!vfx_has("bgblur"))
+            out->push_back(reasons::MissingVfxFeature("bgblur"));
+        } else if (effect_id ==
+                   studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) {
+          if (!vfx_has("denoise"))
+            out->push_back(reasons::MissingVfxFeature("denoise"));
+        } else if (effect_id ==
+                   studiocast::video::effects::contract::kEffectIdVirtualKeyLight) {
+          if (!vfx_has("relighting"))
+            out->push_back(reasons::MissingVfxFeature("relighting"));
+        }
       }
 
-      // AR
-      if (effect_id == studiocast::video::effects::contract::kEffectIdAutoFrame) {
-        if (!(ar_has("face_detection") || ar_has("body_detection"))) {
-          out->push_back("AR feature 'face_detection' not installed.");
+      // AR features are only meaningful when the AR component is runnable.
+      if (ar_ready) {
+        if (effect_id == studiocast::video::effects::contract::kEffectIdAutoFrame) {
+          if (!(ar_has("face_detection") || ar_has("body_detection"))) {
+            out->push_back(reasons::MissingArFeature("face_detection"));
+          }
+        } else if (effect_id == studiocast::video::effects::contract::kEffectIdEyeContact) {
+          if (!(ar_has("face_detection") || ar_has("body_detection"))) {
+            out->push_back(reasons::MissingArFeature("face_detection"));
+          }
+          if (!ar_has("gaze_redirection"))
+            out->push_back(reasons::MissingArFeature("gaze_redirection"));
         }
-      } else if (effect_id == studiocast::video::effects::contract::kEffectIdEyeContact) {
-        if (!(ar_has("face_detection") || ar_has("body_detection"))) {
-          out->push_back("AR feature 'face_detection' not installed.");
-        }
-        if (!ar_has("gaze_redirection"))
-          out->push_back("AR feature 'gaze_redirection' not installed.");
       }
     };
 
@@ -432,30 +552,24 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
         continue;
 
       std::vector<std::string> reasons;
-      if (!d.driver.ok) {
-        reasons.push_back(d.driver.details.empty()
-                              ? "NVIDIA driver not ready for Maxine."
-                              : d.driver.details);
-      }
-      if (!d.gpu.ok) {
-        reasons.push_back(d.gpu.error.empty()
-                              ? "NVIDIA GPU not selected/supported."
-                              : d.gpu.error);
-      }
+      if (!d.driver.ok)
+        reasons.push_back(DriverBlockedReason(d));
+      if (!d.gpu.ok)
+        reasons.push_back(GpuBlockedReason(d));
 
       if (requires_vfx) {
         if (!vfx_ready) {
-          add_reasons_from_component(d.vfx, "VFX", &reasons);
+          add_reasons_from_component(d.vfx, "vfx", &reasons);
         }
       }
       if (requires_ar) {
         if (!ar_ready) {
-          add_reasons_from_component(d.ar, "AR", &reasons);
+          add_reasons_from_component(d.ar, "ar", &reasons);
         }
       }
       effect_feature_reasons(ed.id, &reasons);
       if (reasons.empty())
-        reasons.push_back("Effect is not available (unknown reason).");
+        reasons.push_back(std::string(studiocast::maxine::reasons::kUnknown));
       DedupPreserveOrder(&reasons);
       d.missing_effects[ed.id] = std::move(reasons);
     }
@@ -488,19 +602,24 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
 
   // Blocked reason/details for stable GUI behavior.
   if (d.supported) {
-    d.blocked_reason = "none";
+    d.blocked_reason = std::string(studiocast::maxine::reasons::kNone);
     d.blocked_details.clear();
     d.summary = "Maxine available (" + std::to_string(d.available_effects.size()) +
                 " effect(s) available).";
   } else {
     if (!d.gpu.ok) {
-      d.blocked_reason = "gpu";
+      d.blocked_reason = GpuBlockedReason(d);
     } else if (!d.driver.ok) {
-      d.blocked_reason = "driver";
-    } else if (!vfx_ready || !ar_ready) {
-      d.blocked_reason = "sdk";
+      d.blocked_reason = DriverBlockedReason(d);
+    } else if (!vfx_ready) {
+      d.blocked_reason = ComponentBlockedReason(d.vfx, "vfx");
+    } else if (!ar_ready) {
+      d.blocked_reason = ComponentBlockedReason(d.ar, "ar");
     } else {
-      d.blocked_reason = "features";
+      d.blocked_reason = PickTopReasonFromMissingEffects(d.missing_effects);
+      if (d.blocked_reason.empty()) {
+        d.blocked_reason = std::string(studiocast::maxine::reasons::kUnknown);
+      }
     }
 
     const auto msg = BuildCanonicalMaxineBlockedCopy(d, MaxineNeed::any);

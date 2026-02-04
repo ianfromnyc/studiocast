@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "core/maxine/reason_codes.h"
 #include "core/video/convert.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/v4l2loopback.h"
@@ -178,8 +179,8 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
       const QString id = it.key();
       if (id.isEmpty()) continue;
       QStringList reasons;
-      const auto arr = it.value().toArray();
-      for (const auto& rv : arr) {
+      const auto reasonArr = it.value().toArray();
+      for (const auto& rv : reasonArr) {
         const QString s = rv.toString();
         if (!s.isEmpty()) reasons.push_back(s);
       }
@@ -201,6 +202,12 @@ bool ParseJsonObject(const std::string& json, QJsonObject* outRoot, QString* err
 
   if (outRoot) *outRoot = doc.object();
   return true;
+}
+
+QString FormatMaxineReasonCode(const QString& code) {
+  if (code.isEmpty()) return {};
+  const std::string s = code.toStdString();
+  return QString::fromStdString(studiocast::maxine::reasons::ToEnglish(s));
 }
 
 bool DaemonRequest(const std::string& request, std::string* outJson, QString* outErr) {
@@ -1377,7 +1384,9 @@ void VideoPage::UpdateUiEnabled() {
   if (maxineBanner_) {
     if (daemonReachable_ && !st.maxine_supported) {
       QString msg = "Maxine unavailable.";
-      if (!st.maxine_blocked_reason.isEmpty()) msg += "\n" + st.maxine_blocked_reason;
+      if (!st.maxine_blocked_reason.isEmpty()) {
+        msg += "\n" + FormatMaxineReasonCode(st.maxine_blocked_reason);
+      }
       if (!st.maxine_blocked_details.isEmpty()) {
         msg += "\n\n";
         for (const auto& d : st.maxine_blocked_details) {
@@ -1414,13 +1423,18 @@ void VideoPage::UpdateUiEnabled() {
     if (!fxAvail) {
       if (!st.maxine_blocked_details.isEmpty()) return st.maxine_blocked_details.join("\n");
       if (!st.maxine_summary.isEmpty()) return st.maxine_summary;
-      if (!st.maxine_blocked_reason.isEmpty()) return st.maxine_blocked_reason;
+      if (!st.maxine_blocked_reason.isEmpty()) return FormatMaxineReasonCode(st.maxine_blocked_reason);
       return "Maxine unavailable.";
     }
 
     if (st.maxine_missing_effects.contains(id)) {
       const auto reasons = st.maxine_missing_effects.value(id);
-      if (!reasons.isEmpty()) return reasons.join("\n");
+      if (!reasons.isEmpty()) {
+        QStringList out;
+        out.reserve(reasons.size());
+        for (const auto& r : reasons) out.push_back(FormatMaxineReasonCode(r));
+        return out.join("\n");
+      }
       return "Effect is unavailable.";
     }
 
@@ -1461,11 +1475,11 @@ void VideoPage::UpdateUiEnabled() {
     auto* m = qobject_cast<QStandardItemModel*>(backgroundCombo_->model());
     if (m) {
       for (int i = 0; i < backgroundCombo_->count(); ++i) {
-        const QString data = backgroundCombo_->itemData(i).toString();
+        const QString mode = backgroundCombo_->itemData(i).toString();
         bool itemEnabled = true;
-        if (data == "blur") itemEnabled = vbBlurAvail;
-        else if (data == "remove") itemEnabled = vbRemoveAvail;
-        else if (data == "replace") itemEnabled = vbReplaceAvail;
+        if (mode == "blur") itemEnabled = vbBlurAvail;
+        else if (mode == "remove") itemEnabled = vbRemoveAvail;
+        else if (mode == "replace") itemEnabled = vbReplaceAvail;
         // "off" stays enabled.
         if (auto* item = m->item(i)) item->setEnabled(itemEnabled);
       }

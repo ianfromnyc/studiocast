@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "core/ipc/daemon_client.h"
+#include "core/maxine/reason_codes.h"
 #include "core/util/fs.h"
 #include "core/util/json.h"
 #include "core/video/effects/broadcast_effect_contract.h"
@@ -45,6 +46,74 @@ bool ParseBoolArg(std::string_view s, bool* out) {
 std::string ToLower(std::string s) {
   for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   return s;
+}
+
+std::string MaxineReasonToEnglish(const std::string& code) {
+  return studiocast::maxine::reasons::ToEnglish(code);
+}
+
+void PrintMaxinePrettyFromStatusJson(const std::string& statusJson) {
+  Value root;
+  std::string err;
+  if (!studiocast::util::json::Parse(statusJson, &root, &err)) {
+    std::cerr << "ERROR: invalid status JSON: " << err << "\n";
+    return;
+  }
+
+  const auto* o = root.AsObject();
+  if (!o) {
+    std::cerr << "ERROR: status root is not an object\n";
+    return;
+  }
+
+  const auto itMax = o->find("maxine");
+  if (itMax == o->end()) {
+    std::cout << "Maxine: (not reported by daemon)\n";
+    return;
+  }
+
+  const auto* max = itMax->second.AsObject();
+  if (!max) {
+    std::cout << "Maxine: (invalid maxine object)\n";
+    return;
+  }
+
+  bool supported = false;
+  if (auto it = max->find("supported"); it != max->end()) {
+    if (const auto* b = it->second.AsBool()) supported = *b;
+  }
+
+  std::string blockedReason;
+  if (auto it = max->find("blocked_reason"); it != max->end()) {
+    if (const auto* s = it->second.AsString()) blockedReason = *s;
+  }
+
+  std::string summary;
+  if (auto it = max->find("summary"); it != max->end()) {
+    if (const auto* s = it->second.AsString()) summary = *s;
+  }
+
+  std::cout << "Maxine: "
+            << (supported ? std::string("OK")
+                          : MaxineReasonToEnglish(blockedReason.empty()
+                                                      ? std::string(studiocast::maxine::reasons::kUnknown)
+                                                      : blockedReason))
+            << "\n";
+  if (!summary.empty()) {
+    std::cout << "  " << summary << "\n";
+  }
+
+  if (!supported) {
+    if (auto it = max->find("blocked_details"); it != max->end()) {
+      if (const auto* arr = it->second.AsArray()) {
+        for (const auto& v : *arr) {
+          if (const auto* s = v.AsString()) {
+            if (!s->empty()) std::cout << "  - " << *s << "\n";
+          }
+        }
+      }
+    }
+  }
 }
 
 bool IsKnownEffectId(const std::string& id) {
@@ -249,7 +318,7 @@ void Usage(const char* argv0) {
   std::cout
       << "studiocastctl - control StudioCast daemon (studiocastd)\n\n"
       << "Usage:\n"
-      << "  " << argv0 << " status\n"
+      << "  " << argv0 << " status [--pretty]\n"
       << "  " << argv0 << " config\n"
       << "  " << argv0 << " effects get\n"
       << "  " << argv0 << " effects set --file <effects.json|->\n"
@@ -262,6 +331,7 @@ void Usage(const char* argv0) {
       << "  " << argv0 << " video effects --from <effects.json>\n\n"
       << "Examples:\n"
       << "  " << argv0 << " status\n"
+      << "  " << argv0 << " status --pretty\n"
       << "  " << argv0 << " enable 1\n"
       << "  " << argv0 << " video set input=/dev/video0 output=/dev/video10 width=1280 height=720 fps=30\n"
       << "  " << argv0 << " video effects mirror=1 background=blur background_strength=10\n"
@@ -334,7 +404,30 @@ int main(int argc, char** argv) {
   }
 
   if (cmd == "status") {
-    return CallOrDie("GET_STATUS") ? 0 : 1;
+    bool pretty = false;
+    for (int i = 2; i < argc; ++i) {
+      const std::string_view a = argv[i] ? std::string_view(argv[i]) : std::string_view();
+      if (a == "--pretty") pretty = true;
+    }
+    if (!pretty) {
+      return CallOrDie("GET_STATUS") ? 0 : 1;
+    }
+
+    studiocast::ipc::DaemonCallResult res;
+    std::string err;
+    if (!studiocast::ipc::DaemonCall("GET_STATUS", &res, &err)) {
+      std::cerr << "ERROR: " << err << "\n";
+      return 1;
+    }
+    if (!res.ok) {
+      std::cerr << (res.error_json.empty() ? std::string("{\"error\":\"daemon_error\"}")
+                                           : res.error_json)
+                << "\n";
+      return 1;
+    }
+
+    PrintMaxinePrettyFromStatusJson(res.json);
+    return 0;
   }
   if (cmd == "config") {
     // Back-compat alias.
