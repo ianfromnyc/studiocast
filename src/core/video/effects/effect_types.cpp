@@ -25,6 +25,8 @@ std::string ToString(BackgroundEffect v) {
       return "remove";
     case BackgroundEffect::auto_frame:
       return "auto_frame";
+    case BackgroundEffect::replace:
+      return "replace";
   }
   return "none";
 }
@@ -55,6 +57,10 @@ bool ParseBackgroundEffect(const std::string& s, BackgroundEffect* out) {
   }
   if (v == "remove" || v == "removal" || v == "background_remove" || v == "bg_remove") {
     *out = BackgroundEffect::remove;
+    return true;
+  }
+  if (v == "replace" || v == "background_replace" || v == "bg_replace") {
+    *out = BackgroundEffect::replace;
     return true;
   }
   if (v == "auto_frame" || v == "autoframe" || v == "auto") {

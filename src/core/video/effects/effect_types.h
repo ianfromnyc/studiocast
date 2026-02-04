@@ -14,6 +14,7 @@ enum class BackgroundEffect {
   blur = 1,
   remove = 2,
   auto_frame = 3,
+  replace = 4,
 };
 
 // Backend preference for an effect.

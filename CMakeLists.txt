@@ -67,6 +67,10 @@ add_library(studiocast_core
         src/core/maxine/gpu.cpp
         src/core/maxine/availability.h
         src/core/maxine/availability.cpp
+        src/core/maxine/paths.h
+        src/core/maxine/paths.cpp
+        src/core/maxine/maxine_manager.h
+        src/core/maxine/maxine_manager.cpp
         src/core/maxine/nvcv_types.h
         src/core/maxine/nvcv_api.h
         src/core/maxine/nvcv_api.cpp
@@ -80,6 +84,12 @@ add_library(studiocast_core
         src/core/maxine/effects/vfx_green_screen_effect.cpp
         src/core/maxine/effects/vfx_background_blur_effect.h
         src/core/maxine/effects/vfx_background_blur_effect.cpp
+        src/core/maxine/effects/vfx_transfer_effect.h
+        src/core/maxine/effects/vfx_transfer_effect.cpp
+        src/core/maxine/effects/vfx_denoise_effect.h
+        src/core/maxine/effects/vfx_denoise_effect.cpp
+        src/core/maxine/effects/vfx_relighting_effect.h
+        src/core/maxine/effects/vfx_relighting_effect.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
         src/core/audio/virtual_mic_state.h
@@ -93,6 +103,8 @@ add_library(studiocast_core
         src/core/video/gpu_frame.h
         src/core/video/pattern.h
         src/core/video/pattern.cpp
+        src/core/video/image_ppm.h
+        src/core/video/image_ppm.cpp
         src/core/video/feed.h
         src/core/video/feed.cpp
         src/core/video/convert.h

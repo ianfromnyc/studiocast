@@ -24,12 +24,30 @@ struct DaemonConfig {
   // These are persisted as strings to keep the config file human-readable and
   // stable as we add more effects/backends.
   //
-  // video.background: none|blur|remove|auto_frame
+  // video.background: none|blur|remove|replace|auto_frame
   // video.background_backend: auto|cpu|maxine
   // video.background_strength: integer intensity knob (blur radius for CPU placeholder)
+  // video.background_remove_color: #RRGGBB (used when video.background=remove)
+  // video.background_replace_image: filesystem path (used when video.background=replace)
   std::string video_background = "none";
   std::string video_background_backend = "auto";
   int video_background_strength = 8;
+
+  std::string video_background_remove_color = "#000000";
+  std::string video_background_replace_image;
+
+  // Virtual Key Light (Video Relighting)
+  //
+  // video.virtual_key_light: true|false
+  // video.virtual_key_light_intensity: 0..100 (percent)
+  // video.virtual_key_light_temperature: neutral|warm|cool
+  // video.virtual_key_light_pan: degrees (integer)
+  // video.virtual_key_light_hdri: filesystem path (optional override)
+  bool video_virtual_key_light = false;
+  int video_virtual_key_light_intensity = 70;
+  std::string video_virtual_key_light_temperature = "neutral";
+  int video_virtual_key_light_pan = 0;
+  std::string video_virtual_key_light_hdri;
 
   // Service behavior
   int consumer_poll_ms = 250;

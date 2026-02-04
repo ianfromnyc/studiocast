@@ -98,7 +98,10 @@ bool VfxApi::Initialize(const std::vector<std::filesystem::path>& sdk_roots, std
     initialized_ = false;
     library_path_.clear();
     lib_.Close();
+    cuda_lib_.Close();
     f_ = Functions{};
+    cuda_ = CudaFunctions{};
+    cuda_loaded_ = false;
     error_.clear();
 
     return InitializeImpl(sdk_roots, error_out);
@@ -108,7 +111,10 @@ bool VfxApi::InitializeFromLibraryPath(const std::filesystem::path& library_path
     initialized_ = false;
     library_path_.clear();
     lib_.Close();
+    cuda_lib_.Close();
     f_ = Functions{};
+    cuda_ = CudaFunctions{};
+    cuda_loaded_ = false;
     error_.clear();
 
     return InitializeFromLibraryPathImpl(library_path, error_out);
@@ -238,7 +244,44 @@ bool VfxApi::LoadSymbols(std::string* error_out) {
     load_optional("NvVFX_GetCudaStream", &f_.NvVFX_GetCudaStream);
     load_optional("NvCV_GetErrorStringFromCode", &f_.NvCV_GetErrorStringFromCode);
 
+    TryLoadCudaRuntime();
+
     return true;
+}
+
+void VfxApi::TryLoadCudaRuntime() {
+    cuda_loaded_ = false;
+    cuda_ = CudaFunctions{};
+    cuda_lib_.Close();
+
+    const std::vector<std::string> candidates = {
+        "libcudart.so",
+        "libcudart.so.12",
+        "libcudart.so.11.0",
+    };
+
+    for (const auto& name : candidates) {
+        util::DynLib lib;
+        std::string ignore;
+        if (!lib.Open(fs::path(name), util::DynLib::Scope::Local, &ignore)) {
+            continue;
+        }
+
+        // Require at least cudaMalloc/cudaFree/cudaMemset to consider usable.
+        if (!lib.GetSymbol("cudaMalloc", &cuda_.cudaMalloc, nullptr) ||
+            !lib.GetSymbol("cudaFree", &cuda_.cudaFree, nullptr) ||
+            !lib.GetSymbol("cudaMemset", &cuda_.cudaMemset, nullptr)) {
+            continue;
+        }
+
+        // Optional helpers.
+        lib.GetSymbol("cudaMemsetAsync", &cuda_.cudaMemsetAsync, nullptr);
+        lib.GetSymbol("cudaGetErrorString", &cuda_.cudaGetErrorString, nullptr);
+
+        cuda_lib_ = std::move(lib);
+        cuda_loaded_ = true;
+        return;
+    }
 }
 
 std::string VfxApi::StatusToString(NvCV_Status code) const {

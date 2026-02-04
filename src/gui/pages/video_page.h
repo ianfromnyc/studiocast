@@ -14,6 +14,7 @@ class QPushButton;
 class QSpinBox;
 class QLabel;
 class QTimer;
+class QLineEdit;
 
 namespace studiocast::gui {
 
@@ -32,6 +33,17 @@ namespace studiocast::gui {
         void OnBackgroundChanged(int index);
         void OnBackgroundBackendChanged(int index);
         void OnBackgroundStrengthChanged(int value);
+        void OnBackgroundRemoveColorChanged();
+        void OnBackgroundReplaceImageChanged();
+        void OnBrowseReplaceImage();
+
+        void OnVirtualKeyLightToggled(bool checked);
+        void OnVirtualKeyLightIntensityChanged(int value);
+        void OnVirtualKeyLightTemperatureChanged(int index);
+        void OnVirtualKeyLightPanChanged(int value);
+        void OnVirtualKeyLightHdriChanged();
+        void OnBrowseVirtualKeyLightHdri();
+
         void OnPoll();
 
     private:
@@ -60,6 +72,18 @@ namespace studiocast::gui {
         QComboBox* backgroundCombo_ = nullptr;
         QComboBox* backgroundBackendCombo_ = nullptr;
         QSpinBox* backgroundStrengthSpin_ = nullptr;
+
+        QLineEdit* backgroundRemoveColorEdit_ = nullptr;   // #RRGGBB
+        QLineEdit* backgroundReplaceImageEdit_ = nullptr;  // path (PPM/P6 for now)
+        QPushButton* browseReplaceImageBtn_ = nullptr;
+
+        // Virtual Key Light (Maxine relighting)
+        QCheckBox* virtualKeyLightCheck_ = nullptr;
+        QSpinBox* virtualKeyLightIntensitySpin_ = nullptr;  // 0..100
+        QComboBox* virtualKeyLightTempCombo_ = nullptr;     // neutral|warm|cool
+        QSpinBox* virtualKeyLightPanSpin_ = nullptr;        // -180..180
+        QLineEdit* virtualKeyLightHdriEdit_ = nullptr;      // path override
+        QPushButton* browseVirtualKeyLightHdriBtn_ = nullptr;
 
         QPushButton* refreshBtn_ = nullptr;
         QPushButton* copyCmdBtn_ = nullptr;

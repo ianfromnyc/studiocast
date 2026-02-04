@@ -2,8 +2,11 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdlib>
 #include <cstdio>
+#include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <sstream>
@@ -14,6 +17,7 @@
 #include "core/config/daemon_config.h"
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
+#include "core/maxine/maxine_manager.h"
 #include "core/video/effects/effect_types.h"
 #include "core/video/virtual_camera_service.h"
 #include "core/video/v4l2loopback.h"
@@ -61,9 +65,11 @@ void Usage(const char* argv0) {
         << "  --height N               Requested height (default: 720)\n"
         << "  --fps N                  Requested fps (default: 30)\n"
         << "  --mirror                 Enable mirror (horizontal flip)\n"
-        << "  --background MODE         Background effect: none|blur|remove|auto_frame (default: none)\n"
+        << "  --background MODE         Background effect: none|blur|remove|replace|auto_frame (default: none)\n"
         << "  --background-backend B    Background backend: auto|cpu|maxine (default: auto)\n"
         << "  --background-strength N   Intensity knob (CPU blur radius; default: 8)\n"
+        << "  --background-remove-color #RRGGBB  Remove-mode background color (default: #000000)\n"
+        << "  --background-replace-image PATH    Replace-mode background image path\n"
         << "  --poll-ms N              Consumer poll interval (default: 250)\n"
         << "  --stop-grace-ms N        Stop after N ms without consumers (default: 1000)\n"
         << "  --always-on              Run pipeline even with no consumers\n"
@@ -154,15 +160,76 @@ bool ParseBoolArg(const std::string& raw, bool* out) {
     return false;
 }
 
+bool ParseRgbHex(const std::string& raw, std::uint32_t* out) {
+    if (!out) return false;
+    std::string s = raw;
+    // trim (minimal; enough for our tokenized IPC)
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    while (!s.empty() && (s.front() == ' ' || s.front() == '\t' || s.front() == '\n' || s.front() == '\r')) s.erase(s.begin());
+
+    if (s.empty()) return false;
+    if (!s.empty() && s[0] == '#') s.erase(0, 1);
+    if (s.size() != 6) return false;
+
+    std::uint32_t v = 0;
+    for (const char c : s) {
+        v <<= 4u;
+        if (c >= '0' && c <= '9') {
+            v |= static_cast<std::uint32_t>(c - '0');
+        } else if (c >= 'a' && c <= 'f') {
+            v |= static_cast<std::uint32_t>(c - 'a' + 10);
+        } else if (c >= 'A' && c <= 'F') {
+            v |= static_cast<std::uint32_t>(c - 'A' + 10);
+        } else {
+            return false;
+        }
+    }
+    *out = v;
+    return true;
+}
+
+std::string FormatRgbHex(std::uint32_t rgb) {
+    std::ostringstream oss;
+    oss << "#" << std::hex << std::nouppercase << std::setfill('0') << std::setw(6) << (rgb & 0xFFFFFFu);
+    return oss.str();
+}
+
+std::string ToLowerAscii(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+int ParseKeyLightTemperaturePreset(const std::string& raw, int fallback) {
+    const auto v = ToLowerAscii(raw);
+    if (v == "0" || v == "neutral") return 0;
+    if (v == "1" || v == "warm") return 1;
+    if (v == "2" || v == "cool") return 2;
+    return fallback;
+}
+
+std::string FormatKeyLightTemperaturePreset(int preset) {
+    switch (preset) {
+        case 1: return "warm";
+        case 2: return "cool";
+        default: return "neutral";
+    }
+}
+
 std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st,
                          const studiocast::video::VirtualCameraServiceConfig& cfg,
-                         const std::filesystem::path& socketPath) {
+                         const std::filesystem::path& socketPath,
+                         const std::string& maxineJson) {
     std::ostringstream oss;
     oss << "{";
     oss << "\"version\":\"" << JsonEscape(STUDIOCAST_VERSION) << "\",";
     oss << "\"git_sha\":\"" << JsonEscape(STUDIOCAST_GIT_SHA) << "\",";
     oss << "\"socket\":\"" << JsonEscape(socketPath.string()) << "\",";
     oss << "\"service_running\":" << BoolJson(st.service_running) << ",";
+
+    // Global Maxine diagnostics payload (used by GUI/CLI to disable unsupported effects).
+    if (!maxineJson.empty()) {
+        oss << "\"maxine\":" << maxineJson << ",";
+    }
 
     oss << "\"video\":{";
     oss << "\"enabled\":" << BoolJson(cfg.enabled) << ",";
@@ -180,6 +247,15 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"background\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.background)) << "\",";
     oss << "\"background_backend\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.background_backend)) << "\",";
     oss << "\"background_strength\":" << cfg.pipeline.effects.background_strength << ",";
+    oss << "\"background_remove_color\":\"" << JsonEscape(FormatRgbHex(cfg.pipeline.effects.background_remove_color_rgb)) << "\",";
+    oss << "\"background_replace_image\":\"" << JsonEscape(cfg.pipeline.effects.background_replace_image.string()) << "\",";
+
+    const int vkl_intensity = std::max(0, std::min(100, static_cast<int>(cfg.pipeline.effects.virtual_key_light.intensity * 100.0f)));
+    oss << "\"virtual_key_light\":" << BoolJson(cfg.pipeline.effects.virtual_key_light.enabled) << ",";
+    oss << "\"virtual_key_light_intensity\":" << vkl_intensity << ",";
+    oss << "\"virtual_key_light_temperature\":\"" << JsonEscape(FormatKeyLightTemperaturePreset(cfg.pipeline.effects.virtual_key_light.temperature_preset)) << "\",";
+    oss << "\"virtual_key_light_pan\":" << static_cast<int>(cfg.pipeline.effects.virtual_key_light.direction_pan_degrees) << ",";
+    oss << "\"virtual_key_light_hdri\":\"" << JsonEscape(cfg.pipeline.effects.virtual_key_light.hdri_path.string()) << "\",";
 
     oss << "\"pipeline\":{";
     oss << "\"running\":" << BoolJson(st.pipeline.running) << ",";
@@ -211,7 +287,16 @@ std::string ConfigToJson(const studiocast::video::VirtualCameraServiceConfig& cf
     oss << "\"mirror\":" << BoolJson(cfg.pipeline.effects.mirror) << ",";
     oss << "\"background\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.background)) << "\",";
     oss << "\"background_backend\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.background_backend)) << "\",";
-    oss << "\"background_strength\":" << cfg.pipeline.effects.background_strength;
+    oss << "\"background_strength\":" << cfg.pipeline.effects.background_strength << ",";
+    oss << "\"background_remove_color\":\"" << JsonEscape(FormatRgbHex(cfg.pipeline.effects.background_remove_color_rgb)) << "\",";
+    oss << "\"background_replace_image\":\"" << JsonEscape(cfg.pipeline.effects.background_replace_image.string()) << "\",";
+
+    const int vkl_intensity = std::max(0, std::min(100, static_cast<int>(cfg.pipeline.effects.virtual_key_light.intensity * 100.0f)));
+    oss << "\"virtual_key_light\":" << BoolJson(cfg.pipeline.effects.virtual_key_light.enabled) << ",";
+    oss << "\"virtual_key_light_intensity\":" << vkl_intensity << ",";
+    oss << "\"virtual_key_light_temperature\":\"" << JsonEscape(FormatKeyLightTemperaturePreset(cfg.pipeline.effects.virtual_key_light.temperature_preset)) << "\",";
+    oss << "\"virtual_key_light_pan\":" << static_cast<int>(cfg.pipeline.effects.virtual_key_light.direction_pan_degrees) << ",";
+    oss << "\"virtual_key_light_hdri\":\"" << JsonEscape(cfg.pipeline.effects.virtual_key_light.hdri_path.string()) << "\"";
     oss << "}";
     return oss.str();
 }
@@ -268,6 +353,18 @@ int main(int argc, char** argv) {
         cfg.pipeline.effects.background_strength = std::max(1, std::min(64, v));
     }
 
+    if (const auto v = GetArgValue(argc, argv, "--background-remove-color"); !v.empty()) {
+        std::uint32_t rgb = 0;
+        if (ParseRgbHex(v, &rgb)) {
+            cfg.pipeline.effects.background_remove_color_rgb = rgb;
+        } else {
+            std::cerr << "WARN: invalid --background-remove-color (expected #RRGGBB): " << v << "\n";
+        }
+    }
+    if (const auto v = GetArgValue(argc, argv, "--background-replace-image"); !v.empty()) {
+        cfg.pipeline.effects.background_replace_image = v;
+    }
+
     if (const int v = GetArgInt(argc, argv, "--poll-ms", -1); v > 0) cfg.consumer_poll_ms = v;
     if (const int v = GetArgInt(argc, argv, "--stop-grace-ms", -1); v > 0) cfg.stop_grace_ms = v;
     if (HasArg(argc, argv, "--always-on")) cfg.always_on = true;
@@ -316,7 +413,27 @@ int main(int argc, char** argv) {
                           if (pc.cmd == "GET_STATUS") {
                               const auto st = svc.Status();
                               const auto current = svc.Config();
-                              return std::string("OK ") + StatusToJson(st, current, socketPath);
+
+                              // Cache diagnostics to avoid heavy probing on every GUI poll.
+                              static std::mutex diagMu;
+                              static std::chrono::steady_clock::time_point lastDiag;
+                              static std::string lastDiagJson;
+
+                              std::string diagJson;
+                              {
+                                  std::lock_guard<std::mutex> lock(diagMu);
+                                  const auto now = std::chrono::steady_clock::now();
+                                  if (lastDiagJson.empty() ||
+                                      (now - lastDiag) > std::chrono::seconds(2)) {
+                                      studiocast::maxine::MaxineManager mm;
+                                      const auto d = mm.Diagnose(/*verbose_probe=*/false);
+                                      lastDiagJson = d.ToJson();
+                                      lastDiag = now;
+                                  }
+                                  diagJson = lastDiagJson;
+                              }
+
+                              return std::string("OK ") + StatusToJson(st, current, socketPath, diagJson);
                           }
 
                           if (pc.cmd == "GET_CONFIG") {
@@ -393,7 +510,7 @@ int main(int argc, char** argv) {
                               if (auto it = pc.kv.find("background"); it != pc.kv.end()) {
                                   studiocast::video::effects::BackgroundEffect bg{};
                                   if (!studiocast::video::effects::ParseBackgroundEffect(it->second, &bg)) {
-                                      return std::string("ERR ") + ErrorJson("background must be none|blur|remove|auto_frame");
+                                      return std::string("ERR ") + ErrorJson("background must be none|blur|remove|replace|auto_frame");
                                   }
                                   newCfg.pipeline.effects.background = bg;
                               }
@@ -412,6 +529,52 @@ int main(int argc, char** argv) {
                                       return std::string("ERR ") + ErrorJson("background_strength must be a positive integer");
                                   }
                                   newCfg.pipeline.effects.background_strength = std::max(1, std::min(64, v));
+                              }
+
+                              if (auto it = pc.kv.find("background_remove_color"); it != pc.kv.end()) {
+                                  std::uint32_t rgb = 0;
+                                  if (!ParseRgbHex(it->second, &rgb)) {
+                                      return std::string("ERR ") + ErrorJson("background_remove_color must be #RRGGBB");
+                                  }
+                                  newCfg.pipeline.effects.background_remove_color_rgb = rgb;
+                              }
+
+                              if (auto it = pc.kv.find("background_replace_image"); it != pc.kv.end()) {
+                                  newCfg.pipeline.effects.background_replace_image = it->second;
+                              }
+
+                              if (auto it = pc.kv.find("virtual_key_light"); it != pc.kv.end()) {
+                                  bool en = false;
+                                  if (!ParseBoolArg(it->second, &en)) {
+                                      return std::string("ERR ") + ErrorJson("virtual_key_light must be 0|1");
+                                  }
+                                  newCfg.pipeline.effects.virtual_key_light.enabled = en;
+                              }
+
+                              if (auto it = pc.kv.find("virtual_key_light_intensity"); it != pc.kv.end()) {
+                                  const int v = std::atoi(it->second.c_str());
+                                  if (v < 0 || v > 100) {
+                                      return std::string("ERR ") + ErrorJson("virtual_key_light_intensity must be 0..100");
+                                  }
+                                  newCfg.pipeline.effects.virtual_key_light.intensity = static_cast<float>(v) / 100.0f;
+                              }
+
+                              if (auto it = pc.kv.find("virtual_key_light_temperature"); it != pc.kv.end()) {
+                                  const int preset = ParseKeyLightTemperaturePreset(it->second, -1);
+                                  if (preset < 0) {
+                                      return std::string("ERR ") + ErrorJson("virtual_key_light_temperature must be neutral|warm|cool");
+                                  }
+                                  newCfg.pipeline.effects.virtual_key_light.temperature_preset = preset;
+                              }
+
+                              if (auto it = pc.kv.find("virtual_key_light_pan"); it != pc.kv.end()) {
+                                  const int v = std::atoi(it->second.c_str());
+                                  newCfg.pipeline.effects.virtual_key_light.direction_pan_degrees =
+                                      static_cast<float>(std::max(-180, std::min(180, v)));
+                              }
+
+                              if (auto it = pc.kv.find("virtual_key_light_hdri"); it != pc.kv.end()) {
+                                  newCfg.pipeline.effects.virtual_key_light.hdri_path = it->second;
                               }
 
                               svc.UpdateConfig(newCfg);

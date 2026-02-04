@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -30,6 +31,23 @@ namespace studiocast::video {
         // Interpreted as a blur radius for the CPU placeholder.
         int background_strength = 8;
 
+        // Virtual background parameters.
+        //
+        // - remove: subject over a solid color (default black)
+        // - replace: subject over a user-provided image
+        std::uint32_t background_remove_color_rgb = 0x000000;  // 0xRRGGBB
+        std::filesystem::path background_replace_image;
+
+        // Video noise removal (Maxine VFX Denoising).
+        //
+        // Pipeline format strategy (see docs/task notes): baseline GPU images are
+        // BGRu8 chunky; when denoise is enabled we insert a Transfer stage to
+        // convert to BGRf32 planar normalized, run Denoising, then Transfer back.
+        bool denoise = false;
+        // Strength is an integer percentage [0..100]. The VFX effect supports
+        // discrete strength levels, so the runtime quantizes to supported steps.
+        int denoise_strength = 50;
+
         // Green screen (matte generation) parameters used by Maxine VFX.
         // Stored as raw values to avoid build-time dependency on NVIDIA headers.
         struct GreenScreenSettings {
@@ -40,6 +58,31 @@ namespace studiocast::video {
         };
 
         GreenScreenSettings green_screen{};
+
+        // Virtual Key Light (Video Relighting) parameters.
+        //
+        // These are used by the Maxine VFX relighting stage. If Maxine/VFX is
+        // unavailable, the daemon should report "functionality unavailable"
+        // rather than silently falling back.
+        struct VirtualKeyLightSettings {
+            bool enabled = false;
+
+            // Blend amount between relit foreground and the original image.
+            // 0 = no effect, 1 = fully relit foreground.
+            float intensity = 0.7f;  // [0..1]
+
+            // Temperature preset selects an HDRI variant.
+            // 0 = neutral, 1 = warm, 2 = cool.
+            int temperature_preset = 0;
+
+            // Optional direction control (pan angle, degrees).
+            float direction_pan_degrees = 0.0f;
+
+            // Optional HDRI override. Empty = auto/default.
+            std::filesystem::path hdri_path;
+        };
+
+        VirtualKeyLightSettings virtual_key_light{};
     };
 
     inline bool operator==(const CameraEffects& a, const CameraEffects& b) {
@@ -47,8 +90,17 @@ namespace studiocast::video {
                a.background == b.background &&
                a.background_backend == b.background_backend &&
                a.background_strength == b.background_strength &&
+               a.background_remove_color_rgb == b.background_remove_color_rgb &&
+               a.background_replace_image == b.background_replace_image &&
+               a.denoise == b.denoise &&
+               a.denoise_strength == b.denoise_strength &&
                a.green_screen.mode == b.green_screen.mode &&
-               a.green_screen.temporal == b.green_screen.temporal;
+               a.green_screen.temporal == b.green_screen.temporal &&
+               a.virtual_key_light.enabled == b.virtual_key_light.enabled &&
+               a.virtual_key_light.intensity == b.virtual_key_light.intensity &&
+               a.virtual_key_light.temperature_preset == b.virtual_key_light.temperature_preset &&
+               a.virtual_key_light.direction_pan_degrees == b.virtual_key_light.direction_pan_degrees &&
+               a.virtual_key_light.hdri_path == b.virtual_key_light.hdri_path;
     }
 
     inline bool operator!=(const CameraEffects& a, const CameraEffects& b) { return !(a == b); }

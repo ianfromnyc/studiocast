@@ -1,4 +1,6 @@
 #include <cstdio>
+#include <cstdint>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -8,6 +10,7 @@
 #include "core/maxine/vfx_api.h"
 #include "core/probe/probe.h"
 #include "core/util/strings.h"
+#include "core/video/image_ppm.h"
 #include "studiocast/version.h"
 
 namespace {
@@ -60,6 +63,82 @@ namespace {
             if (!ok && err.empty()) {
                 ++failures;
                 std::printf("[FAIL] NvcvApi.Initialize returned false but provided no error message\n");
+            }
+        }
+
+        // Virtual Background CPU-side math sanity checks.
+        {
+            auto composite_u8 = [](std::uint8_t fg, std::uint8_t bg, std::uint8_t a) -> std::uint8_t {
+                // a is matte alpha for foreground.
+                const int af = static_cast<int>(a);
+                const int ab = 255 - af;
+                const int v = static_cast<int>(fg) * af + static_cast<int>(bg) * ab;
+                return static_cast<std::uint8_t>((v + 127) / 255);
+            };
+
+            // fg=255, bg=0
+            if (composite_u8(255, 0, 0) != 0) {
+                ++failures;
+                std::printf("[FAIL] composite_u8 alpha=0\n");
+            }
+            if (composite_u8(255, 0, 255) != 255) {
+                ++failures;
+                std::printf("[FAIL] composite_u8 alpha=255\n");
+            }
+            const auto mid = composite_u8(255, 0, 128);
+            if (mid < 126 || mid > 129) {
+                ++failures;
+                std::printf("[FAIL] composite_u8 alpha=128 got=%u\n", static_cast<unsigned>(mid));
+            }
+        }
+
+        // PPM loader + resize check (dependency-free replace-image path).
+        {
+            // 2x2 PPM P6: red, green, blue, white.
+            const char* tmpPath = "/tmp/studiocast_selftest_bg.ppm";
+            {
+                std::ofstream out(tmpPath, std::ios::binary);
+                if (!out) {
+                    ++failures;
+                    std::printf("[FAIL] failed to open tmp PPM for writing\n");
+                } else {
+                    out << "P6\n2 2\n255\n";
+                    const std::uint8_t px[] = {
+                        255, 0, 0,   0, 255, 0,
+                        0, 0, 255,   255, 255, 255,
+                    };
+                    out.write(reinterpret_cast<const char*>(px), static_cast<std::streamsize>(sizeof(px)));
+                }
+            }
+
+            int w = 0, h = 0;
+            std::vector<std::uint8_t> rgb;
+            std::string imgErr;
+            if (!studiocast::video::LoadPpmP6Rgb24(tmpPath, &w, &h, &rgb, &imgErr)) {
+                ++failures;
+                std::printf("[FAIL] LoadPpmP6Rgb24: %s\n", imgErr.c_str());
+            } else {
+                if (w != 2 || h != 2 || rgb.size() != 12) {
+                    ++failures;
+                    std::printf("[FAIL] LoadPpmP6Rgb24 unexpected dims\n");
+                }
+            }
+
+            std::vector<std::uint8_t> resized;
+            std::string resizeErr;
+            if (!rgb.empty() && !studiocast::video::ResizeRgb24Bilinear(rgb.data(), 2, 2, 6, 4, 4, &resized, 12, &resizeErr)) {
+                ++failures;
+                std::printf("[FAIL] ResizeRgb24Bilinear: %s\n", resizeErr.c_str());
+            } else if (!resized.empty()) {
+                // Top-left should stay close to red.
+                const std::uint8_t r = resized[0];
+                const std::uint8_t g = resized[1];
+                const std::uint8_t b = resized[2];
+                if (r < 200 || g > 80 || b > 80) {
+                    ++failures;
+                    std::printf("[FAIL] ResizeRgb24Bilinear unexpected top-left pixel: %u,%u,%u\n",
+                                static_cast<unsigned>(r), static_cast<unsigned>(g), static_cast<unsigned>(b));
+                }
             }
         }
 

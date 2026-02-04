@@ -6,10 +6,13 @@
 #include <QGuiApplication>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QFileDialog>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPixmap>
 #include <QMessageBox>
 #include <QPlainTextEdit>
@@ -58,6 +61,20 @@ struct DaemonVideoStatus {
   QString background;
   QString background_backend;
   int background_strength = 0;
+  QString background_remove_color;
+  QString background_replace_image;
+
+  // Virtual Key Light (Video Relighting)
+  bool virtual_key_light = false;
+  int virtual_key_light_intensity = 0;  // 0..100
+  QString virtual_key_light_temperature;
+  int virtual_key_light_pan = 0;
+  QString virtual_key_light_hdri;
+
+  // Maxine runtime diagnostics (from daemon GET_STATUS)
+  bool maxine_ok = false;
+  QString maxine_summary;
+  bool virtual_key_light_available = false;
 
   QString effects_backends;
   QString effects_note;
@@ -98,6 +115,14 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
   out->background = video.value("background").toString();
   out->background_backend = video.value("background_backend").toString();
   out->background_strength = video.value("background_strength").toInt(0);
+  out->background_remove_color = video.value("background_remove_color").toString();
+  out->background_replace_image = video.value("background_replace_image").toString();
+
+  out->virtual_key_light = video.value("virtual_key_light").toBool(false);
+  out->virtual_key_light_intensity = video.value("virtual_key_light_intensity").toInt(0);
+  out->virtual_key_light_temperature = video.value("virtual_key_light_temperature").toString();
+  out->virtual_key_light_pan = video.value("virtual_key_light_pan").toInt(0);
+  out->virtual_key_light_hdri = video.value("virtual_key_light_hdri").toString();
 
   out->input_device = video.value("input_device").toString();
   out->output_device = video.value("output_device").toString();
@@ -109,6 +134,20 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
 
   out->effects_backends = pipe.value("effects_backends").toString();
   out->effects_note = pipe.value("effects_note").toString();
+
+  const QJsonObject maxine = root.value("maxine").toObject();
+  if (!maxine.isEmpty()) {
+    out->maxine_ok = maxine.value("ok").toBool(false);
+    out->maxine_summary = maxine.value("summary").toString();
+    out->virtual_key_light_available = false;
+    const auto arr = maxine.value("available_effects").toArray();
+    for (const auto& v : arr) {
+      if (v.toString() == "virtual_key_light") {
+        out->virtual_key_light_available = true;
+        break;
+      }
+    }
+  }
 
   out->last_error = video.value("last_error").toString();
   return true;
@@ -125,6 +164,13 @@ bool ParseDaemonConfigJson(const std::string& json,
                           QString* background,
                           QString* background_backend,
                           int* background_strength,
+                          QString* background_remove_color,
+                          QString* background_replace_image,
+                          bool* virtual_key_light,
+                          int* virtual_key_light_intensity,
+                          QString* virtual_key_light_temperature,
+                          int* virtual_key_light_pan,
+                          QString* virtual_key_light_hdri,
                           QString* error) {
   QJsonParseError perr;
   const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(json), &perr);
@@ -145,6 +191,14 @@ bool ParseDaemonConfigJson(const std::string& json,
   if (background) *background = root.value("background").toString();
   if (background_backend) *background_backend = root.value("background_backend").toString();
   if (background_strength) *background_strength = root.value("background_strength").toInt(0);
+  if (background_remove_color) *background_remove_color = root.value("background_remove_color").toString();
+  if (background_replace_image) *background_replace_image = root.value("background_replace_image").toString();
+
+  if (virtual_key_light) *virtual_key_light = root.value("virtual_key_light").toBool(false);
+  if (virtual_key_light_intensity) *virtual_key_light_intensity = root.value("virtual_key_light_intensity").toInt(0);
+  if (virtual_key_light_temperature) *virtual_key_light_temperature = root.value("virtual_key_light_temperature").toString();
+  if (virtual_key_light_pan) *virtual_key_light_pan = root.value("virtual_key_light_pan").toInt(0);
+  if (virtual_key_light_hdri) *virtual_key_light_hdri = root.value("virtual_key_light_hdri").toString();
   return true;
 }
 
@@ -238,8 +292,9 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
 
   backgroundCombo_ = new QComboBox(box);
   backgroundCombo_->addItem("None", "none");
-  backgroundCombo_->addItem("Background Blur (CPU placeholder)", "blur");
-  backgroundCombo_->addItem("Background Removal (CPU placeholder)", "remove");
+  backgroundCombo_->addItem("Background Blur", "blur");
+  backgroundCombo_->addItem("Background Removal", "remove");
+  backgroundCombo_->addItem("Background Replace", "replace");
   backgroundCombo_->addItem("Auto Frame (coming soon)", "auto_frame");
   bgRow->addWidget(backgroundCombo_, 1);
 
@@ -252,12 +307,70 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   bgRow->addWidget(new QLabel("Backend:", box));
   backgroundBackendCombo_ = new QComboBox(box);
   backgroundBackendCombo_->addItem("Auto", "auto");
-  backgroundBackendCombo_->addItem("CPU", "cpu");
-  backgroundBackendCombo_->addItem("Maxine (future)", "maxine");
+  backgroundBackendCombo_->addItem("CPU (debug)", "cpu");
+  backgroundBackendCombo_->addItem("Maxine", "maxine");
   bgRow->addWidget(backgroundBackendCombo_);
 
   bgRow->addStretch(1);
   boxLayout->addLayout(bgRow);
+
+  // Background parameters.
+  auto* bgParamRow = new QHBoxLayout();
+  bgParamRow->addWidget(new QLabel("Remove color (#RRGGBB):", box));
+  backgroundRemoveColorEdit_ = new QLineEdit(box);
+  backgroundRemoveColorEdit_->setPlaceholderText("#000000");
+  backgroundRemoveColorEdit_->setMaximumWidth(110);
+  bgParamRow->addWidget(backgroundRemoveColorEdit_);
+
+  bgParamRow->addSpacing(12);
+  bgParamRow->addWidget(new QLabel("Replace image (PPM/P6):", box));
+  backgroundReplaceImageEdit_ = new QLineEdit(box);
+  bgParamRow->addWidget(backgroundReplaceImageEdit_, 1);
+  browseReplaceImageBtn_ = new QPushButton("Browse…", box);
+  bgParamRow->addWidget(browseReplaceImageBtn_);
+  boxLayout->addLayout(bgParamRow);
+
+  // Virtual Key Light (Maxine Video Relighting).
+  auto* vklRow = new QHBoxLayout();
+  virtualKeyLightCheck_ = new QCheckBox("Virtual Key Light (Maxine)", box);
+  vklRow->addWidget(virtualKeyLightCheck_);
+  vklRow->addSpacing(12);
+
+  vklRow->addWidget(new QLabel("Intensity:", box));
+  virtualKeyLightIntensitySpin_ = new QSpinBox(box);
+  virtualKeyLightIntensitySpin_->setRange(0, 100);
+  virtualKeyLightIntensitySpin_->setValue(70);
+  virtualKeyLightIntensitySpin_->setSuffix("%");
+  virtualKeyLightIntensitySpin_->setMaximumWidth(90);
+  vklRow->addWidget(virtualKeyLightIntensitySpin_);
+
+  vklRow->addSpacing(12);
+  vklRow->addWidget(new QLabel("Temp:", box));
+  virtualKeyLightTempCombo_ = new QComboBox(box);
+  virtualKeyLightTempCombo_->addItem("Neutral", "neutral");
+  virtualKeyLightTempCombo_->addItem("Warm", "warm");
+  virtualKeyLightTempCombo_->addItem("Cool", "cool");
+  vklRow->addWidget(virtualKeyLightTempCombo_);
+
+  vklRow->addSpacing(12);
+  vklRow->addWidget(new QLabel("Pan:", box));
+  virtualKeyLightPanSpin_ = new QSpinBox(box);
+  virtualKeyLightPanSpin_->setRange(-180, 180);
+  virtualKeyLightPanSpin_->setValue(0);
+  virtualKeyLightPanSpin_->setSuffix("°");
+  virtualKeyLightPanSpin_->setMaximumWidth(90);
+  vklRow->addWidget(virtualKeyLightPanSpin_);
+
+  vklRow->addStretch(1);
+  boxLayout->addLayout(vklRow);
+
+  auto* vklRow2 = new QHBoxLayout();
+  vklRow2->addWidget(new QLabel("HDRI (optional):", box));
+  virtualKeyLightHdriEdit_ = new QLineEdit(box);
+  vklRow2->addWidget(virtualKeyLightHdriEdit_, 1);
+  browseVirtualKeyLightHdriBtn_ = new QPushButton("Browse…", box);
+  vklRow2->addWidget(browseVirtualKeyLightHdriBtn_);
+  boxLayout->addLayout(vklRow2);
 
   // Controls row
   auto* ctlRow = new QHBoxLayout();
@@ -288,6 +401,20 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
           this, &VideoPage::OnBackgroundBackendChanged);
   connect(backgroundStrengthSpin_, QOverload<int>::of(&QSpinBox::valueChanged),
           this, &VideoPage::OnBackgroundStrengthChanged);
+
+  connect(backgroundRemoveColorEdit_, &QLineEdit::editingFinished, this, &VideoPage::OnBackgroundRemoveColorChanged);
+  connect(backgroundReplaceImageEdit_, &QLineEdit::editingFinished, this, &VideoPage::OnBackgroundReplaceImageChanged);
+  connect(browseReplaceImageBtn_, &QPushButton::clicked, this, &VideoPage::OnBrowseReplaceImage);
+
+  connect(virtualKeyLightCheck_, &QCheckBox::toggled, this, &VideoPage::OnVirtualKeyLightToggled);
+  connect(virtualKeyLightIntensitySpin_, QOverload<int>::of(&QSpinBox::valueChanged),
+          this, &VideoPage::OnVirtualKeyLightIntensityChanged);
+  connect(virtualKeyLightTempCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, &VideoPage::OnVirtualKeyLightTemperatureChanged);
+  connect(virtualKeyLightPanSpin_, QOverload<int>::of(&QSpinBox::valueChanged),
+          this, &VideoPage::OnVirtualKeyLightPanChanged);
+  connect(virtualKeyLightHdriEdit_, &QLineEdit::editingFinished, this, &VideoPage::OnVirtualKeyLightHdriChanged);
+  connect(browseVirtualKeyLightHdriBtn_, &QPushButton::clicked, this, &VideoPage::OnBrowseVirtualKeyLightHdri);
 
   pollTimer_ = new QTimer(this);
   pollTimer_->setInterval(500);
@@ -399,6 +526,14 @@ bool VideoPage::SyncFromDaemonConfig() {
   QString background;
   QString background_backend;
   int background_strength = 0;
+  QString background_remove_color;
+  QString background_replace_image;
+
+  bool virtual_key_light = false;
+  int virtual_key_light_intensity = 0;
+  QString virtual_key_light_temperature;
+  int virtual_key_light_pan = 0;
+  QString virtual_key_light_hdri;
 
   QString parseErr;
   if (!ParseDaemonConfigJson(json,
@@ -412,6 +547,13 @@ bool VideoPage::SyncFromDaemonConfig() {
                              &background,
                              &background_backend,
                              &background_strength,
+                             &background_remove_color,
+                             &background_replace_image,
+                             &virtual_key_light,
+                             &virtual_key_light_intensity,
+                             &virtual_key_light_temperature,
+                             &virtual_key_light_pan,
+                             &virtual_key_light_hdri,
                              &parseErr)) {
     return false;
   }
@@ -455,10 +597,55 @@ bool VideoPage::SyncFromDaemonConfig() {
     backgroundStrengthSpin_->blockSignals(false);
   }
 
-  // Enable strength only for blur.
-  if (backgroundStrengthSpin_ && backgroundCombo_) {
-    backgroundStrengthSpin_->setEnabled(backgroundCombo_->currentData().toString() == "blur");
+  if (backgroundRemoveColorEdit_) {
+    backgroundRemoveColorEdit_->blockSignals(true);
+    if (!background_remove_color.isEmpty()) {
+      backgroundRemoveColorEdit_->setText(background_remove_color);
+    }
+    backgroundRemoveColorEdit_->blockSignals(false);
   }
+  if (backgroundReplaceImageEdit_) {
+    backgroundReplaceImageEdit_->blockSignals(true);
+    if (!background_replace_image.isEmpty()) {
+      backgroundReplaceImageEdit_->setText(background_replace_image);
+    }
+    backgroundReplaceImageEdit_->blockSignals(false);
+  }
+
+  if (virtualKeyLightCheck_) {
+    virtualKeyLightCheck_->blockSignals(true);
+    virtualKeyLightCheck_->setChecked(virtual_key_light);
+    virtualKeyLightCheck_->blockSignals(false);
+  }
+  if (virtualKeyLightIntensitySpin_) {
+    virtualKeyLightIntensitySpin_->blockSignals(true);
+    virtualKeyLightIntensitySpin_->setValue(std::max(0, std::min(100, virtual_key_light_intensity)));
+    virtualKeyLightIntensitySpin_->blockSignals(false);
+  }
+  if (virtualKeyLightTempCombo_) {
+    virtualKeyLightTempCombo_->blockSignals(true);
+    const QString key = virtual_key_light_temperature.isEmpty() ? "neutral" : virtual_key_light_temperature;
+    const int idx = virtualKeyLightTempCombo_->findData(key);
+    if (idx >= 0) virtualKeyLightTempCombo_->setCurrentIndex(idx);
+    virtualKeyLightTempCombo_->blockSignals(false);
+  }
+  if (virtualKeyLightPanSpin_) {
+    virtualKeyLightPanSpin_->blockSignals(true);
+    virtualKeyLightPanSpin_->setValue(std::max(-180, std::min(180, virtual_key_light_pan)));
+    virtualKeyLightPanSpin_->blockSignals(false);
+  }
+  if (virtualKeyLightHdriEdit_) {
+    virtualKeyLightHdriEdit_->blockSignals(true);
+    virtualKeyLightHdriEdit_->setText(virtual_key_light_hdri);
+    virtualKeyLightHdriEdit_->blockSignals(false);
+  }
+
+  // Enable per-effect parameter controls.
+  const QString bgMode = backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  if (backgroundStrengthSpin_) backgroundStrengthSpin_->setEnabled(bgMode == "blur");
+  if (backgroundRemoveColorEdit_) backgroundRemoveColorEdit_->setEnabled(bgMode == "remove");
+  if (backgroundReplaceImageEdit_) backgroundReplaceImageEdit_->setEnabled(bgMode == "replace");
+  if (browseReplaceImageBtn_) browseReplaceImageBtn_->setEnabled(bgMode == "replace");
 
   return true;
 }
@@ -512,6 +699,42 @@ bool VideoPage::SendDaemonVideoEffects() {
     req << " background_strength=" << backgroundStrengthSpin_->value();
   }
 
+  if (backgroundRemoveColorEdit_) {
+    const QString c = backgroundRemoveColorEdit_->text().trimmed();
+    if (!c.isEmpty()) {
+      req << " background_remove_color=" << c.toStdString();
+    }
+  }
+  if (backgroundReplaceImageEdit_) {
+    const QString p = backgroundReplaceImageEdit_->text().trimmed();
+    if (!p.isEmpty()) {
+      req << " background_replace_image=" << p.toStdString();
+    }
+  }
+
+  // Virtual Key Light (Maxine relighting)
+  if (virtualKeyLightCheck_) {
+    req << " virtual_key_light=" << (virtualKeyLightCheck_->isChecked() ? "1" : "0");
+  }
+  if (virtualKeyLightIntensitySpin_) {
+    req << " virtual_key_light_intensity=" << virtualKeyLightIntensitySpin_->value();
+  }
+  if (virtualKeyLightTempCombo_) {
+    const QString t = virtualKeyLightTempCombo_->currentData().toString();
+    if (!t.isEmpty()) {
+      req << " virtual_key_light_temperature=" << t.toStdString();
+    }
+  }
+  if (virtualKeyLightPanSpin_) {
+    req << " virtual_key_light_pan=" << virtualKeyLightPanSpin_->value();
+  }
+  if (virtualKeyLightHdriEdit_) {
+    const QString p = virtualKeyLightHdriEdit_->text().trimmed();
+    if (!p.isEmpty()) {
+      req << " virtual_key_light_hdri=" << p.toStdString();
+    }
+  }
+
   QString err;
   if (!DaemonRequest(req.str(), nullptr, &err)) {
     ShowError("Effects update failed", err);
@@ -536,11 +759,12 @@ void VideoPage::OnMirrorToggled(bool checked) {
 }
 
 void VideoPage::OnBackgroundChanged(int /*index*/) {
-  // Enable strength only for blur.
-  if (backgroundStrengthSpin_ && backgroundCombo_) {
-    const QString bg = backgroundCombo_->currentData().toString();
-    backgroundStrengthSpin_->setEnabled(bg == "blur");
-  }
+  // Enable per-effect parameter controls.
+  const QString bg = backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  if (backgroundStrengthSpin_) backgroundStrengthSpin_->setEnabled(bg == "blur");
+  if (backgroundRemoveColorEdit_) backgroundRemoveColorEdit_->setEnabled(bg == "remove");
+  if (backgroundReplaceImageEdit_) backgroundReplaceImageEdit_->setEnabled(bg == "replace");
+  if (browseReplaceImageBtn_) browseReplaceImageBtn_->setEnabled(bg == "replace");
   (void)SendDaemonVideoEffects();
 }
 
@@ -549,6 +773,55 @@ void VideoPage::OnBackgroundBackendChanged(int /*index*/) {
 }
 
 void VideoPage::OnBackgroundStrengthChanged(int /*value*/) {
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnBackgroundRemoveColorChanged() {
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnBackgroundReplaceImageChanged() {
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnBrowseReplaceImage() {
+  const QString file = QFileDialog::getOpenFileName(this,
+                                                    "Select background image",
+                                                    QString(),
+                                                    "PPM (P6) Images (*.ppm *.PPM);;All files (*)");
+  if (file.isEmpty()) return;
+  if (backgroundReplaceImageEdit_) backgroundReplaceImageEdit_->setText(file);
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnVirtualKeyLightToggled(bool /*checked*/) {
+  UpdateUiEnabled();
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnVirtualKeyLightIntensityChanged(int /*value*/) {
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnVirtualKeyLightTemperatureChanged(int /*index*/) {
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnVirtualKeyLightPanChanged(int /*value*/) {
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnVirtualKeyLightHdriChanged() {
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnBrowseVirtualKeyLightHdri() {
+  const QString file = QFileDialog::getOpenFileName(this,
+                                                    "Select HDRI (.hdr/.exr)",
+                                                    QString(),
+                                                    "HDRI (*.hdr *.exr);;All files (*)");
+  if (file.isEmpty()) return;
+  if (virtualKeyLightHdriEdit_) virtualKeyLightHdriEdit_->setText(file);
   (void)SendDaemonVideoEffects();
 }
 
@@ -701,6 +974,25 @@ void VideoPage::UpdateUiEnabled() {
   if (backgroundStrengthSpin_ && backgroundCombo_) {
     backgroundStrengthSpin_->setEnabled(daemonReachable_ && backgroundCombo_->currentData().toString() == "blur");
   }
+  if (backgroundRemoveColorEdit_ && backgroundCombo_) {
+    backgroundRemoveColorEdit_->setEnabled(daemonReachable_ && backgroundCombo_->currentData().toString() == "remove");
+  }
+  if (backgroundReplaceImageEdit_ && backgroundCombo_) {
+    const bool on = daemonReachable_ && backgroundCombo_->currentData().toString() == "replace";
+    backgroundReplaceImageEdit_->setEnabled(on);
+    if (browseReplaceImageBtn_) browseReplaceImageBtn_->setEnabled(on);
+  }
+
+  // Virtual Key Light gating based on Maxine diagnostics.
+  const bool vklAvail = daemonReachable_ && st.virtual_key_light_available;
+  const bool vklOn = virtualKeyLightCheck_ ? virtualKeyLightCheck_->isChecked() : false;
+
+  if (virtualKeyLightCheck_) virtualKeyLightCheck_->setEnabled(vklAvail);
+  if (virtualKeyLightIntensitySpin_) virtualKeyLightIntensitySpin_->setEnabled(vklAvail && vklOn);
+  if (virtualKeyLightTempCombo_) virtualKeyLightTempCombo_->setEnabled(vklAvail && vklOn);
+  if (virtualKeyLightPanSpin_) virtualKeyLightPanSpin_->setEnabled(vklAvail && vklOn);
+  if (virtualKeyLightHdriEdit_) virtualKeyLightHdriEdit_->setEnabled(vklAvail && vklOn);
+  if (browseVirtualKeyLightHdriBtn_) browseVirtualKeyLightHdriBtn_->setEnabled(vklAvail && vklOn);
 
   startBtn_->setEnabled(daemonReachable_ && !enabled && outSelectable && !outputCombo_->currentData().toString().isEmpty());
   stopBtn_->setEnabled(daemonReachable_ && enabled);
@@ -757,7 +1049,23 @@ void VideoPage::UpdateStatusText() {
   if (st.background_strength > 0) {
     oss << " strength=" << st.background_strength;
   }
+  if (st.background == "remove" && !st.background_remove_color.isEmpty()) {
+    oss << " color=" << st.background_remove_color.toStdString();
+  }
+  if (st.background == "replace" && !st.background_replace_image.isEmpty()) {
+    oss << " image=" << st.background_replace_image.toStdString();
+  }
   oss << "\n";
+
+  if (!st.maxine_summary.isEmpty()) {
+    oss << "  maxine:     " << st.maxine_summary.toStdString() << "\n";
+    oss << "  vkl avail:  " << (st.virtual_key_light_available ? "yes" : "no") << "\n";
+  }
+
+  oss << "  key light:  " << (st.virtual_key_light ? "on" : "off")
+      << " intensity=" << st.virtual_key_light_intensity << "%"
+      << " temp=" << st.virtual_key_light_temperature.toStdString()
+      << " pan=" << st.virtual_key_light_pan << "\n";
 
   if (!st.effects_backends.isEmpty()) {
     oss << "  effects:    " << st.effects_backends.toStdString() << "\n";

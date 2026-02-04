@@ -1,10 +1,14 @@
 #include "daemon_config.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <map>
+#include <sstream>
 #include <string>
 
 #include "core/util/fs.h"
@@ -47,6 +51,54 @@ int ParseInt(const std::string& raw, int fallback) {
   const auto v = studiocast::util::TrimCopy(raw);
   if (v.empty()) return fallback;
   return std::atoi(v.c_str());
+}
+
+bool ParseRgbHex(const std::string& raw, std::uint32_t* out) {
+  if (!out) return false;
+  std::string s = studiocast::util::TrimCopy(raw);
+  if (s.empty()) return false;
+  if (!s.empty() && s[0] == '#') s.erase(0, 1);
+  if (s.size() != 6) return false;
+
+  std::uint32_t v = 0;
+  for (const char c : s) {
+    v <<= 4u;
+    if (c >= '0' && c <= '9') {
+      v |= static_cast<std::uint32_t>(c - '0');
+    } else if (c >= 'a' && c <= 'f') {
+      v |= static_cast<std::uint32_t>(c - 'a' + 10);
+    } else if (c >= 'A' && c <= 'F') {
+      v |= static_cast<std::uint32_t>(c - 'A' + 10);
+    } else {
+      return false;
+    }
+  }
+  *out = v;
+  return true;
+}
+
+std::string FormatRgbHex(std::uint32_t rgb) {
+  std::ostringstream oss;
+  oss << "#" << std::hex << std::nouppercase << std::setfill('0') << std::setw(6) << (rgb & 0xFFFFFFu);
+  return oss.str();
+}
+
+int ParseKeyLightTemperaturePreset(const std::string& raw, int fallback) {
+  auto v = studiocast::util::TrimCopy(raw);
+  std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (v.empty()) return fallback;
+  if (v == "0" || v == "neutral") return 0;
+  if (v == "1" || v == "warm") return 1;
+  if (v == "2" || v == "cool") return 2;
+  return fallback;
+}
+
+std::string FormatKeyLightTemperaturePreset(int preset) {
+  switch (preset) {
+    case 1: return "warm";
+    case 2: return "cool";
+    default: return "neutral";
+  }
 }
 
 }  // namespace
@@ -95,6 +147,28 @@ DaemonConfig LoadDaemonConfig() {
       }
       if (auto it = kv.find("video.background_strength"); it != kv.end()) {
         s.video_background_strength = ParseInt(it->second, s.video_background_strength);
+      }
+      if (auto it = kv.find("video.background_remove_color"); it != kv.end()) {
+        s.video_background_remove_color = it->second;
+      }
+      if (auto it = kv.find("video.background_replace_image"); it != kv.end()) {
+        s.video_background_replace_image = it->second;
+      }
+
+      if (auto it = kv.find("video.virtual_key_light"); it != kv.end()) {
+        s.video_virtual_key_light = ParseBool(it->second, s.video_virtual_key_light);
+      }
+      if (auto it = kv.find("video.virtual_key_light_intensity"); it != kv.end()) {
+        s.video_virtual_key_light_intensity = ParseInt(it->second, s.video_virtual_key_light_intensity);
+      }
+      if (auto it = kv.find("video.virtual_key_light_temperature"); it != kv.end()) {
+        s.video_virtual_key_light_temperature = it->second;
+      }
+      if (auto it = kv.find("video.virtual_key_light_pan"); it != kv.end()) {
+        s.video_virtual_key_light_pan = ParseInt(it->second, s.video_virtual_key_light_pan);
+      }
+      if (auto it = kv.find("video.virtual_key_light_hdri"); it != kv.end()) {
+        s.video_virtual_key_light_hdri = it->second;
       }
 
       if (auto it = kv.find("service.consumer_poll_ms"); it != kv.end()) {
@@ -147,6 +221,23 @@ bool SaveDaemonConfig(const DaemonConfig& s, std::string* error) {
   out << "video.background_backend = " << s.video_background_backend << "\n";
   out << "video.background_strength = " << s.video_background_strength << "\n\n";
 
+  if (!s.video_background_remove_color.empty()) {
+    out << "video.background_remove_color = " << s.video_background_remove_color << "\n";
+  }
+  if (!s.video_background_replace_image.empty()) {
+    out << "video.background_replace_image = " << s.video_background_replace_image << "\n";
+  }
+  out << "\n";
+
+  out << "video.virtual_key_light = " << (s.video_virtual_key_light ? "true" : "false") << "\n";
+  out << "video.virtual_key_light_intensity = " << s.video_virtual_key_light_intensity << "\n";
+  out << "video.virtual_key_light_temperature = " << s.video_virtual_key_light_temperature << "\n";
+  out << "video.virtual_key_light_pan = " << s.video_virtual_key_light_pan << "\n";
+  if (!s.video_virtual_key_light_hdri.empty()) {
+    out << "video.virtual_key_light_hdri = " << s.video_virtual_key_light_hdri << "\n";
+  }
+  out << "\n";
+
   out << "service.consumer_poll_ms = " << s.consumer_poll_ms << "\n";
   out << "service.stop_grace_ms = " << s.stop_grace_ms << "\n";
   out << "service.always_on = " << (s.always_on ? "true" : "false") << "\n";
@@ -177,6 +268,22 @@ studiocast::video::VirtualCameraServiceConfig ToVideoServiceConfig(const DaemonC
     }
 
     cfg.pipeline.effects.background_strength = std::max(1, std::min(64, s.video_background_strength));
+
+    cfg.pipeline.effects.background_replace_image = s.video_background_replace_image;
+    std::uint32_t rgb = 0;
+    if (ParseRgbHex(s.video_background_remove_color, &rgb)) {
+      cfg.pipeline.effects.background_remove_color_rgb = rgb;
+    }
+
+    cfg.pipeline.effects.virtual_key_light.enabled = s.video_virtual_key_light;
+    cfg.pipeline.effects.virtual_key_light.intensity =
+        std::max(0, std::min(100, s.video_virtual_key_light_intensity)) / 100.0f;
+    cfg.pipeline.effects.virtual_key_light.temperature_preset =
+        ParseKeyLightTemperaturePreset(s.video_virtual_key_light_temperature,
+                                       cfg.pipeline.effects.virtual_key_light.temperature_preset);
+    cfg.pipeline.effects.virtual_key_light.direction_pan_degrees =
+        static_cast<float>(std::max(-180, std::min(180, s.video_virtual_key_light_pan)));
+    cfg.pipeline.effects.virtual_key_light.hdri_path = s.video_virtual_key_light_hdri;
   }
 
   cfg.consumer_poll_ms = s.consumer_poll_ms;
@@ -199,6 +306,18 @@ void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCamer
   out->video_background = studiocast::video::effects::ToString(cfg.pipeline.effects.background);
   out->video_background_backend = studiocast::video::effects::ToString(cfg.pipeline.effects.background_backend);
   out->video_background_strength = cfg.pipeline.effects.background_strength;
+
+  out->video_background_remove_color = FormatRgbHex(cfg.pipeline.effects.background_remove_color_rgb);
+  out->video_background_replace_image = cfg.pipeline.effects.background_replace_image.string();
+
+  out->video_virtual_key_light = cfg.pipeline.effects.virtual_key_light.enabled;
+  out->video_virtual_key_light_intensity =
+      std::max(0, std::min(100, static_cast<int>(cfg.pipeline.effects.virtual_key_light.intensity * 100.0f)));
+  out->video_virtual_key_light_temperature =
+      FormatKeyLightTemperaturePreset(cfg.pipeline.effects.virtual_key_light.temperature_preset);
+  out->video_virtual_key_light_pan =
+      std::max(-180, std::min(180, static_cast<int>(cfg.pipeline.effects.virtual_key_light.direction_pan_degrees)));
+  out->video_virtual_key_light_hdri = cfg.pipeline.effects.virtual_key_light.hdri_path.string();
 
   out->consumer_poll_ms = cfg.consumer_poll_ms;
   out->stop_grace_ms = cfg.stop_grace_ms;
