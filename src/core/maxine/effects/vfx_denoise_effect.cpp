@@ -4,7 +4,6 @@
 #include <cmath>
 #include <sstream>
 
-#include "core/video/camera_pipeline.h"
 
 namespace studiocast::maxine::effects {
 
@@ -273,9 +272,9 @@ bool VfxDenoiseEffect::Initialize(std::string* error) {
   return true;
 }
 
-bool VfxDenoiseEffect::Configure(const studiocast::video::CameraEffects& settings, std::string*) {
+bool VfxDenoiseEffect::Configure(const studiocast::video::effects::BroadcastCameraEffects& settings, std::string*) {
   // Strength is carried as an integer percentage in the canonical model.
-  const float s = static_cast<float>(std::clamp(settings.denoise_strength, 0, 100)) / 100.0f;
+  const float s = static_cast<float>(std::clamp(settings.video_noise_removal.strength, 0, 100)) / 100.0f;
   if (std::fabs(s - strength_) > 1e-6f) {
     strength_ = s;
     cfg_dirty_ = true;

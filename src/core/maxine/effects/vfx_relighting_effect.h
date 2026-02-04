@@ -40,7 +40,7 @@ class VfxRelightingEffect final : public IVfxEffect {
   bool Initialize(std::string* error);
 
   // Configure from canonical settings.
-  bool Configure(const studiocast::video::CameraEffects& settings, std::string* error) override;
+  bool Configure(const studiocast::video::effects::BroadcastCameraEffects& settings, std::string* error) override;
 
   // Runs relighting on `frame.nvcv_gpu` using `frame.matte_gpu`.
   // The relit foreground output is stored in an internal GPU NvCVImage.

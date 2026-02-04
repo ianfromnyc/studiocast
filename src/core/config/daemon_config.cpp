@@ -429,7 +429,7 @@ studiocast::video::VirtualCameraServiceConfig ToVideoServiceConfig(const DaemonC
   cfg.pipeline.width = s.video_width;
   cfg.pipeline.height = s.video_height;
   cfg.pipeline.fps = s.video_fps;
-  cfg.pipeline.effects = studiocast::video::ToLegacyCameraEffects(s.video_effects);
+  cfg.pipeline.effects = s.video_effects;
 
   cfg.consumer_poll_ms = s.consumer_poll_ms;
   cfg.stop_grace_ms = s.stop_grace_ms;
@@ -446,7 +446,7 @@ void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCamer
   out->video_width = cfg.pipeline.width;
   out->video_height = cfg.pipeline.height;
   out->video_fps = cfg.pipeline.fps;
-  out->video_effects = studiocast::video::ToBroadcastCameraEffects(cfg.pipeline.effects);
+  out->video_effects = cfg.pipeline.effects;
 
   out->consumer_poll_ms = cfg.consumer_poll_ms;
   out->stop_grace_ms = cfg.stop_grace_ms;

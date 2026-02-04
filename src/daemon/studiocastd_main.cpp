@@ -20,7 +20,6 @@
 #include "core/ipc/daemon_socket.h"
 #include "core/maxine/maxine_manager.h"
 #include "core/video/broadcast_camera_effects_json.h"
-#include "core/video/effects/effect_types.h"
 #include "core/video/virtual_camera_service.h"
 #include "core/video/v4l2loopback.h"
 #include "studiocast/version.h"
@@ -246,24 +245,24 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"height\":" << cfg.pipeline.height << ",";
     oss << "\"fps\":" << cfg.pipeline.fps << ",";
     oss << "\"mirror\":" << BoolJson(cfg.pipeline.effects.mirror) << ",";
-    oss << "\"background\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.background)) << "\",";
-    oss << "\"background_backend\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.background_backend)) << "\",";
-    oss << "\"background_strength\":" << cfg.pipeline.effects.background_strength << ",";
-    oss << "\"background_remove_color\":\"" << JsonEscape(FormatRgbHex(cfg.pipeline.effects.background_remove_color_rgb)) << "\",";
-    oss << "\"background_replace_image\":\"" << JsonEscape(cfg.pipeline.effects.background_replace_image.string()) << "\",";
+    // Legacy flat fields (kept for compatibility): derived from the canonical Broadcast schema.
+    oss << "\"background\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.virtual_background.mode)) << "\",";
+    oss << "\"background_backend\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.engine)) << "\",";
+    oss << "\"background_strength\":" << cfg.pipeline.effects.virtual_background.strength << ",";
+    oss << "\"background_remove_color\":\"" << JsonEscape(cfg.pipeline.effects.virtual_background.remove_color) << "\",";
+    oss << "\"background_replace_image\":\"" << JsonEscape(cfg.pipeline.effects.virtual_background.replace_path) << "\",";
 
     // Canonical effect model (Broadcast schema) for GUI/CLI.
     oss << "\"video_effects\":"
-        << studiocast::video::BroadcastCameraEffectsContractToJson(
-               studiocast::video::ToBroadcastCameraEffects(cfg.pipeline.effects))
+        << studiocast::video::BroadcastCameraEffectsContractToJson(cfg.pipeline.effects)
         << ",";
 
-    const int vkl_intensity = std::max(0, std::min(100, static_cast<int>(cfg.pipeline.effects.virtual_key_light.intensity * 100.0f)));
+    const int vkl_intensity = std::max(0, std::min(100, cfg.pipeline.effects.virtual_key_light.intensity));
     oss << "\"virtual_key_light\":" << BoolJson(cfg.pipeline.effects.virtual_key_light.enabled) << ",";
     oss << "\"virtual_key_light_intensity\":" << vkl_intensity << ",";
     oss << "\"virtual_key_light_temperature\":\"" << JsonEscape(FormatKeyLightTemperaturePreset(cfg.pipeline.effects.virtual_key_light.temperature_preset)) << "\",";
-    oss << "\"virtual_key_light_pan\":" << static_cast<int>(cfg.pipeline.effects.virtual_key_light.direction_pan_degrees) << ",";
-    oss << "\"virtual_key_light_hdri\":\"" << JsonEscape(cfg.pipeline.effects.virtual_key_light.hdri_path.string()) << "\",";
+    oss << "\"virtual_key_light_pan\":" << cfg.pipeline.effects.virtual_key_light.direction_pan_degrees << ",";
+    oss << "\"virtual_key_light_hdri\":\"" << JsonEscape(cfg.pipeline.effects.virtual_key_light.hdri_path) << "\",";
 
     oss << "\"pipeline\":{";
     oss << "\"running\":" << BoolJson(st.pipeline.running) << ",";
@@ -293,29 +292,28 @@ std::string ConfigToJson(const studiocast::video::VirtualCameraServiceConfig& cf
     oss << "\"height\":" << cfg.pipeline.height << ",";
     oss << "\"fps\":" << cfg.pipeline.fps << ",";
     oss << "\"mirror\":" << BoolJson(cfg.pipeline.effects.mirror) << ",";
-    oss << "\"background\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.background)) << "\",";
-    oss << "\"background_backend\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.background_backend)) << "\",";
-    oss << "\"background_strength\":" << cfg.pipeline.effects.background_strength << ",";
-    oss << "\"background_remove_color\":\"" << JsonEscape(FormatRgbHex(cfg.pipeline.effects.background_remove_color_rgb)) << "\",";
-    oss << "\"background_replace_image\":\"" << JsonEscape(cfg.pipeline.effects.background_replace_image.string()) << "\",";
+    // Legacy flat fields (kept for compatibility): derived from the canonical Broadcast schema.
+    oss << "\"background\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.virtual_background.mode)) << "\",";
+    oss << "\"background_backend\":\"" << JsonEscape(studiocast::video::effects::ToString(cfg.pipeline.effects.engine)) << "\",";
+    oss << "\"background_strength\":" << cfg.pipeline.effects.virtual_background.strength << ",";
+    oss << "\"background_remove_color\":\"" << JsonEscape(cfg.pipeline.effects.virtual_background.remove_color) << "\",";
+    oss << "\"background_replace_image\":\"" << JsonEscape(cfg.pipeline.effects.virtual_background.replace_path) << "\",";
 
-    const int vkl_intensity = std::max(0, std::min(100, static_cast<int>(cfg.pipeline.effects.virtual_key_light.intensity * 100.0f)));
+    const int vkl_intensity = std::max(0, std::min(100, cfg.pipeline.effects.virtual_key_light.intensity));
     oss << "\"virtual_key_light\":" << BoolJson(cfg.pipeline.effects.virtual_key_light.enabled) << ",";
     oss << "\"virtual_key_light_intensity\":" << vkl_intensity << ",";
     oss << "\"virtual_key_light_temperature\":\"" << JsonEscape(FormatKeyLightTemperaturePreset(cfg.pipeline.effects.virtual_key_light.temperature_preset)) << "\",";
-    oss << "\"virtual_key_light_pan\":" << static_cast<int>(cfg.pipeline.effects.virtual_key_light.direction_pan_degrees) << ",";
-    oss << "\"virtual_key_light_hdri\":\"" << JsonEscape(cfg.pipeline.effects.virtual_key_light.hdri_path.string()) << "\",";
+    oss << "\"virtual_key_light_pan\":" << cfg.pipeline.effects.virtual_key_light.direction_pan_degrees << ",";
+    oss << "\"virtual_key_light_hdri\":\"" << JsonEscape(cfg.pipeline.effects.virtual_key_light.hdri_path) << "\",";
 
-    const int vignette_intensity =
-        std::max(0, std::min(100, static_cast<int>(cfg.pipeline.effects.vignette.intensity * 100.0f)));
+    const int vignette_intensity = std::max(0, std::min(100, cfg.pipeline.effects.vignette.intensity));
     oss << "\"vignette\":" << BoolJson(cfg.pipeline.effects.vignette.enabled) << ",";
     oss << "\"vignette_intensity\":" << vignette_intensity << ",";
     oss << "\"vignette_center_on_face\":" << BoolJson(cfg.pipeline.effects.vignette.center_on_tracked_face) << ",";
 
     // Canonical, nested effects model (safe for file paths with spaces).
     oss << "\"video_effects\":"
-        << studiocast::video::BroadcastCameraEffectsContractToJson(
-               studiocast::video::ToBroadcastCameraEffects(cfg.pipeline.effects));
+        << studiocast::video::BroadcastCameraEffectsContractToJson(cfg.pipeline.effects);
     oss << "}";
     return oss.str();
 }
@@ -405,36 +403,45 @@ int main(int argc, char** argv) {
 
     if (HasArg(argc, argv, "--mirror")) cfg.pipeline.effects.mirror = true;
 
+    // Legacy CLI flags: map to canonical Broadcast schema.
     if (const auto v = GetArgValue(argc, argv, "--background"); !v.empty()) {
-        studiocast::video::effects::BackgroundEffect bg{};
-        if (studiocast::video::effects::ParseBackgroundEffect(v, &bg)) {
-            cfg.pipeline.effects.background = bg;
+        studiocast::video::effects::VirtualBackgroundMode mode{};
+        if (studiocast::video::effects::ParseVirtualBackgroundMode(v, &mode)) {
+            cfg.pipeline.effects.virtual_background.mode = mode;
+            if (mode != studiocast::video::effects::VirtualBackgroundMode::none) {
+                cfg.pipeline.effects.auto_frame.enabled = false;
+            }
+        } else if (v == "auto_frame" || v == "autoframe") {
+            cfg.pipeline.effects.auto_frame.enabled = true;
+            cfg.pipeline.effects.virtual_background.mode = studiocast::video::effects::VirtualBackgroundMode::none;
         } else {
             std::cerr << "WARN: unknown --background value: " << v << "\n";
         }
     }
     if (const auto v = GetArgValue(argc, argv, "--background-backend"); !v.empty()) {
-        studiocast::video::effects::EffectBackend be{};
-        if (studiocast::video::effects::ParseEffectBackend(v, &be)) {
-            cfg.pipeline.effects.background_backend = be;
+        studiocast::video::effects::EffectsEnginePreference eng{};
+        if (studiocast::video::effects::ParseEffectsEnginePreference(v, &eng)) {
+            cfg.pipeline.effects.engine = eng;
         } else {
-            std::cerr << "WARN: unknown --background-backend value: " << v << "\n";
+            std::cerr << "WARN: unknown --background-backend value: " << v
+                      << " (expected auto_select|maxine)\n";
         }
     }
     if (const int v = GetArgInt(argc, argv, "--background-strength", -1); v > 0) {
-        cfg.pipeline.effects.background_strength = std::max(1, std::min(64, v));
+        cfg.pipeline.effects.virtual_background.strength = std::max(1, std::min(64, v));
     }
 
     if (const auto v = GetArgValue(argc, argv, "--background-remove-color"); !v.empty()) {
+        // Canonical form is "#RRGGBB". Accept legacy formats too.
         std::uint32_t rgb = 0;
         if (ParseRgbHex(v, &rgb)) {
-            cfg.pipeline.effects.background_remove_color_rgb = rgb;
+            cfg.pipeline.effects.virtual_background.remove_color = FormatRgbHex(rgb);
         } else {
             std::cerr << "WARN: invalid --background-remove-color (expected #RRGGBB): " << v << "\n";
         }
     }
     if (const auto v = GetArgValue(argc, argv, "--background-replace-image"); !v.empty()) {
-        cfg.pipeline.effects.background_replace_image = v;
+        cfg.pipeline.effects.virtual_background.replace_path = v;
     }
 
     if (const int v = GetArgInt(argc, argv, "--poll-ms", -1); v > 0) cfg.consumer_poll_ms = v;
@@ -511,8 +518,7 @@ int main(int argc, char** argv) {
                           if (pc.cmd == "GET_CONFIG") {
                               const auto current = svc.Config();
                               return std::string("OK ") +
-                                     studiocast::video::BroadcastCameraEffectsContractToJson(
-                                         studiocast::video::ToBroadcastCameraEffects(current.pipeline.effects));
+                                     studiocast::video::BroadcastCameraEffectsContractToJson(current.pipeline.effects);
                           }
 
                           if (pc.cmd == "SET_ENABLED") {
@@ -579,11 +585,11 @@ int main(int argc, char** argv) {
                               auto newCfg = svc.Config();
 
                               std::string jerr;
-                              auto bfx = studiocast::video::ToBroadcastCameraEffects(newCfg.pipeline.effects);
+                              auto bfx = newCfg.pipeline.effects;
                               if (!studiocast::video::ApplyBroadcastCameraEffectsPatchJsonText(jsonText, &bfx, &jerr)) {
                                   return std::string("ERR ") + ErrorJson(jerr.empty() ? "invalid effects JSON" : jerr);
                               }
-                              newCfg.pipeline.effects = studiocast::video::ToLegacyCameraEffects(bfx);
+                              newCfg.pipeline.effects = bfx;
 
                               svc.UpdateConfig(newCfg);
 
@@ -601,7 +607,7 @@ int main(int argc, char** argv) {
                               std::vector<std::string> warnings;
                               warnings.emplace_back("SET_VIDEO_EFFECTS is deprecated; use SET_VIDEO_EFFECTS_JSON");
 
-                              auto bfx = studiocast::video::ToBroadcastCameraEffects(newCfg.pipeline.effects);
+                              auto bfx = newCfg.pipeline.effects;
 
                               if (auto it = pc.kv.find("mirror"); it != pc.kv.end()) {
                                   bool mirror = false;
@@ -612,45 +618,28 @@ int main(int argc, char** argv) {
                               }
 
                               if (auto it = pc.kv.find("background"); it != pc.kv.end()) {
-                                  studiocast::video::effects::BackgroundEffect bg{};
-                                  if (!studiocast::video::effects::ParseBackgroundEffect(it->second, &bg)) {
-                                      return std::string("ERR ") + ErrorJson("background must be none|blur|remove|replace|auto_frame");
-                                  }
-                                  using studiocast::video::effects::BackgroundEffect;
-                                  if (bg == BackgroundEffect::auto_frame) {
+                                  const auto v = it->second;
+                                  studiocast::video::effects::VirtualBackgroundMode mode{};
+                                  if (studiocast::video::effects::ParseVirtualBackgroundMode(v, &mode)) {
+                                      bfx.virtual_background.mode = mode;
+                                      if (mode != studiocast::video::effects::VirtualBackgroundMode::none) {
+                                          bfx.auto_frame.enabled = false;
+                                      }
+                                  } else if (v == "auto_frame" || v == "autoframe") {
                                       bfx.auto_frame.enabled = true;
                                       bfx.virtual_background.mode = studiocast::video::effects::VirtualBackgroundMode::none;
                                   } else {
-                                      bfx.auto_frame.enabled = false;
-                                      switch (bg) {
-                                          case BackgroundEffect::blur:
-                                              bfx.virtual_background.mode = studiocast::video::effects::VirtualBackgroundMode::blur;
-                                              break;
-                                          case BackgroundEffect::remove:
-                                              bfx.virtual_background.mode = studiocast::video::effects::VirtualBackgroundMode::remove;
-                                              break;
-                                          case BackgroundEffect::replace:
-                                              bfx.virtual_background.mode = studiocast::video::effects::VirtualBackgroundMode::replace;
-                                              break;
-                                          case BackgroundEffect::none:
-                                          default:
-                                              bfx.virtual_background.mode = studiocast::video::effects::VirtualBackgroundMode::none;
-                                              break;
-                                      }
+                                      return std::string("ERR ") + ErrorJson("background must be none|blur|remove|replace|auto_frame");
                                   }
                               }
 
                               if (auto it = pc.kv.find("background_backend"); it != pc.kv.end()) {
-                                  studiocast::video::effects::EffectBackend be{};
-                                  if (!studiocast::video::effects::ParseEffectBackend(it->second, &be)) {
-                                      return std::string("ERR ") + ErrorJson("background_backend must be auto|maxine");
+                                  // Deprecated flat field: map to canonical engine preference.
+                                  studiocast::video::effects::EffectsEnginePreference eng{};
+                                  if (!studiocast::video::effects::ParseEffectsEnginePreference(it->second, &eng)) {
+                                      return std::string("ERR ") + ErrorJson("background_backend must be auto_select|maxine");
                                   }
-                                  if (be == studiocast::video::effects::EffectBackend::cpu) {
-                                      return std::string("ERR ") + ErrorJson("CPU backend not supported");
-                                  }
-                                  bfx.engine = (be == studiocast::video::effects::EffectBackend::maxine)
-                                                   ? studiocast::video::effects::EffectsEnginePreference::maxine
-                                                   : studiocast::video::effects::EffectsEnginePreference::auto_select;
+                                  bfx.engine = eng;
                               }
 
                               if (auto it = pc.kv.find("background_strength"); it != pc.kv.end()) {
@@ -742,7 +731,7 @@ int main(int argc, char** argv) {
                               }
 
                               // Persist via canonical schema.
-                              newCfg.pipeline.effects = studiocast::video::ToLegacyCameraEffects(bfx);
+                              newCfg.pipeline.effects = bfx;
 
                               svc.UpdateConfig(newCfg);
 

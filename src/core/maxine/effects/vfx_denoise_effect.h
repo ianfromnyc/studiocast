@@ -34,7 +34,7 @@ class VfxDenoiseEffect final : public IVfxEffect {
 
   bool Initialize(std::string* error);
 
-  bool Configure(const studiocast::video::CameraEffects& settings, std::string* error) override;
+  bool Configure(const studiocast::video::effects::BroadcastCameraEffects& settings, std::string* error) override;
 
   NvCV_Status Process(studiocast::video::GpuFrame& frame, std::string* error) override;
 

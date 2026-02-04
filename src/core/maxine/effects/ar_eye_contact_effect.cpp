@@ -3,8 +3,6 @@
 #include <algorithm>
 #include <sstream>
 
-#include "core/video/camera_pipeline.h"  // CameraEffects
-
 namespace studiocast::maxine::effects {
 namespace {
 
@@ -33,7 +31,8 @@ ArEyeContactEffect::~ArEyeContactEffect() {
   stream_owned_ = false;
 }
 
-bool ArEyeContactEffect::Configure(const studiocast::video::CameraEffects& settings, std::string* /*error*/) {
+bool ArEyeContactEffect::Configure(const studiocast::video::effects::BroadcastCameraEffects& settings,
+                                   std::string* /*error*/) {
   // Configuration is applied lazily (after feature creation) since selector
   // support may vary by SDK version.
   look_away_enabled_ = settings.eye_contact.look_away_enabled;

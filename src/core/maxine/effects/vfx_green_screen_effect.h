@@ -48,7 +48,7 @@ class VfxGreenScreenEffect final : public IVfxEffect {
   bool Initialize(std::string* error);
 
   // Configure from canonical settings.
-  bool Configure(const studiocast::video::CameraEffects& settings, std::string* error) override;
+  bool Configure(const studiocast::video::effects::BroadcastCameraEffects& settings, std::string* error) override;
 
   // Runs green-screen matte generation on `frame.nvcv_gpu`.
   // Output matte is stored in an internal GPU `NvCVImage`.

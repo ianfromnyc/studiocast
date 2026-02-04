@@ -3,7 +3,7 @@
 #include <string>
 
 #include "core/util/json.h"
-#include "core/video/camera_pipeline.h"
+#include "core/video/legacy_camera_effects.h"
 
 namespace studiocast::video {
 

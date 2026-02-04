@@ -4,10 +4,7 @@
 
 #include "core/maxine/nvcv_types.h"
 #include "core/video/gpu_frame.h"
-
-namespace studiocast::video {
-struct CameraEffects;
-}  // namespace studiocast::video
+#include "core/video/effects/broadcast_effects.h"
 
 namespace studiocast::maxine::effects {
 
@@ -36,7 +33,8 @@ class IMaxineEffect {
   // Configure the effect from the canonical effect settings model.
   // Implementations should be safe to call repeatedly and may be invoked while
   // the pipeline is running.
-  virtual bool Configure(const studiocast::video::CameraEffects& settings, std::string* error) = 0;
+  virtual bool Configure(const studiocast::video::effects::BroadcastCameraEffects& settings,
+                         std::string* error) = 0;
 
   // Process the frame in place. Implementations may:
   // - run GPU processing via `frame.nvcv_gpu` and/or `frame.device_ptr`

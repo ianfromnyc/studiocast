@@ -1,7 +1,5 @@
 #include "core/maxine/effects/vfx_background_blur_effect.h"
 
-#include "core/video/camera_pipeline.h"
-
 #include <algorithm>
 #include <sstream>
 
@@ -26,7 +24,7 @@ float Clamp01(float v) {
   return std::max(0.0f, std::min(1.0f, v));
 }
 
-// Current canonical UI model uses an integer strength knob for background blur.
+// Canonical UI model uses a legacy-style integer strength knob for background blur.
 // Map [1..64] -> [0..1].
 float MapStrengthToUnitInterval(int strength) {
   // Be permissive in case callers supply 0..1 or other ranges.
@@ -58,9 +56,10 @@ bool VfxBackgroundBlurEffect::Initialize(std::string* error) {
   return EnsureEffectCreated(error);
 }
 
-bool VfxBackgroundBlurEffect::Configure(const studiocast::video::CameraEffects& settings, std::string* error) {
+bool VfxBackgroundBlurEffect::Configure(const studiocast::video::effects::BroadcastCameraEffects& settings,
+                                        std::string* error) {
   Config next = cfg_;
-  next.strength = MapStrengthToUnitInterval(settings.background_strength);
+  next.strength = MapStrengthToUnitInterval(settings.virtual_background.strength);
   next.strength = Clamp01(next.strength);
 
   if (next.strength != cfg_.strength) {

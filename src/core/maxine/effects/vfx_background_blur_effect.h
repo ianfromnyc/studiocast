@@ -36,7 +36,7 @@ class VfxBackgroundBlurEffect final : public IVfxEffect {
   // Initializes the underlying NvVFX effect (lazy; also called by Process).
   bool Initialize(std::string* error);
 
-  bool Configure(const studiocast::video::CameraEffects& settings, std::string* error) override;
+  bool Configure(const studiocast::video::effects::BroadcastCameraEffects& settings, std::string* error) override;
 
   // Runs background blur on `frame.nvcv_gpu` using `frame.matte_gpu`.
   // Output is stored in an internal GPU `NvCVImage`.

@@ -166,7 +166,7 @@ bool VfxTransferEffect::Initialize(std::string* error) {
   return true;
 }
 
-bool VfxTransferEffect::Configure(const studiocast::video::CameraEffects&, std::string*) {
+bool VfxTransferEffect::Configure(const studiocast::video::effects::BroadcastCameraEffects&, std::string*) {
   // Transfer has no user-facing configuration in StudioCast.
   return true;
 }

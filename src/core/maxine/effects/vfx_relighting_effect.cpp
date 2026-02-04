@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <sstream>
 
-#include "core/video/camera_pipeline.h"
 
 namespace studiocast::maxine::effects {
 
@@ -44,11 +43,12 @@ bool VfxRelightingEffect::Initialize(std::string* error) {
   return EnsureEffectCreated(error);
 }
 
-bool VfxRelightingEffect::Configure(const studiocast::video::CameraEffects& settings, std::string* error) {
+bool VfxRelightingEffect::Configure(const studiocast::video::effects::BroadcastCameraEffects& settings,
+                                    std::string* error) {
   // Canonical model stores relighting settings under `virtual_key_light`.
   Config next = cfg_;
   next.hdri_path = settings.virtual_key_light.hdri_path;
-  next.direction_pan_degrees = settings.virtual_key_light.direction_pan_degrees;
+  next.direction_pan_degrees = static_cast<float>(settings.virtual_key_light.direction_pan_degrees);
 
   if (next.hdri_path != cfg_.hdri_path || next.direction_pan_degrees != cfg_.direction_pan_degrees) {
     cfg_ = std::move(next);

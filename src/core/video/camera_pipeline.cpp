@@ -53,6 +53,41 @@ std::string ToLowerAscii(std::string s) {
   return s;
 }
 
+bool ParseRgbHex(const std::string& s, std::uint32_t* out_rgb) {
+  if (!out_rgb) return false;
+  *out_rgb = 0;
+
+  std::string t = s;
+  if (t.rfind("0x", 0) == 0 || t.rfind("0X", 0) == 0) {
+    t = t.substr(2);
+  }
+  if (!t.empty() && t.front() == '#') {
+    t = t.substr(1);
+  }
+  if (t.size() != 6) return false;
+
+  std::uint32_t v = 0;
+  for (const char ch : t) {
+    v <<= 4u;
+    if (ch >= '0' && ch <= '9') {
+      v |= static_cast<std::uint32_t>(ch - '0');
+    } else if (ch >= 'a' && ch <= 'f') {
+      v |= static_cast<std::uint32_t>(ch - 'a' + 10);
+    } else if (ch >= 'A' && ch <= 'F') {
+      v |= static_cast<std::uint32_t>(ch - 'A' + 10);
+    } else {
+      return false;
+    }
+  }
+  *out_rgb = (v & 0xFFFFFFu);
+  return true;
+}
+
+float Clamp01FromPercent(int percent) {
+  const int p = std::max(0, std::min(100, percent));
+  return static_cast<float>(p) / 100.0f;
+}
+
 int ParseVideoIndex(const std::string& sys_name) {
   // sys_name is usually "videoN".
   if (sys_name.rfind("video", 0) != 0) return -1;
@@ -121,7 +156,7 @@ void CameraPipeline::SetMirrorEnabled(bool enabled) {
   effects_.mirror = enabled;
 }
 
-void CameraPipeline::SetEffects(const CameraEffects& effects) {
+void CameraPipeline::SetEffects(const studiocast::video::effects::BroadcastCameraEffects& effects) {
   std::lock_guard<std::mutex> lock(effects_mu_);
   effects_ = effects;
 }
@@ -457,7 +492,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   // Build a modular effect chain (Maxine-ready). This can be rebuilt live when
   // the GUI/daemon updates effect settings.
   studiocast::video::effects::EffectChain chain;
-  CameraEffects appliedFx{};
+  studiocast::video::effects::BroadcastCameraEffects appliedFx{};
 
   struct MaxineBackgroundBlurContext {
     bool initialized = false;
@@ -551,7 +586,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return {};
     }
 
-    bool EnsureInitialized(int width, int height, const CameraEffects& fx, std::string* error) {
+    bool EnsureInitialized(int width,
+                           int height,
+                           const studiocast::video::effects::BroadcastCameraEffects& fx,
+                           std::string* error) {
       last_error.clear();
 
       if (initialized) {
@@ -730,7 +768,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     bool EnsureBackgroundGpu(int width,
                              int height,
-                             const CameraEffects& fx,
+                             const studiocast::video::effects::BroadcastCameraEffects& fx,
                              studiocast::maxine::CUstream stream,
                              std::string* error) {
       if (!initialized || !nvcv.IsInitialized()) {
@@ -742,16 +780,26 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      const bool wantReplace = (fx.background == studiocast::video::effects::BackgroundEffect::replace);
+      const bool wantReplace = (fx.virtual_background.mode ==
+                                studiocast::video::effects::VirtualBackgroundMode::replace);
+
+      std::uint32_t remove_rgb = 0x000000u;
+      if (!wantReplace) {
+        // remove mode uses a solid color
+        if (!ParseRgbHex(fx.virtual_background.remove_color, &remove_rgb)) {
+          remove_rgb = 0x000000u;
+        }
+      }
 
       bool needsUpload = false;
       if (wantReplace) {
-        if (!cached_bg_is_replace || cached_bg_path != fx.background_replace_image) {
+        const std::filesystem::path path = fx.virtual_background.replace_path;
+        if (!cached_bg_is_replace || cached_bg_path != path) {
           needsUpload = true;
         }
       } else {
         // remove mode uses a solid color
-        if (cached_bg_is_replace || cached_bg_color_rgb != (fx.background_remove_color_rgb & 0xFFFFFFu)) {
+        if (cached_bg_is_replace || cached_bg_color_rgb != (remove_rgb & 0xFFFFFFu)) {
           needsUpload = true;
         }
       }
@@ -768,14 +816,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       if (wantReplace) {
-        if (fx.background_replace_image.empty()) {
-          if (error) *error = "background_replace_image not set.";
+        if (fx.virtual_background.replace_path.empty()) {
+          if (error) *error = "virtual_background.replace_path not set.";
           return false;
         }
 
+        const std::filesystem::path img_path = fx.virtual_background.replace_path;
+
         int iw = 0, ih = 0;
         std::string img_err;
-        if (!LoadPpmP6Rgb24(fx.background_replace_image, &iw, &ih, &tmp_replace_rgb_src, &img_err)) {
+        if (!LoadPpmP6Rgb24(img_path, &iw, &ih, &tmp_replace_rgb_src, &img_err)) {
           if (error) *error = "Failed to load replace image (PPM/P6 required): " + img_err;
           return false;
         }
@@ -806,9 +856,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
 
         cached_bg_is_replace = true;
-        cached_bg_path = fx.background_replace_image;
+        cached_bg_path = img_path;
       } else {
-        const std::uint32_t rgb = fx.background_remove_color_rgb & 0xFFFFFFu;
+        const std::uint32_t rgb = remove_rgb & 0xFFFFFFu;
         const std::uint8_t r = static_cast<std::uint8_t>((rgb >> 16u) & 0xFFu);
         const std::uint8_t g = static_cast<std::uint8_t>((rgb >> 8u) & 0xFFu);
         const std::uint8_t b = static_cast<std::uint8_t>((rgb >> 0u) & 0xFFu);
@@ -840,7 +890,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          int width,
                          int height,
                          std::size_t rgb_stride,
-                         const CameraEffects& fx,
+                         const studiocast::video::effects::BroadcastCameraEffects& fx,
                          bool apply_vignette,
                          float vignette_center_x_px,
                          float vignette_center_y_px,
@@ -881,7 +931,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      if (fx.background == studiocast::video::effects::BackgroundEffect::blur) {
+      if (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::blur) {
         if (!blur->Configure(fx, &cfg_err)) {
           if (error) *error = cfg_err;
           return false;
@@ -903,7 +953,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       frame.matte_gpu = matte;
 
-      if (fx.background == studiocast::video::effects::BackgroundEffect::blur) {
+      if (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::blur) {
         const auto st2 = blur->Process(frame, &proc_err);
         if (st2 != studiocast::maxine::NVCV_SUCCESS) {
           if (error) *error = proc_err.empty() ? std::to_string(st2) : proc_err;
@@ -917,7 +967,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
 
         if (apply_vignette && fx.vignette.enabled) {
-          const float vig_intensity = std::max(0.0f, std::min(1.0f, fx.vignette.intensity));
+          const float vig_intensity = Clamp01FromPercent(fx.vignette.intensity);
           if (vig_intensity > 0.0001f) {
             std::string ve;
             if (!vignette.ApplyInPlace(const_cast<studiocast::maxine::NvCVImage*>(out_gpu),
@@ -937,8 +987,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (error) *error = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(down);
           return false;
         }
-      } else if (fx.background == studiocast::video::effects::BackgroundEffect::remove ||
-                 fx.background == studiocast::video::effects::BackgroundEffect::replace) {
+      } else if (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::remove ||
+                 fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::replace) {
         if (!nvcv.f().NvCVImage_Composite) {
           if (error) *error = "NvCVImage_Composite unavailable.";
           return false;
@@ -958,7 +1008,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
 
         if (apply_vignette && fx.vignette.enabled) {
-          const float vig_intensity = std::max(0.0f, std::min(1.0f, fx.vignette.intensity));
+          const float vig_intensity = Clamp01FromPercent(fx.vignette.intensity);
           if (vig_intensity > 0.0001f) {
             std::string ve;
             if (!vignette.ApplyInPlace(&gpu_bgr_out_img,
@@ -1138,18 +1188,21 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return best;
     }
 
-    bool ResolveHdriPath(const CameraEffects& fx, std::filesystem::path* out, std::string* error) {
+    bool ResolveHdriPath(const studiocast::video::effects::BroadcastCameraEffects& fx,
+                         std::filesystem::path* out,
+                         std::string* error) {
       if (!out) return false;
       out->clear();
 
       // User override.
       if (!fx.virtual_key_light.hdri_path.empty()) {
         std::error_code ec;
-        if (std::filesystem::exists(fx.virtual_key_light.hdri_path, ec)) {
-          *out = fx.virtual_key_light.hdri_path;
+        const std::filesystem::path p = fx.virtual_key_light.hdri_path;
+        if (std::filesystem::exists(p, ec)) {
+          *out = p;
           return true;
         }
-        if (error) *error = "Virtual Key Light HDRI path does not exist: " + fx.virtual_key_light.hdri_path.string();
+        if (error) *error = "Virtual Key Light HDRI path does not exist: " + p.string();
         return false;
       }
 
@@ -1179,7 +1232,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return true;
     }
 
-    bool EnsureInitialized(int width, int height, const CameraEffects& fx, std::string* error) {
+    bool EnsureInitialized(int width,
+                           int height,
+                           const studiocast::video::effects::BroadcastCameraEffects& fx,
+                           std::string* error) {
       last_error.clear();
 
       if (initialized) {
@@ -1192,8 +1248,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           return false;
         }
 
-        CameraEffects tmp = fx;
-        tmp.virtual_key_light.hdri_path = hdri;
+        auto tmp = fx;
+        tmp.virtual_key_light.hdri_path = hdri.string();
 
         std::string cfg_err;
         if (greenscreen && !greenscreen->Configure(tmp, &cfg_err)) {
@@ -1338,8 +1394,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       greenscreen = std::make_unique<studiocast::maxine::effects::VfxGreenScreenEffect>(&vfx, &nvcv, model_dir);
       relight = std::make_unique<studiocast::maxine::effects::VfxRelightingEffect>(&vfx, &nvcv, model_dir);
 
-      CameraEffects tmp = fx;
-      tmp.virtual_key_light.hdri_path = hdri;
+      auto tmp = fx;
+      tmp.virtual_key_light.hdri_path = hdri.string();
 
       if (!greenscreen->Configure(tmp, &err) || !relight->Configure(tmp, &err)) {
         last_error = "Maxine effect Configure failed: " + err;
@@ -1368,7 +1424,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          int width,
                          int height,
                          std::size_t rgb_stride,
-                         const CameraEffects& fx,
+                         const studiocast::video::effects::BroadcastCameraEffects& fx,
                          bool apply_vignette,
                          float vignette_center_x_px,
                          float vignette_center_y_px,
@@ -1382,7 +1438,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      const float intensity = std::max(0.0f, std::min(1.0f, fx.virtual_key_light.intensity));
+      const float intensity = Clamp01FromPercent(fx.virtual_key_light.intensity);
       if (intensity <= 0.0001f) {
         // No-op.
         return true;
@@ -1395,8 +1451,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      CameraEffects tmp = fx;
-      tmp.virtual_key_light.hdri_path = hdri;
+      auto tmp = fx;
+      tmp.virtual_key_light.hdri_path = hdri.string();
 
       // RGB -> BGR staging
       studiocast::video::Rgb24ToBgr24(rgb,
@@ -1481,7 +1537,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       if (apply_vignette && fx.vignette.enabled) {
-        const float vig_intensity = std::max(0.0f, std::min(1.0f, fx.vignette.intensity));
+        const float vig_intensity = Clamp01FromPercent(fx.vignette.intensity);
         if (vig_intensity > 0.0001f) {
           std::string ve;
           if (!vignette.ApplyInPlace(&gpu_bgr_out_img,
@@ -1570,7 +1626,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       last_error.clear();
     }
 
-    bool EnsureInitialized(int width, int height, const CameraEffects& fx, std::string* error) {
+    bool EnsureInitialized(int width,
+                           int height,
+                           const studiocast::video::effects::BroadcastCameraEffects& fx,
+                           std::string* error) {
       if (initialized) {
         std::string cfg_err;
         if (eye_contact && !eye_contact->Configure(fx, &cfg_err)) {
@@ -1714,7 +1773,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          int width,
                          int height,
                          std::size_t rgb_stride,
-                         const CameraEffects& fx,
+                         const studiocast::video::effects::BroadcastCameraEffects& fx,
                          bool apply_vignette,
                          float vignette_center_x_px,
                          float vignette_center_y_px,
@@ -1757,7 +1816,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       if (apply_vignette && fx.vignette.enabled) {
-        const float vig_intensity = std::max(0.0f, std::min(1.0f, fx.vignette.intensity));
+        const float vig_intensity = Clamp01FromPercent(fx.vignette.intensity);
         if (vig_intensity > 0.0001f) {
           std::string ve;
           if (!vignette.ApplyInPlace(&gpu_bgr_out,
@@ -1847,7 +1906,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       last_error.clear();
     }
 
-    bool EnsureInitialized(int width, int height, const CameraEffects& fx, std::string* error) {
+    bool EnsureInitialized(int width,
+                           int height,
+                           const studiocast::video::effects::BroadcastCameraEffects& fx,
+                           std::string* error) {
       if (initialized) return true;
 
       std::string ar_err;
@@ -1996,7 +2058,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          int width,
                          int height,
                          std::size_t rgb_stride,
-                         const CameraEffects& fx,
+                         const studiocast::video::effects::BroadcastCameraEffects& fx,
                          bool apply_vignette,
                          float vignette_center_x_px,
                          float vignette_center_y_px,
@@ -2055,7 +2117,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       if (apply_vignette && fx.vignette.enabled) {
-        const float vig_intensity = std::max(0.0f, std::min(1.0f, fx.vignette.intensity));
+        const float vig_intensity = Clamp01FromPercent(fx.vignette.intensity);
         if (vig_intensity > 0.0001f) {
           float cx = vignette_center_x_px;
           float cy = vignette_center_y_px;
@@ -2215,14 +2277,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          int width,
                          int height,
                          std::size_t rgb_stride,
-                         const CameraEffects& fx,
+                         const studiocast::video::effects::BroadcastCameraEffects& fx,
                          float vignette_center_x_px,
                          float vignette_center_y_px,
                          std::string* error) {
       if (!rgb || width <= 0 || height <= 0) return true;
       if (!fx.vignette.enabled) return true;
 
-      const float vig_intensity = std::max(0.0f, std::min(1.0f, fx.vignette.intensity));
+      const float vig_intensity = Clamp01FromPercent(fx.vignette.intensity);
       if (vig_intensity <= 0.0001f) return true;
 
       std::string init_err;
@@ -2290,7 +2352,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   bool want_maxine_vignette_only = false;
   bool have_maxine_vignette_only = false;
 
-  auto rebuildChain = [&](const CameraEffects& fx) {
+  auto rebuildChain = [&](const studiocast::video::effects::BroadcastCameraEffects& fx) {
     chain.Clear();
 
     std::string note;
@@ -2322,12 +2384,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     // If Maxine-backed effects are requested but are not available, stop the
     // pipeline with a canonical, actionable message.
     const bool wants_vfx =
-        (fx.background == studiocast::video::effects::BackgroundEffect::blur ||
-         fx.background == studiocast::video::effects::BackgroundEffect::remove ||
-         fx.background == studiocast::video::effects::BackgroundEffect::replace) ||
-        fx.denoise || fx.virtual_key_light.enabled;
-    const bool wants_ar = fx.eye_contact.enabled ||
-                          (fx.background == studiocast::video::effects::BackgroundEffect::auto_frame);
+        (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::blur ||
+         fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::remove ||
+         fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::replace) ||
+        fx.video_noise_removal.enabled || fx.virtual_key_light.enabled;
+    const bool wants_ar = fx.eye_contact.enabled || fx.auto_frame.enabled;
 
     if (wants_vfx || wants_ar) {
       studiocast::maxine::MaxineManager mgr;
@@ -2349,25 +2410,25 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         set_blocked(studiocast::maxine::MaxineNeed::ar);
       }
       if (!stop_.load() &&
-          fx.background == studiocast::video::effects::BackgroundEffect::auto_frame &&
+          fx.auto_frame.enabled &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdAutoFrame))) {
         set_blocked(studiocast::maxine::MaxineNeed::ar);
       }
 
       // VFX effects.
-      if (!stop_.load() && (fx.background == studiocast::video::effects::BackgroundEffect::blur) &&
+      if (!stop_.load() && (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::blur) &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
-      if (!stop_.load() && (fx.background == studiocast::video::effects::BackgroundEffect::remove) &&
+      if (!stop_.load() && (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::remove) &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
-      if (!stop_.load() && (fx.background == studiocast::video::effects::BackgroundEffect::replace) &&
+      if (!stop_.load() && (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::replace) &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
-      if (!stop_.load() && fx.denoise &&
+      if (!stop_.load() && fx.video_noise_removal.enabled &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
@@ -2401,26 +2462,21 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
 
     // Background effects.
-    if (fx.background == studiocast::video::effects::BackgroundEffect::blur ||
-        fx.background == studiocast::video::effects::BackgroundEffect::remove ||
-        fx.background == studiocast::video::effects::BackgroundEffect::replace) {
+    if (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::blur ||
+        fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::remove ||
+        fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::replace) {
 
       // Maxine-only. (auto_select means "use Maxine if available; otherwise unavailable").
       // StudioCast no longer runs CPU placeholder background effects in the camera pipeline.
       want_maxine_bg_blur = true;
 
-      if (fx.background_backend == studiocast::video::effects::EffectBackend::cpu) {
-        if (!note.empty()) note += "\n";
-        note += "CPU backend requested for virtual background, but is not supported; attempting Maxine.";
-      }
-
       std::string mx_err;
       if (maxine_bg_blur.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
         have_maxine_bg_blur = true;
-        if (fx.background == studiocast::video::effects::BackgroundEffect::blur) {
+        if (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::blur) {
           if (!note.empty()) note += "\n";
           note += "Maxine VFX: Green Screen matte + Background Blur.";
-        } else if (fx.background == studiocast::video::effects::BackgroundEffect::remove) {
+        } else if (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::remove) {
           if (!note.empty()) note += "\n";
           note += "Maxine VFX: Green Screen matte + Composite (remove).";
         } else {
@@ -2434,7 +2490,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         stop_.store(true);
       }
 
-    } else if (fx.background == studiocast::video::effects::BackgroundEffect::auto_frame) {
+    } else if (fx.auto_frame.enabled) {
       // Auto Frame is Maxine-only (AR + GPU crop/scale).
       want_maxine_auto_frame = true;
 
@@ -2469,7 +2525,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     // Vignette-only stage.
     // If no other GPU stage is active, run a minimal GPU upload -> vignette kernel -> download.
-    if (fx.vignette.enabled && (fx.vignette.intensity > 0.0001f)) {
+    if (fx.vignette.enabled && (Clamp01FromPercent(fx.vignette.intensity) > 0.0001f)) {
       const bool have_any_maxine_gpu_stage =
           have_maxine_eye_contact || have_maxine_bg_blur || have_maxine_relight || have_maxine_auto_frame;
 
@@ -2499,7 +2555,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       std::string backends = chain.BackendSummary();
       if (have_maxine_bg_blur) {
         if (!backends.empty()) backends += ",";
-        backends += "virtual_background." + studiocast::video::effects::ToString(fx.background) + ":maxine";
+        backends += "virtual_background." +
+                    studiocast::video::effects::ToString(fx.virtual_background.mode) + ":maxine";
       }
       if (have_maxine_relight) {
         if (!backends.empty()) backends += ",";
@@ -2526,7 +2583,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
   // Initial chain based on config at pipeline start.
   {
-    CameraEffects fx;
+    studiocast::video::effects::BroadcastCameraEffects fx;
     {
       std::lock_guard<std::mutex> fxLock(effects_mu_);
       fx = effects_;
@@ -2554,7 +2611,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     // Apply effects (in-place on RGB buffer).
     bool fx_failed = false;
     {
-      CameraEffects fx;
+      studiocast::video::effects::BroadcastCameraEffects fx;
       {
         std::lock_guard<std::mutex> fxLock(effects_mu_);
         fx = effects_;
@@ -2572,7 +2629,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       const float vignette_center_x_px = static_cast<float>(capA.width) * 0.5f;
       const float vignette_center_y_px = static_cast<float>(capA.height) * 0.5f;
 
-      const bool vignette_requested = fx.vignette.enabled && (fx.vignette.intensity > 0.0001f);
+      const bool vignette_requested =
+          fx.vignette.enabled && (Clamp01FromPercent(fx.vignette.intensity) > 0.0001f);
       const bool have_any_maxine_gpu_stage =
           have_maxine_eye_contact || have_maxine_bg_blur || have_maxine_relight || have_maxine_auto_frame;
 

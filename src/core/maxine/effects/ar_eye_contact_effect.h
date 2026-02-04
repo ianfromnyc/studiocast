@@ -23,7 +23,7 @@ class ArEyeContactEffect final : public IArFeature {
   const char* Id() const override { return "eye_contact"; }
   const char* DisplayName() const override { return "Eye Contact"; }
 
-  bool Configure(const studiocast::video::CameraEffects& settings, std::string* error) override;
+  bool Configure(const studiocast::video::effects::BroadcastCameraEffects& settings, std::string* error) override;
   NvCV_Status Process(studiocast::video::GpuFrame& frame, std::string* error) override;
 
   const char* Backend() const override { return "maxine_ar"; }

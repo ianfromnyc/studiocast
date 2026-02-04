@@ -1,7 +1,5 @@
 #include "core/maxine/effects/vfx_green_screen_effect.h"
 
-#include "core/video/camera_pipeline.h"
-
 #include <sstream>
 
 namespace studiocast::maxine::effects {
@@ -45,11 +43,12 @@ bool VfxGreenScreenEffect::Initialize(std::string* error) {
   return EnsureEffectCreated(error);
 }
 
-bool VfxGreenScreenEffect::Configure(const studiocast::video::CameraEffects& settings, std::string* error) {
+bool VfxGreenScreenEffect::Configure(const studiocast::video::effects::BroadcastCameraEffects& settings,
+                                     std::string* error) {
   // Map canonical settings onto our config.
   Config next = cfg_;
-  next.mode = settings.green_screen.mode;
-  next.temporal = settings.green_screen.temporal;
+  next.mode = settings.virtual_background.greenscreen_mode;
+  next.temporal = settings.virtual_background.greenscreen_temporal;
 
   // Keep state_count stable for now; it can be wired later via effect params.
   if (next.temporal && next.state_count == 0) next.state_count = 1;
