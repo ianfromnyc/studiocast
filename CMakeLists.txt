@@ -126,6 +126,7 @@ add_library(studiocast_core
         src/core/video/effects/effect_types.h
         src/core/video/effects/effect_types.cpp
         src/core/video/effects/broadcast_effect_contract.h
+        src/core/video/effects/broadcast_effect_maxine_gate.h
         src/core/video/effects/broadcast_effect_rules.h
         src/core/video/effects/broadcast_effect_rules.cpp
         src/core/video/effects/broadcast_effects.h

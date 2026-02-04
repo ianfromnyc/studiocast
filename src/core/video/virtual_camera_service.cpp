@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <sstream>
 #include <thread>
 
@@ -10,7 +11,9 @@
 #include <cerrno>
 #include <cstring>
 
+#include "core/maxine/maxine_manager.h"
 #include "core/util/proc.h"
+#include "core/video/effects/broadcast_effect_maxine_gate.h"
 #include "core/video/v4l2loopback.h"
 
 namespace studiocast::video {
@@ -165,6 +168,9 @@ void VirtualCameraService::ThreadMain() {
     auto lastConsumerSeen = std::chrono::steady_clock::now();
     auto nextStartRetry = std::chrono::steady_clock::time_point{};
 
+    std::optional<studiocast::maxine::MaxineDiagnostics> maxineDiag;
+    auto lastMaxineDiagAt = std::chrono::steady_clock::time_point{};
+
     bool haveAppliedCfg = false;
     CameraPipelineConfig appliedPipelineCfg{};
 
@@ -262,8 +268,47 @@ void VirtualCameraService::ThreadMain() {
         // Apply effects live regardless of consumer state.
         pipeline_.SetEffects(cfg.pipeline.effects);
 
-        const bool wantRun = cfg.enabled && (cfg.always_on || consumerPresent);
-        const auto pst = pipeline_.Status();
+        const bool wantRunRequested = cfg.enabled && (cfg.always_on || consumerPresent);
+        bool wantRun = wantRunRequested;
+
+        // If Maxine-backed effects are enabled but not runnable on this system,
+        // do not start capture/processing threads. Keep loopback output alive
+        // (see EnsureOutputOpen above) so consumers still see a stable device.
+        bool blockedByMaxine = false;
+        std::string blockedMsg;
+        if (wantRunRequested && effects::WantsMaxineForPlannedEffects(cfg.pipeline.effects)) {
+            const auto ttl = std::chrono::seconds(2);
+            if (!maxineDiag.has_value() || lastMaxineDiagAt == std::chrono::steady_clock::time_point{} ||
+                (now - lastMaxineDiagAt) >= ttl) {
+                studiocast::maxine::MaxineManager mgr;
+                maxineDiag = mgr.Diagnose(false);
+                lastMaxineDiagAt = now;
+            }
+
+            if (maxineDiag.has_value()) {
+                const auto gate = effects::EvaluateMaxineGate(cfg.pipeline.effects, *maxineDiag);
+                if (!gate.ok) {
+                    blockedByMaxine = true;
+                    blockedMsg = gate.message;
+                    wantRun = false;
+                }
+            }
+        }
+
+        auto pst = pipeline_.Status();
+        if (blockedByMaxine) {
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = blockedMsg;
+            }
+
+            if (pst.running || pst.starting) {
+                pipeline_.Stop();
+                haveAppliedCfg = false;
+                nextStartRetry = std::chrono::steady_clock::time_point{};
+                pst = pipeline_.Status();
+            }
+        }
 
         // Restart if config changed and we are running.
         if (pst.running && haveAppliedCfg && NeedsPipelineRestart(appliedPipelineCfg, cfg.pipeline)) {

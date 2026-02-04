@@ -20,6 +20,7 @@
 #include "core/util/json.h"
 #include "core/util/strings.h"
 #include "core/video/broadcast_camera_effects_json.h"
+#include "core/video/effects/broadcast_effect_maxine_gate.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/broadcast_effect_rules.h"
 #include "core/video/effects/broadcast_effects_json.h"
@@ -815,6 +816,33 @@ namespace {
                                "\"missing_effects\":{");
                 expectContains("maxine_tojson has eye_contact reasons", js,
                                "\"eye_contact\":[\"missing_ar_feature:gaze_redirection\"]");
+            }
+
+            // Maxine gating decision helper: if a Maxine-backed effect is enabled but not
+            // available, the pipeline must be blocked before starting.
+            {
+                studiocast::video::effects::BroadcastCameraEffects fx;
+                fx.virtual_background.mode = studiocast::video::effects::VirtualBackgroundMode::blur;
+
+                auto d = mkDiag();
+                d.vfx.root_source = "xdg";
+                d.vfx.root_exists = false;
+                d.vfx.library_exists = false;
+                d.vfx.candidate_roots.push_back(
+                    "/home/studiocast_selftest_home/.local/share/studiocast/maxine/VideoFX");
+
+                const auto gate = studiocast::video::effects::EvaluateMaxineGate(fx, d);
+                expectTrue("maxine_gate blur blocked", !gate.ok);
+                expectContains("maxine_gate blur blocked message", gate.message,
+                               "Maxine unavailable: VFX SDK not found");
+
+                d.vfx.root_exists = true;
+                d.vfx.library_exists = true;
+                d.vfx.ok = true;
+                d.vfx.library_loadable = true;
+                d.available_effects = {"virtual_background.blur"};
+                const auto gate2 = studiocast::video::effects::EvaluateMaxineGate(fx, d);
+                expectTrue("maxine_gate blur allowed when available", gate2.ok);
             }
 
             // Restore env.
