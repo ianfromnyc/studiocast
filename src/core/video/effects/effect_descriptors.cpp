@@ -1,6 +1,5 @@
 #include "effect_descriptors.h"
 
-#include "core/maxine/availability.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 
 namespace studiocast::video::effects {
@@ -333,37 +332,6 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
   }
 
   return out;
-}
-
-VideoEffectAvailabilityReport EvaluateVideoEffectAvailability(const std::vector<VideoEffectDescriptor>& descs) {
-  VideoEffectAvailabilityReport rep;
-
-  std::string maxineReason;
-  const bool maxineOk = studiocast::maxine::RuntimeAvailable(&maxineReason);
-  if (maxineReason.empty()) maxineReason = "Maxine runtime unavailable.";
-
-  for (const auto& d : descs) {
-    bool ok = true;
-    std::string reason;
-
-    for (const auto c : d.required_components) {
-      if (c == RequiredComponent::maxine_vfx || c == RequiredComponent::maxine_ar) {
-        if (!maxineOk) {
-          ok = false;
-          reason = maxineReason;
-          break;
-        }
-      }
-    }
-
-    if (ok) {
-      rep.available_effects.push_back(d.id);
-    } else {
-      rep.unavailable_effects.push_back(UnavailableEffectInfo{.id = d.id, .reason = reason});
-    }
-  }
-
-  return rep;
 }
 
 }  // namespace studiocast::video::effects

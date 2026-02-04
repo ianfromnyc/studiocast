@@ -798,6 +798,24 @@ namespace {
                          "Maxine unavailable: feature libraries not installed (run install_feature.sh).");
             }
 
+            // Maxine per-effect availability oracle JSON contract.
+            // GUI enable/disable decisions rely on `available_effects` + `missing_effects`.
+            {
+                studiocast::maxine::MaxineDiagnostics d;
+                d.ok = true;
+                d.supported = true;
+                d.available_effects = {"auto_frame"};
+                d.missing_effects["eye_contact"] = {"AR feature 'gaze_redirection' not installed."};
+
+                const std::string js = d.ToJson();
+                expectContains("maxine_tojson has available_effects", js,
+                               "\"available_effects\":[\"auto_frame\"]");
+                expectContains("maxine_tojson has missing_effects", js,
+                               "\"missing_effects\":{");
+                expectContains("maxine_tojson has eye_contact reasons", js,
+                               "\"eye_contact\":[\"AR feature 'gaze_redirection' not installed.\"]");
+            }
+
             // Restore env.
             if (oldHome) {
                 ::setenv("HOME", oldHomeStr.c_str(), 1);

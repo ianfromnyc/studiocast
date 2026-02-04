@@ -72,17 +72,4 @@ struct VideoEffectDescriptor {
 // Canonical, stable list of known video effects (Qt-free).
 std::vector<VideoEffectDescriptor> VideoEffectDescriptors();
 
-struct UnavailableEffectInfo {
-  std::string id;
-  std::string reason;
-};
-
-struct VideoEffectAvailabilityReport {
-  std::vector<std::string> available_effects;
-  std::vector<UnavailableEffectInfo> unavailable_effects;
-};
-
-// Evaluates which effects are currently runnable based on runtime checks.
-VideoEffectAvailabilityReport EvaluateVideoEffectAvailability(const std::vector<VideoEffectDescriptor>& descs);
-
 }  // namespace studiocast::video::effects

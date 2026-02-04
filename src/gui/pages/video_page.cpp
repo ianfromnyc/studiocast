@@ -22,6 +22,7 @@
 #include <QPushButton>
 #include <QSlider>
 #include <QSpinBox>
+#include <QStandardItemModel>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -84,6 +85,7 @@ struct DaemonVideoStatus {
   QString maxine_blocked_reason;
   QStringList maxine_blocked_details;
   QStringList maxine_available_effects;
+  QMap<QString, QStringList> maxine_missing_effects;
   bool virtual_key_light_available = false;
 
   QString effects_backends;
@@ -160,6 +162,7 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
     }
 
     out->maxine_available_effects.clear();
+    out->maxine_missing_effects.clear();
     out->virtual_key_light_available = false;
     const auto arr = maxine.value("available_effects").toArray();
     for (const auto& v : arr) {
@@ -168,6 +171,19 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
       if (id == "virtual_key_light") {
         out->virtual_key_light_available = true;
       }
+    }
+
+    const QJsonObject missing = maxine.value("missing_effects").toObject();
+    for (auto it = missing.begin(); it != missing.end(); ++it) {
+      const QString id = it.key();
+      if (id.isEmpty()) continue;
+      QStringList reasons;
+      const auto arr = it.value().toArray();
+      for (const auto& rv : arr) {
+        const QString s = rv.toString();
+        if (!s.isEmpty()) reasons.push_back(s);
+      }
+      out->maxine_missing_effects.insert(id, reasons);
     }
   }
 
@@ -1389,65 +1405,135 @@ void VideoPage::UpdateUiEnabled() {
 
   // Effects are only editable when Maxine is supported.
   const bool fxAvail = maxineSupported;
-  auto hasFx = [&](const QString& id) {
+  auto effectAvailable = [&](const QString& id) -> bool {
     if (!fxAvail) return false;
-    if (st.maxine_available_effects.isEmpty()) return true;  // treat as unknown → allow
     return st.maxine_available_effects.contains(id);
+  };
+  auto effectUnavailableTooltip = [&](const QString& id) -> QString {
+    if (!daemonReachable_) return "Daemon unreachable.";
+    if (!fxAvail) {
+      if (!st.maxine_blocked_details.isEmpty()) return st.maxine_blocked_details.join("\n");
+      if (!st.maxine_summary.isEmpty()) return st.maxine_summary;
+      if (!st.maxine_blocked_reason.isEmpty()) return st.maxine_blocked_reason;
+      return "Maxine unavailable.";
+    }
+
+    if (st.maxine_missing_effects.contains(id)) {
+      const auto reasons = st.maxine_missing_effects.value(id);
+      if (!reasons.isEmpty()) return reasons.join("\n");
+      return "Effect is unavailable.";
+    }
+
+    // If Maxine is supported but daemon did not list this effect as available,
+    // treat it as unavailable (disable-by-default).
+    if (st.maxine_available_effects.isEmpty() && st.maxine_missing_effects.isEmpty()) {
+      return "Effect availability not reported by daemon.";
+    }
+    return "Effect is unavailable.";
+  };
+
+  auto setAvail = [&](QWidget* w, bool avail, const QString& tooltip) {
+    if (!w) return;
+    w->setEnabled(avail);
+    w->setToolTip(avail ? QString() : tooltip);
   };
 
   // Mirror
-  if (mirrorCheck_) mirrorCheck_->setEnabled(fxAvail);
+  if (mirrorCheck_) {
+    const bool on = mirrorCheck_->isChecked();
+    const bool allow = fxAvail || on;
+    setAvail(mirrorCheck_, allow, fxAvail ? QString() : effectUnavailableTooltip("mirror"));
+  }
 
   // Virtual Background
-  if (backgroundCombo_) backgroundCombo_->setEnabled(fxAvail);
+  const QString vbMode = backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  const bool vbBlurAvail = effectAvailable("virtual_background.blur");
+  const bool vbRemoveAvail = effectAvailable("virtual_background.remove");
+  const bool vbReplaceAvail = effectAvailable("virtual_background.replace");
+  const bool vbAnyAvail = vbBlurAvail || vbRemoveAvail || vbReplaceAvail;
+  const bool vbOn = (vbMode == "blur" || vbMode == "remove" || vbMode == "replace");
+  if (backgroundCombo_) {
+    // Allow switching back to "off" even when Maxine is unavailable / effect is missing.
+    const bool allow = (fxAvail && vbAnyAvail) || vbOn;
+    setAvail(backgroundCombo_, allow, vbOn ? effectUnavailableTooltip("virtual_background." + vbMode) : effectUnavailableTooltip("virtual_background.blur"));
+
+    // Disable unavailable modes, but keep "off" selectable.
+    auto* m = qobject_cast<QStandardItemModel*>(backgroundCombo_->model());
+    if (m) {
+      for (int i = 0; i < backgroundCombo_->count(); ++i) {
+        const QString data = backgroundCombo_->itemData(i).toString();
+        bool itemEnabled = true;
+        if (data == "blur") itemEnabled = vbBlurAvail;
+        else if (data == "remove") itemEnabled = vbRemoveAvail;
+        else if (data == "replace") itemEnabled = vbReplaceAvail;
+        // "off" stays enabled.
+        if (auto* item = m->item(i)) item->setEnabled(itemEnabled);
+      }
+    }
+  }
   if (backgroundStrengthSpin_ && backgroundCombo_) {
-    backgroundStrengthSpin_->setEnabled(fxAvail && backgroundCombo_->currentData().toString() == "blur");
+    backgroundStrengthSpin_->setEnabled(fxAvail && vbMode == "blur" && vbBlurAvail);
   }
   if (backgroundRemoveColorEdit_ && backgroundCombo_) {
-    backgroundRemoveColorEdit_->setEnabled(fxAvail && backgroundCombo_->currentData().toString() == "remove");
+    backgroundRemoveColorEdit_->setEnabled(fxAvail && vbMode == "remove" && vbRemoveAvail);
   }
   if (backgroundReplaceImageEdit_ && backgroundCombo_) {
-    const bool on = fxAvail && backgroundCombo_->currentData().toString() == "replace";
+    const bool on = fxAvail && vbMode == "replace" && vbReplaceAvail;
     backgroundReplaceImageEdit_->setEnabled(on);
     if (browseReplaceImageBtn_) browseReplaceImageBtn_->setEnabled(on);
   }
 
   // Auto Frame
-  const bool afAvail = hasFx("auto_frame");
+  const bool afAvailable = effectAvailable("auto_frame");
   const bool afOn = autoFrameCheck_ ? autoFrameCheck_->isChecked() : false;
-  if (autoFrameCheck_) autoFrameCheck_->setEnabled(afAvail);
-  if (autoFrameZoomSlider_) autoFrameZoomSlider_->setEnabled(afAvail && afOn);
+  if (autoFrameCheck_) {
+    const bool allow = afAvailable || afOn;
+    setAvail(autoFrameCheck_, allow, effectUnavailableTooltip("auto_frame"));
+  }
+  if (autoFrameZoomSlider_) setAvail(autoFrameZoomSlider_, afAvailable && afOn, effectUnavailableTooltip("auto_frame"));
 
   // Eye Contact
-  const bool ecAvail = hasFx("eye_contact");
+  const bool ecAvailable = effectAvailable("eye_contact");
   const bool ecOn = eyeContactCheck_ ? eyeContactCheck_->isChecked() : false;
-  if (eyeContactCheck_) eyeContactCheck_->setEnabled(ecAvail);
-  if (eyeContactStrengthSlider_) eyeContactStrengthSlider_->setEnabled(ecAvail && ecOn);
-  if (eyeContactLookAwayCheck_) eyeContactLookAwayCheck_->setEnabled(ecAvail && ecOn);
+  if (eyeContactCheck_) {
+    const bool allow = ecAvailable || ecOn;
+    setAvail(eyeContactCheck_, allow, effectUnavailableTooltip("eye_contact"));
+  }
+  if (eyeContactStrengthSlider_) setAvail(eyeContactStrengthSlider_, ecAvailable && ecOn, effectUnavailableTooltip("eye_contact"));
+  if (eyeContactLookAwayCheck_) setAvail(eyeContactLookAwayCheck_, ecAvailable && ecOn, effectUnavailableTooltip("eye_contact"));
 
   // Video Noise Removal
-  const bool dnAvail = hasFx("video_noise_removal");
+  const bool dnAvailable = effectAvailable("video_noise_removal");
   const bool dnOn = denoiseCheck_ ? denoiseCheck_->isChecked() : false;
-  if (denoiseCheck_) denoiseCheck_->setEnabled(dnAvail);
-  if (denoiseStrengthSlider_) denoiseStrengthSlider_->setEnabled(dnAvail && dnOn);
+  if (denoiseCheck_) {
+    const bool allow = dnAvailable || dnOn;
+    setAvail(denoiseCheck_, allow, effectUnavailableTooltip("video_noise_removal"));
+  }
+  if (denoiseStrengthSlider_) setAvail(denoiseStrengthSlider_, dnAvailable && dnOn, effectUnavailableTooltip("video_noise_removal"));
 
   // Virtual Key Light gating based on Maxine diagnostics.
-  const bool vklAvail = fxAvail && st.virtual_key_light_available;
+  const bool vklAvailable = effectAvailable("virtual_key_light");
   const bool vklOn = virtualKeyLightCheck_ ? virtualKeyLightCheck_->isChecked() : false;
 
-  if (virtualKeyLightCheck_) virtualKeyLightCheck_->setEnabled(vklAvail);
-  if (virtualKeyLightIntensitySpin_) virtualKeyLightIntensitySpin_->setEnabled(vklAvail && vklOn);
-  if (virtualKeyLightTempCombo_) virtualKeyLightTempCombo_->setEnabled(vklAvail && vklOn);
-  if (virtualKeyLightPanSpin_) virtualKeyLightPanSpin_->setEnabled(vklAvail && vklOn);
-  if (virtualKeyLightHdriEdit_) virtualKeyLightHdriEdit_->setEnabled(vklAvail && vklOn);
-  if (browseVirtualKeyLightHdriBtn_) browseVirtualKeyLightHdriBtn_->setEnabled(vklAvail && vklOn);
+  if (virtualKeyLightCheck_) {
+    const bool allow = vklAvailable || vklOn;
+    setAvail(virtualKeyLightCheck_, allow, effectUnavailableTooltip("virtual_key_light"));
+  }
+  if (virtualKeyLightIntensitySpin_) setAvail(virtualKeyLightIntensitySpin_, vklAvailable && vklOn, effectUnavailableTooltip("virtual_key_light"));
+  if (virtualKeyLightTempCombo_) setAvail(virtualKeyLightTempCombo_, vklAvailable && vklOn, effectUnavailableTooltip("virtual_key_light"));
+  if (virtualKeyLightPanSpin_) setAvail(virtualKeyLightPanSpin_, vklAvailable && vklOn, effectUnavailableTooltip("virtual_key_light"));
+  if (virtualKeyLightHdriEdit_) setAvail(virtualKeyLightHdriEdit_, vklAvailable && vklOn, effectUnavailableTooltip("virtual_key_light"));
+  if (browseVirtualKeyLightHdriBtn_) setAvail(browseVirtualKeyLightHdriBtn_, vklAvailable && vklOn, effectUnavailableTooltip("virtual_key_light"));
 
   // Vignette runs in the GPU pipeline; we only expose it when Maxine is supported.
-  const bool vigAvail = fxAvail;
+  const bool vigAvailable = fxAvail;
   const bool vigOn = vignetteCheck_ ? vignetteCheck_->isChecked() : false;
-  if (vignetteCheck_) vignetteCheck_->setEnabled(vigAvail);
-  if (vignetteIntensitySlider_) vignetteIntensitySlider_->setEnabled(vigAvail && vigOn);
-  if (vignetteCenterOnFaceCheck_) vignetteCenterOnFaceCheck_->setEnabled(vigAvail && vigOn);
+  if (vignetteCheck_) {
+    const bool allow = vigAvailable || vigOn;
+    setAvail(vignetteCheck_, allow, effectUnavailableTooltip("vignette"));
+  }
+  if (vignetteIntensitySlider_) setAvail(vignetteIntensitySlider_, vigAvailable && vigOn, effectUnavailableTooltip("vignette"));
+  if (vignetteCenterOnFaceCheck_) setAvail(vignetteCenterOnFaceCheck_, vigAvailable && vigOn, effectUnavailableTooltip("vignette"));
 
   startBtn_->setEnabled(daemonReachable_ && !enabled && outSelectable && !outputCombo_->currentData().toString().isEmpty());
   stopBtn_->setEnabled(daemonReachable_ && enabled);
