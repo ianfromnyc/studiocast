@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/maxine/availability.h"
+#include "core/maxine/effects/ar_eye_contact_effect.h"
 #include "core/maxine/effects/vfx_background_blur_effect.h"
 #include "core/maxine/effects/vfx_green_screen_effect.h"
 #include "core/maxine/effects/vfx_relighting_effect.h"
@@ -1419,6 +1420,243 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   } maxine_relight;
 
+  struct MaxineEyeContactContext {
+    bool initialized = false;
+    std::string last_error;
+
+    studiocast::maxine::ar::ArApi ar;
+    studiocast::maxine::NvcvApi nvcv;
+
+    std::unique_ptr<studiocast::maxine::effects::ArEyeContactEffect> eye_contact;
+
+    std::vector<std::uint8_t> bgr_in;
+    std::vector<std::uint8_t> bgr_out;
+    studiocast::maxine::NvCVImage cpu_bgr_in{};
+    studiocast::maxine::NvCVImage cpu_bgr_out{};
+
+    studiocast::maxine::NvCVImage gpu_bgr_in{};
+    bool gpu_bgr_in_allocated = false;
+
+    studiocast::maxine::NvCVImage gpu_bgr_out{};
+    bool gpu_bgr_out_allocated = false;
+
+    studiocast::maxine::CUstream stream = nullptr;
+    bool stream_owned = false;
+
+    ~MaxineEyeContactContext() { Destroy(); }
+
+    void Destroy() {
+      eye_contact.reset();
+
+      if (stream_owned && stream && ar.IsInitialized() && ar.f().NvAR_CudaStreamDestroy) {
+        (void)ar.f().NvAR_CudaStreamDestroy(stream);
+      }
+      stream = nullptr;
+      stream_owned = false;
+
+      if (gpu_bgr_out_allocated && nvcv.IsInitialized() && nvcv.f().NvCVImage_Dealloc) {
+        (void)nvcv.f().NvCVImage_Dealloc(&gpu_bgr_out);
+      }
+      gpu_bgr_out = studiocast::maxine::NvCVImage{};
+      gpu_bgr_out_allocated = false;
+
+      if (gpu_bgr_in_allocated && nvcv.IsInitialized() && nvcv.f().NvCVImage_Dealloc) {
+        (void)nvcv.f().NvCVImage_Dealloc(&gpu_bgr_in);
+      }
+      gpu_bgr_in = studiocast::maxine::NvCVImage{};
+      gpu_bgr_in_allocated = false;
+
+      bgr_in.clear();
+      bgr_out.clear();
+      cpu_bgr_in = studiocast::maxine::NvCVImage{};
+      cpu_bgr_out = studiocast::maxine::NvCVImage{};
+
+      initialized = false;
+      last_error.clear();
+    }
+
+    bool EnsureInitialized(int width, int height, const CameraEffects& fx, std::string* error) {
+      if (initialized) {
+        std::string cfg_err;
+        if (eye_contact && !eye_contact->Configure(fx, &cfg_err)) {
+          if (error) *error = cfg_err;
+          return false;
+        }
+        return true;
+      }
+
+      std::string ar_err;
+      if (!ar.Initialize(&ar_err)) {
+        if (error) *error = ar_err;
+        last_error = ar_err;
+        return false;
+      }
+
+      std::string nvcv_err;
+      if (!nvcv.Initialize(studiocast::maxine::NvcvApi::Requirement::VfxCompat, &nvcv_err)) {
+        if (error) *error = nvcv_err;
+        last_error = nvcv_err;
+        return false;
+      }
+
+      if (!nvcv.f().NvCVImage_Init || !nvcv.f().NvCVImage_Alloc || !nvcv.f().NvCVImage_Transfer) {
+        const std::string e = "NvCVImage_Init/Alloc/Transfer unavailable.";
+        if (error) *error = e;
+        last_error = e;
+        return false;
+      }
+
+      // Stream: create one so transfers and AR run on a consistent stream.
+      if (ar.f().NvAR_CudaStreamCreate) {
+        const auto st = ar.f().NvAR_CudaStreamCreate(&stream);
+        if (st != studiocast::maxine::NVCV_SUCCESS) {
+          const std::string e = "NvAR_CudaStreamCreate failed: " + std::to_string(st);
+          if (error) *error = e;
+          last_error = e;
+          return false;
+        }
+        stream_owned = true;
+      }
+
+      bgr_in.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u);
+      bgr_out.resize(bgr_in.size());
+
+      const auto init_in = nvcv.f().NvCVImage_Init(&cpu_bgr_in,
+                                                  width,
+                                                  height,
+                                                  static_cast<int>(width * 3),
+                                                  bgr_in.data(),
+                                                  studiocast::maxine::NVCV_BGR,
+                                                  studiocast::maxine::NVCV_U8,
+                                                  studiocast::maxine::NVCV_CHUNKY,
+                                                  studiocast::maxine::NVCV_CPU);
+      if (init_in != studiocast::maxine::NVCV_SUCCESS) {
+        const std::string e = "NvCVImage_Init(cpu input) failed: " + std::to_string(init_in);
+        if (error) *error = e;
+        last_error = e;
+        return false;
+      }
+
+      const auto init_out = nvcv.f().NvCVImage_Init(&cpu_bgr_out,
+                                                   width,
+                                                   height,
+                                                   static_cast<int>(width * 3),
+                                                   bgr_out.data(),
+                                                   studiocast::maxine::NVCV_BGR,
+                                                   studiocast::maxine::NVCV_U8,
+                                                   studiocast::maxine::NVCV_CHUNKY,
+                                                   studiocast::maxine::NVCV_CPU);
+      if (init_out != studiocast::maxine::NVCV_SUCCESS) {
+        const std::string e = "NvCVImage_Init(cpu output) failed: " + std::to_string(init_out);
+        if (error) *error = e;
+        last_error = e;
+        return false;
+      }
+
+      const auto alloc_in = nvcv.f().NvCVImage_Alloc(&gpu_bgr_in,
+                                                    width,
+                                                    height,
+                                                    studiocast::maxine::NVCV_BGR,
+                                                    studiocast::maxine::NVCV_U8,
+                                                    studiocast::maxine::NVCV_CHUNKY,
+                                                    studiocast::maxine::NVCV_GPU,
+                                                    1);
+      if (alloc_in != studiocast::maxine::NVCV_SUCCESS) {
+        const std::string e = "NvCVImage_Alloc(gpu input) failed: " + std::to_string(alloc_in);
+        if (error) *error = e;
+        last_error = e;
+        return false;
+      }
+      gpu_bgr_in_allocated = true;
+
+      const auto alloc_out = nvcv.f().NvCVImage_Alloc(&gpu_bgr_out,
+                                                     width,
+                                                     height,
+                                                     studiocast::maxine::NVCV_BGR,
+                                                     studiocast::maxine::NVCV_U8,
+                                                     studiocast::maxine::NVCV_CHUNKY,
+                                                     studiocast::maxine::NVCV_GPU,
+                                                     1);
+      if (alloc_out != studiocast::maxine::NVCV_SUCCESS) {
+        const std::string e = "NvCVImage_Alloc(gpu output) failed: " + std::to_string(alloc_out);
+        if (error) *error = e;
+        last_error = e;
+        return false;
+      }
+      gpu_bgr_out_allocated = true;
+
+      eye_contact = std::make_unique<studiocast::maxine::effects::ArEyeContactEffect>(&ar);
+
+      std::string cfg_err;
+      if (!eye_contact->Configure(fx, &cfg_err)) {
+        if (error) *error = cfg_err;
+        last_error = cfg_err;
+        return false;
+      }
+
+      initialized = true;
+      return true;
+    }
+
+    bool ApplyRgbInPlace(std::uint8_t* rgb, int width, int height, std::size_t rgb_stride, const CameraEffects& fx, std::string* error) {
+      if (!rgb || width <= 0 || height <= 0) return true;
+      std::string init_err;
+      if (!EnsureInitialized(width, height, fx, &init_err)) {
+        if (error) *error = init_err;
+        return false;
+      }
+      if (!eye_contact) return true;
+
+      // RGB -> BGR
+      studiocast::video::Rgb24ToBgr24(rgb,
+                                     bgr_in.data(),
+                                     width,
+                                     height,
+                                     rgb_stride,
+                                     static_cast<std::size_t>(width) * 3u);
+
+      // CPU -> GPU
+      const auto up = nvcv.f().NvCVImage_Transfer(&cpu_bgr_in, &gpu_bgr_in, 1.0f, stream, nullptr);
+      if (up != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = "NvCVImage_Transfer(cpu->gpu) failed: " + std::to_string(up);
+        return false;
+      }
+
+      studiocast::video::GpuFrame frame;
+      frame.width = width;
+      frame.height = height;
+      frame.nvcv_gpu = &gpu_bgr_in;
+      frame.nvcv_tmp = &gpu_bgr_out;
+      frame.cuda_stream = stream;
+
+      std::string proc_err;
+      const auto st = eye_contact->Process(frame, &proc_err);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = proc_err.empty() ? std::to_string(st) : proc_err;
+        return false;
+      }
+
+      // GPU -> CPU
+      const auto down = nvcv.f().NvCVImage_Transfer(&gpu_bgr_out, &cpu_bgr_out, 1.0f, stream, nullptr);
+      if (down != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(down);
+        return false;
+      }
+
+      // BGR -> RGB
+      studiocast::video::Bgr24ToRgb24(bgr_out.data(),
+                                     rgb,
+                                     width,
+                                     height,
+                                     static_cast<std::size_t>(width) * 3u,
+                                     rgb_stride);
+      return true;
+    }
+  } maxine_eye_contact;
+
+  bool want_maxine_eye_contact = false;
+  bool have_maxine_eye_contact = false;
+
   bool want_maxine_relight = false;
   bool have_maxine_relight = false;
 
@@ -1433,12 +1671,32 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     want_maxine_bg_blur = false;
     have_maxine_bg_blur = false;
 
+    want_maxine_eye_contact = false;
+    have_maxine_eye_contact = false;
+
     want_maxine_relight = false;
     have_maxine_relight = false;
 
     // Mirror
     if (fx.mirror) {
       chain.Add(std::make_unique<studiocast::video::effects::MirrorEffect>());
+    }
+
+    // Eye Contact (AR)
+    if (fx.eye_contact.enabled) {
+      want_maxine_eye_contact = true;
+
+      std::string mx_err;
+      if (maxine_eye_contact.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
+        have_maxine_eye_contact = true;
+        if (!note.empty()) note += "\n";
+        note += "Maxine AR: Eye Contact.";
+      } else {
+        if (!note.empty()) note += "\n";
+        note += "Maxine Eye Contact unavailable: " + mx_err;
+        // No CPU fallback when Maxine is not available.
+        stop_.store(true);
+      }
     }
 
     // Background effects.
@@ -1456,14 +1714,18 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (maxine_bg_blur.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
           have_maxine_bg_blur = true;
           if (fx.background == studiocast::video::effects::BackgroundEffect::blur) {
-            note = "Maxine VFX: Green Screen matte + Background Blur.";
+            if (!note.empty()) note += "\n";
+            note += "Maxine VFX: Green Screen matte + Background Blur.";
           } else if (fx.background == studiocast::video::effects::BackgroundEffect::remove) {
-            note = "Maxine VFX: Green Screen matte + Composite (remove).";
+            if (!note.empty()) note += "\n";
+            note += "Maxine VFX: Green Screen matte + Composite (remove).";
           } else {
-            note = "Maxine VFX: Green Screen matte + Composite (replace).";
+            if (!note.empty()) note += "\n";
+            note += "Maxine VFX: Green Screen matte + Composite (replace).";
           }
         } else {
-          note = "Maxine virtual background unavailable: " + mx_err;
+          if (!note.empty()) note += "\n";
+          note += "Maxine virtual background unavailable: " + mx_err;
           // No CPU fallback when Maxine is not available.
           stop_.store(true);
         }
@@ -1472,19 +1734,23 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         // CPU backend explicitly selected: keep placeholders only where they exist.
         if (fx.background == studiocast::video::effects::BackgroundEffect::blur) {
           chain.Add(std::make_unique<studiocast::video::effects::BackgroundBlurCpuEffect>(fx.background_strength));
-          note = "CPU placeholder: center-focus mask (no AI segmentation yet).";
+          if (!note.empty()) note += "\n";
+          note += "CPU placeholder: center-focus mask (no AI segmentation yet).";
         } else if (fx.background == studiocast::video::effects::BackgroundEffect::remove) {
           chain.Add(std::make_unique<studiocast::video::effects::BackgroundRemoveCpuEffect>());
-          note = "CPU placeholder: center-focus mask (no AI segmentation yet).";
+          if (!note.empty()) note += "\n";
+          note += "CPU placeholder: center-focus mask (no AI segmentation yet).";
         } else {
-          note = "CPU background replace not supported.";
+          if (!note.empty()) note += "\n";
+          note += "CPU background replace not supported.";
           stop_.store(true);
         }
       }
 
     } else if (fx.background == studiocast::video::effects::BackgroundEffect::auto_frame) {
       // Not implemented yet.
-      note = "Auto Frame is not implemented yet.";
+      if (!note.empty()) note += "\n";
+      note += "Auto Frame is not implemented yet.";
     }
 
     // Virtual Key Light (Maxine-only).
@@ -1513,6 +1779,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (have_maxine_relight) {
         if (!backends.empty()) backends += ",";
         backends += "virtual_key_light:maxine";
+      }
+      if (have_maxine_eye_contact) {
+        if (!backends.empty()) backends += ",";
+        backends += "eye_contact:maxine_ar";
       }
       effects_backends_ = backends;
       effects_note_ = note;
@@ -1567,6 +1837,18 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       view.stride_bytes = rgbStride;
 
       chain.Apply(view);
+
+      // Maxine AR Eye Contact (GPU): Gaze Redirection.
+      if (have_maxine_eye_contact) {
+        std::string mx_err;
+        if (!maxine_eye_contact.ApplyRgbInPlace(rgb.data(), capA.width, capA.height, rgbStride, fx, &mx_err)) {
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            last_error_ = "Maxine eye contact failed: " + mx_err;
+          }
+          fx_failed = true;
+        }
+      }
 
       // Maxine Virtual Background = Blur (GPU): Green Screen matte -> Background Blur.
       if (have_maxine_bg_blur) {

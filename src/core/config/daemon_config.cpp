@@ -171,6 +171,16 @@ DaemonConfig LoadDaemonConfig() {
         s.video_virtual_key_light_hdri = it->second;
       }
 
+      if (auto it = kv.find("video.eye_contact"); it != kv.end()) {
+        s.video_eye_contact = ParseBool(it->second, s.video_eye_contact);
+      }
+      if (auto it = kv.find("video.eye_contact_strength"); it != kv.end()) {
+        s.video_eye_contact_strength = ParseInt(it->second, s.video_eye_contact_strength);
+      }
+      if (auto it = kv.find("video.eye_contact_look_away"); it != kv.end()) {
+        s.video_eye_contact_look_away = ParseBool(it->second, s.video_eye_contact_look_away);
+      }
+
       if (auto it = kv.find("service.consumer_poll_ms"); it != kv.end()) {
         s.consumer_poll_ms = ParseInt(it->second, s.consumer_poll_ms);
       }
@@ -238,6 +248,11 @@ bool SaveDaemonConfig(const DaemonConfig& s, std::string* error) {
   }
   out << "\n";
 
+  out << "video.eye_contact = " << (s.video_eye_contact ? "true" : "false") << "\n";
+  out << "video.eye_contact_strength = " << s.video_eye_contact_strength << "\n";
+  out << "video.eye_contact_look_away = " << (s.video_eye_contact_look_away ? "true" : "false") << "\n";
+  out << "\n";
+
   out << "service.consumer_poll_ms = " << s.consumer_poll_ms << "\n";
   out << "service.stop_grace_ms = " << s.stop_grace_ms << "\n";
   out << "service.always_on = " << (s.always_on ? "true" : "false") << "\n";
@@ -284,6 +299,10 @@ studiocast::video::VirtualCameraServiceConfig ToVideoServiceConfig(const DaemonC
     cfg.pipeline.effects.virtual_key_light.direction_pan_degrees =
         static_cast<float>(std::max(-180, std::min(180, s.video_virtual_key_light_pan)));
     cfg.pipeline.effects.virtual_key_light.hdri_path = s.video_virtual_key_light_hdri;
+
+    cfg.pipeline.effects.eye_contact.enabled = s.video_eye_contact;
+    cfg.pipeline.effects.eye_contact.strength = std::max(0, std::min(100, s.video_eye_contact_strength));
+    cfg.pipeline.effects.eye_contact.look_away_enabled = s.video_eye_contact_look_away;
   }
 
   cfg.consumer_poll_ms = s.consumer_poll_ms;
@@ -318,6 +337,10 @@ void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCamer
   out->video_virtual_key_light_pan =
       std::max(-180, std::min(180, static_cast<int>(cfg.pipeline.effects.virtual_key_light.direction_pan_degrees)));
   out->video_virtual_key_light_hdri = cfg.pipeline.effects.virtual_key_light.hdri_path.string();
+
+  out->video_eye_contact = cfg.pipeline.effects.eye_contact.enabled;
+  out->video_eye_contact_strength = std::max(0, std::min(100, cfg.pipeline.effects.eye_contact.strength));
+  out->video_eye_contact_look_away = cfg.pipeline.effects.eye_contact.look_away_enabled;
 
   out->consumer_poll_ms = cfg.consumer_poll_ms;
   out->stop_grace_ms = cfg.stop_grace_ms;

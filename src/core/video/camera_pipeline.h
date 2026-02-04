@@ -83,6 +83,21 @@ namespace studiocast::video {
         };
 
         VirtualKeyLightSettings virtual_key_light{};
+
+        // Eye Contact (Maxine AR Gaze Redirection) parameters.
+        struct EyeContactSettings {
+            bool enabled = false;
+
+            // Strength is an integer percentage [0..100]. The AR feature may
+            // expose different underlying knobs; the runtime performs best-effort
+            // mapping.
+            int strength = 50;
+
+            // Enable randomized look-away micro movements.
+            bool look_away_enabled = true;
+        };
+
+        EyeContactSettings eye_contact{};
     };
 
     inline bool operator==(const CameraEffects& a, const CameraEffects& b) {
@@ -100,7 +115,10 @@ namespace studiocast::video {
                a.virtual_key_light.intensity == b.virtual_key_light.intensity &&
                a.virtual_key_light.temperature_preset == b.virtual_key_light.temperature_preset &&
                a.virtual_key_light.direction_pan_degrees == b.virtual_key_light.direction_pan_degrees &&
-               a.virtual_key_light.hdri_path == b.virtual_key_light.hdri_path;
+               a.virtual_key_light.hdri_path == b.virtual_key_light.hdri_path &&
+               a.eye_contact.enabled == b.eye_contact.enabled &&
+               a.eye_contact.strength == b.eye_contact.strength &&
+               a.eye_contact.look_away_enabled == b.eye_contact.look_away_enabled;
     }
 
     inline bool operator!=(const CameraEffects& a, const CameraEffects& b) { return !(a == b); }

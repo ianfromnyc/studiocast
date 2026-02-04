@@ -49,6 +49,15 @@ struct DaemonConfig {
   int video_virtual_key_light_pan = 0;
   std::string video_virtual_key_light_hdri;
 
+  // Eye Contact (Maxine AR Gaze Redirection)
+  //
+  // video.eye_contact: true|false
+  // video.eye_contact_strength: 0..100 (percent)
+  // video.eye_contact_look_away: true|false
+  bool video_eye_contact = false;
+  int video_eye_contact_strength = 50;
+  bool video_eye_contact_look_away = true;
+
   // Service behavior
   int consumer_poll_ms = 250;
   int stop_grace_ms = 1000;

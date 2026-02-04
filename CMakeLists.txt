@@ -90,6 +90,8 @@ add_library(studiocast_core
         src/core/maxine/effects/vfx_denoise_effect.cpp
         src/core/maxine/effects/vfx_relighting_effect.h
         src/core/maxine/effects/vfx_relighting_effect.cpp
+        src/core/maxine/effects/ar_eye_contact_effect.h
+        src/core/maxine/effects/ar_eye_contact_effect.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
         src/core/audio/virtual_mic_state.h
