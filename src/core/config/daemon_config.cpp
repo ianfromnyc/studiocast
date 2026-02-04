@@ -53,6 +53,12 @@ int ParseInt(const std::string& raw, int fallback) {
   return std::atoi(v.c_str());
 }
 
+float ParseFloat(const std::string& raw, float fallback) {
+  const auto v = studiocast::util::TrimCopy(raw);
+  if (v.empty()) return fallback;
+  return static_cast<float>(std::atof(v.c_str()));
+}
+
 bool ParseRgbHex(const std::string& raw, std::uint32_t* out) {
   if (!out) return false;
   std::string s = studiocast::util::TrimCopy(raw);
@@ -148,6 +154,17 @@ DaemonConfig LoadDaemonConfig() {
       if (auto it = kv.find("video.background_strength"); it != kv.end()) {
         s.video_background_strength = ParseInt(it->second, s.video_background_strength);
       }
+
+      if (auto it = kv.find("video.auto_frame_strength"); it != kv.end()) {
+        s.video_auto_frame_strength = ParseInt(it->second, s.video_auto_frame_strength);
+      }
+      if (auto it = kv.find("video.auto_frame_smoothing"); it != kv.end()) {
+        s.video_auto_frame_smoothing = ParseInt(it->second, s.video_auto_frame_smoothing);
+      }
+      if (auto it = kv.find("video.auto_frame_headroom"); it != kv.end()) {
+        s.video_auto_frame_headroom = ParseFloat(it->second, s.video_auto_frame_headroom);
+      }
+
       if (auto it = kv.find("video.background_remove_color"); it != kv.end()) {
         s.video_background_remove_color = it->second;
       }
@@ -179,6 +196,16 @@ DaemonConfig LoadDaemonConfig() {
       }
       if (auto it = kv.find("video.eye_contact_look_away"); it != kv.end()) {
         s.video_eye_contact_look_away = ParseBool(it->second, s.video_eye_contact_look_away);
+      }
+
+      if (auto it = kv.find("video.vignette"); it != kv.end()) {
+        s.video_vignette = ParseBool(it->second, s.video_vignette);
+      }
+      if (auto it = kv.find("video.vignette_intensity"); it != kv.end()) {
+        s.video_vignette_intensity = ParseInt(it->second, s.video_vignette_intensity);
+      }
+      if (auto it = kv.find("video.vignette_center_on_face"); it != kv.end()) {
+        s.video_vignette_center_on_face = ParseBool(it->second, s.video_vignette_center_on_face);
       }
 
       if (auto it = kv.find("service.consumer_poll_ms"); it != kv.end()) {
@@ -231,6 +258,10 @@ bool SaveDaemonConfig(const DaemonConfig& s, std::string* error) {
   out << "video.background_backend = " << s.video_background_backend << "\n";
   out << "video.background_strength = " << s.video_background_strength << "\n\n";
 
+  out << "video.auto_frame_strength = " << s.video_auto_frame_strength << "\n";
+  out << "video.auto_frame_smoothing = " << s.video_auto_frame_smoothing << "\n";
+  out << "video.auto_frame_headroom = " << s.video_auto_frame_headroom << "\n\n";
+
   if (!s.video_background_remove_color.empty()) {
     out << "video.background_remove_color = " << s.video_background_remove_color << "\n";
   }
@@ -251,6 +282,11 @@ bool SaveDaemonConfig(const DaemonConfig& s, std::string* error) {
   out << "video.eye_contact = " << (s.video_eye_contact ? "true" : "false") << "\n";
   out << "video.eye_contact_strength = " << s.video_eye_contact_strength << "\n";
   out << "video.eye_contact_look_away = " << (s.video_eye_contact_look_away ? "true" : "false") << "\n";
+  out << "\n";
+
+  out << "video.vignette = " << (s.video_vignette ? "true" : "false") << "\n";
+  out << "video.vignette_intensity = " << s.video_vignette_intensity << "\n";
+  out << "video.vignette_center_on_face = " << (s.video_vignette_center_on_face ? "true" : "false") << "\n";
   out << "\n";
 
   out << "service.consumer_poll_ms = " << s.consumer_poll_ms << "\n";
@@ -284,6 +320,10 @@ studiocast::video::VirtualCameraServiceConfig ToVideoServiceConfig(const DaemonC
 
     cfg.pipeline.effects.background_strength = std::max(1, std::min(64, s.video_background_strength));
 
+    cfg.pipeline.effects.auto_frame.strength = std::max(0, std::min(100, s.video_auto_frame_strength));
+    cfg.pipeline.effects.auto_frame.smoothing = std::max(0, std::min(100, s.video_auto_frame_smoothing));
+    cfg.pipeline.effects.auto_frame.headroom = std::max(0.0f, std::min(1.0f, s.video_auto_frame_headroom));
+
     cfg.pipeline.effects.background_replace_image = s.video_background_replace_image;
     std::uint32_t rgb = 0;
     if (ParseRgbHex(s.video_background_remove_color, &rgb)) {
@@ -303,6 +343,11 @@ studiocast::video::VirtualCameraServiceConfig ToVideoServiceConfig(const DaemonC
     cfg.pipeline.effects.eye_contact.enabled = s.video_eye_contact;
     cfg.pipeline.effects.eye_contact.strength = std::max(0, std::min(100, s.video_eye_contact_strength));
     cfg.pipeline.effects.eye_contact.look_away_enabled = s.video_eye_contact_look_away;
+
+    cfg.pipeline.effects.vignette.enabled = s.video_vignette;
+    cfg.pipeline.effects.vignette.intensity =
+        std::max(0, std::min(100, s.video_vignette_intensity)) / 100.0f;
+    cfg.pipeline.effects.vignette.center_on_tracked_face = s.video_vignette_center_on_face;
   }
 
   cfg.consumer_poll_ms = s.consumer_poll_ms;
@@ -326,6 +371,10 @@ void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCamer
   out->video_background_backend = studiocast::video::effects::ToString(cfg.pipeline.effects.background_backend);
   out->video_background_strength = cfg.pipeline.effects.background_strength;
 
+  out->video_auto_frame_strength = std::max(0, std::min(100, cfg.pipeline.effects.auto_frame.strength));
+  out->video_auto_frame_smoothing = std::max(0, std::min(100, cfg.pipeline.effects.auto_frame.smoothing));
+  out->video_auto_frame_headroom = std::max(0.0f, std::min(1.0f, cfg.pipeline.effects.auto_frame.headroom));
+
   out->video_background_remove_color = FormatRgbHex(cfg.pipeline.effects.background_remove_color_rgb);
   out->video_background_replace_image = cfg.pipeline.effects.background_replace_image.string();
 
@@ -341,6 +390,11 @@ void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCamer
   out->video_eye_contact = cfg.pipeline.effects.eye_contact.enabled;
   out->video_eye_contact_strength = std::max(0, std::min(100, cfg.pipeline.effects.eye_contact.strength));
   out->video_eye_contact_look_away = cfg.pipeline.effects.eye_contact.look_away_enabled;
+
+  out->video_vignette = cfg.pipeline.effects.vignette.enabled;
+  out->video_vignette_intensity =
+      std::max(0, std::min(100, static_cast<int>(cfg.pipeline.effects.vignette.intensity * 100.0f)));
+  out->video_vignette_center_on_face = cfg.pipeline.effects.vignette.center_on_tracked_face;
 
   out->consumer_poll_ms = cfg.consumer_poll_ms;
   out->stop_grace_ms = cfg.stop_grace_ms;

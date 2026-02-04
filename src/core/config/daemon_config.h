@@ -33,6 +33,15 @@ struct DaemonConfig {
   std::string video_background_backend = "auto";
   int video_background_strength = 8;
 
+  // Auto Frame knobs (used when video.background=auto_frame)
+  //
+  // video.auto_frame_strength: 0..100 (percent)
+  // video.auto_frame_smoothing: 0..100 (percent)
+  // video.auto_frame_headroom: 0..1 (fraction)
+  int video_auto_frame_strength = 50;
+  int video_auto_frame_smoothing = 70;
+  float video_auto_frame_headroom = 0.15f;
+
   std::string video_background_remove_color = "#000000";
   std::string video_background_replace_image;
 
@@ -57,6 +66,15 @@ struct DaemonConfig {
   bool video_eye_contact = false;
   int video_eye_contact_strength = 50;
   bool video_eye_contact_look_away = true;
+
+  // Vignette (CUDA GPU post-process)
+  //
+  // video.vignette: true|false
+  // video.vignette_intensity: 0..100 (percent)
+  // video.vignette_center_on_face: true|false
+  bool video_vignette = false;
+  int video_vignette_intensity = 35;
+  bool video_vignette_center_on_face = true;
 
   // Service behavior
   int consumer_poll_ms = 250;

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "core/maxine/ar_api.h"
+#include "core/maxine/effects/ar_auto_frame_tracker.h"
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
 #include "core/probe/probe.h"
@@ -89,6 +90,51 @@ namespace {
             if (mid < 126 || mid > 129) {
                 ++failures;
                 std::printf("[FAIL] composite_u8 alpha=128 got=%u\n", static_cast<unsigned>(mid));
+            }
+        }
+
+        // Auto Frame crop math + smoothing (deterministic; no Maxine runtime needed).
+        {
+            using studiocast::maxine::effects::ArAutoFrameTracker;
+            using studiocast::maxine::effects::AutoFrameKnobs;
+            using studiocast::maxine::effects::RectF;
+
+            const int w = 1280;
+            const int h = 720;
+            const float aspect = 16.0f / 9.0f;
+
+            // Center crop at 1x should be full frame for matching aspect.
+            {
+                const RectF r = ArAutoFrameTracker::CenterCrop(w, h, aspect, 1.0f);
+                if (std::abs(r.x) > 1e-3f || std::abs(r.y) > 1e-3f ||
+                    std::abs(r.w - 1280.0f) > 1e-3f || std::abs(r.h - 720.0f) > 1e-3f) {
+                    ++failures;
+                    std::printf("[FAIL] AutoFrame CenterCrop full-frame mismatch\n");
+                }
+            }
+
+            // Stronger strength should produce a tighter crop for the same box.
+            {
+                const RectF face = RectF{540.0f, 180.0f, 200.0f, 200.0f};
+                AutoFrameKnobs k0; k0.strength = 0; k0.smoothing = 0; k0.headroom = 0.15f;
+                AutoFrameKnobs k1; k1.strength = 100; k1.smoothing = 0; k1.headroom = 0.15f;
+
+                const RectF a = ArAutoFrameTracker::ComputeTargetCropFromBoxPx(face, w, h, aspect, k0);
+                const RectF b = ArAutoFrameTracker::ComputeTargetCropFromBoxPx(face, w, h, aspect, k1);
+                if (!(b.w < a.w && b.h < a.h)) {
+                    ++failures;
+                    std::printf("[FAIL] AutoFrame strength should tighten crop\n");
+                }
+            }
+
+            // Smoothing alpha monotonic: smoothing=0 should respond faster than smoothing=100.
+            {
+                const float a0 = ArAutoFrameTracker::SmoothingAlpha(0);
+                const float a1 = ArAutoFrameTracker::SmoothingAlpha(100);
+                if (!(a0 > a1 && a0 > 0.5f && a1 < 0.2f)) {
+                    ++failures;
+                    std::printf("[FAIL] AutoFrame SmoothingAlpha unexpected mapping a0=%f a1=%f\n", a0, a1);
+                }
             }
         }
 

@@ -44,6 +44,10 @@ namespace studiocast::gui {
         void OnVirtualKeyLightHdriChanged();
         void OnBrowseVirtualKeyLightHdri();
 
+        void OnVignetteToggled(bool checked);
+        void OnVignetteIntensityChanged(int value);
+        void OnVignetteCenterOnFaceToggled(bool checked);
+
         void OnPoll();
 
     private:
@@ -84,6 +88,11 @@ namespace studiocast::gui {
         QSpinBox* virtualKeyLightPanSpin_ = nullptr;        // -180..180
         QLineEdit* virtualKeyLightHdriEdit_ = nullptr;      // path override
         QPushButton* browseVirtualKeyLightHdriBtn_ = nullptr;
+
+        // Vignette (GPU post-process)
+        QCheckBox* vignetteCheck_ = nullptr;
+        QSpinBox* vignetteIntensitySpin_ = nullptr;          // 0..100
+        QCheckBox* vignetteCenterOnFaceCheck_ = nullptr;
 
         QPushButton* refreshBtn_ = nullptr;
         QPushButton* copyCmdBtn_ = nullptr;

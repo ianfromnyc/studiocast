@@ -9,9 +9,13 @@
 
 #include "core/maxine/availability.h"
 #include "core/maxine/effects/ar_eye_contact_effect.h"
+#include "core/maxine/effects/ar_auto_frame_tracker.h"
 #include "core/maxine/effects/vfx_background_blur_effect.h"
 #include "core/maxine/effects/vfx_green_screen_effect.h"
 #include "core/maxine/effects/vfx_relighting_effect.h"
+#include "core/maxine/cuda_crop_scale.h"
+#include "core/maxine/cuda_driver_api.h"
+#include "core/maxine/cuda_vignette.h"
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
 #include "core/video/convert.h"
@@ -461,6 +465,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     studiocast::maxine::vfx::VfxApi vfx;
     studiocast::maxine::NvcvApi nvcv;
+    studiocast::maxine::CudaDriverApi cuda;
+    studiocast::maxine::CudaBgrVignette vignette;
 
     std::filesystem::path model_dir;
 
@@ -571,6 +577,21 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         last_error = "NvCVImage runtime unavailable: " + err;
         if (error) *error = last_error;
         return false;
+      }
+
+      {
+        std::string cuda_err;
+        if (!cuda.Initialize(&cuda_err)) {
+          last_error = "CUDA driver API unavailable: " + cuda_err;
+          if (error) *error = last_error;
+          return false;
+        }
+        std::string vig_err;
+        if (!vignette.Initialize(&cuda, &vig_err)) {
+          last_error = "CUDA vignette init failed: " + vig_err;
+          if (error) *error = last_error;
+          return false;
+        }
       }
       if (model_dir.empty()) {
         model_dir = InferModelsDirFromLibrary(vfx.library_path());
@@ -819,6 +840,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          int height,
                          std::size_t rgb_stride,
                          const CameraEffects& fx,
+                         bool apply_vignette,
+                         float vignette_center_x_px,
+                         float vignette_center_y_px,
                          std::string* error) {
       if (!initialized || !greenscreen || !blur) {
         if (error) *error = "Maxine virtual background not initialized.";
@@ -891,6 +915,22 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           return false;
         }
 
+        if (apply_vignette && fx.vignette.enabled) {
+          const float vig_intensity = std::max(0.0f, std::min(1.0f, fx.vignette.intensity));
+          if (vig_intensity > 0.0001f) {
+            std::string ve;
+            if (!vignette.ApplyInPlace(const_cast<studiocast::maxine::NvCVImage*>(out_gpu),
+                                      vig_intensity,
+                                      vignette_center_x_px,
+                                      vignette_center_y_px,
+                                      blur->cuda_stream(),
+                                      &ve)) {
+              if (error) *error = ve;
+              return false;
+            }
+          }
+        }
+
         const auto down = nvcv.f().NvCVImage_Transfer(out_gpu, &cpu_bgr_out, 1.0f, blur->cuda_stream(), nullptr);
         if (down != studiocast::maxine::NVCV_SUCCESS) {
           if (error) *error = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(down);
@@ -914,6 +954,22 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (stc != studiocast::maxine::NVCV_SUCCESS) {
           if (error) *error = "NvCVImage_Composite failed: " + std::to_string(stc);
           return false;
+        }
+
+        if (apply_vignette && fx.vignette.enabled) {
+          const float vig_intensity = std::max(0.0f, std::min(1.0f, fx.vignette.intensity));
+          if (vig_intensity > 0.0001f) {
+            std::string ve;
+            if (!vignette.ApplyInPlace(&gpu_bgr_out_img,
+                                      vig_intensity,
+                                      vignette_center_x_px,
+                                      vignette_center_y_px,
+                                      stream,
+                                      &ve)) {
+              if (error) *error = ve;
+              return false;
+            }
+          }
         }
 
         const auto down = nvcv.f().NvCVImage_Transfer(&gpu_bgr_out_img, &cpu_bgr_out, 1.0f, stream, nullptr);
@@ -943,6 +999,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     studiocast::maxine::vfx::VfxApi vfx;
     studiocast::maxine::NvcvApi nvcv;
+    studiocast::maxine::CudaDriverApi cuda;
+    studiocast::maxine::CudaBgrVignette vignette;
 
     std::filesystem::path model_dir;
     std::filesystem::path features_dir;
@@ -1159,6 +1217,21 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (error) *error = last_error;
         return false;
       }
+
+      {
+        std::string cuda_err;
+        if (!cuda.Initialize(&cuda_err)) {
+          last_error = "CUDA driver API unavailable: " + cuda_err;
+          if (error) *error = last_error;
+          return false;
+        }
+        std::string vig_err;
+        if (!vignette.Initialize(&cuda, &vig_err)) {
+          last_error = "CUDA vignette init failed: " + vig_err;
+          if (error) *error = last_error;
+          return false;
+        }
+      }
       if (model_dir.empty()) {
         model_dir = InferModelsDirFromLibrary(vfx.library_path());
       }
@@ -1295,6 +1368,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          int height,
                          std::size_t rgb_stride,
                          const CameraEffects& fx,
+                         bool apply_vignette,
+                         float vignette_center_x_px,
+                         float vignette_center_y_px,
                          std::string* error) {
       if (!initialized || !greenscreen || !relight) {
         if (error) *error = "Maxine relighting not initialized.";
@@ -1403,6 +1479,22 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
+      if (apply_vignette && fx.vignette.enabled) {
+        const float vig_intensity = std::max(0.0f, std::min(1.0f, fx.vignette.intensity));
+        if (vig_intensity > 0.0001f) {
+          std::string ve;
+          if (!vignette.ApplyInPlace(&gpu_bgr_out_img,
+                                    vig_intensity,
+                                    vignette_center_x_px,
+                                    vignette_center_y_px,
+                                    stream,
+                                    &ve)) {
+            if (error) *error = ve;
+            return false;
+          }
+        }
+      }
+
       const auto down = nvcv.f().NvCVImage_Transfer(&gpu_bgr_out_img, &cpu_bgr_out, 1.0f, stream, nullptr);
       if (down != studiocast::maxine::NVCV_SUCCESS) {
         if (error) *error = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(down);
@@ -1426,6 +1518,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     studiocast::maxine::ar::ArApi ar;
     studiocast::maxine::NvcvApi nvcv;
+    studiocast::maxine::CudaDriverApi cuda;
+    studiocast::maxine::CudaBgrVignette vignette;
 
     std::unique_ptr<studiocast::maxine::effects::ArEyeContactEffect> eye_contact;
 
@@ -1497,6 +1591,23 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (error) *error = nvcv_err;
         last_error = nvcv_err;
         return false;
+      }
+
+      {
+        std::string cuda_err;
+        if (!cuda.Initialize(&cuda_err)) {
+          const std::string e = "CUDA driver API unavailable: " + cuda_err;
+          if (error) *error = e;
+          last_error = e;
+          return false;
+        }
+        std::string vig_err;
+        if (!vignette.Initialize(&cuda, &vig_err)) {
+          const std::string e = "CUDA vignette init failed: " + vig_err;
+          if (error) *error = e;
+          last_error = e;
+          return false;
+        }
       }
 
       if (!nvcv.f().NvCVImage_Init || !nvcv.f().NvCVImage_Alloc || !nvcv.f().NvCVImage_Transfer) {
@@ -1598,7 +1709,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return true;
     }
 
-    bool ApplyRgbInPlace(std::uint8_t* rgb, int width, int height, std::size_t rgb_stride, const CameraEffects& fx, std::string* error) {
+    bool ApplyRgbInPlace(std::uint8_t* rgb,
+                         int width,
+                         int height,
+                         std::size_t rgb_stride,
+                         const CameraEffects& fx,
+                         bool apply_vignette,
+                         float vignette_center_x_px,
+                         float vignette_center_y_px,
+                         std::string* error) {
       if (!rgb || width <= 0 || height <= 0) return true;
       std::string init_err;
       if (!EnsureInitialized(width, height, fx, &init_err)) {
@@ -1636,6 +1755,22 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
+      if (apply_vignette && fx.vignette.enabled) {
+        const float vig_intensity = std::max(0.0f, std::min(1.0f, fx.vignette.intensity));
+        if (vig_intensity > 0.0001f) {
+          std::string ve;
+          if (!vignette.ApplyInPlace(&gpu_bgr_out,
+                                    vig_intensity,
+                                    vignette_center_x_px,
+                                    vignette_center_y_px,
+                                    stream,
+                                    &ve)) {
+            if (error) *error = ve;
+            return false;
+          }
+        }
+      }
+
       // GPU -> CPU
       const auto down = nvcv.f().NvCVImage_Transfer(&gpu_bgr_out, &cpu_bgr_out, 1.0f, stream, nullptr);
       if (down != studiocast::maxine::NVCV_SUCCESS) {
@@ -1654,6 +1789,494 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   } maxine_eye_contact;
 
+  struct MaxineAutoFrameContext {
+    bool initialized = false;
+    std::string last_error;
+
+    studiocast::maxine::ar::ArApi ar;
+    studiocast::maxine::NvcvApi nvcv;
+    studiocast::maxine::CudaDriverApi cuda;
+    studiocast::maxine::CudaBgrCropScale crop_scale;
+    studiocast::maxine::CudaBgrVignette vignette;
+
+    std::unique_ptr<studiocast::maxine::effects::ArAutoFrameTracker> tracker;
+
+    std::vector<std::uint8_t> bgr_in;
+    std::vector<std::uint8_t> bgr_out;
+    studiocast::maxine::NvCVImage cpu_bgr_in{};
+    studiocast::maxine::NvCVImage cpu_bgr_out{};
+
+    studiocast::maxine::NvCVImage gpu_bgr_in{};
+    bool gpu_bgr_in_allocated = false;
+    studiocast::maxine::NvCVImage gpu_bgr_out{};
+    bool gpu_bgr_out_allocated = false;
+
+    studiocast::maxine::CUstream stream = nullptr;
+    bool stream_owned = false;
+
+    ~MaxineAutoFrameContext() { Destroy(); }
+
+    void Destroy() {
+      tracker.reset();
+
+      if (stream_owned && stream && ar.IsInitialized() && ar.f().NvAR_CudaStreamDestroy) {
+        (void)ar.f().NvAR_CudaStreamDestroy(stream);
+      }
+      stream = nullptr;
+      stream_owned = false;
+
+      if (gpu_bgr_out_allocated && nvcv.IsInitialized() && nvcv.f().NvCVImage_Dealloc) {
+        (void)nvcv.f().NvCVImage_Dealloc(&gpu_bgr_out);
+      }
+      gpu_bgr_out = studiocast::maxine::NvCVImage{};
+      gpu_bgr_out_allocated = false;
+
+      if (gpu_bgr_in_allocated && nvcv.IsInitialized() && nvcv.f().NvCVImage_Dealloc) {
+        (void)nvcv.f().NvCVImage_Dealloc(&gpu_bgr_in);
+      }
+      gpu_bgr_in = studiocast::maxine::NvCVImage{};
+      gpu_bgr_in_allocated = false;
+
+      bgr_in.clear();
+      bgr_out.clear();
+      cpu_bgr_in = studiocast::maxine::NvCVImage{};
+      cpu_bgr_out = studiocast::maxine::NvCVImage{};
+
+      initialized = false;
+      last_error.clear();
+    }
+
+    bool EnsureInitialized(int width, int height, const CameraEffects& fx, std::string* error) {
+      if (initialized) return true;
+
+      std::string ar_err;
+      if (!ar.Initialize(&ar_err)) {
+        if (error) *error = ar_err;
+        last_error = ar_err;
+        return false;
+      }
+
+      std::string nvcv_err;
+      if (!nvcv.Initialize(studiocast::maxine::NvcvApi::Requirement::VfxCompat, &nvcv_err)) {
+        if (error) *error = nvcv_err;
+        last_error = nvcv_err;
+        return false;
+      }
+
+      std::string cuda_err;
+      if (!cuda.Initialize(&cuda_err)) {
+        if (error) *error = cuda_err;
+        last_error = cuda_err;
+        return false;
+      }
+
+      if (!nvcv.f().NvCVImage_Init || !nvcv.f().NvCVImage_Alloc || !nvcv.f().NvCVImage_Transfer) {
+        const std::string e = "NvCVImage_Init/Alloc/Transfer unavailable.";
+        if (error) *error = e;
+        last_error = e;
+        return false;
+      }
+
+      // Stream: create one so transfers, AR, and kernel launch share a stream.
+      if (ar.f().NvAR_CudaStreamCreate) {
+        const auto st = ar.f().NvAR_CudaStreamCreate(&stream);
+        if (st != studiocast::maxine::NVCV_SUCCESS) {
+          const std::string e = "NvAR_CudaStreamCreate failed: " + std::to_string(st);
+          if (error) *error = e;
+          last_error = e;
+          return false;
+        }
+        stream_owned = true;
+      }
+
+      bgr_in.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u);
+      bgr_out.resize(bgr_in.size());
+
+      const auto init_in = nvcv.f().NvCVImage_Init(&cpu_bgr_in,
+                                                  width,
+                                                  height,
+                                                  static_cast<int>(width * 3),
+                                                  bgr_in.data(),
+                                                  studiocast::maxine::NVCV_BGR,
+                                                  studiocast::maxine::NVCV_U8,
+                                                  studiocast::maxine::NVCV_CHUNKY,
+                                                  studiocast::maxine::NVCV_CPU);
+      if (init_in != studiocast::maxine::NVCV_SUCCESS) {
+        const std::string e = "NvCVImage_Init(cpu input) failed: " + std::to_string(init_in);
+        if (error) *error = e;
+        last_error = e;
+        return false;
+      }
+
+      const auto init_out = nvcv.f().NvCVImage_Init(&cpu_bgr_out,
+                                                   width,
+                                                   height,
+                                                   static_cast<int>(width * 3),
+                                                   bgr_out.data(),
+                                                   studiocast::maxine::NVCV_BGR,
+                                                   studiocast::maxine::NVCV_U8,
+                                                   studiocast::maxine::NVCV_CHUNKY,
+                                                   studiocast::maxine::NVCV_CPU);
+      if (init_out != studiocast::maxine::NVCV_SUCCESS) {
+        const std::string e = "NvCVImage_Init(cpu output) failed: " + std::to_string(init_out);
+        if (error) *error = e;
+        last_error = e;
+        return false;
+      }
+
+      const auto alloc_in = nvcv.f().NvCVImage_Alloc(&gpu_bgr_in,
+                                                    width,
+                                                    height,
+                                                    studiocast::maxine::NVCV_BGR,
+                                                    studiocast::maxine::NVCV_U8,
+                                                    studiocast::maxine::NVCV_CHUNKY,
+                                                    studiocast::maxine::NVCV_GPU,
+                                                    1);
+      if (alloc_in != studiocast::maxine::NVCV_SUCCESS) {
+        const std::string e = "NvCVImage_Alloc(gpu input) failed: " + std::to_string(alloc_in);
+        if (error) *error = e;
+        last_error = e;
+        return false;
+      }
+      gpu_bgr_in_allocated = true;
+
+      const auto alloc_out = nvcv.f().NvCVImage_Alloc(&gpu_bgr_out,
+                                                     width,
+                                                     height,
+                                                     studiocast::maxine::NVCV_BGR,
+                                                     studiocast::maxine::NVCV_U8,
+                                                     studiocast::maxine::NVCV_CHUNKY,
+                                                     studiocast::maxine::NVCV_GPU,
+                                                     1);
+      if (alloc_out != studiocast::maxine::NVCV_SUCCESS) {
+        const std::string e = "NvCVImage_Alloc(gpu output) failed: " + std::to_string(alloc_out);
+        if (error) *error = e;
+        last_error = e;
+        return false;
+      }
+      gpu_bgr_out_allocated = true;
+
+      std::string crop_err;
+      if (!crop_scale.Initialize(&cuda, &crop_err)) {
+        if (error) *error = crop_err;
+        last_error = crop_err;
+        return false;
+      }
+
+      {
+        std::string vig_err;
+        if (!vignette.Initialize(&cuda, &vig_err)) {
+          if (error) *error = vig_err;
+          last_error = vig_err;
+          return false;
+        }
+      }
+
+      tracker = std::make_unique<studiocast::maxine::effects::ArAutoFrameTracker>(&ar);
+      tracker->SetOutputAspect(static_cast<float>(width) / static_cast<float>(height));
+      studiocast::maxine::effects::AutoFrameKnobs k;
+      k.strength = fx.auto_frame.strength;
+      k.smoothing = fx.auto_frame.smoothing;
+      k.headroom = fx.auto_frame.headroom;
+      tracker->SetKnobs(k);
+
+      std::string tr_err;
+      if (!tracker->EnsureInitialized(&gpu_bgr_in, &tr_err)) {
+        if (error) *error = tr_err;
+        last_error = tr_err;
+        return false;
+      }
+
+      initialized = true;
+      return true;
+    }
+
+    bool ApplyRgbInPlace(std::uint8_t* rgb,
+                         int width,
+                         int height,
+                         std::size_t rgb_stride,
+                         const CameraEffects& fx,
+                         bool apply_vignette,
+                         float vignette_center_x_px,
+                         float vignette_center_y_px,
+                         std::string* error) {
+      if (!rgb || width <= 0 || height <= 0) return true;
+
+      std::string init_err;
+      if (!EnsureInitialized(width, height, fx, &init_err)) {
+        if (error) *error = init_err;
+        return false;
+      }
+      if (!tracker) return true;
+
+      // Update knobs without requiring re-init.
+      tracker->SetOutputAspect(static_cast<float>(width) / static_cast<float>(height));
+      studiocast::maxine::effects::AutoFrameKnobs k;
+      k.strength = fx.auto_frame.strength;
+      k.smoothing = fx.auto_frame.smoothing;
+      k.headroom = fx.auto_frame.headroom;
+      tracker->SetKnobs(k);
+
+      // RGB -> BGR
+      studiocast::video::Rgb24ToBgr24(rgb,
+                                     bgr_in.data(),
+                                     width,
+                                     height,
+                                     rgb_stride,
+                                     static_cast<std::size_t>(width) * 3u);
+
+      // CPU -> GPU
+      const auto up = nvcv.f().NvCVImage_Transfer(&cpu_bgr_in, &gpu_bgr_in, 1.0f, stream, nullptr);
+      if (up != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = "NvCVImage_Transfer(cpu->gpu) failed: " + std::to_string(up);
+        return false;
+      }
+
+      std::string tr_err;
+      if (!tracker->Update(width, height, &tr_err)) {
+        if (error) *error = tr_err;
+        return false;
+      }
+
+      const auto crop = tracker->SmoothedCropPx();
+
+      std::string cs_err;
+      if (!crop_scale.CropScale(gpu_bgr_in,
+                                &gpu_bgr_out,
+                                crop.x,
+                                crop.y,
+                                crop.w,
+                                crop.h,
+                                stream,
+                                &cs_err)) {
+        if (error) *error = cs_err;
+        return false;
+      }
+
+      if (apply_vignette && fx.vignette.enabled) {
+        const float vig_intensity = std::max(0.0f, std::min(1.0f, fx.vignette.intensity));
+        if (vig_intensity > 0.0001f) {
+          float cx = vignette_center_x_px;
+          float cy = vignette_center_y_px;
+          if (fx.vignette.center_on_tracked_face && tracker->last_had_detection()) {
+            cx = static_cast<float>(crop.x) + static_cast<float>(crop.w) * 0.5f;
+            cy = static_cast<float>(crop.y) + static_cast<float>(crop.h) * 0.5f;
+          }
+
+          std::string ve;
+          if (!vignette.ApplyInPlace(&gpu_bgr_out, vig_intensity, cx, cy, stream, &ve)) {
+            if (error) *error = ve;
+            return false;
+          }
+        }
+      }
+
+      // GPU -> CPU
+      const auto down = nvcv.f().NvCVImage_Transfer(&gpu_bgr_out, &cpu_bgr_out, 1.0f, stream, nullptr);
+      if (down != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(down);
+        return false;
+      }
+
+      // BGR -> RGB
+      studiocast::video::Bgr24ToRgb24(bgr_out.data(),
+                                     rgb,
+                                     width,
+                                     height,
+                                     static_cast<std::size_t>(width) * 3u,
+                                     rgb_stride);
+      return true;
+    }
+  } maxine_auto_frame;
+
+  // Standalone GPU vignette stage.
+  //
+  // Used when vignette is enabled but no other Maxine GPU stage is active. This keeps
+  // vignette GPU-only and avoids a silent CPU fallback.
+  struct VignetteOnlyContext {
+    bool initialized = false;
+    std::string last_error;
+
+    studiocast::maxine::NvcvApi nvcv;
+    studiocast::maxine::CudaDriverApi cuda;
+    studiocast::maxine::CudaBgrVignette vignette;
+
+    std::vector<std::uint8_t> bgr_in;
+    std::vector<std::uint8_t> bgr_out;
+    studiocast::maxine::NvCVImage cpu_bgr_in{};
+    studiocast::maxine::NvCVImage cpu_bgr_out{};
+
+    studiocast::maxine::NvCVImage gpu_bgr{};
+    bool gpu_bgr_allocated = false;
+
+    ~VignetteOnlyContext() { Destroy(); }
+
+    void Destroy() {
+      if (gpu_bgr_allocated && nvcv.IsInitialized() && nvcv.f().NvCVImage_Dealloc) {
+        (void)nvcv.f().NvCVImage_Dealloc(&gpu_bgr);
+      }
+      gpu_bgr = studiocast::maxine::NvCVImage{};
+      gpu_bgr_allocated = false;
+
+      bgr_in.clear();
+      bgr_out.clear();
+      cpu_bgr_in = studiocast::maxine::NvCVImage{};
+      cpu_bgr_out = studiocast::maxine::NvCVImage{};
+
+      initialized = false;
+      last_error.clear();
+    }
+
+    bool EnsureInitialized(int width, int height, std::string* error) {
+      last_error.clear();
+      if (initialized) return true;
+
+      std::string nvcv_err;
+      if (!nvcv.Initialize(studiocast::maxine::NvcvApi::Requirement::VfxCompat, &nvcv_err)) {
+        last_error = "NvCVImage runtime unavailable: " + nvcv_err;
+        if (error) *error = last_error;
+        return false;
+      }
+
+      std::string cuda_err;
+      if (!cuda.Initialize(&cuda_err)) {
+        last_error = "CUDA driver API unavailable: " + cuda_err;
+        if (error) *error = last_error;
+        return false;
+      }
+
+      std::string vig_err;
+      if (!vignette.Initialize(&cuda, &vig_err)) {
+        last_error = "CUDA vignette init failed: " + vig_err;
+        if (error) *error = last_error;
+        return false;
+      }
+
+      if (!nvcv.f().NvCVImage_Init || !nvcv.f().NvCVImage_Alloc || !nvcv.f().NvCVImage_Transfer) {
+        last_error = "NvCVImage_Init/Alloc/Transfer unavailable.";
+        if (error) *error = last_error;
+        return false;
+      }
+
+      bgr_in.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u);
+      bgr_out.resize(bgr_in.size());
+
+      const auto init_in = nvcv.f().NvCVImage_Init(&cpu_bgr_in,
+                                                  width,
+                                                  height,
+                                                  static_cast<int>(width * 3),
+                                                  bgr_in.data(),
+                                                  studiocast::maxine::NVCV_BGR,
+                                                  studiocast::maxine::NVCV_U8,
+                                                  studiocast::maxine::NVCV_CHUNKY,
+                                                  studiocast::maxine::NVCV_CPU);
+      if (init_in != studiocast::maxine::NVCV_SUCCESS) {
+        last_error = "NvCVImage_Init(cpu input) failed: " + std::to_string(init_in);
+        if (error) *error = last_error;
+        return false;
+      }
+
+      const auto init_out = nvcv.f().NvCVImage_Init(&cpu_bgr_out,
+                                                   width,
+                                                   height,
+                                                   static_cast<int>(width * 3),
+                                                   bgr_out.data(),
+                                                   studiocast::maxine::NVCV_BGR,
+                                                   studiocast::maxine::NVCV_U8,
+                                                   studiocast::maxine::NVCV_CHUNKY,
+                                                   studiocast::maxine::NVCV_CPU);
+      if (init_out != studiocast::maxine::NVCV_SUCCESS) {
+        last_error = "NvCVImage_Init(cpu output) failed: " + std::to_string(init_out);
+        if (error) *error = last_error;
+        return false;
+      }
+
+      const auto alloc = nvcv.f().NvCVImage_Alloc(&gpu_bgr,
+                                                 width,
+                                                 height,
+                                                 studiocast::maxine::NVCV_BGR,
+                                                 studiocast::maxine::NVCV_U8,
+                                                 studiocast::maxine::NVCV_CHUNKY,
+                                                 studiocast::maxine::NVCV_GPU,
+                                                 1);
+      if (alloc != studiocast::maxine::NVCV_SUCCESS) {
+        last_error = "NvCVImage_Alloc(gpu bgr) failed: " + std::to_string(alloc);
+        if (error) *error = last_error;
+        return false;
+      }
+      gpu_bgr_allocated = true;
+
+      initialized = true;
+      return true;
+    }
+
+    bool ApplyRgbInPlace(std::uint8_t* rgb,
+                         int width,
+                         int height,
+                         std::size_t rgb_stride,
+                         const CameraEffects& fx,
+                         float vignette_center_x_px,
+                         float vignette_center_y_px,
+                         std::string* error) {
+      if (!rgb || width <= 0 || height <= 0) return true;
+      if (!fx.vignette.enabled) return true;
+
+      const float vig_intensity = std::max(0.0f, std::min(1.0f, fx.vignette.intensity));
+      if (vig_intensity <= 0.0001f) return true;
+
+      std::string init_err;
+      if (!EnsureInitialized(width, height, &init_err)) {
+        if (error) *error = init_err;
+        return false;
+      }
+
+      // RGB -> BGR
+      studiocast::video::Rgb24ToBgr24(rgb,
+                                     bgr_in.data(),
+                                     width,
+                                     height,
+                                     rgb_stride,
+                                     static_cast<std::size_t>(width) * 3u);
+
+      // CPU -> GPU
+      const auto up = nvcv.f().NvCVImage_Transfer(&cpu_bgr_in, &gpu_bgr, 1.0f, /*stream=*/nullptr, nullptr);
+      if (up != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = "NvCVImage_Transfer(cpu->gpu) failed: " + std::to_string(up);
+        return false;
+      }
+
+      std::string ve;
+      if (!vignette.ApplyInPlace(&gpu_bgr,
+                                vig_intensity,
+                                vignette_center_x_px,
+                                vignette_center_y_px,
+                                /*stream=*/nullptr,
+                                &ve)) {
+        if (error) *error = ve;
+        return false;
+      }
+
+      // GPU -> CPU
+      const auto down = nvcv.f().NvCVImage_Transfer(&gpu_bgr, &cpu_bgr_out, 1.0f, /*stream=*/nullptr, nullptr);
+      if (down != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(down);
+        return false;
+      }
+
+      // BGR -> RGB
+      studiocast::video::Bgr24ToRgb24(bgr_out.data(),
+                                     rgb,
+                                     width,
+                                     height,
+                                     static_cast<std::size_t>(width) * 3u,
+                                     rgb_stride);
+      return true;
+    }
+  } vignette_only;
+
+  bool want_maxine_auto_frame = false;
+  bool have_maxine_auto_frame = false;
+
   bool want_maxine_eye_contact = false;
   bool have_maxine_eye_contact = false;
 
@@ -1663,6 +2286,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   bool want_maxine_bg_blur = false;
   bool have_maxine_bg_blur = false;
 
+  bool want_maxine_vignette_only = false;
+  bool have_maxine_vignette_only = false;
+
   auto rebuildChain = [&](const CameraEffects& fx) {
     chain.Clear();
 
@@ -1671,11 +2297,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     want_maxine_bg_blur = false;
     have_maxine_bg_blur = false;
 
+    want_maxine_auto_frame = false;
+    have_maxine_auto_frame = false;
+
     want_maxine_eye_contact = false;
     have_maxine_eye_contact = false;
 
     want_maxine_relight = false;
     have_maxine_relight = false;
+
+    want_maxine_vignette_only = false;
+    have_maxine_vignette_only = false;
 
     // Mirror
     if (fx.mirror) {
@@ -1748,9 +2380,20 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
     } else if (fx.background == studiocast::video::effects::BackgroundEffect::auto_frame) {
-      // Not implemented yet.
-      if (!note.empty()) note += "\n";
-      note += "Auto Frame is not implemented yet.";
+      // Auto Frame is Maxine-only (AR + GPU crop/scale).
+      want_maxine_auto_frame = true;
+
+      std::string mx_err;
+      if (maxine_auto_frame.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
+        have_maxine_auto_frame = true;
+        if (!note.empty()) note += "\n";
+        note += "Maxine AR: Auto Frame (FaceBoxDetection + CUDA crop/scale).";
+      } else {
+        if (!note.empty()) note += "\n";
+        note += "Auto Frame unavailable: " + mx_err;
+        // No fallback.
+        stop_.store(true);
+      }
     }
 
     // Virtual Key Light (Maxine-only).
@@ -1769,6 +2412,28 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
     }
 
+    // Vignette-only stage.
+    // If no other GPU stage is active, run a minimal GPU upload -> vignette kernel -> download.
+    if (fx.vignette.enabled && (fx.vignette.intensity > 0.0001f)) {
+      const bool have_any_maxine_gpu_stage =
+          have_maxine_eye_contact || have_maxine_bg_blur || have_maxine_relight || have_maxine_auto_frame;
+
+      if (!have_any_maxine_gpu_stage) {
+        want_maxine_vignette_only = true;
+        std::string mx_err;
+        if (vignette_only.EnsureInitialized(capA.width, capA.height, &mx_err)) {
+          have_maxine_vignette_only = true;
+          if (!note.empty()) note += "\n";
+          note += "CUDA: Vignette.";
+        } else {
+          if (!note.empty()) note += "\n";
+          note += "Vignette unavailable: " + mx_err;
+          // No fallback.
+          stop_.store(true);
+        }
+      }
+    }
+
     {
       std::lock_guard<std::mutex> lock(mu_);
       std::string backends = chain.BackendSummary();
@@ -1783,6 +2448,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (have_maxine_eye_contact) {
         if (!backends.empty()) backends += ",";
         backends += "eye_contact:maxine_ar";
+      }
+      if (have_maxine_auto_frame) {
+        if (!backends.empty()) backends += ",";
+        backends += "auto_frame:maxine_ar_cuda";
+      }
+      if (have_maxine_vignette_only) {
+        if (!backends.empty()) backends += ",";
+        backends += "vignette:cuda";
       }
       effects_backends_ = backends;
       effects_note_ = note;
@@ -1838,10 +2511,37 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       chain.Apply(view);
 
+      const float vignette_center_x_px = static_cast<float>(capA.width) * 0.5f;
+      const float vignette_center_y_px = static_cast<float>(capA.height) * 0.5f;
+
+      const bool vignette_requested = fx.vignette.enabled && (fx.vignette.intensity > 0.0001f);
+      const bool have_any_maxine_gpu_stage =
+          have_maxine_eye_contact || have_maxine_bg_blur || have_maxine_relight || have_maxine_auto_frame;
+
+      // Apply vignette exactly once, by attaching it to the last active Maxine GPU stage.
+      const bool apply_vignette_on_eye_contact =
+          vignette_requested && have_any_maxine_gpu_stage && have_maxine_eye_contact &&
+          !have_maxine_bg_blur && !have_maxine_relight && !have_maxine_auto_frame;
+      const bool apply_vignette_on_bg_blur =
+          vignette_requested && have_any_maxine_gpu_stage && have_maxine_bg_blur &&
+          !have_maxine_relight && !have_maxine_auto_frame;
+      const bool apply_vignette_on_relight =
+          vignette_requested && have_any_maxine_gpu_stage && have_maxine_relight && !have_maxine_auto_frame;
+      const bool apply_vignette_on_auto_frame =
+          vignette_requested && have_any_maxine_gpu_stage && have_maxine_auto_frame;
+
       // Maxine AR Eye Contact (GPU): Gaze Redirection.
       if (have_maxine_eye_contact) {
         std::string mx_err;
-        if (!maxine_eye_contact.ApplyRgbInPlace(rgb.data(), capA.width, capA.height, rgbStride, fx, &mx_err)) {
+        if (!maxine_eye_contact.ApplyRgbInPlace(rgb.data(),
+                                                capA.width,
+                                                capA.height,
+                                                rgbStride,
+                                                fx,
+                                                apply_vignette_on_eye_contact,
+                                                vignette_center_x_px,
+                                                vignette_center_y_px,
+                                                &mx_err)) {
           {
             std::lock_guard<std::mutex> lock(mu_);
             last_error_ = "Maxine eye contact failed: " + mx_err;
@@ -1853,7 +2553,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       // Maxine Virtual Background = Blur (GPU): Green Screen matte -> Background Blur.
       if (have_maxine_bg_blur) {
         std::string mx_err;
-        if (!maxine_bg_blur.ApplyRgbInPlace(rgb.data(), capA.width, capA.height, rgbStride, fx, &mx_err)) {
+        if (!maxine_bg_blur.ApplyRgbInPlace(rgb.data(),
+                                            capA.width,
+                                            capA.height,
+                                            rgbStride,
+                                            fx,
+                                            apply_vignette_on_bg_blur,
+                                            vignette_center_x_px,
+                                            vignette_center_y_px,
+                                            &mx_err)) {
           {
             std::lock_guard<std::mutex> lock(mu_);
             last_error_ = "Maxine background blur failed: " + mx_err;
@@ -1865,10 +2573,58 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       // Maxine Virtual Key Light (GPU): Green Screen matte -> Video Relighting -> Composite.
       if (have_maxine_relight) {
         std::string mx_err;
-        if (!maxine_relight.ApplyRgbInPlace(rgb.data(), capA.width, capA.height, rgbStride, fx, &mx_err)) {
+        if (!maxine_relight.ApplyRgbInPlace(rgb.data(),
+                                            capA.width,
+                                            capA.height,
+                                            rgbStride,
+                                            fx,
+                                            apply_vignette_on_relight,
+                                            vignette_center_x_px,
+                                            vignette_center_y_px,
+                                            &mx_err)) {
           {
             std::lock_guard<std::mutex> lock(mu_);
             last_error_ = "Maxine relighting failed: " + mx_err;
+          }
+          fx_failed = true;
+        }
+      }
+
+      // Maxine Auto Frame (GPU): AR bbox tracking -> GPU crop/scale.
+      // Apply last so we frame the final image.
+      if (have_maxine_auto_frame) {
+        std::string mx_err;
+        if (!maxine_auto_frame.ApplyRgbInPlace(rgb.data(),
+                                               capA.width,
+                                               capA.height,
+                                               rgbStride,
+                                               fx,
+                                               apply_vignette_on_auto_frame,
+                                               vignette_center_x_px,
+                                               vignette_center_y_px,
+                                               &mx_err)) {
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            last_error_ = "Maxine auto frame failed: " + mx_err;
+          }
+          fx_failed = true;
+        }
+      }
+
+      // Standalone vignette stage (only when no other Maxine GPU stage is active).
+      if (have_maxine_vignette_only) {
+        std::string mx_err;
+        if (!vignette_only.ApplyRgbInPlace(rgb.data(),
+                                           capA.width,
+                                           capA.height,
+                                           rgbStride,
+                                           fx,
+                                           vignette_center_x_px,
+                                           vignette_center_y_px,
+                                           &mx_err)) {
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            last_error_ = "CUDA vignette failed: " + mx_err;
           }
           fx_failed = true;
         }

@@ -31,6 +31,24 @@ namespace studiocast::video {
         // Interpreted as a blur radius for the CPU placeholder.
         int background_strength = 8;
 
+        // Auto Frame (Maxine AR bounding boxes + GPU crop/scale).
+        //
+        // Enabled when `background == BackgroundEffect::auto_frame`.
+        struct AutoFrameSettings {
+            // Strength as an integer percentage [0..100].
+            // Higher = tighter framing (more zoom).
+            int strength = 50;
+
+            // Smoothing as an integer percentage [0..100].
+            // Higher = smoother/less jitter, but slower response.
+            int smoothing = 70;
+
+            // Fractional extra headroom above the detected subject (0..1).
+            float headroom = 0.15f;
+        };
+
+        AutoFrameSettings auto_frame{};
+
         // Virtual background parameters.
         //
         // - remove: subject over a solid color (default black)
@@ -98,6 +116,23 @@ namespace studiocast::video {
         };
 
         EyeContactSettings eye_contact{};
+
+        // Vignette (CUDA GPU post-process).
+        //
+        // This is not Maxine-specific, but we only enable it when the Maxine GPU
+        // pipeline is active (no CPU fallback stance).
+        struct VignetteSettings {
+            bool enabled = false;
+
+            // Strength of the vignette. 0 = no-op, 1 = strong darkening.
+            float intensity = 0.35f;  // [0..1]
+
+            // If true and Auto Frame has a valid tracked rect, center the
+            // vignette around the tracked subject.
+            bool center_on_tracked_face = true;
+        };
+
+        VignetteSettings vignette{};
     };
 
     inline bool operator==(const CameraEffects& a, const CameraEffects& b) {
@@ -105,6 +140,9 @@ namespace studiocast::video {
                a.background == b.background &&
                a.background_backend == b.background_backend &&
                a.background_strength == b.background_strength &&
+               a.auto_frame.strength == b.auto_frame.strength &&
+               a.auto_frame.smoothing == b.auto_frame.smoothing &&
+               a.auto_frame.headroom == b.auto_frame.headroom &&
                a.background_remove_color_rgb == b.background_remove_color_rgb &&
                a.background_replace_image == b.background_replace_image &&
                a.denoise == b.denoise &&
@@ -118,7 +156,10 @@ namespace studiocast::video {
                a.virtual_key_light.hdri_path == b.virtual_key_light.hdri_path &&
                a.eye_contact.enabled == b.eye_contact.enabled &&
                a.eye_contact.strength == b.eye_contact.strength &&
-               a.eye_contact.look_away_enabled == b.eye_contact.look_away_enabled;
+               a.eye_contact.look_away_enabled == b.eye_contact.look_away_enabled &&
+               a.vignette.enabled == b.vignette.enabled &&
+               a.vignette.intensity == b.vignette.intensity &&
+               a.vignette.center_on_tracked_face == b.vignette.center_on_tracked_face;
     }
 
     inline bool operator!=(const CameraEffects& a, const CameraEffects& b) { return !(a == b); }

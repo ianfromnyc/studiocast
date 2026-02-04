@@ -78,6 +78,12 @@ add_library(studiocast_core
         src/core/maxine/vfx_api.cpp
         src/core/maxine/ar_api.h
         src/core/maxine/ar_api.cpp
+        src/core/maxine/cuda_driver_api.h
+        src/core/maxine/cuda_driver_api.cpp
+        src/core/maxine/cuda_crop_scale.h
+        src/core/maxine/cuda_crop_scale.cpp
+        src/core/maxine/cuda_vignette.h
+        src/core/maxine/cuda_vignette.cpp
         src/core/maxine/effects/maxine_effect.h
         src/core/maxine/effects/maxine_effect.cpp
         src/core/maxine/effects/vfx_green_screen_effect.h
@@ -92,6 +98,8 @@ add_library(studiocast_core
         src/core/maxine/effects/vfx_relighting_effect.cpp
         src/core/maxine/effects/ar_eye_contact_effect.h
         src/core/maxine/effects/ar_eye_contact_effect.cpp
+        src/core/maxine/effects/ar_auto_frame_tracker.h
+        src/core/maxine/effects/ar_auto_frame_tracker.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
         src/core/audio/virtual_mic_state.h

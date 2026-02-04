@@ -171,6 +171,9 @@ bool ParseDaemonConfigJson(const std::string& json,
                           QString* virtual_key_light_temperature,
                           int* virtual_key_light_pan,
                           QString* virtual_key_light_hdri,
+                          bool* vignette,
+                          int* vignette_intensity,
+                          bool* vignette_center_on_face,
                           QString* error) {
   QJsonParseError perr;
   const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(json), &perr);
@@ -199,6 +202,10 @@ bool ParseDaemonConfigJson(const std::string& json,
   if (virtual_key_light_temperature) *virtual_key_light_temperature = root.value("virtual_key_light_temperature").toString();
   if (virtual_key_light_pan) *virtual_key_light_pan = root.value("virtual_key_light_pan").toInt(0);
   if (virtual_key_light_hdri) *virtual_key_light_hdri = root.value("virtual_key_light_hdri").toString();
+
+  if (vignette) *vignette = root.value("vignette").toBool(false);
+  if (vignette_intensity) *vignette_intensity = root.value("vignette_intensity").toInt(0);
+  if (vignette_center_on_face) *vignette_center_on_face = root.value("vignette_center_on_face").toBool(true);
   return true;
 }
 
@@ -372,6 +379,28 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   vklRow2->addWidget(browseVirtualKeyLightHdriBtn_);
   boxLayout->addLayout(vklRow2);
 
+  // Vignette (GPU post-process).
+  auto* vigRow = new QHBoxLayout();
+  vignetteCheck_ = new QCheckBox("Vignette (GPU)", box);
+  vigRow->addWidget(vignetteCheck_);
+  vigRow->addSpacing(12);
+
+  vigRow->addWidget(new QLabel("Intensity:", box));
+  vignetteIntensitySpin_ = new QSpinBox(box);
+  vignetteIntensitySpin_->setRange(0, 100);
+  vignetteIntensitySpin_->setValue(35);
+  vignetteIntensitySpin_->setSuffix("%");
+  vignetteIntensitySpin_->setMaximumWidth(90);
+  vigRow->addWidget(vignetteIntensitySpin_);
+
+  vigRow->addSpacing(12);
+  vignetteCenterOnFaceCheck_ = new QCheckBox("Center on Auto Frame subject", box);
+  vignetteCenterOnFaceCheck_->setChecked(true);
+  vigRow->addWidget(vignetteCenterOnFaceCheck_);
+
+  vigRow->addStretch(1);
+  boxLayout->addLayout(vigRow);
+
   // Controls row
   auto* ctlRow = new QHBoxLayout();
   startBtn_ = new QPushButton("Start", box);
@@ -415,6 +444,10 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
           this, &VideoPage::OnVirtualKeyLightPanChanged);
   connect(virtualKeyLightHdriEdit_, &QLineEdit::editingFinished, this, &VideoPage::OnVirtualKeyLightHdriChanged);
   connect(browseVirtualKeyLightHdriBtn_, &QPushButton::clicked, this, &VideoPage::OnBrowseVirtualKeyLightHdri);
+
+  connect(vignetteCheck_, &QCheckBox::toggled, this, &VideoPage::OnVignetteToggled);
+  connect(vignetteIntensitySpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, &VideoPage::OnVignetteIntensityChanged);
+  connect(vignetteCenterOnFaceCheck_, &QCheckBox::toggled, this, &VideoPage::OnVignetteCenterOnFaceToggled);
 
   pollTimer_ = new QTimer(this);
   pollTimer_->setInterval(500);
@@ -535,6 +568,10 @@ bool VideoPage::SyncFromDaemonConfig() {
   int virtual_key_light_pan = 0;
   QString virtual_key_light_hdri;
 
+  bool vignette = false;
+  int vignette_intensity = 0;
+  bool vignette_center_on_face = true;
+
   QString parseErr;
   if (!ParseDaemonConfigJson(json,
                              &enabled,
@@ -554,6 +591,9 @@ bool VideoPage::SyncFromDaemonConfig() {
                              &virtual_key_light_temperature,
                              &virtual_key_light_pan,
                              &virtual_key_light_hdri,
+                             &vignette,
+                             &vignette_intensity,
+                             &vignette_center_on_face,
                              &parseErr)) {
     return false;
   }
@@ -638,6 +678,22 @@ bool VideoPage::SyncFromDaemonConfig() {
     virtualKeyLightHdriEdit_->blockSignals(true);
     virtualKeyLightHdriEdit_->setText(virtual_key_light_hdri);
     virtualKeyLightHdriEdit_->blockSignals(false);
+  }
+
+  if (vignetteCheck_) {
+    vignetteCheck_->blockSignals(true);
+    vignetteCheck_->setChecked(vignette);
+    vignetteCheck_->blockSignals(false);
+  }
+  if (vignetteIntensitySpin_) {
+    vignetteIntensitySpin_->blockSignals(true);
+    vignetteIntensitySpin_->setValue(std::max(0, std::min(100, vignette_intensity)));
+    vignetteIntensitySpin_->blockSignals(false);
+  }
+  if (vignetteCenterOnFaceCheck_) {
+    vignetteCenterOnFaceCheck_->blockSignals(true);
+    vignetteCenterOnFaceCheck_->setChecked(vignette_center_on_face);
+    vignetteCenterOnFaceCheck_->blockSignals(false);
   }
 
   // Enable per-effect parameter controls.
@@ -735,6 +791,17 @@ bool VideoPage::SendDaemonVideoEffects() {
     }
   }
 
+  // Vignette (GPU post-process)
+  if (vignetteCheck_) {
+    req << " vignette=" << (vignetteCheck_->isChecked() ? "1" : "0");
+  }
+  if (vignetteIntensitySpin_) {
+    req << " vignette_intensity=" << vignetteIntensitySpin_->value();
+  }
+  if (vignetteCenterOnFaceCheck_) {
+    req << " vignette_center_on_face=" << (vignetteCenterOnFaceCheck_->isChecked() ? "1" : "0");
+  }
+
   QString err;
   if (!DaemonRequest(req.str(), nullptr, &err)) {
     ShowError("Effects update failed", err);
@@ -822,6 +889,21 @@ void VideoPage::OnBrowseVirtualKeyLightHdri() {
                                                     "HDRI (*.hdr *.exr);;All files (*)");
   if (file.isEmpty()) return;
   if (virtualKeyLightHdriEdit_) virtualKeyLightHdriEdit_->setText(file);
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnVignetteToggled(bool checked) {
+  (void)checked;
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnVignetteIntensityChanged(int value) {
+  (void)value;
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnVignetteCenterOnFaceToggled(bool checked) {
+  (void)checked;
   (void)SendDaemonVideoEffects();
 }
 
@@ -993,6 +1075,13 @@ void VideoPage::UpdateUiEnabled() {
   if (virtualKeyLightPanSpin_) virtualKeyLightPanSpin_->setEnabled(vklAvail && vklOn);
   if (virtualKeyLightHdriEdit_) virtualKeyLightHdriEdit_->setEnabled(vklAvail && vklOn);
   if (browseVirtualKeyLightHdriBtn_) browseVirtualKeyLightHdriBtn_->setEnabled(vklAvail && vklOn);
+
+  // Vignette requires the GPU pipeline (we gate on Maxine being OK).
+  const bool vigAvail = daemonReachable_ && st.maxine_ok;
+  const bool vigOn = vignetteCheck_ ? vignetteCheck_->isChecked() : false;
+  if (vignetteCheck_) vignetteCheck_->setEnabled(vigAvail);
+  if (vignetteIntensitySpin_) vignetteIntensitySpin_->setEnabled(vigAvail && vigOn);
+  if (vignetteCenterOnFaceCheck_) vignetteCenterOnFaceCheck_->setEnabled(vigAvail && vigOn);
 
   startBtn_->setEnabled(daemonReachable_ && !enabled && outSelectable && !outputCombo_->currentData().toString().isEmpty());
   stopBtn_->setEnabled(daemonReachable_ && enabled);

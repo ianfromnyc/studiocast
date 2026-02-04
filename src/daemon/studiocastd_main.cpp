@@ -296,7 +296,13 @@ std::string ConfigToJson(const studiocast::video::VirtualCameraServiceConfig& cf
     oss << "\"virtual_key_light_intensity\":" << vkl_intensity << ",";
     oss << "\"virtual_key_light_temperature\":\"" << JsonEscape(FormatKeyLightTemperaturePreset(cfg.pipeline.effects.virtual_key_light.temperature_preset)) << "\",";
     oss << "\"virtual_key_light_pan\":" << static_cast<int>(cfg.pipeline.effects.virtual_key_light.direction_pan_degrees) << ",";
-    oss << "\"virtual_key_light_hdri\":\"" << JsonEscape(cfg.pipeline.effects.virtual_key_light.hdri_path.string()) << "\"";
+    oss << "\"virtual_key_light_hdri\":\"" << JsonEscape(cfg.pipeline.effects.virtual_key_light.hdri_path.string()) << "\",";
+
+    const int vignette_intensity =
+        std::max(0, std::min(100, static_cast<int>(cfg.pipeline.effects.vignette.intensity * 100.0f)));
+    oss << "\"vignette\":" << BoolJson(cfg.pipeline.effects.vignette.enabled) << ",";
+    oss << "\"vignette_intensity\":" << vignette_intensity << ",";
+    oss << "\"vignette_center_on_face\":" << BoolJson(cfg.pipeline.effects.vignette.center_on_tracked_face);
     oss << "}";
     return oss.str();
 }
@@ -575,6 +581,30 @@ int main(int argc, char** argv) {
 
                               if (auto it = pc.kv.find("virtual_key_light_hdri"); it != pc.kv.end()) {
                                   newCfg.pipeline.effects.virtual_key_light.hdri_path = it->second;
+                              }
+
+                              if (auto it = pc.kv.find("vignette"); it != pc.kv.end()) {
+                                  bool en = false;
+                                  if (!ParseBoolArg(it->second, &en)) {
+                                      return std::string("ERR ") + ErrorJson("vignette must be 0|1");
+                                  }
+                                  newCfg.pipeline.effects.vignette.enabled = en;
+                              }
+
+                              if (auto it = pc.kv.find("vignette_intensity"); it != pc.kv.end()) {
+                                  const int v = std::atoi(it->second.c_str());
+                                  if (v < 0 || v > 100) {
+                                      return std::string("ERR ") + ErrorJson("vignette_intensity must be 0..100");
+                                  }
+                                  newCfg.pipeline.effects.vignette.intensity = static_cast<float>(v) / 100.0f;
+                              }
+
+                              if (auto it = pc.kv.find("vignette_center_on_face"); it != pc.kv.end()) {
+                                  bool en = false;
+                                  if (!ParseBoolArg(it->second, &en)) {
+                                      return std::string("ERR ") + ErrorJson("vignette_center_on_face must be 0|1");
+                                  }
+                                  newCfg.pipeline.effects.vignette.center_on_tracked_face = en;
                               }
 
                               svc.UpdateConfig(newCfg);
