@@ -736,74 +736,75 @@ bool VideoPage::SendDaemonVideoConfig() {
 }
 
 bool VideoPage::SendDaemonVideoEffects() {
-  std::ostringstream req;
-  req << "SET_VIDEO_EFFECTS";
-
-  req << " mirror=" << (mirrorCheck_ && mirrorCheck_->isChecked() ? "1" : "0");
-
-  const QString bg = backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
-  if (!bg.isEmpty()) {
-    req << " background=" << bg.toStdString();
-  }
+  QJsonObject effects;
+  effects.insert("mirror", mirrorCheck_ && mirrorCheck_->isChecked());
 
   const QString backend = backgroundBackendCombo_ ? backgroundBackendCombo_->currentData().toString() : QString();
-  if (!backend.isEmpty()) {
-    req << " background_backend=" << backend.toStdString();
+  if (backend == "maxine") {
+    effects.insert("engine", "maxine");
+  } else if (!backend.isEmpty()) {
+    // Production rule: no CPU fallback in the pipeline. Treat other values as auto.
+    effects.insert("engine", "auto");
   }
 
-  if (backgroundStrengthSpin_) {
-    req << " background_strength=" << backgroundStrengthSpin_->value();
-  }
+  const QString bg = backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  {
+    QJsonObject vb;
+    if (bg == "auto_frame") {
+      // Canonical model: auto-frame is separate from virtual background.
+      QJsonObject af;
+      af.insert("enabled", true);
+      effects.insert("auto_frame", af);
+      vb.insert("mode", "none");
+    } else if (!bg.isEmpty()) {
+      vb.insert("mode", bg);
+    }
+    if (backgroundStrengthSpin_) vb.insert("blur_strength", backgroundStrengthSpin_->value());
 
-  if (backgroundRemoveColorEdit_) {
-    const QString c = backgroundRemoveColorEdit_->text().trimmed();
-    if (!c.isEmpty()) {
-      req << " background_remove_color=" << c.toStdString();
+    if (backgroundRemoveColorEdit_) {
+      const QString c = backgroundRemoveColorEdit_->text().trimmed();
+      if (!c.isEmpty()) vb.insert("remove_color", c);
     }
-  }
-  if (backgroundReplaceImageEdit_) {
-    const QString p = backgroundReplaceImageEdit_->text().trimmed();
-    if (!p.isEmpty()) {
-      req << " background_replace_image=" << p.toStdString();
+    if (backgroundReplaceImageEdit_) {
+      const QString p = backgroundReplaceImageEdit_->text().trimmed();
+      if (!p.isEmpty()) vb.insert("replace_path", p);
     }
+
+    if (!vb.isEmpty()) effects.insert("virtual_background", vb);
   }
 
   // Virtual Key Light (Maxine relighting)
-  if (virtualKeyLightCheck_) {
-    req << " virtual_key_light=" << (virtualKeyLightCheck_->isChecked() ? "1" : "0");
-  }
-  if (virtualKeyLightIntensitySpin_) {
-    req << " virtual_key_light_intensity=" << virtualKeyLightIntensitySpin_->value();
-  }
-  if (virtualKeyLightTempCombo_) {
-    const QString t = virtualKeyLightTempCombo_->currentData().toString();
-    if (!t.isEmpty()) {
-      req << " virtual_key_light_temperature=" << t.toStdString();
+  if (virtualKeyLightCheck_ || virtualKeyLightIntensitySpin_ || virtualKeyLightTempCombo_ ||
+      virtualKeyLightPanSpin_ || virtualKeyLightHdriEdit_) {
+    QJsonObject vkl;
+    if (virtualKeyLightCheck_) vkl.insert("enabled", virtualKeyLightCheck_->isChecked());
+    if (virtualKeyLightIntensitySpin_) vkl.insert("intensity", virtualKeyLightIntensitySpin_->value());
+    if (virtualKeyLightTempCombo_) {
+      const QString t = virtualKeyLightTempCombo_->currentData().toString();
+      if (!t.isEmpty()) vkl.insert("temperature_preset", t);
     }
-  }
-  if (virtualKeyLightPanSpin_) {
-    req << " virtual_key_light_pan=" << virtualKeyLightPanSpin_->value();
-  }
-  if (virtualKeyLightHdriEdit_) {
-    const QString p = virtualKeyLightHdriEdit_->text().trimmed();
-    if (!p.isEmpty()) {
-      req << " virtual_key_light_hdri=" << p.toStdString();
+    if (virtualKeyLightPanSpin_) vkl.insert("pan", virtualKeyLightPanSpin_->value());
+    if (virtualKeyLightHdriEdit_) {
+      const QString p = virtualKeyLightHdriEdit_->text().trimmed();
+      if (!p.isEmpty()) vkl.insert("hdri_path", p);
     }
+    if (!vkl.isEmpty()) effects.insert("virtual_key_light", vkl);
   }
 
   // Vignette (GPU post-process)
-  if (vignetteCheck_) {
-    req << " vignette=" << (vignetteCheck_->isChecked() ? "1" : "0");
-  }
-  if (vignetteIntensitySpin_) {
-    req << " vignette_intensity=" << vignetteIntensitySpin_->value();
-  }
-  if (vignetteCenterOnFaceCheck_) {
-    req << " vignette_center_on_face=" << (vignetteCenterOnFaceCheck_->isChecked() ? "1" : "0");
+  if (vignetteCheck_ || vignetteIntensitySpin_ || vignetteCenterOnFaceCheck_) {
+    QJsonObject vg;
+    if (vignetteCheck_) vg.insert("enabled", vignetteCheck_->isChecked());
+    if (vignetteIntensitySpin_) vg.insert("intensity", vignetteIntensitySpin_->value());
+    if (vignetteCenterOnFaceCheck_) vg.insert("center_on_face", vignetteCenterOnFaceCheck_->isChecked());
+    if (!vg.isEmpty()) effects.insert("vignette", vg);
   }
 
+  const QByteArray json = QJsonDocument(effects).toJson(QJsonDocument::Compact);
+  const std::string req = std::string("SET_VIDEO_EFFECTS_JSON ") + json.toStdString();
+
   QString err;
-  if (!DaemonRequest(req.str(), nullptr, &err)) {
+  if (!DaemonRequest(req, nullptr, &err)) {
     ShowError("Effects update failed", err);
     return false;
   }

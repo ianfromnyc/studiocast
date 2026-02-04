@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
@@ -18,6 +19,7 @@
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
 #include "core/maxine/maxine_manager.h"
+#include "core/video/camera_effects_json.h"
 #include "core/video/effects/effect_types.h"
 #include "core/video/virtual_camera_service.h"
 #include "core/video/v4l2loopback.h"
@@ -302,9 +304,27 @@ std::string ConfigToJson(const studiocast::video::VirtualCameraServiceConfig& cf
         std::max(0, std::min(100, static_cast<int>(cfg.pipeline.effects.vignette.intensity * 100.0f)));
     oss << "\"vignette\":" << BoolJson(cfg.pipeline.effects.vignette.enabled) << ",";
     oss << "\"vignette_intensity\":" << vignette_intensity << ",";
-    oss << "\"vignette_center_on_face\":" << BoolJson(cfg.pipeline.effects.vignette.center_on_tracked_face);
+    oss << "\"vignette_center_on_face\":" << BoolJson(cfg.pipeline.effects.vignette.center_on_tracked_face) << ",";
+
+    // Canonical, nested effects model (safe for file paths with spaces).
+    oss << "\"video_effects\":" << studiocast::video::CameraEffectsToJson(cfg.pipeline.effects);
     oss << "}";
     return oss.str();
+}
+
+std::string ExtractRawTailAfterCmd(const std::string& line, const std::string& cmd) {
+    std::size_t pos = 0;
+    // The cmd is the first token.
+    if (line.rfind(cmd, 0) == 0) {
+        pos = cmd.size();
+    } else {
+        // Fallback: find the first occurrence.
+        pos = line.find(cmd);
+        if (pos == std::string::npos) return {};
+        pos += cmd.size();
+    }
+    while (pos < line.size() && std::isspace(static_cast<unsigned char>(line[pos]))) ++pos;
+    return (pos < line.size()) ? line.substr(pos) : std::string();
 }
 
 std::string ErrorJson(const std::string& msg) {
@@ -490,6 +510,29 @@ int main(int argc, char** argv) {
                               }
                               if (auto it = pc.kv.find("fps"); it != pc.kv.end()) {
                                   newCfg.pipeline.fps = std::atoi(it->second.c_str());
+                              }
+
+                              svc.UpdateConfig(newCfg);
+
+                              studiocast::config::ApplyVideoServiceConfigToDaemonConfig(newCfg, &daemonCfg);
+                              std::string perr;
+                              (void)studiocast::config::SaveDaemonConfig(daemonCfg, &perr);
+
+                              return std::string("OK ") + ConfigToJson(newCfg);
+                          }
+
+                          if (pc.cmd == "SET_VIDEO_EFFECTS_JSON") {
+                              const std::string jsonText = ExtractRawTailAfterCmd(line, pc.cmd);
+                              if (jsonText.empty()) {
+                                  return std::string("ERR ") + ErrorJson("SET_VIDEO_EFFECTS_JSON requires a JSON object argument");
+                              }
+
+                              std::lock_guard<std::mutex> lock(controlMu);
+                              auto newCfg = svc.Config();
+
+                              std::string jerr;
+                              if (!studiocast::video::ApplyCameraEffectsPatchJsonText(jsonText, &newCfg.pipeline.effects, &jerr)) {
+                                  return std::string("ERR ") + ErrorJson(jerr.empty() ? "invalid effects JSON" : jerr);
                               }
 
                               svc.UpdateConfig(newCfg);

@@ -1,0 +1,25 @@
+#pragma once
+
+#include <string>
+
+#include "core/util/json.h"
+#include "core/video/camera_pipeline.h"
+
+namespace studiocast::video {
+
+    // Canonical JSON shape for video effects used in IPC and config.
+    // This returns a JSON object string (no surrounding field name).
+    std::string CameraEffectsToJson(const CameraEffects& effects);
+
+    // Applies a partial update (patch) to an existing CameraEffects struct.
+    // The JSON root may be either the effect object itself or an object
+    // containing a `video_effects` object.
+    bool ApplyCameraEffectsPatchJson(const studiocast::util::json::Value& root,
+                                     CameraEffects* effects,
+                                     std::string* error);
+
+    bool ApplyCameraEffectsPatchJsonText(const std::string& jsonText,
+                                         CameraEffects* effects,
+                                         std::string* error);
+
+}  // namespace studiocast::video

@@ -14,7 +14,9 @@
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
 #include "core/probe/probe.h"
+#include "core/util/json.h"
 #include "core/util/strings.h"
+#include "core/video/camera_effects_json.h"
 #include "core/video/image_ppm.h"
 #include "core/video/effects/effect_types.h"
 #include "studiocast/version.h"
@@ -374,6 +376,74 @@ namespace {
                     ::unsetenv("XDG_CONFIG_HOME");
                 }
             }
+        }
+
+        // Effects JSON patch (line-based IPC helper).
+        {
+            studiocast::video::CameraEffects fx;
+            std::string jerr;
+
+            const std::string pretty =
+                "{\n"
+                "  \"virtual_background\": {\n"
+                "    \"mode\": \"replace\",\n"
+                "    \"replace_path\": \"/tmp/some path/with spaces/bg.ppm\"\n"
+                "  }\n"
+                "}\n";
+
+            const std::string minified = studiocast::util::json::Minify(pretty);
+            expectTrue("json minify keeps spaces in strings",
+                       minified.find("/tmp/some path/with spaces/bg.ppm") != std::string::npos);
+
+            if (!studiocast::video::ApplyCameraEffectsPatchJsonText(minified, &fx, &jerr)) {
+                ++failures;
+                std::printf("[FAIL] ApplyCameraEffectsPatchJsonText: %s\n", jerr.c_str());
+            } else {
+                expectEq("effects patch replace_path", fx.background_replace_image.string(), "/tmp/some path/with spaces/bg.ppm");
+                expectTrue("effects patch background replace",
+                           fx.background == studiocast::video::effects::BackgroundEffect::replace);
+            }
+
+            const std::string af = "{\"auto_frame\":{\"enabled\":true,\"zoom\":77}}";
+            jerr.clear();
+            if (!studiocast::video::ApplyCameraEffectsPatchJsonText(af, &fx, &jerr)) {
+                ++failures;
+                std::printf("[FAIL] ApplyCameraEffectsPatchJsonText auto_frame: %s\n", jerr.c_str());
+            } else {
+                expectTrue("effects patch auto_frame background",
+                           fx.background == studiocast::video::effects::BackgroundEffect::auto_frame);
+                expectIntEq("effects patch auto_frame zoom", fx.auto_frame.strength, 77);
+            }
+
+            const std::string blur = "{\"virtual_background\":{\"mode\":\"blur\",\"blur_strength\":9}}";
+            jerr.clear();
+            if (!studiocast::video::ApplyCameraEffectsPatchJsonText(blur, &fx, &jerr)) {
+                ++failures;
+                std::printf("[FAIL] ApplyCameraEffectsPatchJsonText blur: %s\n", jerr.c_str());
+            } else {
+                expectTrue("effects patch blur disables auto_frame",
+                           fx.background == studiocast::video::effects::BackgroundEffect::blur);
+                expectIntEq("effects patch blur_strength", fx.background_strength, 9);
+            }
+
+            // Serializer output should be valid JSON and re-applicable.
+            const std::string fxJson = studiocast::video::CameraEffectsToJson(fx);
+            studiocast::util::json::Value parsed;
+            jerr.clear();
+            if (!studiocast::util::json::Parse(fxJson, &parsed, &jerr)) {
+                ++failures;
+                std::printf("[FAIL] CameraEffectsToJson parseable: %s\n", jerr.c_str());
+            }
+
+            studiocast::video::CameraEffects fx2;
+            const std::string wrapper = std::string("{\"video_effects\":") + fxJson + "}";
+            jerr.clear();
+            if (!studiocast::video::ApplyCameraEffectsPatchJsonText(wrapper, &fx2, &jerr)) {
+                ++failures;
+                std::printf("[FAIL] CameraEffectsToJson roundtrip apply: %s\n", jerr.c_str());
+            }
+            expectTrue("CameraEffectsToJson roundtrip background", fx2.background == fx.background);
+            expectEq("CameraEffectsToJson roundtrip path", fx2.background_replace_image.string(), fx.background_replace_image.string());
         }
 
         if (failures == 0) {
