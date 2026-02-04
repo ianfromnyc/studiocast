@@ -306,7 +306,7 @@ namespace {
 
                 const fs::path confPath = fs::path(dir) / "studiocast" / "daemon.conf";
 
-                // Legacy background keys should migrate to `video.effects.*`.
+                // Legacy background keys should migrate into canonical `video.effects.json`.
                 {
                     std::ofstream out(confPath);
                     out << "video.mirror = true\n";
@@ -327,15 +327,17 @@ namespace {
                 }
 
                 const auto dc = studiocast::config::LoadDaemonConfig();
-                expectEq("daemon_config migrate vb mode", dc.video_effects_virtual_background_mode, "blur");
-                expectIntEq("daemon_config migrate vb blur_strength", dc.video_effects_virtual_background_blur_strength, 13);
-                expectEq("daemon_config migrate vb remove_color", dc.video_effects_virtual_background_remove_color, "#112233");
-                expectEq("daemon_config migrate vb replace_path", dc.video_effects_virtual_background_replace_path, "/tmp/x.ppm");
-                expectTrue("daemon_config migrate mirror", dc.video_mirror);
-                expectTrue("daemon_config migrate eye_contact enabled", dc.video_effects_eye_contact_enabled);
-                expectIntEq("daemon_config migrate eye_contact strength", dc.video_effects_eye_contact_strength, 77);
-                expectTrue("daemon_config migrate key_light enabled", dc.video_effects_virtual_key_light_enabled);
-                expectIntEq("daemon_config migrate key_light intensity", dc.video_effects_virtual_key_light_intensity, 42);
+                expectEq("daemon_config migrate vb mode",
+                         studiocast::video::effects::ToString(dc.video_effects.virtual_background.mode),
+                         "blur");
+                expectIntEq("daemon_config migrate vb blur_strength", dc.video_effects.virtual_background.strength, 13);
+                expectEq("daemon_config migrate vb remove_color", dc.video_effects.virtual_background.remove_color, "#112233");
+                expectEq("daemon_config migrate vb replace_path", dc.video_effects.virtual_background.replace_path, "/tmp/x.ppm");
+                expectTrue("daemon_config migrate mirror", dc.video_effects.mirror);
+                expectTrue("daemon_config migrate eye_contact enabled", dc.video_effects.eye_contact.enabled);
+                expectIntEq("daemon_config migrate eye_contact strength", dc.video_effects.eye_contact.strength, 77);
+                expectTrue("daemon_config migrate key_light enabled", dc.video_effects.virtual_key_light.enabled);
+                expectIntEq("daemon_config migrate key_light intensity", dc.video_effects.virtual_key_light.intensity, 42);
 
                 const auto vc = studiocast::config::ToVideoServiceConfig(dc);
                 expectTrue("ToVideoServiceConfig mirror", vc.pipeline.effects.mirror);
@@ -353,6 +355,18 @@ namespace {
                         ++failures;
                         std::printf("[FAIL] SaveDaemonConfig: %s\n", err.c_str());
                     }
+
+                    // Saved config should contain only the canonical effects blob (no legacy per-effect keys).
+                    {
+                        std::ifstream in(confPath);
+                        const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                        expectTrue("saved config has video.effects.json", content.find("video.effects.json") != std::string::npos);
+                        expectTrue("saved config removes video.mirror", content.find("video.mirror") == std::string::npos);
+                        expectTrue("saved config removes video.background", content.find("video.background") == std::string::npos);
+                        expectTrue("saved config removes video.effects.virtual_background",
+                                   content.find("video.effects.virtual_background") == std::string::npos);
+                    }
+
                     const auto dc2 = studiocast::config::LoadDaemonConfig();
                     const auto vc2 = studiocast::config::ToVideoServiceConfig(dc2);
                     expectTrue("roundtrip background blur",
@@ -362,7 +376,7 @@ namespace {
                     expectTrue("roundtrip key_light enabled", vc2.pipeline.effects.virtual_key_light.enabled);
                 }
 
-                // Legacy auto_frame should migrate to `video.effects.auto_frame.*`.
+                // Legacy auto_frame should migrate into the canonical effects blob.
                 {
                     std::ofstream out(confPath);
                     out << "video.background = auto_frame\n";
@@ -372,8 +386,8 @@ namespace {
                 }
 
                 const auto dc_af = studiocast::config::LoadDaemonConfig();
-                expectTrue("daemon_config migrate auto_frame enabled", dc_af.video_effects_auto_frame_enabled);
-                expectIntEq("daemon_config migrate auto_frame zoom", dc_af.video_effects_auto_frame_zoom, 88);
+                expectTrue("daemon_config migrate auto_frame enabled", dc_af.video_effects.auto_frame.enabled);
+                expectIntEq("daemon_config migrate auto_frame zoom", dc_af.video_effects.auto_frame.strength, 88);
                 const auto vc_af = studiocast::config::ToVideoServiceConfig(dc_af);
                 expectTrue("ToVideoServiceConfig auto_frame",
                            vc_af.pipeline.effects.background == studiocast::video::effects::BackgroundEffect::auto_frame);

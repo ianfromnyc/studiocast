@@ -10,10 +10,13 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "core/util/fs.h"
 #include "core/util/strings.h"
 #include "core/util/xdg.h"
+#include "core/video/broadcast_camera_effects_json.h"
+#include "core/video/effects/broadcast_effects_json.h"
 #include "core/video/effects/effect_types.h"
 
 namespace fs = std::filesystem;
@@ -59,36 +62,6 @@ float ParseFloat(const std::string& raw, float fallback) {
   return static_cast<float>(std::atof(v.c_str()));
 }
 
-bool ParseRgbHex(const std::string& raw, std::uint32_t* out) {
-  if (!out) return false;
-  std::string s = studiocast::util::TrimCopy(raw);
-  if (s.empty()) return false;
-  if (!s.empty() && s[0] == '#') s.erase(0, 1);
-  if (s.size() != 6) return false;
-
-  std::uint32_t v = 0;
-  for (const char c : s) {
-    v <<= 4u;
-    if (c >= '0' && c <= '9') {
-      v |= static_cast<std::uint32_t>(c - '0');
-    } else if (c >= 'a' && c <= 'f') {
-      v |= static_cast<std::uint32_t>(c - 'a' + 10);
-    } else if (c >= 'A' && c <= 'F') {
-      v |= static_cast<std::uint32_t>(c - 'A' + 10);
-    } else {
-      return false;
-    }
-  }
-  *out = v;
-  return true;
-}
-
-std::string FormatRgbHex(std::uint32_t rgb) {
-  std::ostringstream oss;
-  oss << "#" << std::hex << std::nouppercase << std::setfill('0') << std::setw(6) << (rgb & 0xFFFFFFu);
-  return oss.str();
-}
-
 int ParseKeyLightTemperaturePreset(const std::string& raw, int fallback) {
   auto v = studiocast::util::TrimCopy(raw);
   std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -97,14 +70,6 @@ int ParseKeyLightTemperaturePreset(const std::string& raw, int fallback) {
   if (v == "1" || v == "warm") return 1;
   if (v == "2" || v == "cool") return 2;
   return fallback;
-}
-
-std::string FormatKeyLightTemperaturePreset(int preset) {
-  switch (preset) {
-    case 1: return "warm";
-    case 2: return "cool";
-    default: return "neutral";
-  }
 }
 
 }  // namespace
@@ -141,228 +106,261 @@ DaemonConfig LoadDaemonConfig() {
       if (auto it = kv.find("video.fps"); it != kv.end()) {
         s.video_fps = ParseInt(it->second, s.video_fps);
       }
-      if (auto it = kv.find("video.mirror"); it != kv.end()) {
-        s.video_mirror = ParseBool(it->second, s.video_mirror);
-      }
 
-      // New schema (video.effects.*)
-      if (auto it = kv.find("video.effects.engine"); it != kv.end()) {
-        s.video_effects_engine = it->second;
-      }
-
-      if (auto it = kv.find("video.effects.virtual_background.mode"); it != kv.end()) {
-        s.video_effects_virtual_background_mode = it->second;
-      }
-      if (auto it = kv.find("video.effects.virtual_background.blur_strength"); it != kv.end()) {
-        s.video_effects_virtual_background_blur_strength =
-            ParseInt(it->second, s.video_effects_virtual_background_blur_strength);
-      }
-      if (auto it = kv.find("video.effects.virtual_background.remove_color"); it != kv.end()) {
-        s.video_effects_virtual_background_remove_color = it->second;
-      }
-      if (auto it = kv.find("video.effects.virtual_background.replace_path"); it != kv.end()) {
-        s.video_effects_virtual_background_replace_path = it->second;
-      }
-
-      if (auto it = kv.find("video.effects.auto_frame.enabled"); it != kv.end()) {
-        s.video_effects_auto_frame_enabled = ParseBool(it->second, s.video_effects_auto_frame_enabled);
-      }
-      if (auto it = kv.find("video.effects.auto_frame.zoom"); it != kv.end()) {
-        s.video_effects_auto_frame_zoom = ParseInt(it->second, s.video_effects_auto_frame_zoom);
-      }
-      if (auto it = kv.find("video.effects.auto_frame.smoothing"); it != kv.end()) {
-        s.video_effects_auto_frame_smoothing =
-            ParseInt(it->second, s.video_effects_auto_frame_smoothing);
-      }
-      if (auto it = kv.find("video.effects.auto_frame.headroom"); it != kv.end()) {
-        s.video_effects_auto_frame_headroom = ParseFloat(it->second, s.video_effects_auto_frame_headroom);
-      }
-
-      if (auto it = kv.find("video.effects.eye_contact.enabled"); it != kv.end()) {
-        s.video_effects_eye_contact_enabled = ParseBool(it->second, s.video_effects_eye_contact_enabled);
-      }
-      if (auto it = kv.find("video.effects.eye_contact.strength"); it != kv.end()) {
-        s.video_effects_eye_contact_strength = ParseInt(it->second, s.video_effects_eye_contact_strength);
-      }
-      if (auto it = kv.find("video.effects.eye_contact.look_away"); it != kv.end()) {
-        s.video_effects_eye_contact_look_away = ParseBool(it->second, s.video_effects_eye_contact_look_away);
-      }
-
-      if (auto it = kv.find("video.effects.video_noise_removal.enabled"); it != kv.end()) {
-        s.video_effects_video_noise_removal_enabled =
-            ParseBool(it->second, s.video_effects_video_noise_removal_enabled);
-      }
-      if (auto it = kv.find("video.effects.video_noise_removal.strength"); it != kv.end()) {
-        s.video_effects_video_noise_removal_strength =
-            ParseInt(it->second, s.video_effects_video_noise_removal_strength);
-      }
-
-      if (auto it = kv.find("video.effects.virtual_key_light.enabled"); it != kv.end()) {
-        s.video_effects_virtual_key_light_enabled =
-            ParseBool(it->second, s.video_effects_virtual_key_light_enabled);
-      }
-      if (auto it = kv.find("video.effects.virtual_key_light.intensity"); it != kv.end()) {
-        s.video_effects_virtual_key_light_intensity =
-            ParseInt(it->second, s.video_effects_virtual_key_light_intensity);
-      }
-      if (auto it = kv.find("video.effects.virtual_key_light.temperature_preset"); it != kv.end()) {
-        s.video_effects_virtual_key_light_temperature_preset = it->second;
-      }
-      if (auto it = kv.find("video.effects.virtual_key_light.pan"); it != kv.end()) {
-        s.video_effects_virtual_key_light_pan = ParseInt(it->second, s.video_effects_virtual_key_light_pan);
-      }
-      if (auto it = kv.find("video.effects.virtual_key_light.hdri_path"); it != kv.end()) {
-        s.video_effects_virtual_key_light_hdri_path = it->second;
-      }
-
-      if (auto it = kv.find("video.effects.vignette.enabled"); it != kv.end()) {
-        s.video_effects_vignette_enabled = ParseBool(it->second, s.video_effects_vignette_enabled);
-      }
-      if (auto it = kv.find("video.effects.vignette.intensity"); it != kv.end()) {
-        s.video_effects_vignette_intensity = ParseInt(it->second, s.video_effects_vignette_intensity);
-      }
-      if (auto it = kv.find("video.effects.vignette.center_on_face"); it != kv.end()) {
-        s.video_effects_vignette_center_on_face =
-            ParseBool(it->second, s.video_effects_vignette_center_on_face);
-      }
-
-      // Legacy keys migration (read old keys as fallback).
-      const bool vb_has_any_new = (kv.find("video.effects.virtual_background.mode") != kv.end()) ||
-                                 (kv.find("video.effects.virtual_background.blur_strength") != kv.end()) ||
-                                 (kv.find("video.effects.virtual_background.remove_color") != kv.end()) ||
-                                 (kv.find("video.effects.virtual_background.replace_path") != kv.end());
-      const bool af_has_any_new = (kv.find("video.effects.auto_frame.enabled") != kv.end()) ||
-                                 (kv.find("video.effects.auto_frame.zoom") != kv.end()) ||
-                                 (kv.find("video.effects.auto_frame.smoothing") != kv.end()) ||
-                                 (kv.find("video.effects.auto_frame.headroom") != kv.end());
-
-      const bool legacy_bg_has_any = (kv.find("video.background") != kv.end()) ||
-                                     (kv.find("video.background_strength") != kv.end()) ||
-                                     (kv.find("video.background_remove_color") != kv.end()) ||
-                                     (kv.find("video.background_replace_image") != kv.end()) ||
-                                     (kv.find("video.auto_frame_strength") != kv.end()) ||
-                                     (kv.find("video.auto_frame_smoothing") != kv.end()) ||
-                                     (kv.find("video.auto_frame_headroom") != kv.end());
-
-      // Legacy background keys only migrate forward if the new virtual_background/auto_frame keys are absent.
-      if (legacy_bg_has_any && !vb_has_any_new && !af_has_any_new) {
-        std::string legacy_bg_raw;
-        if (auto it = kv.find("video.background"); it != kv.end()) legacy_bg_raw = it->second;
-        if (legacy_bg_raw.empty()) legacy_bg_raw = "none";
-
-        studiocast::video::effects::BackgroundEffect legacy_bg =
-            studiocast::video::effects::BackgroundEffect::none;
-        (void)studiocast::video::effects::ParseBackgroundEffect(legacy_bg_raw, &legacy_bg);
-
-        if (legacy_bg == studiocast::video::effects::BackgroundEffect::auto_frame) {
-          s.video_effects_auto_frame_enabled = true;
-          if (auto it = kv.find("video.auto_frame_strength"); it != kv.end()) {
-            s.video_effects_auto_frame_zoom = ParseInt(it->second, s.video_effects_auto_frame_zoom);
-          }
-          if (auto it = kv.find("video.auto_frame_smoothing"); it != kv.end()) {
-            s.video_effects_auto_frame_smoothing =
-                ParseInt(it->second, s.video_effects_auto_frame_smoothing);
-          }
-          if (auto it = kv.find("video.auto_frame_headroom"); it != kv.end()) {
-            s.video_effects_auto_frame_headroom =
-                ParseFloat(it->second, s.video_effects_auto_frame_headroom);
-          }
-
-          s.video_effects_virtual_background_mode = "none";
-        } else {
-          s.video_effects_auto_frame_enabled = false;
-          s.video_effects_virtual_background_mode = studiocast::video::effects::ToString(legacy_bg);
-          if (auto it = kv.find("video.background_strength"); it != kv.end()) {
-            s.video_effects_virtual_background_blur_strength =
-                ParseInt(it->second, s.video_effects_virtual_background_blur_strength);
-          }
-          if (auto it = kv.find("video.background_remove_color"); it != kv.end()) {
-            s.video_effects_virtual_background_remove_color = it->second;
-          }
-          if (auto it = kv.find("video.background_replace_image"); it != kv.end()) {
-            s.video_effects_virtual_background_replace_path = it->second;
-          }
+      // Canonical effects persistence: prefer `video.effects.json`.
+      bool effects_loaded = false;
+      if (auto it = kv.find("video.effects.json"); it != kv.end() && !it->second.empty()) {
+        studiocast::video::effects::BroadcastCameraEffects parsed;
+        studiocast::video::effects::BroadcastEffectsJsonParseOptions options;
+        options.allow_unknown_keys = true;  // tolerate forward/backward drift
+        options.allow_compat_keys = true;
+        std::vector<std::string> warnings;
+        std::string parse_error;
+        if (studiocast::video::effects::ParseBroadcastCameraEffectsJsonText(it->second,
+                                                                           &parsed,
+                                                                           options,
+                                                                           &warnings,
+                                                                           &parse_error)) {
+          s.video_effects = parsed;
+          effects_loaded = true;
         }
       }
 
-      // Legacy backend selection (deprecated): map to new Maxine-only engine preference.
-      if (kv.find("video.effects.engine") == kv.end()) {
-        if (auto it = kv.find("video.background_backend"); it != kv.end()) {
-          studiocast::video::effects::EffectBackend legacy_be =
-              studiocast::video::effects::EffectBackend::auto_select;
-          if (studiocast::video::effects::ParseEffectBackend(it->second, &legacy_be)) {
-            // Ignore legacy CPU selection.
-            if (legacy_be == studiocast::video::effects::EffectBackend::maxine) {
-              s.video_effects_engine = "maxine";
-            } else {
-              s.video_effects_engine = "auto";
+      // Migration: when the JSON blob is absent (or failed to parse), translate legacy keys.
+      if (!effects_loaded) {
+        auto fx = s.video_effects;
+
+        // Mirror (legacy top-level key).
+        if (auto it = kv.find("video.mirror"); it != kv.end()) {
+          fx.mirror = ParseBool(it->second, fx.mirror);
+        }
+
+        // Engine preference.
+        if (auto it = kv.find("video.effects.engine"); it != kv.end()) {
+          std::string raw = studiocast::util::TrimCopy(it->second);
+          std::transform(raw.begin(), raw.end(), raw.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+          });
+          fx.engine = (raw == "maxine") ? studiocast::video::effects::EffectsEnginePreference::maxine
+                                         : studiocast::video::effects::EffectsEnginePreference::auto_select;
+        } else if (auto it2 = kv.find("video.background_backend"); it2 != kv.end()) {
+          // Legacy backend selection: ignore CPU.
+          studiocast::video::effects::EffectBackend legacy = studiocast::video::effects::EffectBackend::auto_select;
+          if (studiocast::video::effects::ParseEffectBackend(it2->second, &legacy) &&
+              legacy == studiocast::video::effects::EffectBackend::maxine) {
+            fx.engine = studiocast::video::effects::EffectsEnginePreference::maxine;
+          }
+        }
+
+        // Background + auto-frame migration.
+        const bool vb_has_any_new = (kv.find("video.effects.virtual_background.mode") != kv.end()) ||
+                                   (kv.find("video.effects.virtual_background.blur_strength") != kv.end()) ||
+                                   (kv.find("video.effects.virtual_background.remove_color") != kv.end()) ||
+                                   (kv.find("video.effects.virtual_background.replace_path") != kv.end());
+        const bool af_has_any_new = (kv.find("video.effects.auto_frame.enabled") != kv.end()) ||
+                                   (kv.find("video.effects.auto_frame.zoom") != kv.end()) ||
+                                   (kv.find("video.effects.auto_frame.smoothing") != kv.end()) ||
+                                   (kv.find("video.effects.auto_frame.headroom") != kv.end());
+
+        const bool legacy_bg_has_any = (kv.find("video.background") != kv.end()) ||
+                                       (kv.find("video.background_strength") != kv.end()) ||
+                                       (kv.find("video.background_remove_color") != kv.end()) ||
+                                       (kv.find("video.background_replace_image") != kv.end()) ||
+                                       (kv.find("video.auto_frame_strength") != kv.end()) ||
+                                       (kv.find("video.auto_frame_smoothing") != kv.end()) ||
+                                       (kv.find("video.auto_frame_headroom") != kv.end());
+
+        std::string vb_mode_raw;
+        int vb_strength = fx.virtual_background.strength;
+        std::string vb_remove_color = fx.virtual_background.remove_color;
+        std::string vb_replace_path = fx.virtual_background.replace_path;
+        bool af_enabled = fx.auto_frame.enabled;
+        int af_strength = fx.auto_frame.strength;
+        int af_smoothing = fx.auto_frame.smoothing;
+        float af_headroom = fx.auto_frame.headroom;
+
+        if (auto it = kv.find("video.effects.virtual_background.mode"); it != kv.end()) {
+          vb_mode_raw = it->second;
+        }
+        if (auto it = kv.find("video.effects.virtual_background.blur_strength"); it != kv.end()) {
+          vb_strength = ParseInt(it->second, vb_strength);
+        }
+        if (auto it = kv.find("video.effects.virtual_background.remove_color"); it != kv.end()) {
+          vb_remove_color = it->second;
+        }
+        if (auto it = kv.find("video.effects.virtual_background.replace_path"); it != kv.end()) {
+          vb_replace_path = it->second;
+        }
+
+        if (auto it = kv.find("video.effects.auto_frame.enabled"); it != kv.end()) {
+          af_enabled = ParseBool(it->second, af_enabled);
+        }
+        if (auto it = kv.find("video.effects.auto_frame.zoom"); it != kv.end()) {
+          af_strength = ParseInt(it->second, af_strength);
+        }
+        if (auto it = kv.find("video.effects.auto_frame.smoothing"); it != kv.end()) {
+          af_smoothing = ParseInt(it->second, af_smoothing);
+        }
+        if (auto it = kv.find("video.effects.auto_frame.headroom"); it != kv.end()) {
+          af_headroom = ParseFloat(it->second, af_headroom);
+        }
+
+        // Legacy background keys only migrate forward if the new virtual_background/auto_frame keys are absent.
+        if (legacy_bg_has_any && !vb_has_any_new && !af_has_any_new) {
+          std::string legacy_bg_raw;
+          if (auto it = kv.find("video.background"); it != kv.end()) legacy_bg_raw = it->second;
+          if (legacy_bg_raw.empty()) legacy_bg_raw = "none";
+
+          studiocast::video::effects::BackgroundEffect legacy_bg =
+              studiocast::video::effects::BackgroundEffect::none;
+          (void)studiocast::video::effects::ParseBackgroundEffect(legacy_bg_raw, &legacy_bg);
+
+          if (legacy_bg == studiocast::video::effects::BackgroundEffect::auto_frame) {
+            af_enabled = true;
+            if (auto it = kv.find("video.auto_frame_strength"); it != kv.end()) {
+              af_strength = ParseInt(it->second, af_strength);
+            }
+            if (auto it = kv.find("video.auto_frame_smoothing"); it != kv.end()) {
+              af_smoothing = ParseInt(it->second, af_smoothing);
+            }
+            if (auto it = kv.find("video.auto_frame_headroom"); it != kv.end()) {
+              af_headroom = ParseFloat(it->second, af_headroom);
+            }
+            vb_mode_raw = "none";
+          } else {
+            af_enabled = false;
+            vb_mode_raw = studiocast::video::effects::ToString(legacy_bg);
+            if (auto it = kv.find("video.background_strength"); it != kv.end()) {
+              vb_strength = ParseInt(it->second, vb_strength);
+            }
+            if (auto it = kv.find("video.background_remove_color"); it != kv.end()) {
+              vb_remove_color = it->second;
+            }
+            if (auto it = kv.find("video.background_replace_image"); it != kv.end()) {
+              vb_replace_path = it->second;
             }
           }
         }
-      }
 
-      // Legacy key light keys.
-      if (kv.find("video.effects.virtual_key_light.enabled") == kv.end()) {
-        if (auto it = kv.find("video.virtual_key_light"); it != kv.end()) {
-          s.video_effects_virtual_key_light_enabled =
-              ParseBool(it->second, s.video_effects_virtual_key_light_enabled);
-        }
-      }
-      if (kv.find("video.effects.virtual_key_light.intensity") == kv.end()) {
-        if (auto it = kv.find("video.virtual_key_light_intensity"); it != kv.end()) {
-          s.video_effects_virtual_key_light_intensity =
-              ParseInt(it->second, s.video_effects_virtual_key_light_intensity);
-        }
-      }
-      if (kv.find("video.effects.virtual_key_light.temperature_preset") == kv.end()) {
-        if (auto it = kv.find("video.virtual_key_light_temperature"); it != kv.end()) {
-          s.video_effects_virtual_key_light_temperature_preset = it->second;
-        }
-      }
-      if (kv.find("video.effects.virtual_key_light.pan") == kv.end()) {
-        if (auto it = kv.find("video.virtual_key_light_pan"); it != kv.end()) {
-          s.video_effects_virtual_key_light_pan = ParseInt(it->second, s.video_effects_virtual_key_light_pan);
-        }
-      }
-      if (kv.find("video.effects.virtual_key_light.hdri_path") == kv.end()) {
-        if (auto it = kv.find("video.virtual_key_light_hdri"); it != kv.end()) {
-          s.video_effects_virtual_key_light_hdri_path = it->second;
-        }
-      }
+        fx.auto_frame.enabled = af_enabled;
+        fx.auto_frame.strength = std::max(0, std::min(100, af_strength));
+        fx.auto_frame.smoothing = std::max(0, std::min(100, af_smoothing));
+        fx.auto_frame.headroom = std::max(0.0f, std::min(1.0f, af_headroom));
 
-      // Legacy eye contact keys.
-      if (kv.find("video.effects.eye_contact.enabled") == kv.end()) {
-        if (auto it = kv.find("video.eye_contact"); it != kv.end()) {
-          s.video_effects_eye_contact_enabled = ParseBool(it->second, s.video_effects_eye_contact_enabled);
+        // Background mutex: auto-frame wins.
+        if (fx.auto_frame.enabled) {
+          fx.virtual_background.mode = studiocast::video::effects::VirtualBackgroundMode::none;
+        } else {
+          studiocast::video::effects::VirtualBackgroundMode m =
+              studiocast::video::effects::VirtualBackgroundMode::none;
+          std::string raw = studiocast::util::TrimCopy(vb_mode_raw);
+          std::transform(raw.begin(), raw.end(), raw.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+          });
+          if (raw == "auto_frame") {
+            m = studiocast::video::effects::VirtualBackgroundMode::none;
+          } else {
+            (void)studiocast::video::effects::ParseVirtualBackgroundMode(raw, &m);
+          }
+          fx.virtual_background.mode = m;
         }
-      }
-      if (kv.find("video.effects.eye_contact.strength") == kv.end()) {
-        if (auto it = kv.find("video.eye_contact_strength"); it != kv.end()) {
-          s.video_effects_eye_contact_strength = ParseInt(it->second, s.video_effects_eye_contact_strength);
-        }
-      }
-      if (kv.find("video.effects.eye_contact.look_away") == kv.end()) {
-        if (auto it = kv.find("video.eye_contact_look_away"); it != kv.end()) {
-          s.video_effects_eye_contact_look_away = ParseBool(it->second, s.video_effects_eye_contact_look_away);
-        }
-      }
+        fx.virtual_background.strength = std::max(1, std::min(64, vb_strength));
+        fx.virtual_background.remove_color = vb_remove_color;
+        fx.virtual_background.replace_path = vb_replace_path;
 
-      // Legacy vignette keys.
-      if (kv.find("video.effects.vignette.enabled") == kv.end()) {
-        if (auto it = kv.find("video.vignette"); it != kv.end()) {
-          s.video_effects_vignette_enabled = ParseBool(it->second, s.video_effects_vignette_enabled);
+        // Video noise removal.
+        if (auto it = kv.find("video.effects.video_noise_removal.enabled"); it != kv.end()) {
+          fx.video_noise_removal.enabled =
+              ParseBool(it->second, fx.video_noise_removal.enabled);
         }
-      }
-      if (kv.find("video.effects.vignette.intensity") == kv.end()) {
-        if (auto it = kv.find("video.vignette_intensity"); it != kv.end()) {
-          s.video_effects_vignette_intensity = ParseInt(it->second, s.video_effects_vignette_intensity);
+        if (auto it = kv.find("video.effects.video_noise_removal.strength"); it != kv.end()) {
+          fx.video_noise_removal.strength =
+              std::max(0, std::min(100, ParseInt(it->second, fx.video_noise_removal.strength)));
         }
-      }
-      if (kv.find("video.effects.vignette.center_on_face") == kv.end()) {
-        if (auto it = kv.find("video.vignette_center_on_face"); it != kv.end()) {
-          s.video_effects_vignette_center_on_face =
-              ParseBool(it->second, s.video_effects_vignette_center_on_face);
+
+        // Virtual key light (new keys preferred, legacy keys as fallback).
+        if (auto it = kv.find("video.effects.virtual_key_light.enabled"); it != kv.end()) {
+          fx.virtual_key_light.enabled = ParseBool(it->second, fx.virtual_key_light.enabled);
+        } else if (auto itLegacy = kv.find("video.virtual_key_light"); itLegacy != kv.end()) {
+          fx.virtual_key_light.enabled = ParseBool(itLegacy->second, fx.virtual_key_light.enabled);
         }
+
+        if (auto it = kv.find("video.effects.virtual_key_light.intensity"); it != kv.end()) {
+          fx.virtual_key_light.intensity = std::max(0, std::min(100, ParseInt(it->second, fx.virtual_key_light.intensity)));
+        } else if (auto itLegacy = kv.find("video.virtual_key_light_intensity"); itLegacy != kv.end()) {
+          fx.virtual_key_light.intensity = std::max(0, std::min(100, ParseInt(itLegacy->second, fx.virtual_key_light.intensity)));
+        }
+
+        std::string temp_preset_raw;
+        if (auto it = kv.find("video.effects.virtual_key_light.temperature_preset"); it != kv.end()) {
+          temp_preset_raw = it->second;
+        } else if (auto itLegacy = kv.find("video.virtual_key_light_temperature"); itLegacy != kv.end()) {
+          temp_preset_raw = itLegacy->second;
+        }
+        if (!temp_preset_raw.empty()) {
+          fx.virtual_key_light.temperature_preset =
+              ParseKeyLightTemperaturePreset(temp_preset_raw, fx.virtual_key_light.temperature_preset);
+          // Match KelvinFromPreset() in broadcast_effects_json.cpp.
+          switch (fx.virtual_key_light.temperature_preset) {
+            case 1: fx.virtual_key_light.temperature = 3200; break;
+            case 2: fx.virtual_key_light.temperature = 6500; break;
+            default: fx.virtual_key_light.temperature = 4500; break;
+          }
+        }
+
+        if (auto it = kv.find("video.effects.virtual_key_light.pan"); it != kv.end()) {
+          fx.virtual_key_light.direction_pan_degrees =
+              std::max(-180, std::min(180, ParseInt(it->second, fx.virtual_key_light.direction_pan_degrees)));
+        } else if (auto itLegacy = kv.find("video.virtual_key_light_pan"); itLegacy != kv.end()) {
+          fx.virtual_key_light.direction_pan_degrees =
+              std::max(-180, std::min(180, ParseInt(itLegacy->second, fx.virtual_key_light.direction_pan_degrees)));
+        }
+
+        if (auto it = kv.find("video.effects.virtual_key_light.hdri_path"); it != kv.end()) {
+          fx.virtual_key_light.hdri_path = it->second;
+        } else if (auto itLegacy = kv.find("video.virtual_key_light_hdri"); itLegacy != kv.end()) {
+          fx.virtual_key_light.hdri_path = itLegacy->second;
+        }
+
+        // Eye contact (new keys preferred, legacy keys as fallback).
+        if (auto it = kv.find("video.effects.eye_contact.enabled"); it != kv.end()) {
+          fx.eye_contact.enabled = ParseBool(it->second, fx.eye_contact.enabled);
+        } else if (auto itLegacy = kv.find("video.eye_contact"); itLegacy != kv.end()) {
+          fx.eye_contact.enabled = ParseBool(itLegacy->second, fx.eye_contact.enabled);
+        }
+
+        if (auto it = kv.find("video.effects.eye_contact.strength"); it != kv.end()) {
+          fx.eye_contact.strength = std::max(0, std::min(100, ParseInt(it->second, fx.eye_contact.strength)));
+        } else if (auto itLegacy = kv.find("video.eye_contact_strength"); itLegacy != kv.end()) {
+          fx.eye_contact.strength = std::max(0, std::min(100, ParseInt(itLegacy->second, fx.eye_contact.strength)));
+        }
+
+        if (auto it = kv.find("video.effects.eye_contact.look_away"); it != kv.end()) {
+          fx.eye_contact.look_away_enabled = ParseBool(it->second, fx.eye_contact.look_away_enabled);
+        } else if (auto itLegacy = kv.find("video.eye_contact_look_away"); itLegacy != kv.end()) {
+          fx.eye_contact.look_away_enabled = ParseBool(itLegacy->second, fx.eye_contact.look_away_enabled);
+        }
+
+        // Vignette (new keys preferred, legacy keys as fallback).
+        if (auto it = kv.find("video.effects.vignette.enabled"); it != kv.end()) {
+          fx.vignette.enabled = ParseBool(it->second, fx.vignette.enabled);
+        } else if (auto itLegacy = kv.find("video.vignette"); itLegacy != kv.end()) {
+          fx.vignette.enabled = ParseBool(itLegacy->second, fx.vignette.enabled);
+        }
+
+        if (auto it = kv.find("video.effects.vignette.intensity"); it != kv.end()) {
+          fx.vignette.intensity = std::max(0, std::min(100, ParseInt(it->second, fx.vignette.intensity)));
+        } else if (auto itLegacy = kv.find("video.vignette_intensity"); itLegacy != kv.end()) {
+          fx.vignette.intensity = std::max(0, std::min(100, ParseInt(itLegacy->second, fx.vignette.intensity)));
+        }
+
+        if (auto it = kv.find("video.effects.vignette.center_on_face"); it != kv.end()) {
+          fx.vignette.center_on_tracked_face = ParseBool(it->second, fx.vignette.center_on_tracked_face);
+        } else if (auto itLegacy = kv.find("video.vignette_center_on_face"); itLegacy != kv.end()) {
+          fx.vignette.center_on_tracked_face = ParseBool(itLegacy->second, fx.vignette.center_on_tracked_face);
+        }
+
+        s.video_effects = fx;
       }
 
       if (auto it = kv.find("service.consumer_poll_ms"); it != kv.end()) {
@@ -409,59 +407,12 @@ bool SaveDaemonConfig(const DaemonConfig& s, std::string* error) {
   out << "video.width = " << s.video_width << "\n";
   out << "video.height = " << s.video_height << "\n";
   out << "video.fps = " << s.video_fps << "\n";
-  out << "video.mirror = " << (s.video_mirror ? "true" : "false") << "\n\n";
-
-  out << "# Video effects (Maxine-only)\n";
-  out << "video.effects.engine = " << s.video_effects_engine << "\n\n";
-
-  out << "video.effects.virtual_background.mode = " << s.video_effects_virtual_background_mode << "\n";
-  out << "video.effects.virtual_background.blur_strength = "
-      << s.video_effects_virtual_background_blur_strength << "\n";
-  if (!s.video_effects_virtual_background_remove_color.empty()) {
-    out << "video.effects.virtual_background.remove_color = "
-        << s.video_effects_virtual_background_remove_color << "\n";
-  }
-  if (!s.video_effects_virtual_background_replace_path.empty()) {
-    out << "video.effects.virtual_background.replace_path = "
-        << s.video_effects_virtual_background_replace_path << "\n";
-  }
   out << "\n";
 
-  out << "video.effects.auto_frame.enabled = " << (s.video_effects_auto_frame_enabled ? "true" : "false")
-      << "\n";
-  out << "video.effects.auto_frame.zoom = " << s.video_effects_auto_frame_zoom << "\n";
-  out << "video.effects.auto_frame.smoothing = " << s.video_effects_auto_frame_smoothing << "\n";
-  out << "video.effects.auto_frame.headroom = " << s.video_effects_auto_frame_headroom << "\n\n";
-
-  out << "video.effects.eye_contact.enabled = " << (s.video_effects_eye_contact_enabled ? "true" : "false")
-      << "\n";
-  out << "video.effects.eye_contact.strength = " << s.video_effects_eye_contact_strength << "\n";
-  out << "video.effects.eye_contact.look_away = "
-      << (s.video_effects_eye_contact_look_away ? "true" : "false") << "\n\n";
-
-  out << "video.effects.video_noise_removal.enabled = "
-      << (s.video_effects_video_noise_removal_enabled ? "true" : "false") << "\n";
-  out << "video.effects.video_noise_removal.strength = " << s.video_effects_video_noise_removal_strength
-      << "\n\n";
-
-  out << "video.effects.virtual_key_light.enabled = "
-      << (s.video_effects_virtual_key_light_enabled ? "true" : "false") << "\n";
-  out << "video.effects.virtual_key_light.intensity = " << s.video_effects_virtual_key_light_intensity
-      << "\n";
-  out << "video.effects.virtual_key_light.temperature_preset = "
-      << s.video_effects_virtual_key_light_temperature_preset << "\n";
-  out << "video.effects.virtual_key_light.pan = " << s.video_effects_virtual_key_light_pan << "\n";
-  if (!s.video_effects_virtual_key_light_hdri_path.empty()) {
-    out << "video.effects.virtual_key_light.hdri_path = " << s.video_effects_virtual_key_light_hdri_path
-        << "\n";
-  }
-  out << "\n";
-
-  out << "video.effects.vignette.enabled = " << (s.video_effects_vignette_enabled ? "true" : "false")
-      << "\n";
-  out << "video.effects.vignette.intensity = " << s.video_effects_vignette_intensity << "\n";
-  out << "video.effects.vignette.center_on_face = "
-      << (s.video_effects_vignette_center_on_face ? "true" : "false") << "\n\n";
+  out << "# Canonical video effects (Broadcast schema)\n";
+  out << "# Single-line JSON blob, managed by the StudioCast GUI / studiocastctl.\n";
+  out << "video.effects.json = "
+      << studiocast::video::effects::BroadcastCameraEffectsToJson(s.video_effects) << "\n\n";
 
   out << "service.consumer_poll_ms = " << s.consumer_poll_ms << "\n";
   out << "service.stop_grace_ms = " << s.stop_grace_ms << "\n";
@@ -478,75 +429,7 @@ studiocast::video::VirtualCameraServiceConfig ToVideoServiceConfig(const DaemonC
   cfg.pipeline.width = s.video_width;
   cfg.pipeline.height = s.video_height;
   cfg.pipeline.fps = s.video_fps;
-  cfg.pipeline.effects.mirror = s.video_mirror;
-
-  // Parse the persisted config fields into the strongly-typed effect config.
-  {
-    // Maxine-only engine preference (ignore CPU legacy).
-    cfg.pipeline.effects.background_backend = studiocast::video::effects::EffectBackend::auto_select;
-    {
-      std::string raw = s.video_effects_engine;
-      std::transform(raw.begin(), raw.end(), raw.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-      });
-      if (raw == "maxine") {
-        cfg.pipeline.effects.background_backend = studiocast::video::effects::EffectBackend::maxine;
-      } else {
-        cfg.pipeline.effects.background_backend = studiocast::video::effects::EffectBackend::auto_select;
-      }
-    }
-
-    // Auto Frame and Virtual Background are mutually exclusive. Auto Frame wins if enabled.
-    if (s.video_effects_auto_frame_enabled) {
-      cfg.pipeline.effects.background = studiocast::video::effects::BackgroundEffect::auto_frame;
-      cfg.pipeline.effects.auto_frame.strength = std::max(0, std::min(100, s.video_effects_auto_frame_zoom));
-      cfg.pipeline.effects.auto_frame.smoothing =
-          std::max(0, std::min(100, s.video_effects_auto_frame_smoothing));
-      cfg.pipeline.effects.auto_frame.headroom =
-          std::max(0.0f, std::min(1.0f, s.video_effects_auto_frame_headroom));
-    } else {
-      studiocast::video::effects::BackgroundEffect bg = studiocast::video::effects::BackgroundEffect::none;
-      if (studiocast::video::effects::ParseBackgroundEffect(s.video_effects_virtual_background_mode, &bg)) {
-        if (bg == studiocast::video::effects::BackgroundEffect::auto_frame) {
-          bg = studiocast::video::effects::BackgroundEffect::none;
-        }
-        cfg.pipeline.effects.background = bg;
-      }
-    }
-
-    cfg.pipeline.effects.background_strength =
-        std::max(1, std::min(64, s.video_effects_virtual_background_blur_strength));
-
-    cfg.pipeline.effects.background_replace_image = s.video_effects_virtual_background_replace_path;
-    std::uint32_t rgb = 0;
-    if (ParseRgbHex(s.video_effects_virtual_background_remove_color, &rgb)) {
-      cfg.pipeline.effects.background_remove_color_rgb = rgb;
-    }
-
-    cfg.pipeline.effects.denoise = s.video_effects_video_noise_removal_enabled;
-    cfg.pipeline.effects.denoise_strength =
-        std::max(0, std::min(100, s.video_effects_video_noise_removal_strength));
-
-    cfg.pipeline.effects.virtual_key_light.enabled = s.video_effects_virtual_key_light_enabled;
-    cfg.pipeline.effects.virtual_key_light.intensity =
-        static_cast<float>(std::max(0, std::min(100, s.video_effects_virtual_key_light_intensity))) / 100.0f;
-    cfg.pipeline.effects.virtual_key_light.temperature_preset =
-        ParseKeyLightTemperaturePreset(s.video_effects_virtual_key_light_temperature_preset,
-                                       cfg.pipeline.effects.virtual_key_light.temperature_preset);
-    cfg.pipeline.effects.virtual_key_light.direction_pan_degrees =
-        static_cast<float>(std::max(-180, std::min(180, s.video_effects_virtual_key_light_pan)));
-    cfg.pipeline.effects.virtual_key_light.hdri_path = s.video_effects_virtual_key_light_hdri_path;
-
-    cfg.pipeline.effects.eye_contact.enabled = s.video_effects_eye_contact_enabled;
-    cfg.pipeline.effects.eye_contact.strength =
-        std::max(0, std::min(100, s.video_effects_eye_contact_strength));
-    cfg.pipeline.effects.eye_contact.look_away_enabled = s.video_effects_eye_contact_look_away;
-
-    cfg.pipeline.effects.vignette.enabled = s.video_effects_vignette_enabled;
-    cfg.pipeline.effects.vignette.intensity =
-        static_cast<float>(std::max(0, std::min(100, s.video_effects_vignette_intensity))) / 100.0f;
-    cfg.pipeline.effects.vignette.center_on_tracked_face = s.video_effects_vignette_center_on_face;
-  }
+  cfg.pipeline.effects = studiocast::video::ToLegacyCameraEffects(s.video_effects);
 
   cfg.consumer_poll_ms = s.consumer_poll_ms;
   cfg.stop_grace_ms = s.stop_grace_ms;
@@ -563,54 +446,7 @@ void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCamer
   out->video_width = cfg.pipeline.width;
   out->video_height = cfg.pipeline.height;
   out->video_fps = cfg.pipeline.fps;
-  out->video_mirror = cfg.pipeline.effects.mirror;
-
-  // Effects engine preference (Maxine-only; ignore legacy CPU selection).
-  out->video_effects_engine = "auto";
-  if (cfg.pipeline.effects.background_backend == studiocast::video::effects::EffectBackend::maxine) {
-    out->video_effects_engine = "maxine";
-  }
-
-  // Auto Frame vs Virtual Background.
-  out->video_effects_auto_frame_enabled =
-      (cfg.pipeline.effects.background == studiocast::video::effects::BackgroundEffect::auto_frame);
-  out->video_effects_auto_frame_zoom = std::max(0, std::min(100, cfg.pipeline.effects.auto_frame.strength));
-  out->video_effects_auto_frame_smoothing = std::max(0, std::min(100, cfg.pipeline.effects.auto_frame.smoothing));
-  out->video_effects_auto_frame_headroom =
-      std::max(0.0f, std::min(1.0f, cfg.pipeline.effects.auto_frame.headroom));
-
-  if (out->video_effects_auto_frame_enabled) {
-    out->video_effects_virtual_background_mode = "none";
-  } else {
-    out->video_effects_virtual_background_mode =
-        studiocast::video::effects::ToString(cfg.pipeline.effects.background);
-  }
-  out->video_effects_virtual_background_blur_strength = cfg.pipeline.effects.background_strength;
-  out->video_effects_virtual_background_remove_color =
-      FormatRgbHex(cfg.pipeline.effects.background_remove_color_rgb);
-  out->video_effects_virtual_background_replace_path = cfg.pipeline.effects.background_replace_image.string();
-
-  out->video_effects_video_noise_removal_enabled = cfg.pipeline.effects.denoise;
-  out->video_effects_video_noise_removal_strength =
-      std::max(0, std::min(100, cfg.pipeline.effects.denoise_strength));
-
-  out->video_effects_virtual_key_light_enabled = cfg.pipeline.effects.virtual_key_light.enabled;
-  out->video_effects_virtual_key_light_intensity =
-      std::max(0, std::min(100, static_cast<int>(cfg.pipeline.effects.virtual_key_light.intensity * 100.0f)));
-  out->video_effects_virtual_key_light_temperature_preset =
-      FormatKeyLightTemperaturePreset(cfg.pipeline.effects.virtual_key_light.temperature_preset);
-  out->video_effects_virtual_key_light_pan =
-      std::max(-180, std::min(180, static_cast<int>(cfg.pipeline.effects.virtual_key_light.direction_pan_degrees)));
-  out->video_effects_virtual_key_light_hdri_path = cfg.pipeline.effects.virtual_key_light.hdri_path.string();
-
-  out->video_effects_eye_contact_enabled = cfg.pipeline.effects.eye_contact.enabled;
-  out->video_effects_eye_contact_strength = std::max(0, std::min(100, cfg.pipeline.effects.eye_contact.strength));
-  out->video_effects_eye_contact_look_away = cfg.pipeline.effects.eye_contact.look_away_enabled;
-
-  out->video_effects_vignette_enabled = cfg.pipeline.effects.vignette.enabled;
-  out->video_effects_vignette_intensity =
-      std::max(0, std::min(100, static_cast<int>(cfg.pipeline.effects.vignette.intensity * 100.0f)));
-  out->video_effects_vignette_center_on_face = cfg.pipeline.effects.vignette.center_on_tracked_face;
+  out->video_effects = studiocast::video::ToBroadcastCameraEffects(cfg.pipeline.effects);
 
   out->consumer_poll_ms = cfg.consumer_poll_ms;
   out->stop_grace_ms = cfg.stop_grace_ms;
