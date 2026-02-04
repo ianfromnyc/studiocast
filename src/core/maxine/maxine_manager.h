@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -8,9 +9,26 @@
 namespace studiocast::maxine {
 
 struct FeatureInstallStatus {
-  std::string id;      // e.g. "greenscreen"
+  std::string id; // e.g. "greenscreen"
   bool installed = false;
   std::string details; // human-friendly hint
+};
+
+struct GpuSummary {
+  int index = -1; // nvidia-smi index
+  std::string uuid;
+  std::string name;
+  std::string compute_cap; // empty if unknown
+  bool likely_supported = false;
+  std::string maxine_gpu_arg; // empty if unknown
+};
+
+struct DriverDiagnostics {
+  std::string version; // empty if unknown
+  bool ok = false;     // known + meets minimum requirement
+  std::string min_version;
+  bool meets_min_version = false;
+  std::string details;
 };
 
 struct ComponentDiagnostics {
@@ -57,10 +75,19 @@ struct GpuDiagnostics {
 };
 
 struct MaxineDiagnostics {
+  // True when at least one Maxine-backed effect is runnable.
   bool ok = false;
+  bool supported = false;
+
+  std::string blocked_reason;               // stable enum string
+  std::vector<std::string> blocked_details; // human actionable strings
+
   std::string summary;
 
-  std::string nvidia_driver; // empty if unknown
+  DriverDiagnostics driver;
+  std::string nvidia_driver; // legacy alias: empty if unknown
+  std::vector<GpuSummary> gpus;
+
   GpuDiagnostics gpu;
   ComponentDiagnostics vfx;
   ComponentDiagnostics ar;
@@ -68,8 +95,13 @@ struct MaxineDiagnostics {
   // Stable effect IDs (see `core/video/effects/effect_descriptors.*`).
   std::vector<std::string> available_effects;
 
+  // effect_id -> reason(s)
+  std::map<std::string, std::vector<std::string>> missing_effects;
+
   std::vector<std::string> problems;
   std::vector<std::string> hints;
+
+  std::string last_error;
 
   std::string ToJson() const;
 };
@@ -79,4 +111,4 @@ public:
   MaxineDiagnostics Diagnose(bool verbose_probe = false) const;
 };
 
-}  // namespace studiocast::maxine
+} // namespace studiocast::maxine
