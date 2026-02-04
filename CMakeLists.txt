@@ -45,6 +45,8 @@ studiocast_generate_version_header(
 add_library(studiocast_core
         src/core/probe/probe.h
         src/core/probe/probe.cpp
+        src/core/util/dynlib.h
+        src/core/util/dynlib.cpp
         src/core/util/exec.h
         src/core/util/exec.cpp
         src/core/util/fs.h
@@ -65,6 +67,13 @@ add_library(studiocast_core
         src/core/maxine/gpu.cpp
         src/core/maxine/availability.h
         src/core/maxine/availability.cpp
+        src/core/maxine/nvcv_types.h
+        src/core/maxine/nvcv_api.h
+        src/core/maxine/nvcv_api.cpp
+        src/core/maxine/vfx_api.h
+        src/core/maxine/vfx_api.cpp
+        src/core/maxine/ar_api.h
+        src/core/maxine/ar_api.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
         src/core/audio/virtual_mic_state.h
@@ -120,6 +129,8 @@ target_include_directories(studiocast_core PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${STUDIOCAST_GENERATED_DIR}"
 )
+
+target_link_libraries(studiocast_core PUBLIC ${CMAKE_DL_LIBS})
 
 studiocast_set_project_warnings(studiocast_core)
 studiocast_enable_sanitizers(studiocast_core)

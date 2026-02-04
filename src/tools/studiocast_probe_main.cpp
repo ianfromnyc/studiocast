@@ -3,6 +3,9 @@
 #include <string_view>
 #include <vector>
 
+#include "core/maxine/ar_api.h"
+#include "core/maxine/nvcv_api.h"
+#include "core/maxine/vfx_api.h"
 #include "core/probe/probe.h"
 #include "core/util/strings.h"
 #include "studiocast/version.h"
@@ -45,6 +48,86 @@ namespace {
         expectVecEq("Split", Split("a,b,,c", ','), {"a", "b", "", "c"});
         expectVecEq("SplitLines", SplitLines("a\r\nb\n\nc"), {"a", "b", "", "c"});
         expectEq("FirstNonEmptyLine", FirstNonEmptyLine("\n  \n x \n"), "x");
+
+        {
+            studiocast::maxine::NvcvApi api;
+            std::string err;
+            const bool ok = api.Initialize(studiocast::maxine::NvcvApi::Requirement::Minimal, &err);
+
+            // Self-test must be stable without Maxine installed:
+            // - If Maxine is present, initialization may succeed.
+            // - If Maxine is absent, we expect a clean failure with a non-empty error message.
+            if (!ok && err.empty()) {
+                ++failures;
+                std::printf("[FAIL] NvcvApi.Initialize returned false but provided no error message\n");
+            }
+        }
+
+        {
+            studiocast::maxine::vfx::VfxApi api;
+            std::string err;
+            const bool ok = api.Initialize(&err);
+
+            // Self-test must be stable without Maxine installed:
+            // - If Maxine is present, initialization may succeed.
+            // - If Maxine is absent, we expect a clean failure with a non-empty error message.
+            if (!ok && err.empty()) {
+                ++failures;
+                std::printf("[FAIL] VfxApi.Initialize returned false but provided no error message\n");
+            }
+
+            // If the library is present, CreateEffect should either succeed or return an error
+            // code that maps to a useful string.
+            if (ok) {
+                studiocast::maxine::vfx::NvVFX_Handle h = nullptr;
+                const studiocast::maxine::NvCV_Status st =
+                    api.f().NvVFX_CreateEffect(studiocast::maxine::vfx::NVVFX_FX_GREEN_SCREEN, &h);
+                if (st == studiocast::maxine::NVCV_SUCCESS) {
+                    if (h) {
+                        api.f().NvVFX_DestroyEffect(h);
+                    }
+                } else {
+                    const std::string msg = api.StatusToString(st);
+                    if (msg.empty()) {
+                        ++failures;
+                        std::printf("[FAIL] VfxApi.StatusToString returned empty message for status=%d\n", st);
+                    }
+                }
+            }
+        }
+
+        {
+            studiocast::maxine::ar::ArApi api;
+            std::string err;
+            const bool ok = api.Initialize(&err);
+
+            // Self-test must be stable without Maxine installed:
+            // - If Maxine is present, initialization may succeed.
+            // - If Maxine is absent, we expect a clean failure with a non-empty error message.
+            if (!ok && err.empty()) {
+                ++failures;
+                std::printf("[FAIL] ArApi.Initialize returned false but provided no error message\n");
+            }
+
+            // If the library is present, Create should either succeed or return an error
+            // code that maps to a useful string.
+            if (ok) {
+                studiocast::maxine::ar::NvAR_FeatureHandle h = nullptr;
+                const studiocast::maxine::NvCV_Status st = api.f().NvAR_Create(
+                    studiocast::maxine::ar::NVAR_FEATURE_GAZE_REDIRECTION, &h);
+                if (st == studiocast::maxine::NVCV_SUCCESS) {
+                    if (h) {
+                        api.f().NvAR_Destroy(h);
+                    }
+                } else {
+                    const std::string msg = api.StatusToString(st);
+                    if (msg.empty()) {
+                        ++failures;
+                        std::printf("[FAIL] ArApi.StatusToString returned empty message for status=%d\n", st);
+                    }
+                }
+            }
+        }
 
         if (failures == 0) {
             std::printf("SELFTEST OK\n");
