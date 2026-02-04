@@ -1,6 +1,7 @@
 #include "effect_descriptors.h"
 
 #include "core/maxine/availability.h"
+#include "core/video/effects/broadcast_effect_contract.h"
 
 namespace studiocast::video::effects {
 
@@ -24,6 +25,8 @@ std::string ToString(ParamType v) {
       return "bool";
     case ParamType::integer:
       return "int";
+    case ParamType::floating:
+      return "float";
     case ParamType::string:
       return "string";
   }
@@ -37,12 +40,16 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
 
   {
     VideoEffectDescriptor d;
-    d.id = "mirror";
+    d.id = std::string(contract::kEffectIdMirror);
     d.display_name = "Mirror";
     d.required_components = {RequiredComponent::none};
     d.pipeline_order = 10;
     d.params = {
-        ParamDescriptor{.id = "enabled", .display_name = "Enabled", .type = ParamType::boolean, .default_bool = false, .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kEnabled),
+                        .display_name = "Enabled",
+                        .type = ParamType::boolean,
+                        .default_bool = false,
+                        .default_string = ""},
     };
     out.push_back(d);
   }
@@ -51,68 +58,113 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
   // These share the stable mode strings used by IPC: blur/remove/replace.
   {
     VideoEffectDescriptor d;
-    d.id = "virtual_background.blur";
+    d.id = std::string(contract::kEffectIdVirtualBackgroundBlur);
     d.display_name = "Virtual Background — Blur";
     d.required_components = {RequiredComponent::maxine_vfx};
-    d.mutex_groups = {"virtual_background_mode", "background_or_auto_frame"};
+    d.mutex_groups = {std::string(contract::kMutexGroupVirtualBackgroundMode),
+                      std::string(contract::kMutexGroupBackgroundOrAutoFrame)};
     d.pipeline_order = 40;
     d.params = {
-        ParamDescriptor{.id = "strength",
+        ParamDescriptor{.id = std::string(contract::param::kEnabled),
+                        .display_name = "Enabled",
+                        .type = ParamType::boolean,
+                        .default_bool = false,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kStrength),
                         .display_name = "Strength",
                         .type = ParamType::integer,
-                        .min = 1,
-                        .max = 64,
+                        .min = contract::kVbStrengthMin,
+                        .max = contract::kVbStrengthMax,
                         .step = 1,
-                        .default_int = 8,
+                        .default_int = contract::kVbStrengthDefault,
                         .default_string = ""},
     };
     out.push_back(d);
   }
   {
     VideoEffectDescriptor d;
-    d.id = "virtual_background.remove";
+    d.id = std::string(contract::kEffectIdVirtualBackgroundRemove);
     d.display_name = "Virtual Background — Remove";
     d.required_components = {RequiredComponent::maxine_vfx};
-    d.mutex_groups = {"virtual_background_mode", "background_or_auto_frame"};
+    d.mutex_groups = {std::string(contract::kMutexGroupVirtualBackgroundMode),
+                      std::string(contract::kMutexGroupBackgroundOrAutoFrame)};
     d.pipeline_order = 40;
     d.params = {
-        ParamDescriptor{.id = "greenscreen_mode",
+        ParamDescriptor{.id = std::string(contract::param::kEnabled),
+                        .display_name = "Enabled",
+                        .type = ParamType::boolean,
+                        .default_bool = false,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kStrength),
+                        .display_name = "Strength",
+                        .type = ParamType::integer,
+                        .min = contract::kVbStrengthMin,
+                        .max = contract::kVbStrengthMax,
+                        .step = 1,
+                        .default_int = contract::kVbStrengthDefault,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kVbRemoveColor),
+                        .display_name = "Remove color",
+                        .type = ParamType::string,
+                        .default_string = "#000000"},
+        ParamDescriptor{.id = std::string(contract::param::kGreenscreenMode),
                         .display_name = "Mode",
                         .type = ParamType::integer,
                         .min = 0,
                         .max = 8,
                         .step = 1,
-                        .default_int = 0,
+                        .default_int = contract::kGreenscreenModeDefault,
                         .default_string = ""},
-        ParamDescriptor{.id = "greenscreen_temporal",
+        ParamDescriptor{.id = std::string(contract::param::kGreenscreenTemporal),
                         .display_name = "Temporal consistency",
                         .type = ParamType::boolean,
-                        .default_bool = true,
+                        .default_bool = contract::kGreenscreenTemporalDefault,
                         .default_string = ""},
     };
     out.push_back(d);
   }
   {
     VideoEffectDescriptor d;
-    d.id = "virtual_background.replace";
+    d.id = std::string(contract::kEffectIdVirtualBackgroundReplace);
     d.display_name = "Virtual Background — Replace";
     d.required_components = {RequiredComponent::maxine_vfx};
-    d.mutex_groups = {"virtual_background_mode", "background_or_auto_frame"};
+    d.mutex_groups = {std::string(contract::kMutexGroupVirtualBackgroundMode),
+                      std::string(contract::kMutexGroupBackgroundOrAutoFrame)};
     d.pipeline_order = 40;
     d.params = {
-        ParamDescriptor{.id = "replace_path", .display_name = "Image", .type = ParamType::string, .default_string = ""},
-        ParamDescriptor{.id = "greenscreen_mode",
+        ParamDescriptor{.id = std::string(contract::param::kEnabled),
+                        .display_name = "Enabled",
+                        .type = ParamType::boolean,
+                        .default_bool = false,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kStrength),
+                        .display_name = "Strength",
+                        .type = ParamType::integer,
+                        .min = contract::kVbStrengthMin,
+                        .max = contract::kVbStrengthMax,
+                        .step = 1,
+                        .default_int = contract::kVbStrengthDefault,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kVbReplacePath),
+                        .display_name = "Image",
+                        .type = ParamType::string,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kVbRemoveColor),
+                        .display_name = "Remove color",
+                        .type = ParamType::string,
+                        .default_string = "#000000"},
+        ParamDescriptor{.id = std::string(contract::param::kGreenscreenMode),
                         .display_name = "Mode",
                         .type = ParamType::integer,
                         .min = 0,
                         .max = 8,
                         .step = 1,
-                        .default_int = 0,
+                        .default_int = contract::kGreenscreenModeDefault,
                         .default_string = ""},
-        ParamDescriptor{.id = "greenscreen_temporal",
+        ParamDescriptor{.id = std::string(contract::param::kGreenscreenTemporal),
                         .display_name = "Temporal consistency",
                         .type = ParamType::boolean,
-                        .default_bool = true,
+                        .default_bool = contract::kGreenscreenTemporalDefault,
                         .default_string = ""},
     };
     out.push_back(d);
@@ -121,28 +173,69 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
   // Maxine AR effects.
   {
     VideoEffectDescriptor d;
-    d.id = "auto_frame";
+    d.id = std::string(contract::kEffectIdAutoFrame);
     d.display_name = "Auto Frame";
     d.required_components = {RequiredComponent::maxine_ar};
-    d.mutex_groups = {"background_or_auto_frame"};
+    d.mutex_groups = {std::string(contract::kMutexGroupBackgroundOrAutoFrame)};
     d.pipeline_order = 20;
     d.params = {
-        ParamDescriptor{.id = "enabled", .display_name = "Enabled", .type = ParamType::boolean, .default_bool = false, .default_string = ""},
-        ParamDescriptor{.id = "strength", .display_name = "Strength", .type = ParamType::integer, .min = 0, .max = 100, .step = 1, .default_int = 50, .default_string = ""},
-        ParamDescriptor{.id = "smoothing", .display_name = "Smoothing", .type = ParamType::integer, .min = 0, .max = 100, .step = 1, .default_int = 50, .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kEnabled),
+                        .display_name = "Enabled",
+                        .type = ParamType::boolean,
+                        .default_bool = false,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kStrength),
+                        .display_name = "Strength",
+                        .type = ParamType::integer,
+                        .min = contract::kAutoFrameStrengthMin,
+                        .max = contract::kAutoFrameStrengthMax,
+                        .step = 1,
+                        .default_int = contract::kAutoFrameStrengthDefault,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kSmoothing),
+                        .display_name = "Smoothing",
+                        .type = ParamType::integer,
+                        .min = 0,
+                        .max = 100,
+                        .step = 1,
+                        .default_int = contract::kAutoFrameSmoothingDefault,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kHeadroom),
+                        .display_name = "Headroom",
+                        .type = ParamType::floating,
+                        .min_f = contract::kAutoFrameHeadroomMin,
+                        .max_f = contract::kAutoFrameHeadroomMax,
+                        .step_f = 0.01f,
+                        .default_float = contract::kAutoFrameHeadroomDefault,
+                        .default_string = ""},
     };
     out.push_back(d);
   }
   {
     VideoEffectDescriptor d;
-    d.id = "eye_contact";
+    d.id = std::string(contract::kEffectIdEyeContact);
     d.display_name = "Eye Contact";
     d.required_components = {RequiredComponent::maxine_ar};
     d.pipeline_order = 30;
     d.params = {
-        ParamDescriptor{.id = "enabled", .display_name = "Enabled", .type = ParamType::boolean, .default_bool = false, .default_string = ""},
-        ParamDescriptor{.id = "strength", .display_name = "Strength", .type = ParamType::integer, .min = 0, .max = 100, .step = 1, .default_int = 50, .default_string = ""},
-        ParamDescriptor{.id = "look_away_enabled", .display_name = "Allow look away", .type = ParamType::boolean, .default_bool = true, .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kEnabled),
+                        .display_name = "Enabled",
+                        .type = ParamType::boolean,
+                        .default_bool = false,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kStrength),
+                        .display_name = "Strength",
+                        .type = ParamType::integer,
+                        .min = 0,
+                        .max = 100,
+                        .step = 1,
+                        .default_int = contract::kEyeContactStrengthDefault,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kLookAwayEnabled),
+                        .display_name = "Allow look away",
+                        .type = ParamType::boolean,
+                        .default_bool = true,
+                        .default_string = ""},
     };
     out.push_back(d);
   }
@@ -150,38 +243,91 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
   // VFX-ish effects.
   {
     VideoEffectDescriptor d;
-    d.id = "video_noise_removal";
+    d.id = std::string(contract::kEffectIdVideoNoiseRemoval);
     d.display_name = "Video Noise Removal";
     d.required_components = {RequiredComponent::maxine_vfx};
     d.pipeline_order = 50;
     d.params = {
-        ParamDescriptor{.id = "enabled", .display_name = "Enabled", .type = ParamType::boolean, .default_bool = false, .default_string = ""},
-        ParamDescriptor{.id = "strength", .display_name = "Strength", .type = ParamType::integer, .min = 0, .max = 100, .step = 1, .default_int = 50, .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kEnabled),
+                        .display_name = "Enabled",
+                        .type = ParamType::boolean,
+                        .default_bool = false,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kStrength),
+                        .display_name = "Strength",
+                        .type = ParamType::integer,
+                        .min = 0,
+                        .max = 100,
+                        .step = 1,
+                        .default_int = contract::kVideoNoiseRemovalStrengthDefault,
+                        .default_string = ""},
     };
     out.push_back(d);
   }
   {
     VideoEffectDescriptor d;
-    d.id = "virtual_key_light";
+    d.id = std::string(contract::kEffectIdVirtualKeyLight);
     d.display_name = "Virtual Key Light";
     d.required_components = {RequiredComponent::maxine_vfx};
     d.pipeline_order = 60;
     d.params = {
-        ParamDescriptor{.id = "enabled", .display_name = "Enabled", .type = ParamType::boolean, .default_bool = false, .default_string = ""},
-        ParamDescriptor{.id = "intensity", .display_name = "Intensity", .type = ParamType::integer, .min = 0, .max = 100, .step = 1, .default_int = 50, .default_string = ""},
-        ParamDescriptor{.id = "temperature", .display_name = "Temperature (K)", .type = ParamType::integer, .min = 2000, .max = 6500, .step = 100, .default_int = 4500, .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kEnabled),
+                        .display_name = "Enabled",
+                        .type = ParamType::boolean,
+                        .default_bool = false,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kIntensity),
+                        .display_name = "Intensity",
+                        .type = ParamType::integer,
+                        .min = 0,
+                        .max = 100,
+                        .step = 1,
+                        .default_int = contract::kVirtualKeyLightIntensityDefault,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kTemperaturePreset),
+                        .display_name = "Temperature preset",
+                        .type = ParamType::string,
+                        .default_string = "neutral"},
+        ParamDescriptor{.id = std::string(contract::param::kDirectionPanDegrees),
+                        .display_name = "Direction pan (degrees)",
+                        .type = ParamType::integer,
+                        .min = contract::kVirtualKeyLightPanMin,
+                        .max = contract::kVirtualKeyLightPanMax,
+                        .step = 1,
+                        .default_int = 0,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kHdriPath),
+                        .display_name = "HDRI path",
+                        .type = ParamType::string,
+                        .default_string = ""},
     };
     out.push_back(d);
   }
   {
     VideoEffectDescriptor d;
-    d.id = "vignette";
+    d.id = std::string(contract::kEffectIdVignette);
     d.display_name = "Vignette";
     d.required_components = {RequiredComponent::gpu_utility};
     d.pipeline_order = 70;
     d.params = {
-        ParamDescriptor{.id = "enabled", .display_name = "Enabled", .type = ParamType::boolean, .default_bool = false, .default_string = ""},
-        ParamDescriptor{.id = "intensity", .display_name = "Intensity", .type = ParamType::integer, .min = 0, .max = 100, .step = 1, .default_int = 25, .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kEnabled),
+                        .display_name = "Enabled",
+                        .type = ParamType::boolean,
+                        .default_bool = false,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kIntensity),
+                        .display_name = "Intensity",
+                        .type = ParamType::integer,
+                        .min = 0,
+                        .max = 100,
+                        .step = 1,
+                        .default_int = contract::kVignetteIntensityDefault,
+                        .default_string = ""},
+        ParamDescriptor{.id = std::string(contract::param::kCenterOnTrackedFace),
+                        .display_name = "Center on tracked face",
+                        .type = ParamType::boolean,
+                        .default_bool = true,
+                        .default_string = ""},
     };
     out.push_back(d);
   }

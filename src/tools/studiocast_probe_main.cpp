@@ -19,6 +19,7 @@
 #include "core/util/json.h"
 #include "core/util/strings.h"
 #include "core/video/camera_effects_json.h"
+#include "core/video/effects/broadcast_effects_json.h"
 #include "core/video/image_ppm.h"
 #include "core/video/effects/effect_types.h"
 #include "studiocast/version.h"
@@ -391,10 +392,11 @@ namespace {
             studiocast::video::CameraEffects fx;
             std::string jerr;
 
+            // Canonical contract: effect IDs are keys.
             const std::string pretty =
                 "{\n"
-                "  \"virtual_background\": {\n"
-                "    \"mode\": \"replace\",\n"
+                "  \"virtual_background.replace\": {\n"
+                "    \"enabled\": true,\n"
                 "    \"replace_path\": \"/tmp/some path/with spaces/bg.ppm\"\n"
                 "  }\n"
                 "}\n";
@@ -412,7 +414,7 @@ namespace {
                            fx.background == studiocast::video::effects::BackgroundEffect::replace);
             }
 
-            const std::string af = "{\"auto_frame\":{\"enabled\":true,\"zoom\":77}}";
+            const std::string af = "{\"auto_frame\":{\"enabled\":true,\"strength\":77}}";
             jerr.clear();
             if (!studiocast::video::ApplyCameraEffectsPatchJsonText(af, &fx, &jerr)) {
                 ++failures;
@@ -423,7 +425,7 @@ namespace {
                 expectIntEq("effects patch auto_frame zoom", fx.auto_frame.strength, 77);
             }
 
-            const std::string blur = "{\"virtual_background\":{\"mode\":\"blur\",\"blur_strength\":9}}";
+            const std::string blur = "{\"virtual_background.blur\":{\"enabled\":true,\"strength\":9}}";
             jerr.clear();
             if (!studiocast::video::ApplyCameraEffectsPatchJsonText(blur, &fx, &jerr)) {
                 ++failures;
@@ -452,6 +454,126 @@ namespace {
             }
             expectTrue("CameraEffectsToJson roundtrip background", fx2.background == fx.background);
             expectEq("CameraEffectsToJson roundtrip path", fx2.background_replace_image.string(), fx.background_replace_image.string());
+        }
+
+        // BroadcastCameraEffects canonical JSON round-trip + strict validation.
+        {
+            using studiocast::video::effects::BroadcastCameraEffects;
+            using studiocast::video::effects::BroadcastCameraEffectsToJson;
+            using studiocast::video::effects::BroadcastEffectsJsonParseOptions;
+            using studiocast::video::effects::EffectsEnginePreference;
+            using studiocast::video::effects::ParseBroadcastCameraEffectsJsonText;
+            using studiocast::video::effects::VirtualBackgroundMode;
+
+            BroadcastCameraEffects fx;
+            fx.schema_version = studiocast::video::effects::kBroadcastEffectsSchemaVersion;
+            fx.mirror = true;
+            fx.engine = EffectsEnginePreference::maxine;
+            fx.virtual_background.mode = VirtualBackgroundMode::replace;
+            fx.virtual_background.strength = 9;
+            fx.virtual_background.replace_path = "/tmp/bg.ppm";
+            fx.auto_frame.enabled = false;
+            fx.eye_contact.enabled = true;
+            fx.eye_contact.strength = 77;
+            fx.eye_contact.look_away_enabled = false;
+            fx.video_noise_removal.enabled = true;
+            fx.video_noise_removal.strength = 22;
+            fx.virtual_key_light.enabled = true;
+            fx.virtual_key_light.intensity = 42;
+            fx.virtual_key_light.temperature = 5000;
+            fx.vignette.enabled = true;
+            fx.vignette.intensity = 33;
+
+            const std::string json = BroadcastCameraEffectsToJson(fx);
+            BroadcastCameraEffects out;
+            std::vector<std::string> warnings;
+            std::string err;
+
+            BroadcastEffectsJsonParseOptions opt;
+            opt.allow_unknown_keys = false;
+            opt.allow_compat_keys = true;
+            if (!ParseBroadcastCameraEffectsJsonText(json, &out, opt, &warnings, &err)) {
+                ++failures;
+                std::printf("[FAIL] ParseBroadcastCameraEffectsJsonText roundtrip: %s\n", err.c_str());
+            } else {
+                expectTrue("BroadcastCameraEffects roundtrip equals", out == fx);
+                expectTrue("BroadcastCameraEffects roundtrip no warnings", warnings.empty());
+            }
+
+            // Unknown key strict vs compat.
+            {
+                const std::string u = "{\"schema_version\":1,\"unknown\":123}";
+
+                BroadcastCameraEffects tmp;
+                warnings.clear();
+                err.clear();
+                opt.allow_unknown_keys = false;
+                if (ParseBroadcastCameraEffectsJsonText(u, &tmp, opt, &warnings, &err)) {
+                    ++failures;
+                    std::printf("[FAIL] BroadcastCameraEffects unknown key should fail in strict mode\n");
+                } else {
+                    expectContains("BroadcastCameraEffects unknown strict msg", err, "unknown key");
+                }
+
+                warnings.clear();
+                err.clear();
+                opt.allow_unknown_keys = true;
+                if (!ParseBroadcastCameraEffectsJsonText(u, &tmp, opt, &warnings, &err)) {
+                    ++failures;
+                    std::printf("[FAIL] BroadcastCameraEffects unknown key should pass in compat mode: %s\n", err.c_str());
+                } else {
+                    expectTrue("BroadcastCameraEffects unknown compat warns", !warnings.empty());
+                }
+            }
+
+            // Validation: virtual_background.mode
+            {
+                const std::string badMode =
+                    "{\"schema_version\":1,\"virtual_background\":{\"mode\":\"wat\"}}";
+                BroadcastCameraEffects tmp;
+                warnings.clear();
+                err.clear();
+                opt.allow_unknown_keys = false;
+                if (ParseBroadcastCameraEffectsJsonText(badMode, &tmp, opt, &warnings, &err)) {
+                    ++failures;
+                    std::printf("[FAIL] BroadcastCameraEffects bad mode should fail\n");
+                } else {
+                    expectContains("BroadcastCameraEffects bad mode msg", err, "virtual_background.mode");
+                }
+            }
+
+            // Validation: conflict between auto_frame and virtual_background.
+            {
+                const std::string conflict =
+                    "{\"schema_version\":1,\"auto_frame\":{\"enabled\":true},\"virtual_background\":{\"mode\":\"blur\"}}";
+                BroadcastCameraEffects tmp;
+                warnings.clear();
+                err.clear();
+                if (ParseBroadcastCameraEffectsJsonText(conflict, &tmp, opt, &warnings, &err)) {
+                    ++failures;
+                    std::printf("[FAIL] BroadcastCameraEffects conflict should fail\n");
+                } else {
+                    expectContains("BroadcastCameraEffects conflict msg", err, "auto_frame.enabled");
+                }
+            }
+
+            // Compatibility: temperature_preset alias.
+            {
+                const std::string preset =
+                    "{\"schema_version\":1,\"virtual_key_light\":{\"temperature_preset\":\"warm\"}}";
+                BroadcastCameraEffects tmp;
+                warnings.clear();
+                err.clear();
+                opt.allow_unknown_keys = false;
+                opt.allow_compat_keys = true;
+                if (!ParseBroadcastCameraEffectsJsonText(preset, &tmp, opt, &warnings, &err)) {
+                    ++failures;
+                    std::printf("[FAIL] BroadcastCameraEffects temperature_preset compat: %s\n", err.c_str());
+                } else {
+                    expectTrue("BroadcastCameraEffects preset sets temp", tmp.virtual_key_light.temperature != 4500);
+                    expectTrue("BroadcastCameraEffects preset warns", !warnings.empty());
+                }
+            }
         }
 
         // Canonical Maxine blocked messaging copy (Task 25).

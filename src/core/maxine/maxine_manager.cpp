@@ -16,6 +16,7 @@
 #include "core/probe/probe.h"
 #include "core/util/dynlib.h"
 #include "core/video/effects/effect_descriptors.h"
+#include "core/video/effects/broadcast_effect_contract.h"
 
 namespace studiocast::maxine {
 namespace {
@@ -385,29 +386,29 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
       if (!out)
         return;
       // VFX
-      if (effect_id == "virtual_background.remove" ||
-          effect_id == "virtual_background.replace") {
+      if (effect_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove ||
+          effect_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace) {
         if (!vfx_has("greenscreen"))
           out->push_back("VFX feature 'greenscreen' not installed.");
-      } else if (effect_id == "virtual_background.blur") {
+      } else if (effect_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) {
         if (!vfx_has("greenscreen"))
           out->push_back("VFX feature 'greenscreen' not installed.");
         if (!vfx_has("bgblur"))
           out->push_back("VFX feature 'bgblur' not installed.");
-      } else if (effect_id == "video_noise_removal") {
+      } else if (effect_id == studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) {
         if (!vfx_has("denoise"))
           out->push_back("VFX feature 'denoise' not installed.");
-      } else if (effect_id == "virtual_key_light") {
+      } else if (effect_id == studiocast::video::effects::contract::kEffectIdVirtualKeyLight) {
         if (!vfx_has("relighting"))
           out->push_back("VFX feature 'relighting' not installed.");
       }
 
       // AR
-      if (effect_id == "auto_frame") {
+      if (effect_id == studiocast::video::effects::contract::kEffectIdAutoFrame) {
         if (!(ar_has("face_detection") || ar_has("body_detection"))) {
           out->push_back("AR feature 'face_detection' not installed.");
         }
-      } else if (effect_id == "eye_contact") {
+      } else if (effect_id == studiocast::video::effects::contract::kEffectIdEyeContact) {
         if (!(ar_has("face_detection") || ar_has("body_detection"))) {
           out->push_back("AR feature 'face_detection' not installed.");
         }

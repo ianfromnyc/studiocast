@@ -17,7 +17,8 @@ std::string ToString(RequiredComponent v);
 enum class ParamType {
   boolean = 0,
   integer = 1,
-  string = 2,
+  floating = 2,
+  string = 3,
 };
 
 std::string ToString(ParamType v);
@@ -36,9 +37,15 @@ struct ParamDescriptor {
   int max = 0;
   int step = 1;
 
+  // Float constraints (meaningful when type==floating).
+  float min_f = 0.0f;
+  float max_f = 0.0f;
+  float step_f = 0.0f;
+
   // Defaults.
   bool default_bool = false;
   int default_int = 0;
+  float default_float = 0.0f;
   std::string default_string;
 };
 

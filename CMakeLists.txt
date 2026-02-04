@@ -123,6 +123,11 @@ add_library(studiocast_core
         src/core/video/convert.cpp
         src/core/video/effects/effect_types.h
         src/core/video/effects/effect_types.cpp
+        src/core/video/effects/broadcast_effect_contract.h
+        src/core/video/effects/broadcast_effects.h
+        src/core/video/effects/broadcast_effects.cpp
+        src/core/video/effects/broadcast_effects_json.h
+        src/core/video/effects/broadcast_effects_json.cpp
         src/core/video/effects/effect.h
         src/core/video/effects/effect_chain.h
         src/core/video/effects/effect_chain.cpp

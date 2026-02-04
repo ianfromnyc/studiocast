@@ -9,6 +9,7 @@
 #include <string_view>
 
 #include "core/video/effects/effect_types.h"
+#include "core/video/effects/broadcast_effect_contract.h"
 
 namespace studiocast::video {
 
@@ -174,9 +175,17 @@ namespace studiocast::video {
                 *vbMode = parsed;
             }
 
-            int blurStrength = 0;
-            if (!TryGetInt(vb, "blur_strength", &found, &blurStrength, err)) return false;
-            if (found) effects->background_strength = ClampInt(blurStrength, 0, 100);
+            // Legacy key: blur_strength. Canonical key: strength.
+            int strength = 0;
+            if (!TryGetInt(vb, "strength", &found, &strength, err)) return false;
+            if (!found) {
+                if (!TryGetInt(vb, "blur_strength", &found, &strength, err)) return false;
+            }
+            if (found) {
+                effects->background_strength = ClampInt(strength,
+                                                      studiocast::video::effects::contract::kVbStrengthMin,
+                                                      studiocast::video::effects::contract::kVbStrengthMax);
+            }
 
             std::string removeColor;
             if (!TryGetString(vb, "remove_color", &found, &removeColor, err)) return false;
@@ -199,65 +208,107 @@ namespace studiocast::video {
     }  // namespace
 
     std::string CameraEffectsToJson(const CameraEffects& effects) {
+        using studiocast::video::effects::contract::kEffectIdAutoFrame;
+        using studiocast::video::effects::contract::kEffectIdEyeContact;
+        using studiocast::video::effects::contract::kEffectIdMirror;
+        using studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval;
+        using studiocast::video::effects::contract::kEffectIdVignette;
+        using studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur;
+        using studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove;
+        using studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace;
+        using studiocast::video::effects::contract::kEffectIdVirtualKeyLight;
+
+        using studiocast::video::effects::contract::param::kCenterOnTrackedFace;
+        using studiocast::video::effects::contract::param::kDirectionPanDegrees;
+        using studiocast::video::effects::contract::param::kEnabled;
+        using studiocast::video::effects::contract::param::kGreenscreenMode;
+        using studiocast::video::effects::contract::param::kGreenscreenTemporal;
+        using studiocast::video::effects::contract::param::kHdriPath;
+        using studiocast::video::effects::contract::param::kHeadroom;
+        using studiocast::video::effects::contract::param::kIntensity;
+        using studiocast::video::effects::contract::param::kLookAwayEnabled;
+        using studiocast::video::effects::contract::param::kSmoothing;
+        using studiocast::video::effects::contract::param::kStrength;
+        using studiocast::video::effects::contract::param::kTemperaturePreset;
+        using studiocast::video::effects::contract::param::kVbRemoveColor;
+        using studiocast::video::effects::contract::param::kVbReplacePath;
+
+        std::ostringstream cs;
+        cs << "#";
+        cs.setf(std::ios::hex, std::ios::basefield);
+        cs.width(6);
+        cs.fill('0');
+        cs << static_cast<unsigned>(effects.background_remove_color_rgb & 0xFFFFFFu);
+        const std::string removeColor = cs.str();
+
+        const bool autoFrameEnabled = (effects.background == studiocast::video::effects::BackgroundEffect::auto_frame);
+        const bool vbBlurEnabled = (!autoFrameEnabled && effects.background == studiocast::video::effects::BackgroundEffect::blur);
+        const bool vbRemoveEnabled = (!autoFrameEnabled && effects.background == studiocast::video::effects::BackgroundEffect::remove);
+        const bool vbReplaceEnabled = (!autoFrameEnabled && effects.background == studiocast::video::effects::BackgroundEffect::replace);
+
         std::ostringstream oss;
         oss << "{";
-        oss << "\"mirror\":" << (effects.mirror ? "true" : "false") << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEffectIdMirror)) << "\":{";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEnabled)) << "\":" << (effects.mirror ? "true" : "false");
+        oss << "},";
+
         oss << "\"engine\":\"" << studiocast::util::json::EscapeString(EngineToString(effects.background_backend)) << "\",";
 
-        // Virtual background mode excludes auto_frame (represented separately).
-        const auto vbMode = (effects.background == studiocast::video::effects::BackgroundEffect::auto_frame)
-                                ? studiocast::video::effects::BackgroundEffect::none
-                                : effects.background;
-        oss << "\"virtual_background\":{";
-        oss << "\"mode\":\"" << studiocast::util::json::EscapeString(VbModeToString(vbMode)) << "\",";
-        oss << "\"blur_strength\":" << effects.background_strength << ",";
-        {
-            std::ostringstream cs;
-            cs << "#";
-            cs.setf(std::ios::hex, std::ios::basefield);
-            cs.width(6);
-            cs.fill('0');
-            cs << static_cast<unsigned>(effects.background_remove_color_rgb & 0xFFFFFFu);
-            oss << "\"remove_color\":\"" << studiocast::util::json::EscapeString(cs.str()) << "\",";
-        }
-        oss << "\"replace_path\":\"" << studiocast::util::json::EscapeString(effects.background_replace_image.string()) << "\"";
+        // Virtual background modes (mutually exclusive).
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEffectIdVirtualBackgroundBlur)) << "\":{";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEnabled)) << "\":" << (vbBlurEnabled ? "true" : "false") << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kStrength)) << "\":" << effects.background_strength;
         oss << "},";
 
-        oss << "\"auto_frame\":{";
-        oss << "\"enabled\":" << ((effects.background == studiocast::video::effects::BackgroundEffect::auto_frame) ? "true" : "false") << ",";
-        oss << "\"zoom\":" << effects.auto_frame.strength << ",";
-        oss << "\"smoothing\":" << effects.auto_frame.smoothing << ",";
-        oss << "\"headroom\":" << effects.auto_frame.headroom;
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEffectIdVirtualBackgroundRemove)) << "\":{";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEnabled)) << "\":" << (vbRemoveEnabled ? "true" : "false") << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kStrength)) << "\":" << effects.background_strength << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kVbRemoveColor)) << "\":\"" << studiocast::util::json::EscapeString(removeColor) << "\",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kGreenscreenMode)) << "\":" << effects.green_screen.mode << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kGreenscreenTemporal)) << "\":" << (effects.green_screen.temporal ? "true" : "false");
         oss << "},";
 
-        oss << "\"video_noise_removal\":{";
-        oss << "\"enabled\":" << (effects.denoise ? "true" : "false") << ",";
-        oss << "\"strength\":" << effects.denoise_strength;
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEffectIdVirtualBackgroundReplace)) << "\":{";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEnabled)) << "\":" << (vbReplaceEnabled ? "true" : "false") << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kStrength)) << "\":" << effects.background_strength << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kVbReplacePath)) << "\":\"" << studiocast::util::json::EscapeString(effects.background_replace_image.string()) << "\",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kVbRemoveColor)) << "\":\"" << studiocast::util::json::EscapeString(removeColor) << "\",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kGreenscreenMode)) << "\":" << effects.green_screen.mode << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kGreenscreenTemporal)) << "\":" << (effects.green_screen.temporal ? "true" : "false");
         oss << "},";
 
-        oss << "\"green_screen\":{";
-        oss << "\"mode\":" << effects.green_screen.mode << ",";
-        oss << "\"temporal\":" << (effects.green_screen.temporal ? "true" : "false");
+        // Auto Frame (mutually exclusive with virtual background).
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEffectIdAutoFrame)) << "\":{";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEnabled)) << "\":" << (autoFrameEnabled ? "true" : "false") << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kStrength)) << "\":" << effects.auto_frame.strength << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kSmoothing)) << "\":" << effects.auto_frame.smoothing << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kHeadroom)) << "\":" << effects.auto_frame.headroom;
         oss << "},";
 
-        oss << "\"eye_contact\":{";
-        oss << "\"enabled\":" << (effects.eye_contact.enabled ? "true" : "false") << ",";
-        oss << "\"strength\":" << effects.eye_contact.strength << ",";
-        oss << "\"look_away\":" << (effects.eye_contact.look_away_enabled ? "true" : "false");
+        // VFX/AR effects.
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEffectIdVideoNoiseRemoval)) << "\":{";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEnabled)) << "\":" << (effects.denoise ? "true" : "false") << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kStrength)) << "\":" << effects.denoise_strength;
         oss << "},";
 
-        oss << "\"virtual_key_light\":{";
-        oss << "\"enabled\":" << (effects.virtual_key_light.enabled ? "true" : "false") << ",";
-        oss << "\"intensity\":" << Float01ToPercent(effects.virtual_key_light.intensity) << ",";
-        oss << "\"temperature_preset\":\"" << studiocast::util::json::EscapeString(TemperaturePresetToString(effects.virtual_key_light.temperature_preset)) << "\",";
-        oss << "\"pan\":" << static_cast<int>(std::lround(effects.virtual_key_light.direction_pan_degrees)) << ",";
-        oss << "\"hdri_path\":\"" << studiocast::util::json::EscapeString(effects.virtual_key_light.hdri_path.string()) << "\"";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEffectIdEyeContact)) << "\":{";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEnabled)) << "\":" << (effects.eye_contact.enabled ? "true" : "false") << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kStrength)) << "\":" << effects.eye_contact.strength << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kLookAwayEnabled)) << "\":" << (effects.eye_contact.look_away_enabled ? "true" : "false");
         oss << "},";
 
-        oss << "\"vignette\":{";
-        oss << "\"enabled\":" << (effects.vignette.enabled ? "true" : "false") << ",";
-        oss << "\"intensity\":" << Float01ToPercent(effects.vignette.intensity) << ",";
-        oss << "\"center_on_face\":" << (effects.vignette.center_on_tracked_face ? "true" : "false");
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEffectIdVirtualKeyLight)) << "\":{";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEnabled)) << "\":" << (effects.virtual_key_light.enabled ? "true" : "false") << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kIntensity)) << "\":" << Float01ToPercent(effects.virtual_key_light.intensity) << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kTemperaturePreset)) << "\":\"" << studiocast::util::json::EscapeString(TemperaturePresetToString(effects.virtual_key_light.temperature_preset)) << "\",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kDirectionPanDegrees)) << "\":" << static_cast<int>(std::lround(effects.virtual_key_light.direction_pan_degrees)) << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kHdriPath)) << "\":\"" << studiocast::util::json::EscapeString(effects.virtual_key_light.hdri_path.string()) << "\"";
+        oss << "},";
+
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEffectIdVignette)) << "\":{";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kEnabled)) << "\":" << (effects.vignette.enabled ? "true" : "false") << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kIntensity)) << "\":" << Float01ToPercent(effects.vignette.intensity) << ",";
+        oss << "\"" << studiocast::util::json::EscapeString(std::string(kCenterOnTrackedFace)) << "\":" << (effects.vignette.center_on_tracked_face ? "true" : "false");
         oss << "}";
 
         oss << "}";
@@ -281,9 +332,43 @@ namespace studiocast::video {
 
         bool found = false;
 
-        bool mirror = effects->mirror;
-        if (!TryGetBool(*obj, "mirror", &found, &mirror, error)) return false;
-        if (found) effects->mirror = mirror;
+        using studiocast::video::effects::contract::kEffectIdAutoFrame;
+        using studiocast::video::effects::contract::kEffectIdEyeContact;
+        using studiocast::video::effects::contract::kEffectIdMirror;
+        using studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval;
+        using studiocast::video::effects::contract::kEffectIdVignette;
+        using studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur;
+        using studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove;
+        using studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace;
+        using studiocast::video::effects::contract::kEffectIdVirtualKeyLight;
+
+        using studiocast::video::effects::contract::param::kCenterOnTrackedFace;
+        using studiocast::video::effects::contract::param::kDirectionPanDegrees;
+        using studiocast::video::effects::contract::param::kEnabled;
+        using studiocast::video::effects::contract::param::kGreenscreenMode;
+        using studiocast::video::effects::contract::param::kGreenscreenTemporal;
+        using studiocast::video::effects::contract::param::kHeadroom;
+        using studiocast::video::effects::contract::param::kIntensity;
+        using studiocast::video::effects::contract::param::kLookAwayEnabled;
+        using studiocast::video::effects::contract::param::kSmoothing;
+        using studiocast::video::effects::contract::param::kStrength;
+        using studiocast::video::effects::contract::param::kTemperaturePreset;
+        using studiocast::video::effects::contract::param::kVbRemoveColor;
+        using studiocast::video::effects::contract::param::kVbReplacePath;
+
+        // mirror: canonical form is an object { enabled: bool }, but accept legacy boolean.
+        if (const Value* mv = Find(*obj, std::string(kEffectIdMirror))) {
+            if (const auto* mo = mv->AsObject()) {
+                bool en = effects->mirror;
+                if (!TryGetBool(*mo, std::string(kEnabled), &found, &en, error)) return false;
+                if (found) effects->mirror = en;
+            } else if (const bool* mb = mv->AsBool()) {
+                effects->mirror = *mb;
+            } else {
+                if (error) *error = "expected object or boolean for '" + std::string(kEffectIdMirror) + "'";
+                return false;
+            }
+        }
 
         std::string engine;
         if (!TryGetString(*obj, "engine", &found, &engine, error)) return false;
@@ -295,6 +380,76 @@ namespace studiocast::video {
         // auto-frame unless the patch explicitly enables it.
         bool vbModeSet = false;
         studiocast::video::effects::BackgroundEffect vbMode = effects->background;
+
+        // Canonical VB schema: keys are `virtual_background.*` with `{ enabled, strength, ... }`.
+        {
+            auto vb_set_mode = [&](studiocast::video::effects::BackgroundEffect newMode) -> bool {
+                if (vbModeSet && vbMode != newMode) {
+                    if (error) *error = "multiple virtual background modes set in one patch";
+                    return false;
+                }
+                vbModeSet = true;
+                vbMode = newMode;
+                return true;
+            };
+
+            auto apply_vb_obj = [&](std::string_view effectId,
+                                   studiocast::video::effects::BackgroundEffect mode) -> bool {
+                const Value* vv = Find(*obj, std::string(effectId));
+                if (!vv) return true;
+                const auto* vo = vv->AsObject();
+                if (!vo) {
+                    if (error) *error = "expected object for '" + std::string(effectId) + "'";
+                    return false;
+                }
+
+                bool en = false;
+                bool enFound = false;
+                if (!TryGetBool(*vo, std::string(kEnabled), &enFound, &en, error)) return false;
+                if (enFound) {
+                    if (en) {
+                        if (!vb_set_mode(mode)) return false;
+                    } else {
+                        if (effects->background == mode) {
+                            if (!vb_set_mode(studiocast::video::effects::BackgroundEffect::none)) return false;
+                        }
+                    }
+                }
+
+                int strength = effects->background_strength;
+                if (!TryGetInt(*vo, std::string(kStrength), &found, &strength, error)) return false;
+                if (found) {
+                    effects->background_strength = ClampInt(strength,
+                                                          studiocast::video::effects::contract::kVbStrengthMin,
+                                                          studiocast::video::effects::contract::kVbStrengthMax);
+                }
+
+                std::string removeColor;
+                if (!TryGetString(*vo, std::string(kVbRemoveColor), &found, &removeColor, error)) return false;
+                if (found) {
+                    std::uint32_t rgb = 0;
+                    if (!ParseHexColorRgb(removeColor, &rgb, error)) return false;
+                    effects->background_remove_color_rgb = rgb;
+                }
+
+                std::string replacePath;
+                if (!TryGetString(*vo, std::string(kVbReplacePath), &found, &replacePath, error)) return false;
+                if (found) effects->background_replace_image = replacePath;
+
+                int gsMode = 0;
+                if (!TryGetInt(*vo, std::string(kGreenscreenMode), &found, &gsMode, error)) return false;
+                if (found) effects->green_screen.mode = static_cast<std::uint32_t>(std::max(0, gsMode));
+                bool gsTemporal = effects->green_screen.temporal;
+                if (!TryGetBool(*vo, std::string(kGreenscreenTemporal), &found, &gsTemporal, error)) return false;
+                if (found) effects->green_screen.temporal = gsTemporal;
+
+                return true;
+            };
+
+            if (!apply_vb_obj(kEffectIdVirtualBackgroundBlur, studiocast::video::effects::BackgroundEffect::blur)) return false;
+            if (!apply_vb_obj(kEffectIdVirtualBackgroundRemove, studiocast::video::effects::BackgroundEffect::remove)) return false;
+            if (!apply_vb_obj(kEffectIdVirtualBackgroundReplace, studiocast::video::effects::BackgroundEffect::replace)) return false;
+        }
 
         // Canonical nested keys.
         if (const auto* vb = GetObj(*obj, "virtual_background", error)) {
@@ -318,7 +473,9 @@ namespace studiocast::video {
 
         int bgStrength = 0;
         if (!TryGetInt(*obj, "background_strength", &found, &bgStrength, error)) return false;
-        if (found) effects->background_strength = ClampInt(bgStrength, 0, 100);
+        if (found) effects->background_strength = ClampInt(bgStrength,
+                                                           studiocast::video::effects::contract::kVbStrengthMin,
+                                                           studiocast::video::effects::contract::kVbStrengthMax);
 
         {
             std::string c;
@@ -348,16 +505,19 @@ namespace studiocast::video {
             if (!TryGetBool(*af, "enabled", &found, &autoFrameEnabled, error)) return false;
             if (found) autoFrameEnabledSet = true;
 
-            int zoom = 0;
-            if (!TryGetInt(*af, "zoom", &found, &zoom, error)) return false;
-            if (found) effects->auto_frame.strength = ClampInt(zoom, 0, 100);
+            int strength = 0;
+            if (!TryGetInt(*af, std::string(kStrength), &found, &strength, error)) return false;
+            if (!found) {
+                if (!TryGetInt(*af, "zoom", &found, &strength, error)) return false;
+            }
+            if (found) effects->auto_frame.strength = ClampInt(strength, 0, 100);
 
             int smoothing = 0;
-            if (!TryGetInt(*af, "smoothing", &found, &smoothing, error)) return false;
+            if (!TryGetInt(*af, std::string(kSmoothing), &found, &smoothing, error)) return false;
             if (found) effects->auto_frame.smoothing = ClampInt(smoothing, 0, 100);
 
             float headroom = 0;
-            if (!TryGetFloat(*af, "headroom", &found, &headroom, error)) return false;
+            if (!TryGetFloat(*af, std::string(kHeadroom), &found, &headroom, error)) return false;
             if (found) effects->auto_frame.headroom = ClampFloat(headroom, 0.0f, 1.0f);
         }
 
@@ -367,7 +527,7 @@ namespace studiocast::video {
             if (!TryGetBool(*dn, "enabled", &found, &en, error)) return false;
             if (found) effects->denoise = en;
             int strength = 0;
-            if (!TryGetInt(*dn, "strength", &found, &strength, error)) return false;
+            if (!TryGetInt(*dn, std::string(kStrength), &found, &strength, error)) return false;
             if (found) effects->denoise_strength = ClampInt(strength, 0, 100);
         }
         bool enDenoise = effects->denoise;
@@ -383,10 +543,13 @@ namespace studiocast::video {
             if (!TryGetBool(*ec, "enabled", &found, &en, error)) return false;
             if (found) effects->eye_contact.enabled = en;
             int strength = 0;
-            if (!TryGetInt(*ec, "strength", &found, &strength, error)) return false;
+            if (!TryGetInt(*ec, std::string(kStrength), &found, &strength, error)) return false;
             if (found) effects->eye_contact.strength = ClampInt(strength, 0, 100);
             bool lookAway = effects->eye_contact.look_away_enabled;
-            if (!TryGetBool(*ec, "look_away", &found, &lookAway, error)) return false;
+            if (!TryGetBool(*ec, std::string(kLookAwayEnabled), &found, &lookAway, error)) return false;
+            if (!found) {
+                if (!TryGetBool(*ec, "look_away", &found, &lookAway, error)) return false;
+            }
             if (found) effects->eye_contact.look_away_enabled = lookAway;
         }
         // Legacy flat boolean (do not error if the canonical object form is present).
@@ -409,15 +572,21 @@ namespace studiocast::video {
             if (found) effects->virtual_key_light.enabled = en;
 
             int intensityPct = 0;
-            if (!TryGetInt(*vkl, "intensity", &found, &intensityPct, error)) return false;
+            if (!TryGetInt(*vkl, std::string(kIntensity), &found, &intensityPct, error)) return false;
             if (found) effects->virtual_key_light.intensity = PercentToFloat01(intensityPct);
 
             std::string temp;
-            if (!TryGetString(*vkl, "temperature_preset", &found, &temp, error)) return false;
+            if (!TryGetString(*vkl, std::string(kTemperaturePreset), &found, &temp, error)) return false;
+            if (!found) {
+                if (!TryGetString(*vkl, "temperature", &found, &temp, error)) return false;
+            }
             if (found) effects->virtual_key_light.temperature_preset = TemperaturePresetFromString(temp);
 
             int pan = 0;
-            if (!TryGetInt(*vkl, "pan", &found, &pan, error)) return false;
+            if (!TryGetInt(*vkl, std::string(kDirectionPanDegrees), &found, &pan, error)) return false;
+            if (!found) {
+                if (!TryGetInt(*vkl, "pan", &found, &pan, error)) return false;
+            }
             if (found) effects->virtual_key_light.direction_pan_degrees = static_cast<float>(ClampInt(pan, -180, 180));
 
             std::string hdri;
@@ -449,10 +618,13 @@ namespace studiocast::video {
             if (!TryGetBool(*vg, "enabled", &found, &en, error)) return false;
             if (found) effects->vignette.enabled = en;
             int intensityPct = 0;
-            if (!TryGetInt(*vg, "intensity", &found, &intensityPct, error)) return false;
+            if (!TryGetInt(*vg, std::string(kIntensity), &found, &intensityPct, error)) return false;
             if (found) effects->vignette.intensity = PercentToFloat01(intensityPct);
             bool center = effects->vignette.center_on_tracked_face;
-            if (!TryGetBool(*vg, "center_on_face", &found, &center, error)) return false;
+            if (!TryGetBool(*vg, std::string(kCenterOnTrackedFace), &found, &center, error)) return false;
+            if (!found) {
+                if (!TryGetBool(*vg, "center_on_face", &found, &center, error)) return false;
+            }
             if (found) effects->vignette.center_on_tracked_face = center;
         }
         // Legacy flat boolean (do not error if the canonical object form is present).

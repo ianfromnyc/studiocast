@@ -32,6 +32,7 @@
 #include <cstring>
 
 #include "core/video/convert.h"
+#include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/v4l2loopback.h"
 
 namespace studiocast::gui {
@@ -641,50 +642,91 @@ bool VideoPage::SyncFromDaemonConfig() {
 
   const QJsonObject fx = root.value("video_effects").toObject();
 
-  const bool mirror = fx.isEmpty() ? root.value("mirror").toBool(false) : fx.value("mirror").toBool(false);
+  // Canonical contract: effect IDs are keys; each effect is an object with params.
+  // Keep best-effort legacy fallback for older daemons.
 
-  // Virtual Background
-  QString vbMode = "none";
-  int vbBlurStrength = 50;
-  QString vbRemoveColor;
-  QString vbReplacePath;
-  const QJsonObject vb = fx.value("virtual_background").toObject();
-  if (!vb.isEmpty()) {
-    vbMode = vb.value("mode").toString("none");
-    vbBlurStrength = vb.value("blur_strength").toInt(50);
-    vbRemoveColor = vb.value("remove_color").toString();
-    vbReplacePath = vb.value("replace_path").toString();
-  } else {
-    vbMode = root.value("background").toString("none");
-    vbBlurStrength = root.value("background_strength").toInt(50);
-    vbRemoveColor = root.value("background_remove_color").toString();
-    vbReplacePath = root.value("background_replace_image").toString();
+  bool mirror = false;
+  {
+    const QJsonValue mv = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdMirror.data()));
+    if (mv.isObject()) {
+      mirror = mv.toObject().value("enabled").toBool(false);
+    } else if (!mv.isUndefined()) {
+      mirror = mv.toBool(false);
+    } else {
+      mirror = root.value("mirror").toBool(false);
+    }
   }
 
   // Auto Frame
   bool autoFrame = false;
-  int autoFrameZoom = 50;
-  const QJsonObject af = fx.value("auto_frame").toObject();
-  if (!af.isEmpty()) {
-    autoFrame = af.value("enabled").toBool(false);
-    autoFrameZoom = af.value("zoom").toInt(50);
+  int autoFrameStrength = 50;
+  {
+    const QJsonObject af = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdAutoFrame.data())).toObject();
+    if (!af.isEmpty()) {
+      autoFrame = af.value("enabled").toBool(false);
+      autoFrameStrength = af.value("strength").toInt(af.value("zoom").toInt(50));
+    }
+  }
+
+  // Virtual Background (mutually exclusive modes)
+  QString vbMode = "none";
+  int vbStrength = 8;
+  QString vbRemoveColor;
+  QString vbReplacePath;
+  if (autoFrame) {
+    vbMode = "auto_frame";
+  } else {
+    const auto vbBlur = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur.data())).toObject();
+    const auto vbRemove = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove.data())).toObject();
+    const auto vbReplace = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace.data())).toObject();
+    if (vbBlur.value("enabled").toBool(false)) {
+      vbMode = "blur";
+      vbStrength = vbBlur.value("strength").toInt(8);
+    } else if (vbRemove.value("enabled").toBool(false)) {
+      vbMode = "remove";
+      vbStrength = vbRemove.value("strength").toInt(8);
+      vbRemoveColor = vbRemove.value("remove_color").toString();
+    } else if (vbReplace.value("enabled").toBool(false)) {
+      vbMode = "replace";
+      vbStrength = vbReplace.value("strength").toInt(8);
+      vbRemoveColor = vbReplace.value("remove_color").toString();
+      vbReplacePath = vbReplace.value("replace_path").toString();
+    }
+  }
+
+  // Legacy fallback: nested virtual_background object.
+  if (vbMode == "none") {
+    const QJsonObject vb = fx.value("virtual_background").toObject();
+    if (!vb.isEmpty()) {
+      vbMode = vb.value("mode").toString("none");
+      vbStrength = vb.value("strength").toInt(vb.value("blur_strength").toInt(8));
+      vbRemoveColor = vb.value("remove_color").toString();
+      vbReplacePath = vb.value("replace_path").toString();
+    } else {
+      vbMode = root.value("background").toString("none");
+      vbStrength = root.value("background_strength").toInt(8);
+      vbRemoveColor = root.value("background_remove_color").toString();
+      vbReplacePath = root.value("background_replace_image").toString();
+    }
   }
 
   // Eye Contact
   bool eyeContact = false;
   int eyeContactStrength = 50;
   bool eyeContactLookAway = true;
-  const QJsonObject ec = fx.value("eye_contact").toObject();
-  if (!ec.isEmpty()) {
-    eyeContact = ec.value("enabled").toBool(false);
-    eyeContactStrength = ec.value("strength").toInt(50);
-    eyeContactLookAway = ec.value("look_away").toBool(true);
+  {
+    const QJsonObject ec = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdEyeContact.data())).toObject();
+    if (!ec.isEmpty()) {
+      eyeContact = ec.value("enabled").toBool(false);
+      eyeContactStrength = ec.value("strength").toInt(50);
+      eyeContactLookAway = ec.value("look_away_enabled").toBool(ec.value("look_away").toBool(true));
+    }
   }
 
   // Video Noise Removal
   bool denoise = false;
   int denoiseStrength = 50;
-  const QJsonObject dn = fx.value("video_noise_removal").toObject();
+  const QJsonObject dn = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval.data())).toObject();
   if (!dn.isEmpty()) {
     denoise = dn.value("enabled").toBool(false);
     denoiseStrength = dn.value("strength").toInt(50);
@@ -696,12 +738,12 @@ bool VideoPage::SyncFromDaemonConfig() {
   QString virtualKeyLightTemp = "neutral";
   int virtualKeyLightPan = 0;
   QString virtualKeyLightHdri;
-  const QJsonObject vkl = fx.value("virtual_key_light").toObject();
+  const QJsonObject vkl = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualKeyLight.data())).toObject();
   if (!vkl.isEmpty()) {
     virtualKeyLight = vkl.value("enabled").toBool(false);
     virtualKeyLightIntensity = vkl.value("intensity").toInt(70);
-    virtualKeyLightTemp = vkl.value("temperature").toString("neutral");
-    virtualKeyLightPan = vkl.value("pan").toInt(0);
+    virtualKeyLightTemp = vkl.value("temperature_preset").toString(vkl.value("temperature").toString("neutral"));
+    virtualKeyLightPan = vkl.value("direction_pan_degrees").toInt(vkl.value("pan").toInt(0));
     virtualKeyLightHdri = vkl.value("hdri_path").toString();
   } else {
     virtualKeyLight = root.value("virtual_key_light").toBool(false);
@@ -715,11 +757,11 @@ bool VideoPage::SyncFromDaemonConfig() {
   bool vignette = false;
   int vignetteIntensity = 35;
   bool vignetteCenterOnFace = true;
-  const QJsonObject vg = fx.value("vignette").toObject();
+  const QJsonObject vg = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVignette.data())).toObject();
   if (!vg.isEmpty()) {
     vignette = vg.value("enabled").toBool(false);
     vignetteIntensity = vg.value("intensity").toInt(35);
-    vignetteCenterOnFace = vg.value("center_on_face").toBool(true);
+    vignetteCenterOnFace = vg.value("center_on_tracked_face").toBool(vg.value("center_on_face").toBool(true));
   } else {
     vignette = root.value("vignette").toBool(false);
     vignetteIntensity = root.value("vignette_intensity").toInt(35);
@@ -753,7 +795,7 @@ bool VideoPage::SyncFromDaemonConfig() {
 
   if (backgroundStrengthSpin_) {
     backgroundStrengthSpin_->blockSignals(true);
-    backgroundStrengthSpin_->setValue(std::max(0, std::min(100, vbBlurStrength)));
+    backgroundStrengthSpin_->setValue(std::max(0, std::min(100, vbStrength)));
     backgroundStrengthSpin_->blockSignals(false);
   }
 
@@ -775,7 +817,7 @@ bool VideoPage::SyncFromDaemonConfig() {
   }
   if (autoFrameZoomSlider_) {
     autoFrameZoomSlider_->blockSignals(true);
-    autoFrameZoomSlider_->setValue(std::max(0, std::min(100, autoFrameZoom)));
+    autoFrameZoomSlider_->setValue(std::max(0, std::min(100, autoFrameStrength)));
     autoFrameZoomSlider_->blockSignals(false);
   }
   if (autoFrameZoomValue_ && autoFrameZoomSlider_) {
@@ -908,35 +950,57 @@ bool VideoPage::SendDaemonVideoConfig() {
 
 bool VideoPage::SendDaemonVideoEffects() {
   QJsonObject effects;
-  effects.insert("mirror", mirrorCheck_ && mirrorCheck_->isChecked());
-
   // Product rule: Maxine is the only production effect engine.
   effects.insert("engine", "maxine");
 
+  auto add_effect = [&](const QString& id, const QJsonObject& obj) {
+    if (!obj.isEmpty()) effects.insert(id, obj);
+  };
+
+  // Mirror.
+  {
+    QJsonObject mir;
+    mir.insert("enabled", mirrorCheck_ && mirrorCheck_->isChecked());
+    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdMirror.data()), mir);
+  }
+
   const QString bg = backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  const int vbStrength = backgroundStrengthSpin_ ? backgroundStrengthSpin_->value() : studiocast::video::effects::contract::kVbStrengthDefault;
+  const QString vbRemoveColor = backgroundRemoveColorEdit_ ? backgroundRemoveColorEdit_->text().trimmed() : QString();
+  const QString vbReplacePath = backgroundReplaceImageEdit_ ? backgroundReplaceImageEdit_->text().trimmed() : QString();
+
+  const bool bgIsAutoFrame = (bg == "auto_frame");
+
+  // Virtual Background modes (mutually exclusive).
   {
     QJsonObject vb;
-    if (!bg.isEmpty()) vb.insert("mode", bg);
-    if (backgroundStrengthSpin_) vb.insert("blur_strength", backgroundStrengthSpin_->value());
-
-    if (backgroundRemoveColorEdit_) {
-      const QString c = backgroundRemoveColorEdit_->text().trimmed();
-      if (!c.isEmpty()) vb.insert("remove_color", c);
-    }
-    if (backgroundReplaceImageEdit_) {
-      const QString p = backgroundReplaceImageEdit_->text().trimmed();
-      if (!p.isEmpty()) vb.insert("replace_path", p);
-    }
-
-    if (!vb.isEmpty()) effects.insert("virtual_background", vb);
+    vb.insert("enabled", (!bgIsAutoFrame && bg == "blur"));
+    vb.insert("strength", vbStrength);
+    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur.data()), vb);
+  }
+  {
+    QJsonObject vb;
+    vb.insert("enabled", (!bgIsAutoFrame && bg == "remove"));
+    vb.insert("strength", vbStrength);
+    if (!vbRemoveColor.isEmpty()) vb.insert("remove_color", vbRemoveColor);
+    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove.data()), vb);
+  }
+  {
+    QJsonObject vb;
+    vb.insert("enabled", (!bgIsAutoFrame && bg == "replace"));
+    vb.insert("strength", vbStrength);
+    if (!vbReplacePath.isEmpty()) vb.insert("replace_path", vbReplacePath);
+    if (!vbRemoveColor.isEmpty()) vb.insert("remove_color", vbRemoveColor);
+    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace.data()), vb);
   }
 
   // Auto Frame
   if (autoFrameCheck_ || autoFrameZoomSlider_) {
     QJsonObject af;
-    if (autoFrameCheck_) af.insert("enabled", autoFrameCheck_->isChecked());
-    if (autoFrameZoomSlider_) af.insert("zoom", autoFrameZoomSlider_->value());
-    if (!af.isEmpty()) effects.insert("auto_frame", af);
+    const bool en = (autoFrameCheck_ && autoFrameCheck_->isChecked()) || bgIsAutoFrame;
+    af.insert("enabled", en);
+    if (autoFrameZoomSlider_) af.insert("strength", autoFrameZoomSlider_->value());
+    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdAutoFrame.data()), af);
   }
 
   // Eye Contact
@@ -944,8 +1008,8 @@ bool VideoPage::SendDaemonVideoEffects() {
     QJsonObject ec;
     if (eyeContactCheck_) ec.insert("enabled", eyeContactCheck_->isChecked());
     if (eyeContactStrengthSlider_) ec.insert("strength", eyeContactStrengthSlider_->value());
-    if (eyeContactLookAwayCheck_) ec.insert("look_away", eyeContactLookAwayCheck_->isChecked());
-    if (!ec.isEmpty()) effects.insert("eye_contact", ec);
+    if (eyeContactLookAwayCheck_) ec.insert("look_away_enabled", eyeContactLookAwayCheck_->isChecked());
+    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdEyeContact.data()), ec);
   }
 
   // Video Noise Removal
@@ -953,7 +1017,7 @@ bool VideoPage::SendDaemonVideoEffects() {
     QJsonObject dn;
     if (denoiseCheck_) dn.insert("enabled", denoiseCheck_->isChecked());
     if (denoiseStrengthSlider_) dn.insert("strength", denoiseStrengthSlider_->value());
-    if (!dn.isEmpty()) effects.insert("video_noise_removal", dn);
+    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval.data()), dn);
   }
 
   // Virtual Key Light (Maxine relighting)
@@ -964,14 +1028,14 @@ bool VideoPage::SendDaemonVideoEffects() {
     if (virtualKeyLightIntensitySpin_) vkl.insert("intensity", virtualKeyLightIntensitySpin_->value());
     if (virtualKeyLightTempCombo_) {
       const QString t = virtualKeyLightTempCombo_->currentData().toString();
-      if (!t.isEmpty()) vkl.insert("temperature", t);
+      if (!t.isEmpty()) vkl.insert("temperature_preset", t);
     }
-    if (virtualKeyLightPanSpin_) vkl.insert("pan", virtualKeyLightPanSpin_->value());
+    if (virtualKeyLightPanSpin_) vkl.insert("direction_pan_degrees", virtualKeyLightPanSpin_->value());
     if (virtualKeyLightHdriEdit_) {
       const QString p = virtualKeyLightHdriEdit_->text().trimmed();
       if (!p.isEmpty()) vkl.insert("hdri_path", p);
     }
-    if (!vkl.isEmpty()) effects.insert("virtual_key_light", vkl);
+    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualKeyLight.data()), vkl);
   }
 
   // Vignette (GPU post-process)
@@ -979,8 +1043,8 @@ bool VideoPage::SendDaemonVideoEffects() {
     QJsonObject vg;
     if (vignetteCheck_) vg.insert("enabled", vignetteCheck_->isChecked());
     if (vignetteIntensitySlider_) vg.insert("intensity", vignetteIntensitySlider_->value());
-    if (vignetteCenterOnFaceCheck_) vg.insert("center_on_face", vignetteCenterOnFaceCheck_->isChecked());
-    if (!vg.isEmpty()) effects.insert("vignette", vg);
+    if (vignetteCenterOnFaceCheck_) vg.insert("center_on_tracked_face", vignetteCenterOnFaceCheck_->isChecked());
+    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVignette.data()), vg);
   }
 
   const QByteArray json = QJsonDocument(effects).toJson(QJsonDocument::Compact);

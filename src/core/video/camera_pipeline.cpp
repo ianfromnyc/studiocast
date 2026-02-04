@@ -23,6 +23,7 @@
 #include "core/video/convert.h"
 #include "core/video/image_ppm.h"
 #include "core/video/effects/effect_chain.h"
+#include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/mirror_effect.h"
 #include "core/video/v4l2loopback.h"
 
@@ -2343,34 +2344,35 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       };
 
       // AR effects.
-      if (!stop_.load() && fx.eye_contact.enabled && !avail.count("eye_contact")) {
+      if (!stop_.load() && fx.eye_contact.enabled &&
+          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdEyeContact))) {
         set_blocked(studiocast::maxine::MaxineNeed::ar);
       }
       if (!stop_.load() &&
           fx.background == studiocast::video::effects::BackgroundEffect::auto_frame &&
-          !avail.count("auto_frame")) {
+          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdAutoFrame))) {
         set_blocked(studiocast::maxine::MaxineNeed::ar);
       }
 
       // VFX effects.
       if (!stop_.load() && (fx.background == studiocast::video::effects::BackgroundEffect::blur) &&
-          !avail.count("virtual_background.blur")) {
+          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
       if (!stop_.load() && (fx.background == studiocast::video::effects::BackgroundEffect::remove) &&
-          !avail.count("virtual_background.remove")) {
+          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
       if (!stop_.load() && (fx.background == studiocast::video::effects::BackgroundEffect::replace) &&
-          !avail.count("virtual_background.replace")) {
+          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
       if (!stop_.load() && fx.denoise &&
-          !avail.count("video_noise_removal")) {
+          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
       if (!stop_.load() && fx.virtual_key_light.enabled &&
-          !avail.count("virtual_key_light")) {
+          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualKeyLight))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
 
