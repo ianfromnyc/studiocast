@@ -12,6 +12,7 @@
 #include "core/probe/probe.h"
 #include "core/video/convert.h"
 #include "core/video/camera_pipeline.h"
+#include "core/video/effects/broadcast_effects.h"
 #include "core/video/v4l2_capture.h"
 #include "core/util/xdg.h"
 
@@ -325,9 +326,9 @@ int main(int argc, char** argv) {
     }
 
     studiocast::maxine::effects::VfxGreenScreenEffect gs(&vfx_api, &nvcv_api, model_dir);
-    studiocast::video::CameraEffects settings;
-    settings.green_screen.mode = mode;
-    settings.green_screen.temporal = temporal;
+    studiocast::video::effects::BroadcastCameraEffects settings;
+    settings.virtual_background.greenscreen_mode = mode;
+    settings.virtual_background.greenscreen_temporal = temporal;
     if (!gs.Configure(settings, &err)) {
       std::cerr << "Configure failed: " << err << "\n";
       return 5;
@@ -548,10 +549,11 @@ int main(int argc, char** argv) {
     studiocast::maxine::effects::VfxGreenScreenEffect gs(&vfx_api, &nvcv_api, model_dir);
     studiocast::maxine::effects::VfxBackgroundBlurEffect bgblur(&vfx_api, &nvcv_api, model_dir);
 
-    studiocast::video::CameraEffects settings;
-    settings.green_screen.mode = mode;
-    settings.green_screen.temporal = temporal;
-    settings.background_strength = strength;
+    studiocast::video::effects::BroadcastCameraEffects settings;
+    settings.virtual_background.mode = studiocast::video::effects::VirtualBackgroundMode::blur;
+    settings.virtual_background.greenscreen_mode = mode;
+    settings.virtual_background.greenscreen_temporal = temporal;
+    settings.virtual_background.strength = strength;
 
     if (!gs.Configure(settings, &err) || !bgblur.Configure(settings, &err)) {
       std::cerr << "Configure failed: " << err << "\n";

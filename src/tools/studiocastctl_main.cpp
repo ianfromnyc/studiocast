@@ -3,12 +3,17 @@
 #include <cstdio>
 #include <cctype>
 #include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <sys/wait.h>
 
 #include "core/ipc/daemon_client.h"
 #include "core/maxine/reason_codes.h"
@@ -18,6 +23,103 @@
 #include "studiocast/version.h"
 
 namespace {
+
+namespace fs = std::filesystem;
+
+std::string ShellQuote(const std::string& s) {
+  // Minimal POSIX shell quoting: wrap in single quotes, escape embedded single quotes.
+  // Result can be safely concatenated into a `/bin/sh -c` command string.
+  std::string out;
+  out.reserve(s.size() + 2);
+  out.push_back('\'');
+  for (const char c : s) {
+    if (c == '\'') {
+      out.append("'\\''");
+    } else {
+      out.push_back(c);
+    }
+  }
+  out.push_back('\'');
+  return out;
+}
+
+std::string BuildShellCommand(const std::vector<std::string>& argv) {
+  std::ostringstream oss;
+  bool first = true;
+  for (const auto& a : argv) {
+    if (!first) oss << ' ';
+    first = false;
+    oss << ShellQuote(a);
+  }
+  return oss.str();
+}
+
+struct CommandCaptureResult {
+  int exit_code = -1;
+  std::string output;
+  std::string error;
+};
+
+CommandCaptureResult RunCommandCapture(const std::vector<std::string>& argv) {
+  CommandCaptureResult out;
+  if (argv.empty()) {
+    out.error = "empty argv";
+    return out;
+  }
+
+  const std::string cmd = BuildShellCommand(argv) + " 2>&1";
+  FILE* f = ::popen(cmd.c_str(), "r");
+  if (!f) {
+    out.error = "popen failed";
+    return out;
+  }
+
+  char buf[4096];
+  while (std::fgets(buf, static_cast<int>(sizeof(buf)), f)) {
+    out.output.append(buf);
+  }
+
+  const int status = ::pclose(f);
+  if (WIFEXITED(status)) {
+    out.exit_code = WEXITSTATUS(status);
+  } else {
+    out.exit_code = -1;
+  }
+  return out;
+}
+
+std::string ResolveSiblingToolPath(const char* argv0, const char* toolName) {
+  if (!argv0 || !toolName) return toolName ? std::string(toolName) : std::string();
+
+  try {
+    const fs::path exe = fs::path(argv0);
+    if (exe.has_parent_path()) {
+      const fs::path candidate = exe.parent_path() / toolName;
+      if (fs::exists(candidate)) return candidate.string();
+    }
+  } catch (...) {
+    // Fall back to PATH.
+  }
+  return std::string(toolName);
+}
+
+std::string LocalTimestampForFilename() {
+  const std::time_t t = std::time(nullptr);
+  std::tm tm{};
+  if (!::localtime_r(&t, &tm)) return "unknown-time";
+  char buf[64];
+  if (std::strftime(buf, sizeof(buf), "%Y%m%d-%H%M%S", &tm) == 0) return "unknown-time";
+  return std::string(buf);
+}
+
+std::string LocalTimestampForHumans() {
+  const std::time_t t = std::time(nullptr);
+  std::tm tm{};
+  if (!::localtime_r(&t, &tm)) return "unknown";
+  char buf[64];
+  if (std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %z", &tm) == 0) return "unknown";
+  return std::string(buf);
+}
 
 using studiocast::util::json::Value;
 
@@ -319,6 +421,7 @@ void Usage(const char* argv0) {
       << "studiocastctl - control StudioCast daemon (studiocastd)\n\n"
       << "Usage:\n"
       << "  " << argv0 << " status [--pretty]\n"
+      << "  " << argv0 << " debug-report [--out <path>]\n"
       << "  " << argv0 << " config\n"
       << "  " << argv0 << " effects get\n"
       << "  " << argv0 << " effects set --file <effects.json|->\n"
@@ -332,6 +435,7 @@ void Usage(const char* argv0) {
       << "Examples:\n"
       << "  " << argv0 << " status\n"
       << "  " << argv0 << " status --pretty\n"
+      << "  " << argv0 << " debug-report --out studiocast-debug-report.txt\n"
       << "  " << argv0 << " enable 1\n"
       << "  " << argv0 << " video set input=/dev/video0 output=/dev/video10 width=1280 height=720 fps=30\n"
       << "  " << argv0 << " video effects mirror=1 background=blur background_strength=10\n"
@@ -429,6 +533,112 @@ int main(int argc, char** argv) {
     PrintMaxinePrettyFromStatusJson(res.json);
     return 0;
   }
+
+  if (cmd == "debug-report") {
+    std::string outPath;
+    for (int i = 2; i < argc; ++i) {
+      const std::string_view a = argv[i] ? std::string_view(argv[i]) : std::string_view();
+      if (a == "--out" || a == "-o") {
+        if (i + 1 >= argc || !argv[i + 1]) {
+          std::cerr << "ERROR: --out requires a path\n";
+          return 2;
+        }
+        outPath = argv[i + 1] ? std::string(argv[i + 1]) : std::string();
+        ++i;
+        continue;
+      }
+      if (a == "--help" || a == "-h") {
+        Usage(argv[0]);
+        return 0;
+      }
+    }
+    if (outPath.empty()) {
+      outPath = std::string("studiocast-debug-report-") + LocalTimestampForFilename() + ".txt";
+    }
+
+    std::ofstream out(outPath, std::ios::out | std::ios::trunc);
+    if (!out) {
+      std::cerr << "ERROR: failed to open output file: " << outPath << "\n";
+      return 1;
+    }
+
+    auto section = [&](const std::string& name) {
+      out << "\n";
+      out << "================================================================================\n";
+      out << name << "\n";
+      out << "================================================================================\n";
+    };
+
+    out << "StudioCast debug report\n";
+    out << "Generated: " << LocalTimestampForHumans() << "\n";
+    out << "studiocastctl: " << STUDIOCAST_VERSION << " (" << STUDIOCAST_GIT_SHA << ")\n";
+
+    bool okAll = true;
+
+    section("IPC: GET_STATUS");
+    {
+      studiocast::ipc::DaemonCallResult res;
+      std::string err;
+      if (!studiocast::ipc::DaemonCall("GET_STATUS", &res, &err)) {
+        okAll = false;
+        out << "DaemonCall failed: " << err << "\n";
+      } else if (!res.ok) {
+        okAll = false;
+        out << "Daemon returned ok=false\n";
+        out << (res.error_json.empty() ? std::string("{\"error\":\"daemon_error\"}") : res.error_json) << "\n";
+      } else {
+        out << res.json << "\n";
+      }
+    }
+
+    const std::string probePath = ResolveSiblingToolPath(argv[0], "studiocast-probe");
+    const std::string maxinePath = ResolveSiblingToolPath(argv[0], "studiocast-maxine");
+
+    section(std::string("Exec: ") + probePath + " --json");
+    {
+      const auto r = RunCommandCapture({probePath, "--json"});
+      if (!r.error.empty()) {
+        okAll = false;
+        out << "spawn error: " << r.error << "\n";
+      }
+      out << "exit_code: " << r.exit_code << "\n";
+      if (r.exit_code != 0) okAll = false;
+      out << r.output;
+      if (!r.output.empty() && r.output.back() != '\n') out << "\n";
+    }
+
+    section(std::string("Exec: ") + maxinePath + " paths");
+    {
+      const auto r = RunCommandCapture({maxinePath, "paths"});
+      if (!r.error.empty()) {
+        okAll = false;
+        out << "spawn error: " << r.error << "\n";
+      }
+      out << "exit_code: " << r.exit_code << "\n";
+      if (r.exit_code != 0) okAll = false;
+      out << r.output;
+      if (!r.output.empty() && r.output.back() != '\n') out << "\n";
+    }
+
+    section(std::string("Exec: ") + maxinePath + " install-hints");
+    {
+      const auto r = RunCommandCapture({maxinePath, "install-hints"});
+      if (!r.error.empty()) {
+        okAll = false;
+        out << "spawn error: " << r.error << "\n";
+      }
+      out << "exit_code: " << r.exit_code << "\n";
+      if (r.exit_code != 0) okAll = false;
+      out << r.output;
+      if (!r.output.empty() && r.output.back() != '\n') out << "\n";
+    }
+
+    out.flush();
+
+    std::cout << outPath << "\n";
+    return okAll ? 0 : 1;
+  }
+
   if (cmd == "config") {
     // Back-compat alias.
     return CallOrDie("GET_CONFIG") ? 0 : 1;
