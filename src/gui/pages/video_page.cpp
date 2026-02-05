@@ -20,6 +20,7 @@
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStandardItemModel>
@@ -31,10 +32,13 @@
 
 #include <algorithm>
 #include <cstring>
+#include <unordered_map>
 
 #include "core/maxine/reason_codes.h"
+#include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/convert.h"
 #include "core/video/effects/broadcast_effect_contract.h"
+#include "core/video/effects/effect_descriptors.h"
 #include "core/video/v4l2loopback.h"
 
 namespace studiocast::gui {
@@ -46,6 +50,42 @@ QString DeviceLabel(const studiocast::video::VideoDevice& d) {
   if (!d.driver.empty()) label += " (" + QString::fromStdString(d.driver) + ")";
   if (d.is_loopback) label += " [loopback]";
   return label;
+}
+
+enum class EffectAvailabilityKind {
+  always,
+  gpu_utility,
+  maxine_listed,
+};
+
+const std::unordered_map<std::string, studiocast::video::effects::VideoEffectDescriptor>& EffectDescriptorById() {
+  static const auto* map = []() {
+    auto* m = new std::unordered_map<std::string, studiocast::video::effects::VideoEffectDescriptor>();
+    for (const auto& d : studiocast::video::effects::VideoEffectDescriptors()) {
+      (*m)[d.id] = d;
+    }
+    return m;
+  }();
+  return *map;
+}
+
+EffectAvailabilityKind AvailabilityKindForEffectId(const QString& id) {
+  const auto& m = EffectDescriptorById();
+  const auto it = m.find(id.toStdString());
+  if (it == m.end()) {
+    // Conservative default for unknown IDs.
+    return EffectAvailabilityKind::maxine_listed;
+  }
+  bool needsMaxine = false;
+  bool needsGpuUtility = false;
+  for (const auto c : it->second.required_components) {
+    needsMaxine = needsMaxine || (c == studiocast::video::effects::RequiredComponent::maxine_vfx ||
+                                 c == studiocast::video::effects::RequiredComponent::maxine_ar);
+    needsGpuUtility = needsGpuUtility || (c == studiocast::video::effects::RequiredComponent::gpu_utility);
+  }
+  if (needsMaxine) return EffectAvailabilityKind::maxine_listed;
+  if (needsGpuUtility) return EffectAvailabilityKind::gpu_utility;
+  return EffectAvailabilityKind::always;
 }
 
 struct DaemonVideoStatus {
@@ -64,20 +104,14 @@ struct DaemonVideoStatus {
   int width = 0;
   int height = 0;
   int fps = 0;
-  bool mirror = false;
 
-  QString background;
-  QString background_backend;
-  int background_strength = 0;
-  QString background_remove_color;
-  QString background_replace_image;
+  studiocast::video::effects::BroadcastCameraEffects effects{};
+  bool effects_valid = false;
 
-  // Virtual Key Light (Video Relighting)
-  bool virtual_key_light = false;
-  int virtual_key_light_intensity = 0;  // 0..100
-  QString virtual_key_light_temperature;
-  int virtual_key_light_pan = 0;
-  QString virtual_key_light_hdri;
+  // Rule-based disable reasons and deterministic ordering (from daemon status).
+  QStringList effects_plan_ordered;
+  QString effects_plan_vignette_attach_to;
+  QMap<QString, QString> effects_plan_disabled;
 
   // Maxine runtime diagnostics (from daemon GET_STATUS)
   bool maxine_ok = false;
@@ -123,19 +157,6 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
   out->width = video.value("width").toInt(0);
   out->height = video.value("height").toInt(0);
   out->fps = video.value("fps").toInt(0);
-  out->mirror = video.value("mirror").toBool(false);
-
-  out->background = video.value("background").toString();
-  out->background_backend = video.value("background_backend").toString();
-  out->background_strength = video.value("background_strength").toInt(0);
-  out->background_remove_color = video.value("background_remove_color").toString();
-  out->background_replace_image = video.value("background_replace_image").toString();
-
-  out->virtual_key_light = video.value("virtual_key_light").toBool(false);
-  out->virtual_key_light_intensity = video.value("virtual_key_light_intensity").toInt(0);
-  out->virtual_key_light_temperature = video.value("virtual_key_light_temperature").toString();
-  out->virtual_key_light_pan = video.value("virtual_key_light_pan").toInt(0);
-  out->virtual_key_light_hdri = video.value("virtual_key_light_hdri").toString();
 
   out->input_device = video.value("input_device").toString();
   out->output_device = video.value("output_device").toString();
@@ -147,6 +168,43 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
 
   out->effects_backends = pipe.value("effects_backends").toString();
   out->effects_note = pipe.value("effects_note").toString();
+
+  // Canonical effects model (Broadcast schema).
+  out->effects = {};
+  out->effects_valid = false;
+  const QJsonObject fx = video.value("video_effects").toObject();
+  if (!fx.isEmpty()) {
+    const QByteArray txt = QJsonDocument(fx).toJson(QJsonDocument::Compact);
+    std::string jerr;
+    if (studiocast::video::ApplyBroadcastCameraEffectsPatchJsonText(txt.toStdString(), &out->effects, &jerr)) {
+      out->effects_valid = true;
+    }
+  }
+
+  // Effect plan (ordering + disable reasons).
+  out->effects_plan_ordered.clear();
+  out->effects_plan_vignette_attach_to.clear();
+  out->effects_plan_disabled.clear();
+  const QJsonObject plan = pipe.value("effects_plan").toObject();
+  if (!plan.isEmpty()) {
+    const auto ordered = plan.value("ordered").toArray();
+    for (const auto& v : ordered) {
+      const QString s = v.toString();
+      if (!s.isEmpty()) out->effects_plan_ordered.push_back(s);
+    }
+
+    out->effects_plan_vignette_attach_to = plan.value("vignette_attach_to").toString();
+
+    const auto disabled = plan.value("disabled").toArray();
+    for (const auto& v : disabled) {
+      const QJsonObject o = v.toObject();
+      const QString id = o.value("id").toString();
+      const QString reason = o.value("reason").toString();
+      if (!id.isEmpty() && !reason.isEmpty()) {
+        out->effects_plan_disabled.insert(id, reason);
+      }
+    }
+  }
 
   const QJsonObject maxine = root.value("maxine").toObject();
   if (!maxine.isEmpty()) {
@@ -670,131 +728,49 @@ bool VideoPage::SyncFromDaemonConfig() {
 
   const QJsonObject fx = src.value("video_effects").toObject();
 
-  // Canonical contract: effect IDs are keys; each effect is an object with params.
-  // Keep best-effort legacy fallback for older daemons.
+  // Canonical contract: `video_effects` is a patch object in Broadcast contract-ID form.
+  // GUI does not read any legacy effect fields here.
+  effects_ = {};
+  if (!fx.isEmpty()) {
+    const QByteArray txt = QJsonDocument(fx).toJson(QJsonDocument::Compact);
+    std::string jerr;
+    (void)studiocast::video::ApplyBroadcastCameraEffectsPatchJsonText(txt.toStdString(), &effects_, &jerr);
+  }
 
-  bool mirror = false;
-  {
-    const QJsonValue mv = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdMirror.data()));
-    if (mv.isObject()) {
-      mirror = mv.toObject().value("enabled").toBool(false);
-    } else if (!mv.isUndefined()) {
-      mirror = mv.toBool(false);
-    } else {
-      mirror = src.value("mirror").toBool(false);
+  const bool autoFrame = effects_.auto_frame.enabled;
+  const int autoFrameStrength = effects_.auto_frame.strength;
+  const QString vbMode = autoFrame ? QStringLiteral("auto_frame")
+                                  : QString::fromStdString(studiocast::video::effects::ToString(effects_.virtual_background.mode));
+  const int vbStrength = effects_.virtual_background.strength;
+  const QString vbRemoveColor = QString::fromStdString(effects_.virtual_background.remove_color);
+  const QString vbReplacePath = QString::fromStdString(effects_.virtual_background.replace_path);
+
+  const bool eyeContact = effects_.eye_contact.enabled;
+  const int eyeContactStrength = effects_.eye_contact.strength;
+  const bool eyeContactLookAway = effects_.eye_contact.look_away_enabled;
+
+  const bool denoise = effects_.video_noise_removal.enabled;
+  const int denoiseStrength = effects_.video_noise_removal.strength;
+
+  const bool virtualKeyLight = effects_.virtual_key_light.enabled;
+  const int virtualKeyLightIntensity = effects_.virtual_key_light.intensity;
+  const auto vklPresetToStr = [](int p) -> const char* {
+    switch (p) {
+      case 1:
+        return "warm";
+      case 2:
+        return "cool";
+      default:
+        return "neutral";
     }
-  }
+  };
+  const QString virtualKeyLightTemp = QString::fromUtf8(vklPresetToStr(effects_.virtual_key_light.temperature_preset));
+  const int virtualKeyLightPan = effects_.virtual_key_light.direction_pan_degrees;
+  const QString virtualKeyLightHdri = QString::fromStdString(effects_.virtual_key_light.hdri_path);
 
-  // Auto Frame
-  bool autoFrame = false;
-  int autoFrameStrength = 50;
-  {
-    const QJsonObject af = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdAutoFrame.data())).toObject();
-    if (!af.isEmpty()) {
-      autoFrame = af.value("enabled").toBool(false);
-      autoFrameStrength = af.value("strength").toInt(af.value("zoom").toInt(50));
-    }
-  }
-
-  // Virtual Background (mutually exclusive modes)
-  QString vbMode = "none";
-  int vbStrength = 8;
-  QString vbRemoveColor;
-  QString vbReplacePath;
-  if (autoFrame) {
-    vbMode = "auto_frame";
-  } else {
-    const auto vbBlur = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur.data())).toObject();
-    const auto vbRemove = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove.data())).toObject();
-    const auto vbReplace = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace.data())).toObject();
-    if (vbBlur.value("enabled").toBool(false)) {
-      vbMode = "blur";
-      vbStrength = vbBlur.value("strength").toInt(8);
-    } else if (vbRemove.value("enabled").toBool(false)) {
-      vbMode = "remove";
-      vbStrength = vbRemove.value("strength").toInt(8);
-      vbRemoveColor = vbRemove.value("remove_color").toString();
-    } else if (vbReplace.value("enabled").toBool(false)) {
-      vbMode = "replace";
-      vbStrength = vbReplace.value("strength").toInt(8);
-      vbRemoveColor = vbReplace.value("remove_color").toString();
-      vbReplacePath = vbReplace.value("replace_path").toString();
-    }
-  }
-
-  // Legacy fallback: nested virtual_background object.
-  if (vbMode == "none") {
-    const QJsonObject vb = fx.value("virtual_background").toObject();
-    if (!vb.isEmpty()) {
-      vbMode = vb.value("mode").toString("none");
-      vbStrength = vb.value("strength").toInt(vb.value("blur_strength").toInt(8));
-      vbRemoveColor = vb.value("remove_color").toString();
-      vbReplacePath = vb.value("replace_path").toString();
-    } else {
-      vbMode = src.value("background").toString("none");
-      vbStrength = src.value("background_strength").toInt(8);
-      vbRemoveColor = src.value("background_remove_color").toString();
-      vbReplacePath = src.value("background_replace_image").toString();
-    }
-  }
-
-  // Eye Contact
-  bool eyeContact = false;
-  int eyeContactStrength = 50;
-  bool eyeContactLookAway = true;
-  {
-    const QJsonObject ec = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdEyeContact.data())).toObject();
-    if (!ec.isEmpty()) {
-      eyeContact = ec.value("enabled").toBool(false);
-      eyeContactStrength = ec.value("strength").toInt(50);
-      eyeContactLookAway = ec.value("look_away_enabled").toBool(ec.value("look_away").toBool(true));
-    }
-  }
-
-  // Video Noise Removal
-  bool denoise = false;
-  int denoiseStrength = 50;
-  const QJsonObject dn = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval.data())).toObject();
-  if (!dn.isEmpty()) {
-    denoise = dn.value("enabled").toBool(false);
-    denoiseStrength = dn.value("strength").toInt(50);
-  }
-
-  // Virtual Key Light
-  bool virtualKeyLight = false;
-  int virtualKeyLightIntensity = 70;
-  QString virtualKeyLightTemp = "neutral";
-  int virtualKeyLightPan = 0;
-  QString virtualKeyLightHdri;
-  const QJsonObject vkl = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualKeyLight.data())).toObject();
-  if (!vkl.isEmpty()) {
-    virtualKeyLight = vkl.value("enabled").toBool(false);
-    virtualKeyLightIntensity = vkl.value("intensity").toInt(70);
-    virtualKeyLightTemp = vkl.value("temperature_preset").toString(vkl.value("temperature").toString("neutral"));
-    virtualKeyLightPan = vkl.value("direction_pan_degrees").toInt(vkl.value("pan").toInt(0));
-    virtualKeyLightHdri = vkl.value("hdri_path").toString();
-  } else {
-    virtualKeyLight = src.value("virtual_key_light").toBool(false);
-    virtualKeyLightIntensity = src.value("virtual_key_light_intensity").toInt(70);
-    virtualKeyLightTemp = src.value("virtual_key_light_temperature").toString("neutral");
-    virtualKeyLightPan = src.value("virtual_key_light_pan").toInt(0);
-    virtualKeyLightHdri = src.value("virtual_key_light_hdri").toString();
-  }
-
-  // Vignette
-  bool vignette = false;
-  int vignetteIntensity = 35;
-  bool vignetteCenterOnFace = true;
-  const QJsonObject vg = fx.value(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVignette.data())).toObject();
-  if (!vg.isEmpty()) {
-    vignette = vg.value("enabled").toBool(false);
-    vignetteIntensity = vg.value("intensity").toInt(35);
-    vignetteCenterOnFace = vg.value("center_on_tracked_face").toBool(vg.value("center_on_face").toBool(true));
-  } else {
-    vignette = src.value("vignette").toBool(false);
-    vignetteIntensity = src.value("vignette_intensity").toInt(35);
-    vignetteCenterOnFace = src.value("vignette_center_on_face").toBool(true);
-  }
+  const bool vignette = effects_.vignette.enabled;
+  const int vignetteIntensity = effects_.vignette.intensity;
+  const bool vignetteCenterOnFace = effects_.vignette.center_on_tracked_face;
 
   // Apply to UI (best-effort; ignore if device not found in combo).
   const QString inKey = input.isEmpty() ? "auto" : input;
@@ -810,7 +786,7 @@ bool VideoPage::SyncFromDaemonConfig() {
   if (fps > 0) fpsSpin_->setValue(fps);
 
   mirrorCheck_->blockSignals(true);
-  mirrorCheck_->setChecked(mirror);
+  mirrorCheck_->setChecked(effects_.mirror);
   mirrorCheck_->blockSignals(false);
 
   if (backgroundCombo_) {
@@ -977,106 +953,60 @@ bool VideoPage::SendDaemonVideoConfig() {
 }
 
 bool VideoPage::SendDaemonVideoEffects() {
-  QJsonObject effects;
-  // Product rule: Maxine is the only production effect engine.
-  effects.insert("engine", "maxine");
-
-  auto add_effect = [&](const QString& id, const QJsonObject& obj) {
-    if (!obj.isEmpty()) effects.insert(id, obj);
-  };
-
-  // Mirror.
-  {
-    QJsonObject mir;
-    mir.insert("enabled", mirrorCheck_ && mirrorCheck_->isChecked());
-    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdMirror.data()), mir);
-  }
+  // Canonical local model is `effects_` (Broadcast schema). Sync UI -> model here,
+  // then serialize using the stable contract JSON.
+  effects_.engine = studiocast::video::effects::EffectsEnginePreference::maxine;
+  effects_.mirror = mirrorCheck_ && mirrorCheck_->isChecked();
 
   const QString bg = backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
-  const int vbStrength = backgroundStrengthSpin_ ? backgroundStrengthSpin_->value() : studiocast::video::effects::contract::kVbStrengthDefault;
-  const QString vbRemoveColor = backgroundRemoveColorEdit_ ? backgroundRemoveColorEdit_->text().trimmed() : QString();
-  const QString vbReplacePath = backgroundReplaceImageEdit_ ? backgroundReplaceImageEdit_->text().trimmed() : QString();
-
   const bool bgIsAutoFrame = (bg == "auto_frame");
 
-  // Virtual Background modes (mutually exclusive).
-  {
-    QJsonObject vb;
-    vb.insert("enabled", (!bgIsAutoFrame && bg == "blur"));
-    vb.insert("strength", vbStrength);
-    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur.data()), vb);
-  }
-  {
-    QJsonObject vb;
-    vb.insert("enabled", (!bgIsAutoFrame && bg == "remove"));
-    vb.insert("strength", vbStrength);
-    if (!vbRemoveColor.isEmpty()) vb.insert("remove_color", vbRemoveColor);
-    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove.data()), vb);
-  }
-  {
-    QJsonObject vb;
-    vb.insert("enabled", (!bgIsAutoFrame && bg == "replace"));
-    vb.insert("strength", vbStrength);
-    if (!vbReplacePath.isEmpty()) vb.insert("replace_path", vbReplacePath);
-    if (!vbRemoveColor.isEmpty()) vb.insert("remove_color", vbRemoveColor);
-    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace.data()), vb);
+  // Auto Frame vs Virtual Background are mutually exclusive in the current UX.
+  effects_.auto_frame.enabled = (autoFrameCheck_ && autoFrameCheck_->isChecked()) || bgIsAutoFrame;
+  if (autoFrameZoomSlider_) {
+    effects_.auto_frame.strength = autoFrameZoomSlider_->value();
   }
 
-  // Auto Frame
-  if (autoFrameCheck_ || autoFrameZoomSlider_) {
-    QJsonObject af;
-    const bool en = (autoFrameCheck_ && autoFrameCheck_->isChecked()) || bgIsAutoFrame;
-    af.insert("enabled", en);
-    if (autoFrameZoomSlider_) af.insert("strength", autoFrameZoomSlider_->value());
-    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdAutoFrame.data()), af);
+  // Virtual background mode.
+  if (bgIsAutoFrame || effects_.auto_frame.enabled) {
+    effects_.virtual_background.mode = studiocast::video::effects::VirtualBackgroundMode::none;
+  } else {
+    studiocast::video::effects::VirtualBackgroundMode m = studiocast::video::effects::VirtualBackgroundMode::none;
+    (void)studiocast::video::effects::ParseVirtualBackgroundMode(bg.toStdString(), &m);
+    effects_.virtual_background.mode = m;
   }
+  if (backgroundStrengthSpin_) effects_.virtual_background.strength = backgroundStrengthSpin_->value();
+  if (backgroundRemoveColorEdit_) effects_.virtual_background.remove_color = backgroundRemoveColorEdit_->text().trimmed().toStdString();
+  if (backgroundReplaceImageEdit_) effects_.virtual_background.replace_path = backgroundReplaceImageEdit_->text().trimmed().toStdString();
 
-  // Eye Contact
-  if (eyeContactCheck_ || eyeContactStrengthSlider_ || eyeContactLookAwayCheck_) {
-    QJsonObject ec;
-    if (eyeContactCheck_) ec.insert("enabled", eyeContactCheck_->isChecked());
-    if (eyeContactStrengthSlider_) ec.insert("strength", eyeContactStrengthSlider_->value());
-    if (eyeContactLookAwayCheck_) ec.insert("look_away_enabled", eyeContactLookAwayCheck_->isChecked());
-    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdEyeContact.data()), ec);
+  // Eye contact.
+  if (eyeContactCheck_) effects_.eye_contact.enabled = eyeContactCheck_->isChecked();
+  if (eyeContactStrengthSlider_) effects_.eye_contact.strength = eyeContactStrengthSlider_->value();
+  if (eyeContactLookAwayCheck_) effects_.eye_contact.look_away_enabled = eyeContactLookAwayCheck_->isChecked();
+
+  // Denoise.
+  if (denoiseCheck_) effects_.video_noise_removal.enabled = denoiseCheck_->isChecked();
+  if (denoiseStrengthSlider_) effects_.video_noise_removal.strength = denoiseStrengthSlider_->value();
+
+  // Virtual Key Light.
+  if (virtualKeyLightCheck_) effects_.virtual_key_light.enabled = virtualKeyLightCheck_->isChecked();
+  if (virtualKeyLightIntensitySpin_) effects_.virtual_key_light.intensity = virtualKeyLightIntensitySpin_->value();
+  if (virtualKeyLightTempCombo_) {
+    const QString t = virtualKeyLightTempCombo_->currentData().toString();
+    if (t == "warm") effects_.virtual_key_light.temperature_preset = 1;
+    else if (t == "cool") effects_.virtual_key_light.temperature_preset = 2;
+    else effects_.virtual_key_light.temperature_preset = 0;
   }
+  if (virtualKeyLightPanSpin_) effects_.virtual_key_light.direction_pan_degrees = virtualKeyLightPanSpin_->value();
+  if (virtualKeyLightHdriEdit_) effects_.virtual_key_light.hdri_path = virtualKeyLightHdriEdit_->text().trimmed().toStdString();
 
-  // Video Noise Removal
-  if (denoiseCheck_ || denoiseStrengthSlider_) {
-    QJsonObject dn;
-    if (denoiseCheck_) dn.insert("enabled", denoiseCheck_->isChecked());
-    if (denoiseStrengthSlider_) dn.insert("strength", denoiseStrengthSlider_->value());
-    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval.data()), dn);
-  }
+  // Vignette.
+  if (vignetteCheck_) effects_.vignette.enabled = vignetteCheck_->isChecked();
+  if (vignetteIntensitySlider_) effects_.vignette.intensity = vignetteIntensitySlider_->value();
+  if (vignetteCenterOnFaceCheck_) effects_.vignette.center_on_tracked_face = vignetteCenterOnFaceCheck_->isChecked();
 
-  // Virtual Key Light (Maxine relighting)
-  if (virtualKeyLightCheck_ || virtualKeyLightIntensitySpin_ || virtualKeyLightTempCombo_ ||
-      virtualKeyLightPanSpin_ || virtualKeyLightHdriEdit_) {
-    QJsonObject vkl;
-    if (virtualKeyLightCheck_) vkl.insert("enabled", virtualKeyLightCheck_->isChecked());
-    if (virtualKeyLightIntensitySpin_) vkl.insert("intensity", virtualKeyLightIntensitySpin_->value());
-    if (virtualKeyLightTempCombo_) {
-      const QString t = virtualKeyLightTempCombo_->currentData().toString();
-      if (!t.isEmpty()) vkl.insert("temperature_preset", t);
-    }
-    if (virtualKeyLightPanSpin_) vkl.insert("direction_pan_degrees", virtualKeyLightPanSpin_->value());
-    if (virtualKeyLightHdriEdit_) {
-      const QString p = virtualKeyLightHdriEdit_->text().trimmed();
-      if (!p.isEmpty()) vkl.insert("hdri_path", p);
-    }
-    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVirtualKeyLight.data()), vkl);
-  }
-
-  // Vignette (GPU post-process)
-  if (vignetteCheck_ || vignetteIntensitySlider_ || vignetteCenterOnFaceCheck_) {
-    QJsonObject vg;
-    if (vignetteCheck_) vg.insert("enabled", vignetteCheck_->isChecked());
-    if (vignetteIntensitySlider_) vg.insert("intensity", vignetteIntensitySlider_->value());
-    if (vignetteCenterOnFaceCheck_) vg.insert("center_on_tracked_face", vignetteCenterOnFaceCheck_->isChecked());
-    add_effect(QString::fromUtf8(studiocast::video::effects::contract::kEffectIdVignette.data()), vg);
-  }
-
-  const QByteArray json = QJsonDocument(effects).toJson(QJsonDocument::Compact);
-  const std::string req = std::string("SET_VIDEO_EFFECTS_JSON ") + json.toStdString();
+  const std::string json = studiocast::video::BroadcastCameraEffectsContractToJson(effects_);
+  const std::string req = std::string("SET_VIDEO_EFFECTS_JSON ") + json;
 
   QString err;
   if (!DaemonRequest(req, nullptr, &err)) {
@@ -1412,19 +1342,53 @@ void VideoPage::UpdateUiEnabled() {
     }
   }
 
-  // Effects are only editable when Maxine is supported.
-  const bool fxAvail = maxineSupported;
+  // Per-effect availability comes from daemon status:
+  //  - `maxine.available_effects` / `maxine.missing_effects` (MaxineManager)
+  //  - `pipeline.effects_plan.disabled` (rule-based gating; single source of truth)
+  // Plus static effect descriptors that tell us which effects depend on Maxine.
   auto effectAvailable = [&](const QString& id) -> bool {
-    if (!fxAvail) return false;
+    if (!daemonReachable_) return false;
+    if (st.effects_plan_disabled.contains(id)) return false;
+
+    const auto kind = AvailabilityKindForEffectId(id);
+    if (kind == EffectAvailabilityKind::always) return true;
+    if (kind == EffectAvailabilityKind::gpu_utility) {
+      // We currently treat "GPU utility" effects as gated by the same runtime
+      // prerequisites as Maxine (CUDA/GPU/driver). If we later expose explicit
+      // CUDA diagnostics, this can be relaxed.
+      return maxineSupported;
+    }
+
+    // Maxine-listed effect.
+    if (!maxineSupported) return false;
+    if (st.maxine_available_effects.isEmpty() && st.maxine_missing_effects.isEmpty()) {
+      // Disable-by-default when daemon did not report availability.
+      return false;
+    }
     return st.maxine_available_effects.contains(id);
   };
+
   auto effectUnavailableTooltip = [&](const QString& id) -> QString {
     if (!daemonReachable_) return "Daemon unreachable.";
-    if (!fxAvail) {
+
+    if (st.effects_plan_disabled.contains(id)) {
+      return st.effects_plan_disabled.value(id);
+    }
+
+    const auto kind = AvailabilityKindForEffectId(id);
+    if (kind == EffectAvailabilityKind::always) {
+      return "Effect is unavailable.";
+    }
+
+    if (!maxineSupported) {
       if (!st.maxine_blocked_details.isEmpty()) return st.maxine_blocked_details.join("\n");
       if (!st.maxine_summary.isEmpty()) return st.maxine_summary;
       if (!st.maxine_blocked_reason.isEmpty()) return FormatMaxineReasonCode(st.maxine_blocked_reason);
       return "Maxine unavailable.";
+    }
+
+    if (kind == EffectAvailabilityKind::gpu_utility) {
+      return "GPU processing unavailable.";
     }
 
     if (st.maxine_missing_effects.contains(id)) {
@@ -1438,8 +1402,6 @@ void VideoPage::UpdateUiEnabled() {
       return "Effect is unavailable.";
     }
 
-    // If Maxine is supported but daemon did not list this effect as available,
-    // treat it as unavailable (disable-by-default).
     if (st.maxine_available_effects.isEmpty() && st.maxine_missing_effects.isEmpty()) {
       return "Effect availability not reported by daemon.";
     }
@@ -1454,22 +1416,28 @@ void VideoPage::UpdateUiEnabled() {
 
   // Mirror
   if (mirrorCheck_) {
+    const QString id = QString::fromUtf8(studiocast::video::effects::contract::kEffectIdMirror.data());
     const bool on = mirrorCheck_->isChecked();
-    const bool allow = fxAvail || on;
-    setAvail(mirrorCheck_, allow, fxAvail ? QString() : effectUnavailableTooltip("mirror"));
+    const bool avail = effectAvailable(id);
+    const bool allow = avail || on;
+    setAvail(mirrorCheck_, allow, effectUnavailableTooltip(id));
   }
 
   // Virtual Background
   const QString vbMode = backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
-  const bool vbBlurAvail = effectAvailable("virtual_background.blur");
-  const bool vbRemoveAvail = effectAvailable("virtual_background.remove");
-  const bool vbReplaceAvail = effectAvailable("virtual_background.replace");
+  const bool vbBlurAvail = effectAvailable(QStringLiteral("virtual_background.blur"));
+  const bool vbRemoveAvail = effectAvailable(QStringLiteral("virtual_background.remove"));
+  const bool vbReplaceAvail = effectAvailable(QStringLiteral("virtual_background.replace"));
+  const bool afAvail = effectAvailable(QStringLiteral("auto_frame"));
   const bool vbAnyAvail = vbBlurAvail || vbRemoveAvail || vbReplaceAvail;
   const bool vbOn = (vbMode == "blur" || vbMode == "remove" || vbMode == "replace");
+  const bool afOn = (vbMode == "auto_frame");
   if (backgroundCombo_) {
     // Allow switching back to "off" even when Maxine is unavailable / effect is missing.
-    const bool allow = (fxAvail && vbAnyAvail) || vbOn;
-    setAvail(backgroundCombo_, allow, vbOn ? effectUnavailableTooltip("virtual_background." + vbMode) : effectUnavailableTooltip("virtual_background.blur"));
+    const bool allow = (vbAnyAvail || afAvail) || vbOn || afOn;
+    const QString tipId = vbOn ? (QStringLiteral("virtual_background.") + vbMode)
+                              : (afOn ? QStringLiteral("auto_frame") : QStringLiteral("virtual_background.blur"));
+    setAvail(backgroundCombo_, allow, effectUnavailableTooltip(tipId));
 
     // Disable unavailable modes, but keep "off" selectable.
     auto* m = qobject_cast<QStandardItemModel*>(backgroundCombo_->model());
@@ -1480,31 +1448,32 @@ void VideoPage::UpdateUiEnabled() {
         if (mode == "blur") itemEnabled = vbBlurAvail;
         else if (mode == "remove") itemEnabled = vbRemoveAvail;
         else if (mode == "replace") itemEnabled = vbReplaceAvail;
+        else if (mode == "auto_frame") itemEnabled = afAvail;
         // "off" stays enabled.
         if (auto* item = m->item(i)) item->setEnabled(itemEnabled);
       }
     }
   }
   if (backgroundStrengthSpin_ && backgroundCombo_) {
-    backgroundStrengthSpin_->setEnabled(fxAvail && vbMode == "blur" && vbBlurAvail);
+    backgroundStrengthSpin_->setEnabled(vbMode == "blur" && vbBlurAvail);
   }
   if (backgroundRemoveColorEdit_ && backgroundCombo_) {
-    backgroundRemoveColorEdit_->setEnabled(fxAvail && vbMode == "remove" && vbRemoveAvail);
+    backgroundRemoveColorEdit_->setEnabled(vbMode == "remove" && vbRemoveAvail);
   }
   if (backgroundReplaceImageEdit_ && backgroundCombo_) {
-    const bool on = fxAvail && vbMode == "replace" && vbReplaceAvail;
+    const bool on = vbMode == "replace" && vbReplaceAvail;
     backgroundReplaceImageEdit_->setEnabled(on);
     if (browseReplaceImageBtn_) browseReplaceImageBtn_->setEnabled(on);
   }
 
   // Auto Frame
-  const bool afAvailable = effectAvailable("auto_frame");
-  const bool afOn = autoFrameCheck_ ? autoFrameCheck_->isChecked() : false;
+  const bool afAvailable = effectAvailable(QStringLiteral("auto_frame"));
+  const bool afCheckOn = autoFrameCheck_ ? autoFrameCheck_->isChecked() : false;
   if (autoFrameCheck_) {
-    const bool allow = afAvailable || afOn;
-    setAvail(autoFrameCheck_, allow, effectUnavailableTooltip("auto_frame"));
+    const bool allow = afAvailable || afCheckOn;
+    setAvail(autoFrameCheck_, allow, effectUnavailableTooltip(QStringLiteral("auto_frame")));
   }
-  if (autoFrameZoomSlider_) setAvail(autoFrameZoomSlider_, afAvailable && afOn, effectUnavailableTooltip("auto_frame"));
+  if (autoFrameZoomSlider_) setAvail(autoFrameZoomSlider_, afAvailable && afCheckOn, effectUnavailableTooltip(QStringLiteral("auto_frame")));
 
   // Eye Contact
   const bool ecAvailable = effectAvailable("eye_contact");
@@ -1539,15 +1508,15 @@ void VideoPage::UpdateUiEnabled() {
   if (virtualKeyLightHdriEdit_) setAvail(virtualKeyLightHdriEdit_, vklAvailable && vklOn, effectUnavailableTooltip("virtual_key_light"));
   if (browseVirtualKeyLightHdriBtn_) setAvail(browseVirtualKeyLightHdriBtn_, vklAvailable && vklOn, effectUnavailableTooltip("virtual_key_light"));
 
-  // Vignette runs in the GPU pipeline; we only expose it when Maxine is supported.
-  const bool vigAvailable = fxAvail;
+  // Vignette (GPU utility).
+  const bool vigAvailable = effectAvailable(QStringLiteral("vignette"));
   const bool vigOn = vignetteCheck_ ? vignetteCheck_->isChecked() : false;
   if (vignetteCheck_) {
     const bool allow = vigAvailable || vigOn;
-    setAvail(vignetteCheck_, allow, effectUnavailableTooltip("vignette"));
+    setAvail(vignetteCheck_, allow, effectUnavailableTooltip(QStringLiteral("vignette")));
   }
-  if (vignetteIntensitySlider_) setAvail(vignetteIntensitySlider_, vigAvailable && vigOn, effectUnavailableTooltip("vignette"));
-  if (vignetteCenterOnFaceCheck_) setAvail(vignetteCenterOnFaceCheck_, vigAvailable && vigOn, effectUnavailableTooltip("vignette"));
+  if (vignetteIntensitySlider_) setAvail(vignetteIntensitySlider_, vigAvailable && vigOn, effectUnavailableTooltip(QStringLiteral("vignette")));
+  if (vignetteCenterOnFaceCheck_) setAvail(vignetteCenterOnFaceCheck_, vigAvailable && vigOn, effectUnavailableTooltip(QStringLiteral("vignette")));
 
   startBtn_->setEnabled(daemonReachable_ && !enabled && outSelectable && !outputCombo_->currentData().toString().isEmpty());
   stopBtn_->setEnabled(daemonReachable_ && enabled);
@@ -1596,31 +1565,52 @@ void VideoPage::UpdateStatusText() {
   oss << "  input:      " << st.input_device.toStdString() << "\n";
   oss << "  output:     " << st.output_device.toStdString() << "\n";
   oss << "  requested:  " << st.width << "x" << st.height << " @ " << st.fps << " fps\n";
-  oss << "  mirror:     " << (st.mirror ? "on" : "off") << "\n";
-  oss << "  background: " << st.background.toStdString();
-  if (!st.background_backend.isEmpty()) {
-    oss << " (backend " << st.background_backend.toStdString() << ")";
+  if (st.effects_valid) {
+    oss << "  mirror:     " << (st.effects.mirror ? "on" : "off") << "\n";
+
+    const bool autoFrame = st.effects.auto_frame.enabled;
+    const std::string vbMode = autoFrame ? "auto_frame" : studiocast::video::effects::ToString(st.effects.virtual_background.mode);
+
+    oss << "  background: " << vbMode;
+    if (vbMode == "blur" || vbMode == "remove" || vbMode == "replace") {
+      oss << " strength=" << st.effects.virtual_background.strength;
+    }
+    if ((vbMode == "remove" || vbMode == "replace") && !st.effects.virtual_background.remove_color.empty()) {
+      oss << " color=" << st.effects.virtual_background.remove_color;
+    }
+    if (vbMode == "replace" && !st.effects.virtual_background.replace_path.empty()) {
+      oss << " image=" << st.effects.virtual_background.replace_path;
+    }
+    oss << "\n";
+  } else {
+    oss << "  effects:    (failed to parse video_effects)\n";
   }
-  if (st.background_strength > 0) {
-    oss << " strength=" << st.background_strength;
-  }
-  if (st.background == "remove" && !st.background_remove_color.isEmpty()) {
-    oss << " color=" << st.background_remove_color.toStdString();
-  }
-  if (st.background == "replace" && !st.background_replace_image.isEmpty()) {
-    oss << " image=" << st.background_replace_image.toStdString();
-  }
-  oss << "\n";
 
   if (!st.maxine_summary.isEmpty()) {
     oss << "  maxine:     " << st.maxine_summary.toStdString() << "\n";
     oss << "  vkl avail:  " << (st.virtual_key_light_available ? "yes" : "no") << "\n";
   }
 
-  oss << "  key light:  " << (st.virtual_key_light ? "on" : "off")
-      << " intensity=" << st.virtual_key_light_intensity << "%"
-      << " temp=" << st.virtual_key_light_temperature.toStdString()
-      << " pan=" << st.virtual_key_light_pan << "\n";
+  if (st.effects_valid) {
+    const auto presetToStr = [](int p) -> const char* {
+      switch (p) {
+        case 1:
+          return "warm";
+        case 2:
+          return "cool";
+        default:
+          return "neutral";
+      }
+    };
+    oss << "  key light:  " << (st.effects.virtual_key_light.enabled ? "on" : "off")
+        << " intensity=" << st.effects.virtual_key_light.intensity << "%"
+        << " temp=" << presetToStr(st.effects.virtual_key_light.temperature_preset)
+        << " pan=" << st.effects.virtual_key_light.direction_pan_degrees;
+    if (!st.effects.virtual_key_light.hdri_path.empty()) {
+      oss << " hdri=" << st.effects.virtual_key_light.hdri_path;
+    }
+    oss << "\n";
+  }
 
   if (!st.effects_backends.isEmpty()) {
     oss << "  effects:    " << st.effects_backends.toStdString() << "\n";

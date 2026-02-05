@@ -9,6 +9,7 @@
 #include <string_view>
 
 #include "core/video/effects/broadcast_effect_contract.h"
+#include "core/video/legacy_camera_effects.h"
 
 namespace studiocast::video {
 namespace {

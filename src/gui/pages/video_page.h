@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "core/ipc/daemon_client.h"
+#include "core/video/effects/broadcast_effects.h"
 #include "core/video/v4l2_capture.h"
 
 class QCheckBox;
@@ -144,6 +145,10 @@ namespace studiocast::gui {
 
         bool daemonReachable_ = false;
         std::string daemonLastStatusJson_;
+
+        // Canonical local effects model (Broadcast schema). This is the single
+        // source of truth for what the GUI intends to apply.
+        studiocast::video::effects::BroadcastCameraEffects effects_{};
 
         // Preview is implemented by opening the virtual camera (output device)
         // as a consumer and rendering frames inside the GUI.

@@ -3,7 +3,6 @@
 #include <string>
 
 #include "core/util/json.h"
-#include "core/video/legacy_camera_effects.h"
 #include "core/video/effects/broadcast_effects.h"
 
 namespace studiocast::video {
@@ -22,9 +21,5 @@ bool ApplyBroadcastCameraEffectsPatchJson(const studiocast::util::json::Value& r
 bool ApplyBroadcastCameraEffectsPatchJsonText(const std::string& jsonText,
                                              studiocast::video::effects::BroadcastCameraEffects* effects,
                                              std::string* error);
-
-// Temporary adapters for migration/compatibility tooling.
-studiocast::video::effects::BroadcastCameraEffects ToBroadcastCameraEffects(const studiocast::video::CameraEffects& legacy);
-studiocast::video::CameraEffects ToLegacyCameraEffects(const studiocast::video::effects::BroadcastCameraEffects& fx);
 
 }  // namespace studiocast::video
