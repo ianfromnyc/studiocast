@@ -106,6 +106,9 @@ add_library(studiocast_core
         src/core/maxine/effects/ar_auto_frame_tracker.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
+        src/core/audio/effects/broadcast_audio_effects.h
+        src/core/audio/effects/broadcast_audio_effects_json.h
+        src/core/audio/effects/broadcast_audio_effects_json.cpp
         src/core/audio/virtual_mic_state.h
         src/core/audio/virtual_mic_state.cpp
         src/core/audio/virtual_mic.h

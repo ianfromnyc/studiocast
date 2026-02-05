@@ -19,6 +19,7 @@
 #include "core/probe/probe.h"
 #include "core/util/json.h"
 #include "core/util/strings.h"
+#include "core/audio/effects/broadcast_audio_effects_json.h"
 #include "core/video/broadcast_camera_effects_legacy_adapter.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/camera_effects_json.h"
@@ -100,6 +101,55 @@ namespace {
             const auto roundtrip = studiocast::video::ToLegacyCameraEffects(bfx);
             expectTrue("ToLegacyCameraEffects never returns cpu backend",
                        roundtrip.background_backend != studiocast::video::effects::EffectBackend::cpu);
+        }
+
+        // Canonical Broadcast-style audio effects JSON round-trip + validation.
+        {
+            using studiocast::audio::effects::BroadcastAudioEffects;
+            using studiocast::audio::effects::BroadcastAudioEffectsJsonParseOptions;
+            using studiocast::audio::effects::BroadcastAudioEffectsToJson;
+            using studiocast::audio::effects::ParseBroadcastAudioEffectsJsonText;
+
+            BroadcastAudioEffects fx;
+            fx.microphone.noise_removal_enabled = true;
+            fx.microphone.room_echo_removal_enabled = true;
+            fx.microphone.strength = 42;
+            fx.microphone.studio_voice_enabled = false;
+            fx.speaker.noise_removal_enabled = true;
+            fx.speaker.strength = 33;
+
+            const auto json = BroadcastAudioEffectsToJson(fx);
+            BroadcastAudioEffects parsed;
+            std::vector<std::string> warnings;
+            std::string error;
+            expectTrue("ParseBroadcastAudioEffectsJsonText: round-trip ok",
+                       ParseBroadcastAudioEffectsJsonText(json, &parsed, BroadcastAudioEffectsJsonParseOptions{}, &warnings, &error));
+            expectEq("ParseBroadcastAudioEffectsJsonText: error empty", error, "");
+            expectVecEq("ParseBroadcastAudioEffectsJsonText: warnings empty", warnings, {});
+            expectTrue("BroadcastAudioEffects JSON round-trip equality", parsed == fx);
+
+            // Studio Voice must be mutually exclusive with mic noise/echo removal.
+            const std::string bad =
+                "{"
+                "\"schema_version\":1,"
+                "\"microphone\":{"
+                "\"noise_removal_enabled\":true,"
+                "\"room_echo_removal_enabled\":false,"
+                "\"strength\":50,"
+                "\"studio_voice_enabled\":true"
+                "},"
+                "\"speaker\":{"
+                "\"noise_removal_enabled\":false,"
+                "\"strength\":50"
+                "}"
+                "}";
+
+            BroadcastAudioEffects parsedBad;
+            warnings.clear();
+            error.clear();
+            expectTrue("ParseBroadcastAudioEffectsJsonText: exclusivity rejects",
+                       !ParseBroadcastAudioEffectsJsonText(bad, &parsedBad, BroadcastAudioEffectsJsonParseOptions{}, &warnings, &error));
+            expectContains("ParseBroadcastAudioEffectsJsonText: exclusivity error text", error, "mutually exclusive");
         }
 
         // Effect ordering + compatibility rules (single source of truth).

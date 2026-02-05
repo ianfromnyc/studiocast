@@ -1,0 +1,238 @@
+#include "core/audio/effects/broadcast_audio_effects_json.h"
+
+#include <set>
+#include <sstream>
+#include <string_view>
+
+namespace studiocast::audio::effects {
+
+using studiocast::util::json::Value;
+
+namespace {
+
+constexpr int kStrengthMin = 0;
+constexpr int kStrengthMax = 100;
+
+const Value* Find(const Value::Object& obj, const std::string& key) {
+    const auto it = obj.find(key);
+    if (it == obj.end()) return nullptr;
+    return &it->second;
+}
+
+std::string JoinPath(std::string_view parent, std::string_view key) {
+    if (parent.empty()) return std::string(key);
+    return std::string(parent) + "." + std::string(key);
+}
+
+void AddWarning(std::vector<std::string>* warnings, const std::string& s) {
+    if (warnings) warnings->push_back(s);
+}
+
+bool Fail(std::string* error, const std::string& msg) {
+    if (error) *error = msg;
+    return false;
+}
+
+bool CheckUnknownKeys(const Value::Object& obj,
+                      const std::set<std::string_view>& allowed,
+                      std::string_view path,
+                      const BroadcastAudioEffectsJsonParseOptions& options,
+                      std::vector<std::string>* warnings,
+                      std::string* error) {
+    for (const auto& [k, _] : obj) {
+        if (allowed.contains(k)) continue;
+        const std::string msg = JoinPath(path, k) + ": unknown key";
+        if (options.allow_unknown_keys) {
+            AddWarning(warnings, msg);
+            continue;
+        }
+        return Fail(error, msg);
+    }
+    return true;
+}
+
+bool TryGetBool(const Value::Object& obj,
+                std::string_view path,
+                std::string_view key,
+                bool* found,
+                bool* out,
+                std::string* error) {
+    *found = false;
+    const Value* v = Find(obj, std::string(key));
+    if (!v) return true;
+    const bool* b = v->AsBool();
+    if (!b) return Fail(error, JoinPath(path, key) + " must be a boolean");
+    *found = true;
+    *out = *b;
+    return true;
+}
+
+bool TryGetInt(const Value::Object& obj,
+               std::string_view path,
+               std::string_view key,
+               bool* found,
+               int* out,
+               std::string* error) {
+    *found = false;
+    const Value* v = Find(obj, std::string(key));
+    if (!v) return true;
+    const double* n = v->AsNumber();
+    if (!n) return Fail(error, JoinPath(path, key) + " must be a number");
+    *found = true;
+    *out = static_cast<int>(*n);
+    return true;
+}
+
+const Value::Object* GetObj(const Value::Object& obj,
+                            std::string_view path,
+                            std::string_view key,
+                            std::string* error) {
+    const Value* v = Find(obj, std::string(key));
+    if (!v) return nullptr;
+    const Value::Object* o = v->AsObject();
+    if (!o) {
+        Fail(error, JoinPath(path, key) + " must be an object");
+        return nullptr;
+    }
+    return o;
+}
+
+bool RequireRangeInt(std::string_view path, int v, int lo, int hi, std::string* error) {
+    if (v < lo || v > hi) {
+        return Fail(error,
+                    std::string(path) + " must be in [" + std::to_string(lo) + ", " + std::to_string(hi) + "]");
+    }
+    return true;
+}
+
+bool ParseRootObject(const Value& root,
+                     const Value::Object** out,
+                     std::vector<std::string>* warnings,
+                     std::string* error) {
+    const Value::Object* obj = root.AsObject();
+    if (!obj) return Fail(error, "root must be a JSON object");
+    *out = obj;
+    (void)warnings;
+    return true;
+}
+
+bool ValidateMicExclusivity(const BroadcastAudioEffects& fx, std::string* error) {
+    if (fx.microphone.studio_voice_enabled &&
+        (fx.microphone.noise_removal_enabled || fx.microphone.room_echo_removal_enabled)) {
+        return Fail(error,
+                    "microphone.studio_voice_enabled is mutually exclusive with microphone.noise_removal_enabled and microphone.room_echo_removal_enabled");
+    }
+    return true;
+}
+
+}  // namespace
+
+std::string BroadcastAudioEffectsToJson(const BroadcastAudioEffects& effects) {
+    std::ostringstream oss;
+    oss << "{";
+    oss << "\"schema_version\":" << effects.schema_version << ",";
+
+    oss << "\"microphone\":{";
+    oss << "\"noise_removal_enabled\":" << (effects.microphone.noise_removal_enabled ? "true" : "false") << ",";
+    oss << "\"room_echo_removal_enabled\":" << (effects.microphone.room_echo_removal_enabled ? "true" : "false") << ",";
+    oss << "\"strength\":" << effects.microphone.strength << ",";
+    oss << "\"studio_voice_enabled\":" << (effects.microphone.studio_voice_enabled ? "true" : "false");
+    oss << "},";
+
+    oss << "\"speaker\":{";
+    oss << "\"noise_removal_enabled\":" << (effects.speaker.noise_removal_enabled ? "true" : "false") << ",";
+    oss << "\"strength\":" << effects.speaker.strength;
+    oss << "}";
+
+    oss << "}";
+    return oss.str();
+}
+
+bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
+                                   BroadcastAudioEffects* out,
+                                   const BroadcastAudioEffectsJsonParseOptions& options,
+                                   std::vector<std::string>* warnings,
+                                   std::string* error) {
+    if (!out) return Fail(error, "output pointer is null");
+    *out = BroadcastAudioEffects{};
+
+    const Value::Object* obj = nullptr;
+    if (!ParseRootObject(root, &obj, warnings, error)) return false;
+
+    if (!CheckUnknownKeys(*obj, {"schema_version", "microphone", "speaker"}, "", options, warnings, error)) return false;
+
+    bool found = false;
+
+    int schema = out->schema_version;
+    if (!TryGetInt(*obj, "", "schema_version", &found, &schema, error)) return false;
+    if (found) {
+        if (schema != kBroadcastAudioEffectsSchemaVersion) {
+            return Fail(error,
+                        "unsupported schema_version " + std::to_string(schema) +
+                            " (expected " + std::to_string(kBroadcastAudioEffectsSchemaVersion) + ")");
+        }
+        out->schema_version = schema;
+    } else {
+        AddWarning(warnings, "schema_version missing; assuming " + std::to_string(kBroadcastAudioEffectsSchemaVersion));
+        out->schema_version = kBroadcastAudioEffectsSchemaVersion;
+    }
+
+    if (const auto* mic = GetObj(*obj, "", "microphone", error)) {
+        if (!CheckUnknownKeys(*mic,
+                              {"noise_removal_enabled", "room_echo_removal_enabled", "strength", "studio_voice_enabled"},
+                              "microphone",
+                              options,
+                              warnings,
+                              error)) {
+            return false;
+        }
+
+        bool en = out->microphone.noise_removal_enabled;
+        if (!TryGetBool(*mic, "microphone", "noise_removal_enabled", &found, &en, error)) return false;
+        if (found) out->microphone.noise_removal_enabled = en;
+
+        en = out->microphone.room_echo_removal_enabled;
+        if (!TryGetBool(*mic, "microphone", "room_echo_removal_enabled", &found, &en, error)) return false;
+        if (found) out->microphone.room_echo_removal_enabled = en;
+
+        int strength = out->microphone.strength;
+        if (!TryGetInt(*mic, "microphone", "strength", &found, &strength, error)) return false;
+        if (found) {
+            if (!RequireRangeInt("microphone.strength", strength, kStrengthMin, kStrengthMax, error)) return false;
+            out->microphone.strength = strength;
+        }
+
+        en = out->microphone.studio_voice_enabled;
+        if (!TryGetBool(*mic, "microphone", "studio_voice_enabled", &found, &en, error)) return false;
+        if (found) out->microphone.studio_voice_enabled = en;
+    }
+
+    if (const auto* spk = GetObj(*obj, "", "speaker", error)) {
+        if (!CheckUnknownKeys(*spk, {"noise_removal_enabled", "strength"}, "speaker", options, warnings, error)) return false;
+
+        bool en = out->speaker.noise_removal_enabled;
+        if (!TryGetBool(*spk, "speaker", "noise_removal_enabled", &found, &en, error)) return false;
+        if (found) out->speaker.noise_removal_enabled = en;
+
+        int strength = out->speaker.strength;
+        if (!TryGetInt(*spk, "speaker", "strength", &found, &strength, error)) return false;
+        if (found) {
+            if (!RequireRangeInt("speaker.strength", strength, kStrengthMin, kStrengthMax, error)) return false;
+            out->speaker.strength = strength;
+        }
+    }
+
+    return ValidateMicExclusivity(*out, error);
+}
+
+bool ParseBroadcastAudioEffectsJsonText(const std::string& jsonText,
+                                       BroadcastAudioEffects* out,
+                                       const BroadcastAudioEffectsJsonParseOptions& options,
+                                       std::vector<std::string>* warnings,
+                                       std::string* error) {
+    Value root;
+    if (!studiocast::util::json::Parse(jsonText, &root, error)) return false;
+    return ParseBroadcastAudioEffectsJson(root, out, options, warnings, error);
+}
+
+}  // namespace studiocast::audio::effects
