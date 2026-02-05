@@ -39,6 +39,9 @@ std::string ToEnglish(std::string_view code) {
   if (code == kMissingArSdk) {
     return "Maxine AR SDK not found.";
   }
+  if (code == kMissingAfxSdk) {
+    return "Maxine Audio Effects SDK not found.";
+  }
 
   if (StartsWith(code, kMissingVfxFeaturePrefix)) {
     const auto feat = code.substr(kMissingVfxFeaturePrefix.size());
@@ -47,6 +50,10 @@ std::string ToEnglish(std::string_view code) {
   if (StartsWith(code, kMissingArFeaturePrefix)) {
     const auto feat = code.substr(kMissingArFeaturePrefix.size());
     return "Missing AR feature: " + std::string(feat);
+  }
+  if (StartsWith(code, kMissingAfxFeaturePrefix)) {
+    const auto feat = code.substr(kMissingAfxFeaturePrefix.size());
+    return "Missing Audio Effects feature: " + std::string(feat);
   }
 
   // Allow suffixes like "dlopen_failed:vfx".

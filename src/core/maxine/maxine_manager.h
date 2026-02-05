@@ -91,9 +91,13 @@ struct MaxineDiagnostics {
   GpuDiagnostics gpu;
   ComponentDiagnostics vfx;
   ComponentDiagnostics ar;
+  ComponentDiagnostics afx;
 
   // Stable effect IDs (see `core/video/effects/effect_descriptors.*`).
   std::vector<std::string> available_effects;
+
+  // Stable audio effect IDs (AFX-backed). Keep stable for GUI/CLI.
+  std::vector<std::string> available_audio_effects;
 
   // effect_id -> reason(s)
   std::map<std::string, std::vector<std::string>> missing_effects;

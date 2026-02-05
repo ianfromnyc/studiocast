@@ -195,6 +195,11 @@ std::string ComponentBlockedReason(const studiocast::maxine::ComponentDiagnostic
       return std::string(kMissingArSdk);
     }
   }
+  if (c.component == "AFX") {
+    if (!c.root_exists || !c.library_exists) {
+      return std::string(kMissingAfxSdk);
+    }
+  }
 
   if (c.library_exists && !c.library_loadable) {
     const std::string err = ToLowerCopy(c.library_dlopen_error);
@@ -340,6 +345,7 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
   const auto paths = ResolveMaxinePaths();
   d.vfx = ConvertComponent(paths.vfx);
   d.ar = ConvertComponent(paths.ar);
+  d.afx = ConvertComponent(paths.afx);
 
   // dlopen checks are best-effort: they validate that the resolved .so is a
   // real, loadable ELF.
@@ -363,6 +369,18 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
       d.ar.problems.push_back(
           "AR library exists but required symbols could not be loaded: " +
           d.ar.library.string() + (err.empty() ? "" : " (" + err + ")"));
+    }
+  }
+  if (d.afx.library_exists) {
+    std::string err;
+    studiocast::util::DynLib lib;
+    d.afx.library_loadable =
+        lib.Open(d.afx.library, studiocast::util::DynLib::Scope::Local, &err);
+    d.afx.library_dlopen_error = d.afx.library_loadable ? "" : err;
+    if (!d.afx.library_loadable) {
+      d.afx.problems.push_back(
+          "AFX library exists but could not be loaded: " + d.afx.library.string() +
+          (err.empty() ? "" : " (" + err + ")"));
     }
   }
 
@@ -398,10 +416,21 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
               "optional (install AR body detection to improve tracking)",
               {"BodyBoxDetection", "bodybox"});
 
+  add_feature(&d.afx, "denoiser",
+              "missing (run AFX install_feature.sh for denoiser)");
+  add_feature(&d.afx, "dereverb",
+              "missing (run AFX install_feature.sh for dereverb)",
+              {"room_echo_removal"});
+  add_feature(&d.afx, "dereverb_denoiser",
+              "missing (run AFX install_feature.sh for dereverb_denoiser)");
+  add_feature(&d.afx, "studio_voice",
+              "missing (run AFX install_feature.sh for studio_voice)");
+
   // Derive effect availability using stable effect IDs.
   const bool gpu_ok = d.gpu.ok && d.driver.ok;
   const bool vfx_ready = gpu_ok && d.vfx.ok && d.vfx.library_loadable;
   const bool ar_ready = gpu_ok && d.ar.ok && d.ar.library_loadable;
+  const bool afx_ready = gpu_ok && d.afx.ok && d.afx.library_loadable;
 
   auto vfx_has = [&](const char *id) {
     for (const auto &f : d.vfx.features) {
@@ -417,6 +446,29 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
     }
     return false;
   };
+
+  auto afx_has = [&](const char *id) {
+    for (const auto &f : d.afx.features) {
+      if (f.id == id)
+        return f.installed;
+    }
+    return false;
+  };
+
+  if (afx_ready) {
+    if (afx_has("denoiser")) {
+      d.available_audio_effects.push_back("denoiser");
+    }
+    if (afx_has("dereverb")) {
+      d.available_audio_effects.push_back("dereverb");
+    }
+    if (afx_has("dereverb_denoiser")) {
+      d.available_audio_effects.push_back("dereverb_denoiser");
+    }
+    if (afx_has("studio_voice")) {
+      d.available_audio_effects.push_back("studio_voice");
+    }
+  }
 
   if (vfx_ready) {
     if (vfx_has("greenscreen")) {
@@ -590,6 +642,11 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
         "Install/extract the Maxine AR SDK and set " + d.ar.root_env_var +
         " to the SDK root (or install under the default XDG path).");
   }
+  if (!d.afx.root_exists) {
+    d.hints.push_back(
+        "Install/extract the Maxine Audio Effects SDK and set " +
+        d.afx.root_env_var + " to the SDK root (or install under the default XDG path).");
+  }
 
   if (d.gpu.maxine_gpu_arg.has_value()) {
     d.hints.push_back("When installing features, use the GPU flag suggested by "
@@ -597,15 +654,18 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
                       *d.gpu.maxine_gpu_arg + ".");
   }
 
-  d.ok = !d.available_effects.empty();
+  d.ok = !d.available_effects.empty() || !d.available_audio_effects.empty();
   d.supported = d.ok;
 
   // Blocked reason/details for stable GUI behavior.
   if (d.supported) {
     d.blocked_reason = std::string(studiocast::maxine::reasons::kNone);
     d.blocked_details.clear();
-    d.summary = "Maxine available (" + std::to_string(d.available_effects.size()) +
-                " effect(s) available).";
+    d.summary = "Maxine available (" +
+                std::to_string(d.available_effects.size()) +
+                " video effect(s), " +
+                std::to_string(d.available_audio_effects.size()) +
+                " audio effect(s) available).";
   } else {
     if (!d.gpu.ok) {
       d.blocked_reason = GpuBlockedReason(d);
@@ -750,6 +810,29 @@ std::string MaxineDiagnostics::ToJson() const {
   json_string(gpu.error);
   oss << "},";
 
+  auto component_summary_json = [&](const ComponentDiagnostics &c) {
+    oss << "{";
+    oss << "\"found\":" << json_bool(c.root_exists && c.library_exists) << ",";
+    oss << "\"root\":";
+    json_string(c.root.string());
+    oss << ",\"core_lib\":";
+    json_string(c.library.string());
+    oss << ",\"features_dir\":";
+    json_string(c.features_dir.string());
+    oss << ",\"feature_status\":";
+    json_feature_status_map(c.features);
+    oss << "}";
+  };
+
+  oss << "\"components\":{";
+  oss << "\"vfx\":";
+  component_summary_json(vfx);
+  oss << ",\"ar\":";
+  component_summary_json(ar);
+  oss << ",\"afx\":";
+  component_summary_json(afx);
+  oss << "},";
+
   auto component_json = [&](const ComponentDiagnostics &c) {
     oss << "{";
     oss << "\"component\":";
@@ -816,6 +899,10 @@ std::string MaxineDiagnostics::ToJson() const {
   component_json(ar);
   oss << ",";
 
+  oss << "\"afx\":";
+  component_json(afx);
+  oss << ",";
+
   oss << "\"available_effects\":[";
   for (size_t i = 0; i < available_effects.size(); ++i) {
     if (i)
@@ -823,6 +910,10 @@ std::string MaxineDiagnostics::ToJson() const {
     json_string(available_effects[i]);
   }
   oss << "],";
+
+  oss << "\"available_audio_effects\":";
+  json_string_array(available_audio_effects);
+  oss << ",";
 
   oss << "\"missing_effects\":{";
   bool first = true;

@@ -12,6 +12,7 @@ enum class MaxineNeed {
   any,
   vfx,
   ar,
+  afx,
 };
 
 struct CanonicalMaxineBlockedCopy {

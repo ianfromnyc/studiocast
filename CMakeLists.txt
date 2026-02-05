@@ -80,6 +80,8 @@ add_library(studiocast_core
         src/core/maxine/nvcv_api.cpp
         src/core/maxine/vfx_api.h
         src/core/maxine/vfx_api.cpp
+        src/core/maxine/afx_api.h
+        src/core/maxine/afx_api.cpp
         src/core/maxine/ar_api.h
         src/core/maxine/ar_api.cpp
         src/core/maxine/cuda_driver_api.h

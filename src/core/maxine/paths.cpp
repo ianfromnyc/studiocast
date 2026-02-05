@@ -97,11 +97,16 @@ namespace studiocast::maxine {
                                         const char* env_var,
                                         const fs::path& xdg_default,
                                         const fs::path& system_default,
-                                        std::vector<std::string> library_names) {
+                                        std::vector<std::string> library_names,
+                                        bool require_models_dir,
+                                        bool require_features_dir,
+                                        std::vector<fs::path> extra_lib_dirs_relative) {
             ComponentPaths out;
             out.component = component;
             out.root_env_var = env_var;
             out.library_names = std::move(library_names);
+            out.require_models_dir = require_models_dir;
+            out.require_features_dir = require_features_dir;
 
             const auto env_override = GetEnvPath(env_var);
             out.candidate_roots = {};
@@ -118,7 +123,17 @@ namespace studiocast::maxine {
             out.models_dir_exists = DirExists(out.models_dir);
             out.features_dir_exists = DirExists(out.features_dir);
 
-            out.searched_lib_dirs = CandidateLibDirs(out.root);
+            out.searched_lib_dirs.clear();
+            out.searched_lib_dirs.reserve(extra_lib_dirs_relative.size() + 8);
+            for (const auto& rel : extra_lib_dirs_relative) {
+                if (!rel.empty()) {
+                    out.searched_lib_dirs.push_back(out.root / rel);
+                }
+            }
+            const auto base_lib_dirs = CandidateLibDirs(out.root);
+            out.searched_lib_dirs.insert(out.searched_lib_dirs.end(),
+                                         base_lib_dirs.begin(),
+                                         base_lib_dirs.end());
             out.library = FindFirstExistingLib(out.searched_lib_dirs, out.library_names);
             out.library_exists = !out.library.empty();
 
@@ -139,15 +154,17 @@ namespace studiocast::maxine {
                         << "). Searched: " << SearchedDirsString(out.searched_lib_dirs);
                     out.problems.push_back(oss.str());
                 }
-                if (!out.models_dir_exists) {
+                if (out.require_models_dir && !out.models_dir_exists) {
                     out.problems.push_back("Missing models dir: " + out.models_dir.string());
                 }
-                if (!out.features_dir_exists) {
+                if (out.require_features_dir && !out.features_dir_exists) {
                     out.problems.push_back("Missing features dir: " + out.features_dir.string());
                 }
             }
 
-            out.ok = out.root_exists && out.library_exists && out.models_dir_exists && out.features_dir_exists;
+            out.ok = out.root_exists && out.library_exists &&
+                     (!out.require_models_dir || out.models_dir_exists) &&
+                     (!out.require_features_dir || out.features_dir_exists);
             return out;
         }
     }  // namespace
@@ -160,14 +177,30 @@ namespace studiocast::maxine {
             "STUDIOCAST_VFX_SDK_ROOT",
             util::DefaultVfxRoot(),
             fs::path("/usr/local/VideoFX"),
-            {"libnvvfx.so", "libNvVFX.so"});
+            {"libnvvfx.so", "libNvVFX.so"},
+            /*require_models_dir=*/true,
+            /*require_features_dir=*/true,
+            /*extra_lib_dirs_relative=*/{});
 
         rep.ar = ResolveComponent(
             "AR",
             "STUDIOCAST_AR_SDK_ROOT",
             util::DefaultArRoot(),
             fs::path("/usr/local/ARSDK"),
-            {"libnvar.so", "libNvAR.so"});
+            {"libnvar.so", "libNvAR.so"},
+            /*require_models_dir=*/true,
+            /*require_features_dir=*/true,
+            /*extra_lib_dirs_relative=*/{});
+
+        rep.afx = ResolveComponent(
+            "AFX",
+            "STUDIOCAST_AFX_SDK_ROOT",
+            util::DefaultAfxRoot(),
+            fs::path("/usr/local/Audio_Effects_SDK"),
+            {"libnv_audiofx.so"},
+            /*require_models_dir=*/false,
+            /*require_features_dir=*/true,
+            /*extra_lib_dirs_relative=*/{fs::path("nvafx") / "lib", fs::path("nvafx") / "lib64"});
 
         return rep;
     }

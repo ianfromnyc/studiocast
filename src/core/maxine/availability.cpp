@@ -108,6 +108,10 @@ bool NeedsMaxineAr(const MaxineDiagnostics &d) {
   return d.gpu.ok && d.driver.ok && d.ar.ok && d.ar.library_loadable;
 }
 
+bool NeedsMaxineAfx(const MaxineDiagnostics &d) {
+  return d.gpu.ok && d.driver.ok && d.afx.ok && d.afx.library_loadable;
+}
+
 } // namespace
 
 CanonicalMaxineBlockedCopy BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics &d,
@@ -130,9 +134,11 @@ CanonicalMaxineBlockedCopy BuildCanonicalMaxineBlockedCopy(const MaxineDiagnosti
   const bool driver_ok = d.driver.ok;
   const bool vfx_ready = NeedsMaxineVfx(d);
   const bool ar_ready = NeedsMaxineAr(d);
+  const bool afx_ready = NeedsMaxineAfx(d);
 
   const bool require_vfx = (need == MaxineNeed::vfx);
   const bool require_ar = (need == MaxineNeed::ar);
+  const bool require_afx = (need == MaxineNeed::afx);
 
   // Headline selection priority (matches Task 25 examples).
   if (!gpu_ok) {
@@ -153,7 +159,7 @@ CanonicalMaxineBlockedCopy BuildCanonicalMaxineBlockedCopy(const MaxineDiagnosti
   }
 
   // Component-specific blocking.
-  if (require_vfx || (need == MaxineNeed::any && !vfx_ready && !ar_ready)) {
+  if (require_vfx || (need == MaxineNeed::any && !vfx_ready && !ar_ready && !afx_ready)) {
     if (!d.vfx.root_exists || !d.vfx.library_exists) {
       const auto expected = ExpectedRootsFor(d.vfx, "VideoFX", fs::path("/usr/local/VideoFX"));
       out.summary =
@@ -175,7 +181,7 @@ CanonicalMaxineBlockedCopy BuildCanonicalMaxineBlockedCopy(const MaxineDiagnosti
     }
   }
 
-  if (require_ar || (need == MaxineNeed::any && !ar_ready && !vfx_ready)) {
+  if (require_ar || (need == MaxineNeed::any && !ar_ready && !vfx_ready && !afx_ready)) {
     if (!d.ar.root_exists || !d.ar.library_exists || !d.ar.library_loadable) {
       const auto expected = ExpectedRootsFor(d.ar, "ARSDK", fs::path("/usr/local/ARSDK"));
       out.summary = "Maxine unavailable: AR SDK not found (needed for Eye Contact / Auto Frame).";
@@ -186,7 +192,36 @@ CanonicalMaxineBlockedCopy BuildCanonicalMaxineBlockedCopy(const MaxineDiagnosti
     }
   }
 
+  if (require_afx || (need == MaxineNeed::any && !afx_ready && !vfx_ready && !ar_ready)) {
+    if (!d.afx.root_exists || !d.afx.library_exists) {
+      const auto expected =
+          ExpectedRootsFor(d.afx, "Audio_Effects_SDK", fs::path("/usr/local/Audio_Effects_SDK"));
+      out.summary = "Maxine unavailable: Audio Effects SDK not found (needed for audio effects).";
+      add_step("Run `studiocast-probe` to verify GPU/driver.");
+      add_step("Run `studiocast-maxine init` then follow `studiocast-maxine install-hints`.");
+      add_step("Expected AFX SDK root: " + expected + ".");
+      add_step("Ensure `libnv_audiofx.so` is under `<AFX_ROOT>/nvafx/lib/` and feature installs exist under `<AFX_ROOT>/features/`.");
+      return out;
+    }
+    if (!d.afx.library_loadable) {
+      out.summary = "Maxine unavailable: Audio Effects SDK library could not be loaded.";
+      add_step("Run `studiocast-probe` to verify GPU/driver.");
+      add_step("Ensure `libnv_audiofx.so` is under `<AFX_ROOT>/nvafx/lib/`.");
+      return out;
+    }
+  }
+
   // Default: SDK present but effect libraries/features are missing.
+  if (require_afx) {
+    out.summary =
+        "Maxine unavailable: Audio Effects features not installed (run install_feature.sh).";
+    add_step("Run `studiocast-probe` to verify GPU/driver.");
+    add_step("Run `studiocast-maxine init` then follow `studiocast-maxine install-hints`.");
+    add_step(
+        "Ensure `libnv_audiofx.so` is under `<AFX_ROOT>/nvafx/lib/` and feature installs exist under `<AFX_ROOT>/features/`.");
+    return out;
+  }
+
   out.summary =
       "Maxine unavailable: feature libraries not installed (run install_feature.sh).";
   add_step("Run `studiocast-probe` to verify GPU/driver.");

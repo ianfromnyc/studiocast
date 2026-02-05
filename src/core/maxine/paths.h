@@ -23,6 +23,10 @@ namespace studiocast::maxine {
         fs::path models_dir;
         fs::path features_dir;
 
+        // Some components (e.g. AFX) do not ship a `models/` directory.
+        bool require_models_dir = true;
+        bool require_features_dir = true;
+
         bool root_exists = false;
         bool models_dir_exists = false;
         bool features_dir_exists = false;
@@ -35,14 +39,15 @@ namespace studiocast::maxine {
     struct MaxinePathsReport {
         ComponentPaths vfx;
         ComponentPaths ar;
+        ComponentPaths afx;
     };
 
-    // Resolves expected Maxine SDK paths for VFX and AR.
+    // Resolves expected Maxine SDK paths for VFX, AR, and AFX.
     //
     // Priority order for selecting roots:
     //  1) environment override (if set)
     //  2) XDG default roots (see `core/util/xdg.*`)
-    //  3) `/usr/local/VideoFX` and `/usr/local/ARSDK`
+    //  3) `/usr/local/VideoFX`, `/usr/local/ARSDK`, and `/usr/local/Audio_Effects_SDK`
     //
     // The returned report contains precise missing-piece diagnostics.
     MaxinePathsReport ResolveMaxinePaths();

@@ -10,6 +10,7 @@
 
 #include "core/config/daemon_config.h"
 #include "core/maxine/availability.h"
+#include "core/maxine/afx_api.h"
 #include "core/maxine/ar_api.h"
 #include "core/maxine/effects/ar_auto_frame_tracker.h"
 #include "core/maxine/maxine_manager.h"
@@ -475,6 +476,30 @@ namespace {
             }
         }
 
+        {
+            studiocast::maxine::afx::AfxApi api;
+            std::string err;
+            const bool ok = api.Initialize(&err);
+
+            // Self-test must be stable without Maxine installed:
+            // - If Maxine is present, initialization may succeed.
+            // - If Maxine is absent, we expect a clean failure with a non-empty error message.
+            if (!ok && err.empty()) {
+                ++failures;
+                std::printf("[FAIL] AfxApi.Initialize returned false but provided no error message\n");
+            }
+
+            // If the library is present, ensure required symbols resolved.
+            if (ok) {
+                if (!api.f().NvAFX_CreateEffect || !api.f().NvAFX_DestroyEffect ||
+                    !api.f().NvAFX_SetU32 || !api.f().NvAFX_SetFloat || !api.f().NvAFX_SetString ||
+                    !api.f().NvAFX_GetU32 || !api.f().NvAFX_Load || !api.f().NvAFX_Run) {
+                    ++failures;
+                    std::printf("[FAIL] AfxApi.Initialize succeeded but required symbols are missing\n");
+                }
+            }
+        }
+
         // Daemon config schema migration + round-trip.
         {
             namespace fs = std::filesystem;
@@ -861,6 +886,24 @@ namespace {
                                "Expected AR SDK root: ~/.local/share/studiocast/maxine/ARSDK or /usr/local/ARSDK.");
             }
 
+            // 4b) AFX SDK missing.
+            {
+                auto d = mkDiag();
+                d.afx.root_source = "xdg";
+                d.afx.root_exists = false;
+                d.afx.library_exists = false;
+                d.afx.candidate_roots.push_back(
+                    "/home/studiocast_selftest_home/.local/share/studiocast/maxine/Audio_Effects_SDK");
+
+                const auto c = studiocast::maxine::BuildCanonicalMaxineBlockedCopy(
+                    d, studiocast::maxine::MaxineNeed::afx);
+                expectEq("maxine_copy afx_missing summary", c.summary,
+                         "Maxine unavailable: Audio Effects SDK not found (needed for audio effects).");
+                const std::string s = studiocast::maxine::FormatCanonicalMaxineBlockedCopy(c);
+                expectContains("maxine_copy afx_missing shows expected root", s,
+                               "Expected AFX SDK root: ~/.local/share/studiocast/maxine/Audio_Effects_SDK or /usr/local/Audio_Effects_SDK.");
+            }
+
             // 5) Features missing.
             {
                 auto d = mkDiag();
@@ -873,6 +916,19 @@ namespace {
                          "Maxine unavailable: feature libraries not installed (run install_feature.sh).");
             }
 
+            // 5b) AFX features missing.
+            {
+                auto d = mkDiag();
+                d.afx.root_exists = true;
+                d.afx.library_exists = true;
+                d.afx.ok = true;
+                d.afx.library_loadable = true;
+                const auto c = studiocast::maxine::BuildCanonicalMaxineBlockedCopy(
+                    d, studiocast::maxine::MaxineNeed::afx);
+                expectEq("maxine_copy afx_features summary", c.summary,
+                         "Maxine unavailable: Audio Effects features not installed (run install_feature.sh).");
+            }
+
             // Maxine per-effect availability oracle JSON contract.
             // GUI enable/disable decisions rely on `available_effects` + `missing_effects`.
             {
@@ -880,15 +936,23 @@ namespace {
                 d.ok = true;
                 d.supported = true;
                 d.available_effects = {"auto_frame"};
+                d.available_audio_effects = {"denoiser"};
                 d.missing_effects["eye_contact"] = {studiocast::maxine::reasons::MissingArFeature("gaze_redirection")};
+                d.missing_effects["noise_removal"] = {studiocast::maxine::reasons::MissingAfxFeature("denoiser")};
 
                 const std::string js = d.ToJson();
                 expectContains("maxine_tojson has available_effects", js,
                                "\"available_effects\":[\"auto_frame\"]");
+                expectContains("maxine_tojson has available_audio_effects", js,
+                               "\"available_audio_effects\":[\"denoiser\"]");
                 expectContains("maxine_tojson has missing_effects", js,
                                "\"missing_effects\":{");
                 expectContains("maxine_tojson has eye_contact reasons", js,
                                "\"eye_contact\":[\"missing_ar_feature:gaze_redirection\"]");
+                expectContains("maxine_tojson has noise_removal reasons", js,
+                               "\"noise_removal\":[\"missing_afx_feature:denoiser\"]");
+                expectContains("maxine_tojson has components.afx", js,
+                               "\"components\":{");
             }
 
             // Maxine gating decision helper: if a Maxine-backed effect is enabled but not
