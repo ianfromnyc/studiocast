@@ -6,6 +6,7 @@ sudo apt install -y \
   build-essential cmake ninja-build pkg-config \
   qt6-base-dev qt6-base-dev-tools \
   qtbase5-dev \
+  libpulse-dev \
   clang clang-format clang-tidy
 
 echo "Done. Build with:"

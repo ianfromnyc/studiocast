@@ -10,10 +10,13 @@
 
 #include "core/config/daemon_config.h"
 #include "core/maxine/availability.h"
+#include "core/maxine/afx/afx_effect.h"
 #include "core/maxine/afx_api.h"
 #include "core/maxine/ar_api.h"
 #include "core/maxine/effects/ar_auto_frame_tracker.h"
 #include "core/maxine/maxine_manager.h"
+#include "core/maxine/gpu_selection.h"
+#include "core/maxine/paths.h"
 #include "core/maxine/reason_codes.h"
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
@@ -980,6 +983,116 @@ namespace {
                 d.available_effects = {"virtual_background.blur"};
                 const auto gate2 = studiocast::video::effects::EvaluateMaxineGate(fx, d);
                 expectTrue("maxine_gate blur allowed when available", gate2.ok);
+            }
+
+            // AFX: Broadcast-equivalent microphone planning rules.
+            {
+                using studiocast::maxine::afx::PlanBroadcastMicrophoneEffect;
+
+                const auto p0 = PlanBroadcastMicrophoneEffect(/*studio_voice_enabled=*/false,
+                                                              /*noise_removal_enabled=*/false,
+                                                              /*room_echo_removal_enabled=*/false,
+                                                              /*strength=*/50);
+                expectTrue("afx_plan none disabled", !p0.enabled);
+
+                const auto p1 = PlanBroadcastMicrophoneEffect(/*studio_voice_enabled=*/true,
+                                                              /*noise_removal_enabled=*/true,
+                                                              /*room_echo_removal_enabled=*/true,
+                                                              /*strength=*/50);
+                expectTrue("afx_plan studio_voice enabled", p1.enabled);
+                expectEq("afx_plan studio_voice selector", p1.effect_selector, "studio_voice_low_latency");
+                expectEq("afx_plan studio_voice feature_id", p1.feature_id, "studio_voice");
+
+                const auto p2 = PlanBroadcastMicrophoneEffect(/*studio_voice_enabled=*/false,
+                                                              /*noise_removal_enabled=*/true,
+                                                              /*room_echo_removal_enabled=*/true,
+                                                              /*strength=*/50);
+                expectEq("afx_plan noise+echo selector", p2.effect_selector, "dereverb_denoiser");
+                expectEq("afx_plan noise+echo feature_id", p2.feature_id, "dereverb_denoiser");
+
+                const auto p3 = PlanBroadcastMicrophoneEffect(/*studio_voice_enabled=*/false,
+                                                              /*noise_removal_enabled=*/true,
+                                                              /*room_echo_removal_enabled=*/false,
+                                                              /*strength=*/50);
+                expectEq("afx_plan noise selector", p3.effect_selector, "denoiser");
+                expectEq("afx_plan noise feature_id", p3.feature_id, "denoiser");
+
+                const auto p4 = PlanBroadcastMicrophoneEffect(/*studio_voice_enabled=*/false,
+                                                              /*noise_removal_enabled=*/false,
+                                                              /*room_echo_removal_enabled=*/true,
+                                                              /*strength=*/50);
+                expectEq("afx_plan echo selector", p4.effect_selector, "dereverb");
+                expectEq("afx_plan echo feature_id", p4.feature_id, "dereverb");
+            }
+
+            // AFX: wrapper error messaging should be clean + actionable even without AFX installed.
+            {
+                studiocast::maxine::afx::AfxEffect e(nullptr);
+                studiocast::maxine::afx::AfxEffectConfig cfg;
+                cfg.effect_selector = "denoiser";
+                cfg.feature_id = "denoiser";
+                cfg.features_dir = "/nonexistent/afx/features";
+                cfg.model_path = "/this/does/not/exist.trtpkg";
+
+                std::string err;
+                expectTrue("afx_effect missing model fails", !e.Configure(cfg, &err));
+                expectContains("afx_effect missing model message", err, "AFX model file not found");
+            }
+            {
+                studiocast::maxine::afx::AfxEffect e(nullptr);
+                studiocast::maxine::afx::AfxEffectConfig cfg;
+                cfg.effect_selector = "denoiser";
+                cfg.feature_id = "denoiser";
+                cfg.features_dir = "/nonexistent/afx/features";
+                cfg.model_path = "/dev/null";
+
+                std::string err;
+                expectTrue("afx_effect missing feature lib fails", !e.Configure(cfg, &err));
+                expectContains("afx_effect missing feature lib message", err, "AFX feature library not found");
+                expectContains("afx_effect missing feature lib mentions .so", err, "libnv_audiofx_denoiser.so");
+            }
+
+            // Optional AFX runtime smoke test: if AFX + GPU are present, ensure we can create+load+run.
+            {
+                const auto paths = studiocast::maxine::ResolveMaxinePaths();
+                if (paths.afx.ok) {
+                    studiocast::maxine::afx::AfxApi api;
+                    std::string apiErr;
+                    if (api.InitializeFromLibraryPath(paths.afx.library, &apiErr)) {
+                        const auto sel = studiocast::maxine::SelectGpu(studiocast::config::GpuSelection{});
+                        if (sel.selected && sel.selected->compute_capability) {
+                            studiocast::maxine::afx::AfxEffect fx(&api);
+                            studiocast::maxine::afx::AfxEffectConfig cfg;
+                            cfg.effect_selector = "denoiser";
+                            cfg.feature_id = "denoiser";
+                            cfg.features_dir = paths.afx.features_dir;
+                            cfg.compute_capability = sel.selected->compute_capability;
+                            cfg.sample_rate = 48000;
+                            cfg.frame_samples = 480;
+                            cfg.channels = 1;
+                            cfg.intensity = 0.5f;
+
+                            std::string err;
+                            if (!fx.Configure(cfg, &err)) {
+                                ++failures;
+                                std::printf("[FAIL] afx_effect Configure (runtime)\n  error: %s\n", err.c_str());
+                            } else if (!fx.Load(&err)) {
+                                ++failures;
+                                std::printf("[FAIL] afx_effect Load (runtime)\n  error: %s\n", err.c_str());
+                            } else {
+                                std::vector<float> in(cfg.frame_samples * cfg.channels);
+                                std::vector<float> out(in.size());
+                                if (!in.empty()) {
+                                    in[0] = 1.0f;
+                                }
+                                if (!fx.Run(in.data(), out.data(), static_cast<std::uint32_t>(in.size()), &err)) {
+                                    ++failures;
+                                    std::printf("[FAIL] afx_effect Run (runtime)\n  error: %s\n", err.c_str());
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Restore env.

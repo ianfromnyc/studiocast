@@ -11,22 +11,17 @@ namespace studiocast::maxine {
 namespace {
 
 std::vector<SelectedGpu> ListGpusViaNvidiaSmi(std::string* error_out) {
-    std::string out;
     const auto res = util::ExecCapture(
-        {"nvidia-smi",
-         "--query-gpu=index,uuid,name,compute_cap",
-         "--format=csv,noheader,nounits"},
-        &out);
-
-    if (!res.ok()) {
+        "nvidia-smi --query-gpu=index,uuid,name,compute_cap --format=csv,noheader,nounits");
+    if (res.exit_code != 0) {
         if (error_out) {
-            *error_out = "nvidia-smi failed: " + res.message;
+            *error_out = "nvidia-smi failed (exit code " + std::to_string(res.exit_code) + ")";
         }
         return {};
     }
 
     std::vector<SelectedGpu> gpus;
-    for (auto line : util::SplitLines(out)) {
+    for (auto line : util::SplitLines(res.stdout_str)) {
         line = util::TrimCopy(line);
         if (line.empty()) {
             continue;
@@ -129,7 +124,11 @@ GpuSelectionResult SelectGpu(const config::GpuSelection& policy) {
         return best;
     };
 
-    if (policy.mode == config::GpuSelectionMode::Uuid) {
+    if (policy.mode == config::GpuSelectMode::Uuid) {
+        if (policy.uuid.empty()) {
+            result.error = "GPU selection mode is uuid, but uuid is empty.";
+            return result;
+        }
         for (const auto& gpu : result.all_gpus) {
             if (gpu.uuid == policy.uuid) {
                 if (!gpu.compute_capability.has_value()) {
@@ -146,6 +145,31 @@ GpuSelectionResult SelectGpu(const config::GpuSelection& policy) {
             }
         }
         result.error = "Requested GPU UUID not found: " + policy.uuid;
+        return result;
+    }
+
+    if (policy.mode == config::GpuSelectMode::Index) {
+        if (!policy.index.has_value()) {
+            result.error = "GPU selection mode is index, but index is not set.";
+            return result;
+        }
+        for (const auto& gpu : result.all_gpus) {
+            if (gpu.index == *policy.index) {
+                if (!gpu.compute_capability.has_value()) {
+                    result.error = "Selected GPU has unknown compute capability.";
+                    return result;
+                }
+                const auto [maj, min] = *gpu.compute_capability;
+                if (!IsComputeCapabilitySupported(maj, min)) {
+                    result.error = "Selected GPU compute capability " + gpu.ComputeCapString() +
+                                   " is not supported by Maxine.";
+                    return result;
+                }
+                result.selected = gpu;
+                return result;
+            }
+        }
+        result.error = "Requested GPU index not found: " + std::to_string(*policy.index);
         return result;
     }
 

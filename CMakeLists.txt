@@ -29,6 +29,11 @@ studiocast_global_options()
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 
+# PulseAudio (libpulse-simple) for real-time audio capture/playback.
+# Keep optional so the repo can still build on minimal systems.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PULSE_SIMPLE QUIET IMPORTED_TARGET libpulse-simple)
+
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
@@ -67,6 +72,8 @@ add_library(studiocast_core
         src/core/config/settings.cpp
         src/core/maxine/gpu.h
         src/core/maxine/gpu.cpp
+        src/core/maxine/gpu_selection.h
+        src/core/maxine/gpu_selection.cpp
         src/core/maxine/availability.h
         src/core/maxine/availability.cpp
         src/core/maxine/reason_codes.h
@@ -82,6 +89,8 @@ add_library(studiocast_core
         src/core/maxine/vfx_api.cpp
         src/core/maxine/afx_api.h
         src/core/maxine/afx_api.cpp
+        src/core/maxine/afx/afx_effect.h
+        src/core/maxine/afx/afx_effect.cpp
         src/core/maxine/ar_api.h
         src/core/maxine/ar_api.cpp
         src/core/maxine/cuda_driver_api.h
@@ -183,6 +192,18 @@ target_include_directories(studiocast_core PUBLIC
 )
 
 target_link_libraries(studiocast_core PUBLIC ${CMAKE_DL_LIBS})
+
+if (PULSE_SIMPLE_FOUND)
+    target_sources(studiocast_core PRIVATE
+            src/core/audio/audio_pipeline.h
+            src/core/audio/audio_pipeline.cpp
+    )
+    target_link_libraries(studiocast_core PUBLIC PkgConfig::PULSE_SIMPLE)
+    target_compile_definitions(studiocast_core PUBLIC STUDIOCAST_HAVE_PULSE_SIMPLE=1)
+else()
+    target_compile_definitions(studiocast_core PUBLIC STUDIOCAST_HAVE_PULSE_SIMPLE=0)
+    message(STATUS "libpulse-simple not found via pkg-config; audio pipeline is disabled. Install libpulse-dev to enable.")
+endif()
 
 studiocast_set_project_warnings(studiocast_core)
 studiocast_enable_sanitizers(studiocast_core)
