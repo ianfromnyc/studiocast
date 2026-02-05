@@ -10,13 +10,23 @@ StudioCast is independent and does **not** ship or redistribute NVIDIA Broadcast
 
 ## Build (Ubuntu 22.04)
 
+For a one-shot prerequisites install on Ubuntu 22.04+:
+
 ```bash
-sudo apt update
-sudo apt install -y build-essential cmake ninja-build pkg-config qt6-base-dev qt6-base-dev-tools qtbase5-dev
+./scripts/setup_ubuntu22.sh --deps --v4l2loopback --load-loopback --persist-loopback
+./scripts/setup_ubuntu22.sh --build --build-type Debug
+```
+
+Manual build:
+
+```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ./build/studiocast
 ```
+
+See `docs/SETUP.md` for the full quickstart, including v4l2loopback and Maxine setup.
+
 
 ## Dev tooling
 - Formatting: `./scripts/format.sh`
