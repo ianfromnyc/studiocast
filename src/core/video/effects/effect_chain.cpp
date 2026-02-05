@@ -29,7 +29,11 @@ std::string EffectChain::BackendSummary() const {
     if (!fx) continue;
     if (!first) oss << ",";
     first = false;
-    oss << fx->Id() << ":" << fx->Backend();
+    // User-facing diagnostics: avoid implying CPU effect backends are supported.
+    // Some lightweight tail operations (e.g. `mirror`) are still host-side, but
+    // we present them as "builtin" rather than "cpu".
+    const std::string backend = fx->Backend() ? std::string(fx->Backend()) : std::string();
+    oss << fx->Id() << ":" << ((backend == "cpu") ? "builtin" : backend);
   }
   return oss.str();
 }

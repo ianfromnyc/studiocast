@@ -380,6 +380,14 @@ namespace studiocast::video {
         std::string engine;
         if (!TryGetString(*obj, "engine", &found, &engine, error)) return false;
         if (found) {
+            std::string v = engine;
+            std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            if (v == "cpu") {
+                if (error) *error = "backend 'cpu' is not supported";
+                return false;
+            }
             effects->background_backend = EngineFromString(engine);
         }
 
@@ -502,6 +510,14 @@ namespace studiocast::video {
         std::string backend;
         if (!TryGetString(*obj, "background_backend", &found, &backend, error)) return false;
         if (found) {
+            std::string v = backend;
+            std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            if (v == "cpu") {
+                if (error) *error = "backend 'cpu' is not supported";
+                return false;
+            }
             effects->background_backend = EngineFromString(backend == "maxine" ? "maxine" : "auto");
         }
 

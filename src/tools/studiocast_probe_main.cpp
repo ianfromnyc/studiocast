@@ -21,6 +21,7 @@
 #include "core/util/strings.h"
 #include "core/video/broadcast_camera_effects_legacy_adapter.h"
 #include "core/video/broadcast_camera_effects_json.h"
+#include "core/video/camera_effects_json.h"
 #include "core/video/legacy_camera_effects.h"
 #include "core/video/effects/broadcast_effect_maxine_gate.h"
 #include "core/video/effects/broadcast_effect_contract.h"
@@ -201,6 +202,26 @@ namespace {
             expectTrue("ParseBroadcastCameraEffectsJsonText rejects engine=cpu",
                        !studiocast::video::effects::ParseBroadcastCameraEffectsJsonText(
                            "{\"engine\":\"cpu\"}", &parsed, options, &warnings, &perr));
+        }
+
+        {
+            studiocast::video::CameraEffects legacy;
+            std::string perr;
+
+            expectTrue("ApplyCameraEffectsPatchJsonText rejects engine=cpu",
+                       !studiocast::video::ApplyCameraEffectsPatchJsonText("{\"engine\":\"cpu\"}", &legacy, &perr));
+
+            perr.clear();
+            expectTrue("ApplyCameraEffectsPatchJsonText rejects background_backend=cpu",
+                       !studiocast::video::ApplyCameraEffectsPatchJsonText("{\"background_backend\":\"cpu\"}", &legacy, &perr));
+
+            perr.clear();
+            expectTrue("ApplyCameraEffectsPatchJsonText accepts background_backend=maxine",
+                       studiocast::video::ApplyCameraEffectsPatchJsonText("{\"background_backend\":\"maxine\"}", &legacy, &perr));
+
+            const auto bfx = studiocast::video::ToBroadcastCameraEffects(legacy);
+            expectTrue("Legacy patch converts to Broadcast engine=maxine",
+                       bfx.engine == studiocast::video::effects::EffectsEnginePreference::maxine);
         }
 
         {
@@ -433,7 +454,7 @@ namespace {
                     std::ofstream out(confPath);
                     out << "video.mirror = true\n";
                     out << "video.background = blur\n";
-                    out << "video.background_backend = cpu\n";
+                    out << "video.background_backend = maxine\n";
                     out << "video.background_strength = 13\n";
                     out << "video.background_remove_color = #112233\n";
                     out << "video.background_replace_image = /tmp/x.ppm\n";
@@ -467,8 +488,8 @@ namespace {
                            vc.pipeline.effects.virtual_background.mode ==
                                studiocast::video::effects::VirtualBackgroundMode::blur);
                 expectIntEq("ToVideoServiceConfig vb strength", vc.pipeline.effects.virtual_background.strength, 13);
-                expectTrue("ToVideoServiceConfig engine auto_select",
-                           vc.pipeline.effects.engine == studiocast::video::effects::EffectsEnginePreference::auto_select);
+                expectTrue("ToVideoServiceConfig engine maxine",
+                           vc.pipeline.effects.engine == studiocast::video::effects::EffectsEnginePreference::maxine);
                 expectTrue("ToVideoServiceConfig eye_contact enabled", vc.pipeline.effects.eye_contact.enabled);
 
                 // New schema should round-trip through Save/Load.

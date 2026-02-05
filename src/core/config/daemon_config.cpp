@@ -144,7 +144,7 @@ DaemonConfig LoadDaemonConfig() {
           fx.engine = (raw == "maxine") ? studiocast::video::effects::EffectsEnginePreference::maxine
                                          : studiocast::video::effects::EffectsEnginePreference::auto_select;
         } else if (auto it2 = kv.find("video.background_backend"); it2 != kv.end()) {
-          // Legacy backend selection: ignore CPU.
+          // Legacy backend selection: only `maxine` is honored; all other legacy values map to `auto_select`.
           studiocast::video::effects::EffectBackend legacy = studiocast::video::effects::EffectBackend::auto_select;
           if (studiocast::video::effects::ParseEffectBackend(it2->second, &legacy) &&
               legacy == studiocast::video::effects::EffectBackend::maxine) {

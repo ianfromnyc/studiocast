@@ -20,6 +20,7 @@
 #include "core/ipc/daemon_socket.h"
 #include "core/maxine/maxine_manager.h"
 #include "core/video/broadcast_camera_effects_json.h"
+#include "core/video/camera_effects_json.h"
 #include "core/video/effects/broadcast_effect_rules.h"
 #include "core/video/virtual_camera_service.h"
 #include "core/video/v4l2loopback.h"
@@ -68,8 +69,8 @@ void Usage(const char* argv0) {
         << "  --fps N                  Requested fps (default: 30)\n"
         << "  --mirror                 Enable mirror (horizontal flip)\n"
         << "  --background MODE         Background effect: none|blur|remove|replace|auto_frame (default: none)\n"
-        << "  --background-backend B    Background backend: auto|cpu|maxine (default: auto)\n"
-        << "  --background-strength N   Intensity knob (CPU blur radius; default: 8)\n"
+        << "  --background-backend B    Effects engine preference: auto|maxine (default: auto)\n"
+        << "  --background-strength N   Intensity knob (default: 8)\n"
         << "  --background-remove-color #RRGGBB  Remove-mode background color (default: #000000)\n"
         << "  --background-replace-image PATH    Replace-mode background image path\n"
         << "  --poll-ms N              Consumer poll interval (default: 250)\n"
@@ -608,10 +609,27 @@ int main(int argc, char** argv) {
                               std::lock_guard<std::mutex> lock(controlMu);
                               auto newCfg = svc.Config();
 
+                              std::vector<std::string> warnings;
+
                               std::string jerr;
                               auto bfx = newCfg.pipeline.effects;
+
                               if (!studiocast::video::ApplyBroadcastCameraEffectsPatchJsonText(jsonText, &bfx, &jerr)) {
-                                  return std::string("ERR ") + ErrorJson(jerr.empty() ? "invalid effects JSON" : jerr);
+                                  // Legacy compatibility: accept old `CameraEffects` JSON patches, but warn.
+                                  // Note: explicit requests for backend `cpu` are rejected by the legacy parser.
+                                  std::string lerr;
+                                  auto legacy = studiocast::video::ToLegacyCameraEffects(bfx);
+                                  if (!studiocast::video::ApplyCameraEffectsPatchJsonText(jsonText, &legacy, &lerr)) {
+                                      std::string msg = jerr.empty() ? "invalid effects JSON" : jerr;
+                                      if (!lerr.empty()) {
+                                          msg += "; legacy parse: " + lerr;
+                                      }
+                                      return std::string("ERR ") + ErrorJson(msg);
+                                  }
+                                  warnings.emplace_back(
+                                      "Legacy effects JSON accepted; please migrate to the Broadcast effects schema (video_effects)."
+                                  );
+                                  bfx = studiocast::video::ToBroadcastCameraEffects(legacy);
                               }
                               newCfg.pipeline.effects = bfx;
 
@@ -621,7 +639,7 @@ int main(int argc, char** argv) {
                               std::string perr;
                               (void)studiocast::config::SaveDaemonConfig(daemonCfg, &perr);
 
-                              return std::string("OK ") + ConfigToJson(newCfg);
+                              return std::string("OK ") + AppendWarningsToObjectJson(ConfigToJson(newCfg), warnings);
                           }
 
                           if (pc.cmd == "SET_VIDEO_EFFECTS") {
@@ -659,9 +677,21 @@ int main(int argc, char** argv) {
 
                               if (auto it = pc.kv.find("background_backend"); it != pc.kv.end()) {
                                   // Deprecated flat field: map to canonical engine preference.
+                                  warnings.emplace_back("background_backend is deprecated; use engine");
+
+                                  {
+                                      std::string v = it->second;
+                                      std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+                                          return static_cast<char>(std::tolower(c));
+                                      });
+                                      if (v == "cpu") {
+                                          return std::string("ERR ") + ErrorJson("backend 'cpu' is not supported");
+                                      }
+                                  }
+
                                   studiocast::video::effects::EffectsEnginePreference eng{};
                                   if (!studiocast::video::effects::ParseEffectsEnginePreference(it->second, &eng)) {
-                                      return std::string("ERR ") + ErrorJson("background_backend must be auto_select|maxine");
+                                      return std::string("ERR ") + ErrorJson("background_backend must be auto|maxine");
                                   }
                                   bfx.engine = eng;
                               }

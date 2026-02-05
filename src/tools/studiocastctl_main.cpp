@@ -162,7 +162,7 @@ bool ValidateNoCpuOptions(const Value& root, std::vector<std::string>* warnings,
     if (const auto* s = it->second.AsString()) {
       const std::string v = ToLower(*s);
       if (v == "cpu") {
-        warn("CPU effects are not supported; use engine=auto or engine=maxine");
+        warn("backend 'cpu' is not supported; use engine=auto|maxine");
         if (error) *error = "engine must be 'auto' or 'maxine'";
         return false;
       }
@@ -180,7 +180,7 @@ bool ValidateNoCpuOptions(const Value& root, std::vector<std::string>* warnings,
       if (const auto* s = v.AsString()) {
         const std::string vv = ToLower(*s);
         if (vv == "cpu") {
-          warn("CPU backends are not supported (and legacy backend keys are ignored); use engine=auto|maxine");
+          warn("backend 'cpu' is not supported; use engine=auto|maxine");
         } else {
           warn("legacy backend key '" + k + "' is ignored; use engine=auto|maxine");
         }
@@ -529,7 +529,7 @@ int main(int argc, char** argv) {
         if (auto v = needValue("--engine")) {
           const std::string vv = ToLower(std::string(*v));
           if (vv == "cpu") {
-            std::cerr << "WARNING: CPU effects are not supported; use engine=auto|maxine\n";
+            std::cerr << "WARNING: backend 'cpu' is not supported; use engine=auto|maxine\n";
             std::cerr << "ERROR: engine must be auto|maxine\n";
             return 2;
           }

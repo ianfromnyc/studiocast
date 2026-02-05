@@ -39,8 +39,8 @@ namespace studiocast::video {
         int frame_index = 0;
 
         // Debug/status for effects.
-        std::string effects_backends;  // e.g. "mirror:cpu,background_blur:cpu"
-        std::string effects_note;      // e.g. "Maxine requested but unavailable; using CPU placeholder"
+        std::string effects_backends;  // e.g. "mirror:builtin,virtual_background.blur:maxine"
+        std::string effects_note;      // e.g. "Maxine requested but unavailable; effects disabled"
 
         std::string last_error;
     };
