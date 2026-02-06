@@ -32,6 +32,12 @@ namespace studiocast::gui {
 
         void OnSourceChanged(int index);
 
+        void OnEnableVirtualSpeakers();
+
+        void OnStopSpeakersRouting();
+
+        void OnDestroyVirtualSpeakers();
+
     private:
         void ShowError(const QString &title, const QString &details);
 
@@ -48,6 +54,10 @@ namespace studiocast::gui {
         QPushButton *destroyBtn_ = nullptr;
         QPushButton *startBtn_ = nullptr;
         QPushButton *stopBtn_ = nullptr;
+
+        QPushButton *enableSpeakersBtn_ = nullptr;
+        QPushButton *stopSpeakersBtn_ = nullptr;
+        QPushButton *destroySpeakersBtn_ = nullptr;
 
         QPlainTextEdit *statusText_ = nullptr;
         QPushButton *refreshStatusBtn_ = nullptr;

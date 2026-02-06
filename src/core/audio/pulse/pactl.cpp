@@ -29,6 +29,20 @@ namespace studiocast::audio::pulse {
         }
     } // namespace
 
+    std::optional<std::string> ParseDefaultFromPactlInfo(const std::string& pactl_info_text,
+                                                         const std::string& key) {
+        if (key.empty()) return std::nullopt;
+
+        for (const auto& raw : util::SplitLines(pactl_info_text)) {
+            const auto line = util::TrimCopy(raw);
+            if (line.rfind(key, 0) == 0) {
+                auto val = util::TrimCopy(line.substr(key.size()));
+                if (!val.empty()) return val;
+            }
+        }
+        return std::nullopt;
+    }
+
     bool PactlAvailable(std::string *details) {
         auto res = util::ExecCapture("pactl --version 2>&1");
         if (res.exit_code != 0) {
@@ -120,6 +134,30 @@ namespace studiocast::audio::pulse {
             if (fields.size() < 2) continue;
 
             PactlSource s;
+            s.id = std::atoi(fields[0].c_str());
+            s.name = fields[1];
+            out.push_back(s);
+        }
+
+        return out;
+    }
+
+    std::vector<PactlSink> ListSinks(std::string* error) {
+        auto res = util::ExecCapture("pactl list short sinks 2>&1");
+        if (res.exit_code != 0) {
+            if (error) *error = util::TrimCopy(res.stdout_str);
+            return {};
+        }
+
+        std::vector<PactlSink> out;
+        for (const auto& raw : util::SplitLines(res.stdout_str)) {
+            const auto line = util::TrimCopy(raw);
+            if (line.empty()) continue;
+
+            auto fields = SplitTabs(line);
+            if (fields.size() < 2) continue;
+
+            PactlSink s;
             s.id = std::atoi(fields[0].c_str());
             s.name = fields[1];
             out.push_back(s);
@@ -249,16 +287,34 @@ namespace studiocast::audio::pulse {
             return std::nullopt;
         }
 
-        for (const auto &raw: util::SplitLines(res.stdout_str)) {
-            const auto line = util::TrimCopy(raw);
-            const std::string prefix = "Default Source:";
-            if (line.rfind(prefix, 0) == 0) {
-                auto val = util::TrimCopy(line.substr(prefix.size()));
-                if (!val.empty()) return val;
-            }
+        if (auto v = ParseDefaultFromPactlInfo(res.stdout_str, "Default Source:")) {
+            return v;
         }
 
         if (error) *error = "Could not determine default source";
+        return std::nullopt;
+    }
+
+    std::optional<std::string> GetDefaultSinkName(std::string* error) {
+        // Newer pactl
+        auto res = util::ExecCapture("pactl get-default-sink 2>&1");
+        if (res.exit_code == 0) {
+            const auto line = util::TrimCopy(FirstLineOrEmpty(res.stdout_str));
+            if (!line.empty()) return line;
+        }
+
+        // Fallback: parse `pactl info`
+        res = util::ExecCapture("pactl info 2>&1");
+        if (res.exit_code != 0) {
+            if (error) *error = util::TrimCopy(res.stdout_str);
+            return std::nullopt;
+        }
+
+        if (auto v = ParseDefaultFromPactlInfo(res.stdout_str, "Default Sink:")) {
+            return v;
+        }
+
+        if (error) *error = "Could not determine default sink";
         return std::nullopt;
     }
 

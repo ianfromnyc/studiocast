@@ -17,6 +17,7 @@
 
 #include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_mic.h"
+#include "core/audio/virtual_speaker.h"
 
 namespace studiocast::gui {
     namespace {
@@ -113,6 +114,34 @@ namespace studiocast::gui {
 
         root->addWidget(vmicBox);
 
+        auto *speakersTitle = new QLabel("Speakers", this);
+        speakersTitle->setStyleSheet("font-size: 20px; font-weight: 600;");
+        root->addWidget(speakersTitle);
+
+        // -----------------------
+        // Virtual speakers controls
+        // -----------------------
+        auto *spkBox = new QGroupBox("StudioCast Speakers", this);
+        auto *spkLayout = new QVBoxLayout(spkBox);
+
+        auto *spkButtonsRow = new QHBoxLayout();
+        enableSpeakersBtn_ = new QPushButton("Enable speakers device", spkBox);
+        stopSpeakersBtn_ = new QPushButton("Stop routing", spkBox);
+        destroySpeakersBtn_ = new QPushButton("Destroy speakers device", spkBox);
+
+        spkButtonsRow->addWidget(enableSpeakersBtn_);
+        spkButtonsRow->addWidget(stopSpeakersBtn_);
+        spkButtonsRow->addWidget(destroySpeakersBtn_);
+        spkButtonsRow->addStretch(1);
+        spkLayout->addLayout(spkButtonsRow);
+
+        spkLayout->addWidget(new QLabel(
+            "Tip: In other apps, select “StudioCast Speakers” as the output device.\n"
+            "StudioCast will route that audio to your physical speakers.",
+            spkBox));
+
+        root->addWidget(spkBox);
+
         // -----------------------
         // Status
         // -----------------------
@@ -143,6 +172,10 @@ namespace studiocast::gui {
         connect(destroyBtn_, &QPushButton::clicked, this, &AudioPage::OnDestroyVirtualMic);
         connect(startBtn_, &QPushButton::clicked, this, &AudioPage::OnStartLoopback);
         connect(stopBtn_, &QPushButton::clicked, this, &AudioPage::OnStopLoopback);
+
+        connect(enableSpeakersBtn_, &QPushButton::clicked, this, &AudioPage::OnEnableVirtualSpeakers);
+        connect(stopSpeakersBtn_, &QPushButton::clicked, this, &AudioPage::OnStopSpeakersRouting);
+        connect(destroySpeakersBtn_, &QPushButton::clicked, this, &AudioPage::OnDestroyVirtualSpeakers);
 
         connect(sourceCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, &AudioPage::OnSourceChanged);
@@ -290,6 +323,10 @@ namespace studiocast::gui {
         startBtn_->setEnabled(pactlOk);
         stopBtn_->setEnabled(pactlOk);
 
+        enableSpeakersBtn_->setEnabled(pactlOk);
+        stopSpeakersBtn_->setEnabled(pactlOk);
+        destroySpeakersBtn_->setEnabled(pactlOk);
+
         if (!pactlOk) return;
 
         std::string err;
@@ -298,6 +335,9 @@ namespace studiocast::gui {
         bool hasSink = false;
         bool hasRemap = false;
         bool hasLoopback = false;
+
+        bool hasSpeakersSink = false;
+        bool hasSpeakersLoopback = false;
 
         for (const auto &m: mods) {
             if (m.name == "module-null-sink" && Contains(m.args, "sink_name=studiocast_sink")) {
@@ -309,12 +349,22 @@ namespace studiocast::gui {
             if (m.name == "module-loopback" && Contains(m.args, "sink=studiocast_sink")) {
                 hasLoopback = true;
             }
+
+            if (m.name == "module-null-sink" && Contains(m.args, "sink_name=studiocast_speakers")) {
+                hasSpeakersSink = true;
+            }
+            if (m.name == "module-loopback" && Contains(m.args, "source=studiocast_speakers.monitor")) {
+                hasSpeakersLoopback = true;
+            }
         }
 
         // Create is always safe; disable Destroy if nothing exists.
         destroyBtn_->setEnabled(hasSink || hasRemap);
         startBtn_->setEnabled(hasSink && hasRemap);
         stopBtn_->setEnabled(hasLoopback);
+
+        destroySpeakersBtn_->setEnabled(hasSpeakersSink);
+        stopSpeakersBtn_->setEnabled(hasSpeakersLoopback);
     }
 
     void AudioPage::OnCreateVirtualMic() {
@@ -371,6 +421,40 @@ namespace studiocast::gui {
         std::string err;
         if (!studiocast::audio::StopLoopback(&err)) {
             ShowError("Stop loopback failed", QString::fromStdString(err));
+            return;
+        }
+        RefreshStatus();
+    }
+
+    void AudioPage::OnEnableVirtualSpeakers() {
+        std::string err;
+        if (!studiocast::audio::CreateVirtualSpeaker(&err)) {
+            ShowError("Enable speakers failed", QString::fromStdString(err));
+            return;
+        }
+
+        err.clear();
+        if (!studiocast::audio::StartSpeakerLoopback("", 10, &err)) {
+            ShowError("Start speakers routing failed", QString::fromStdString(err));
+            return;
+        }
+
+        RefreshStatus();
+    }
+
+    void AudioPage::OnStopSpeakersRouting() {
+        std::string err;
+        if (!studiocast::audio::StopSpeakerLoopback(&err)) {
+            ShowError("Stop speakers routing failed", QString::fromStdString(err));
+            return;
+        }
+        RefreshStatus();
+    }
+
+    void AudioPage::OnDestroyVirtualSpeakers() {
+        std::string err;
+        if (!studiocast::audio::DestroyVirtualSpeaker(&err)) {
+            ShowError("Destroy speakers failed", QString::fromStdString(err));
             return;
         }
         RefreshStatus();

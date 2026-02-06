@@ -8,6 +8,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/audio/pulse/pactl.h"
 #include "core/config/daemon_config.h"
 #include "core/maxine/availability.h"
 #include "core/maxine/afx/afx_effect.h"
@@ -92,6 +93,23 @@ namespace {
         expectVecEq("Split", Split("a,b,,c", ','), {"a", "b", "", "c"});
         expectVecEq("SplitLines", SplitLines("a\r\nb\n\nc"), {"a", "b", "", "c"});
         expectEq("FirstNonEmptyLine", FirstNonEmptyLine("\n  \n x \n"), "x");
+
+        // `pactl info` parsing helper (deterministic; avoids needing pactl in self-test).
+        {
+            const std::string info =
+                "Server String: /run/user/1000/pulse/native\n"
+                "Default Sink:  alsa_output.pci-0000_00_1f.3.analog-stereo  \n"
+                "Default Source:\talsa_input.pci-0000_00_1f.3.analog-stereo\n";
+
+            const auto sink = studiocast::audio::pulse::ParseDefaultFromPactlInfo(info, "Default Sink:");
+            expectEq("ParseDefaultFromPactlInfo(Default Sink)", sink ? *sink : "", "alsa_output.pci-0000_00_1f.3.analog-stereo");
+
+            const auto src = studiocast::audio::pulse::ParseDefaultFromPactlInfo(info, "Default Source:");
+            expectEq("ParseDefaultFromPactlInfo(Default Source)", src ? *src : "", "alsa_input.pci-0000_00_1f.3.analog-stereo");
+
+            const auto missing = studiocast::audio::pulse::ParseDefaultFromPactlInfo(info, "Does Not Exist:");
+            expectTrue("ParseDefaultFromPactlInfo(missing) is nullopt", !missing.has_value());
+        }
 
         // Canonical effects model sanity: CPU backend must never be persisted/returned as a real option.
         {

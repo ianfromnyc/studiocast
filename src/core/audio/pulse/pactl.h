@@ -17,6 +17,11 @@ namespace studiocast::audio::pulse {
         std::string name;
     };
 
+    struct PactlSink {
+        int id = -1;
+        std::string name;
+    };
+
     struct PactlPort {
         std::string name;         // e.g. "analog-input-internal-mic"
         std::string description;  // e.g. "Internal Microphone"
@@ -41,8 +46,15 @@ namespace studiocast::audio::pulse {
 
     std::vector<PactlModule> ListModules(std::string* error);
     std::vector<PactlSource> ListSources(std::string* error);
+    std::vector<PactlSink> ListSinks(std::string* error);
 
     std::optional<std::string> GetDefaultSourceName(std::string* error);
+    std::optional<std::string> GetDefaultSinkName(std::string* error);
+
+    // Deterministic parsing helper (used for `pactl info` fallbacks and self-test).
+    // Example keys: "Default Source:", "Default Sink:".
+    std::optional<std::string> ParseDefaultFromPactlInfo(const std::string& pactl_info_text,
+                                                         const std::string& key);
 
     bool UpdateSinkProplist(const std::string& sink_name_or_index,
                         const std::vector<std::string>& kv_pairs,

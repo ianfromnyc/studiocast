@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "core/audio/pulse/pactl.h"
+#include "core/audio/virtual_speaker.h"
 #include "core/audio/virtual_mic_state.h"
 #include "core/util/strings.h"
 
@@ -327,6 +328,49 @@ std::string StatusText() {
   for (const auto& s : sources) {
     oss << "  [" << s.id << "] " << s.name;
     if (s.name == kSourceName) oss << "  <== StudioCast virtual mic";
+    oss << "\n";
+  }
+
+  // Virtual speaker status
+  oss << "\nStudioCast Virtual Speakers\n";
+  oss << "  sink name: studiocast_speakers\n";
+  oss << "  monitor source: " << VirtualSpeakerMonitorSourceName() << "\n";
+
+  const auto spkState = LoadVirtualSpeakerState();
+  const auto spkLoaded = DetectVirtualSpeakerLoaded();
+  oss << "  state file: " << VirtualSpeakerStatePath().string() << "\n";
+  oss << "  state ids: "
+      << "sink=" << (spkState.null_sink_module_id ? std::to_string(*spkState.null_sink_module_id) : "none") << ", "
+      << "loopback=" << (spkState.loopback_module_id ? std::to_string(*spkState.loopback_module_id) : "none") << ", "
+      << "target_sink=" << (spkState.loopback_target_sink_name ? *spkState.loopback_target_sink_name : "none")
+      << "\n";
+  oss << "  loaded ids: "
+      << "sink=" << (spkLoaded.null_sink_module_id ? std::to_string(*spkLoaded.null_sink_module_id) : "none") << ", "
+      << "loopback=" << (spkLoaded.loopback_module_id ? std::to_string(*spkLoaded.loopback_module_id) : "none")
+      << "\n";
+
+  {
+    std::string err2;
+    auto def = pulse::GetDefaultSinkName(&err2);
+    oss << "\nDefault sink\n";
+    if (def) {
+      oss << "  " << *def << "\n";
+    } else {
+      oss << "  (none)";
+      if (!err2.empty()) oss << "  (note) " << err2;
+      oss << "\n";
+    }
+  }
+
+  // List sinks for convenience
+  err.clear();
+  const auto sinks = pulse::ListSinks(&err);
+  oss << "\nSinks (pactl list short sinks)\n";
+  if (!err.empty()) oss << "  (note) " << err << "\n";
+  for (const auto& s : sinks) {
+    oss << "  [" << s.id << "] " << s.name;
+    if (s.name == "studiocast_speakers") oss << "  <== StudioCast Speakers";
+    if (s.name == kSinkName) oss << "  <== StudioCast Sink";
     oss << "\n";
   }
 
