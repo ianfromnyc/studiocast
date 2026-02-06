@@ -21,6 +21,7 @@
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
 #include "core/video/convert.h"
+#include "core/video/capture_error_policy.h"
 #include "core/video/image_ppm.h"
 #include "core/video/effects/effect_chain.h"
 #include "core/video/effects/broadcast_effect_contract.h"
@@ -237,7 +238,14 @@ bool CameraPipeline::Start(const CameraPipelineConfig& cfg, std::string* error) 
   return true;
 }
 
-bool CameraPipeline::OpenOutputLocked(const std::string& outDev, int width, int height, int fps, std::string* error) {
+bool CameraPipeline::OpenOutputLocked(const std::string& outDev,
+                                     int width,
+                                     int height,
+                                     int fps,
+                                     bool* out_opened_or_renegotiated,
+                                     std::string* error) {
+  if (out_opened_or_renegotiated) *out_opened_or_renegotiated = false;
+
   // Try to reuse an existing open writer when possible.
   if (writer_.IsOpen() && writer_device_ == outDev) {
     const auto& a = writer_.Actual();
@@ -256,6 +264,8 @@ bool CameraPipeline::OpenOutputLocked(const std::string& outDev, int width, int 
   }
 
   // Open writer: prefer RGB24 output (avoids RGB->YUYV conversion), fallback to YUYV.
+  if (out_opened_or_renegotiated) *out_opened_or_renegotiated = true;
+
   std::string werr;
   if (!writer_.Open(outDev, width, height, fps, PixelFormat::rgb24, &werr)) {
     std::string werr2;
@@ -301,8 +311,9 @@ bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig& cfg, std::stri
     }
   }
 
+  bool opened_or_renegotiated = false;
   std::string oerr;
-  if (!OpenOutputLocked(outDev, cfg.width, cfg.height, cfg.fps, &oerr)) {
+  if (!OpenOutputLocked(outDev, cfg.width, cfg.height, cfg.fps, &opened_or_renegotiated, &oerr)) {
     if (error) *error = oerr;
     return false;
   }
@@ -315,7 +326,9 @@ bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig& cfg, std::stri
   // This is particularly important with v4l2loopback 'exclusive_caps=1':
   // the device is typically only considered a "real" capture source once a producer
   // has set a format and provided at least one frame.
-  if (writer_.IsOpen()) {
+  // Only seed a frame when we actually opened/renegotiated the output. If we reuse an already-open
+  // writer, re-seeding would overwrite the live stream and manifest as periodic black flashes.
+  if (opened_or_renegotiated && writer_.IsOpen()) {
     const ActualFormat outA = output_;
     std::size_t size = outA.size_image;
     if (size == 0 && outA.bytes_per_line > 0 && outA.height > 0) {
@@ -457,8 +470,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   // Open (or reuse) writer to v4l2loopback output.
   {
     std::lock_guard<std::mutex> lock(mu_);
+    bool opened_or_renegotiated = false;
     std::string oerr;
-    if (!OpenOutputLocked(outDev, capA.width, capA.height, capA.fps, &oerr)) {
+    if (!OpenOutputLocked(outDev, capA.width, capA.height, capA.fps, &opened_or_renegotiated, &oerr)) {
       last_error_ = oerr;
       running_ = false;
       start_notified_ = true;
@@ -2621,8 +2635,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     CapturedFrameView f{};
     std::string ferr;
     if (!cap.AcquireFrame(&f, 1000, &ferr)) {
-      // timeouts can happen; treat as recoverable unless stop requested
+      // Timeouts and transient interruptions can happen on some devices/drivers.
+      // Treat timeouts as recoverable to avoid pipeline flapping (which can manifest as
+      // periodic black frames when the loopback output is kept alive).
       if (stop_.load()) break;
+
+      if (IsRecoverableCaptureAcquireFailure(ferr)) continue;
+
       std::lock_guard<std::mutex> lock(mu_);
       last_error_ = "Capture acquire failed: " + ferr;
       break;

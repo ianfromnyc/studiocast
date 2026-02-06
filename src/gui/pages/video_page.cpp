@@ -13,14 +13,17 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
-#include <QPixmap>
+#include <QPaintEvent>
+#include <QPainter>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QSizePolicy>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStandardItemModel>
@@ -42,6 +45,58 @@
 #include "core/video/v4l2loopback.h"
 
 namespace studiocast::gui {
+
+class VideoPreviewWidget final : public QWidget {
+ public:
+  explicit VideoPreviewWidget(QWidget* parent = nullptr) : QWidget(parent) {
+    setMinimumSize(320, 240);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+  }
+
+  void SetStatusText(QString text) {
+    frame_ = QImage{};
+    statusText_ = std::move(text);
+    update();
+  }
+
+  void SetFrame(const QImage& frame) {
+    // Detach from the caller's backing buffer.
+    frame_ = frame.copy();
+    statusText_.clear();
+    update();
+  }
+
+ protected:
+  void paintEvent(QPaintEvent* /*event*/) override {
+    QPainter p(this);
+    p.fillRect(rect(), QColor(0x11, 0x11, 0x11));
+
+    p.setPen(QColor(0x33, 0x33, 0x33));
+    p.drawRect(rect().adjusted(0, 0, -1, -1));
+
+    const QRect content = rect().adjusted(8, 8, -8, -8);
+
+    if (!frame_.isNull()) {
+      QSize scaled = frame_.size();
+      scaled.scale(content.size(), Qt::KeepAspectRatio);
+      QRect target(QPoint(0, 0), scaled);
+      target.moveCenter(content.center());
+      p.drawImage(target, frame_);
+      return;
+    }
+
+    p.setPen(QColor(0xaa, 0xaa, 0xaa));
+    const QString text = statusText_.isEmpty() ? QStringLiteral("Preview") : statusText_;
+    p.drawText(content, Qt::AlignCenter | Qt::TextWordWrap, text);
+  }
+
+  QSize sizeHint() const override { return {640, 360}; }
+
+ private:
+  QImage frame_;
+  QString statusText_;
+};
+
 namespace {
 
 QString DeviceLabel(const studiocast::video::VideoDevice& d) {
@@ -297,12 +352,9 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   auto* boxLayout = new QVBoxLayout(box);
 
   // Preview
-  previewLabel_ = new QLabel(box);
-  previewLabel_->setMinimumHeight(240);
-  previewLabel_->setAlignment(Qt::AlignCenter);
-  previewLabel_->setStyleSheet("background: #111; border: 1px solid #333; color: #aaa;");
-  previewLabel_->setText("Preview (opens the virtual camera as a consumer)");
-  boxLayout->addWidget(previewLabel_);
+  preview_ = new VideoPreviewWidget(box);
+  preview_->SetStatusText("Preview (opens the virtual camera as a consumer)");
+  boxLayout->addWidget(preview_);
 
   // Input row
   auto* inRow = new QHBoxLayout();
@@ -1215,7 +1267,7 @@ void VideoPage::StartPreview() {
   }
 
   if (outDev.isEmpty() || outDev == "auto") {
-    previewLabel_->setText("Preview unavailable (no output device selected)");
+    preview_->SetStatusText("Preview unavailable (no output device selected)");
     return;
   }
 
@@ -1227,7 +1279,7 @@ void VideoPage::StartPreview() {
   if (!previewCapture_.Open(outDev.toStdString(), wantW, wantH, wantFps, studiocast::video::CapturePixelFormat::rgb24, &err)) {
     std::string err2;
     if (!previewCapture_.Open(outDev.toStdString(), wantW, wantH, wantFps, studiocast::video::CapturePixelFormat::yuyv, &err2)) {
-      previewLabel_->setText("Preview open failed:\n" + QString::fromStdString(err2));
+      preview_->SetStatusText("Preview open failed:\n" + QString::fromStdString(err2));
       return;
     }
   }
@@ -1239,7 +1291,7 @@ void VideoPage::StartPreview() {
   previewRgb_.assign(static_cast<std::size_t>(previewBpl_ * previewH_), 0);
 
   previewTimer_->start();
-  previewLabel_->setText("Preview starting...");
+  preview_->SetStatusText("Preview starting...");
 }
 
 void VideoPage::StopPreview() {
@@ -1247,6 +1299,8 @@ void VideoPage::StopPreview() {
   if (previewCapture_.IsOpen()) previewCapture_.Close();
   previewRgb_.clear();
   previewW_ = previewH_ = previewBpl_ = 0;
+
+  if (preview_) preview_->SetStatusText("Preview stopped");
 }
 
 void VideoPage::OnPreviewTick() {
@@ -1284,7 +1338,7 @@ void VideoPage::OnPreviewTick() {
   (void)previewCapture_.ReleaseFrame(f, &rerr);
 
   QImage img(previewRgb_.data(), previewW_, previewH_, previewBpl_, QImage::Format_RGB888);
-  previewLabel_->setPixmap(QPixmap::fromImage(img).scaled(previewLabel_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+  preview_->SetFrame(img);
 }
 
 void VideoPage::UpdateUiEnabled() {

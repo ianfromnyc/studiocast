@@ -19,6 +19,10 @@ class QTimer;
 class QLineEdit;
 
 namespace studiocast::gui {
+class VideoPreviewWidget;
+}  // namespace studiocast::gui
+
+namespace studiocast::gui {
 
     class VideoPage final : public QWidget {
         Q_OBJECT
@@ -134,7 +138,7 @@ namespace studiocast::gui {
         QPushButton* startBtn_ = nullptr;
         QPushButton* stopBtn_ = nullptr;
 
-        QLabel* previewLabel_ = nullptr;
+        VideoPreviewWidget* preview_ = nullptr;
         QTimer* previewTimer_ = nullptr;
 
         QPlainTextEdit* statusText_ = nullptr;

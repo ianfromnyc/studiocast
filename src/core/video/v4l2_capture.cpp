@@ -396,9 +396,17 @@ bool V4l2Capture::AcquireFrame(CapturedFrameView* out, int timeout_ms, std::stri
   pfd.fd = fd_;
   pfd.events = POLLIN;
 
-  const int pr = ::poll(&pfd, 1, timeout_ms);
+  int pr = 0;
+  for (;;) {
+    pr = ::poll(&pfd, 1, timeout_ms);
+    if (pr < 0 && errno == EINTR) {
+      // Retry on signal interruption.
+      continue;
+    }
+    break;
+  }
+
   if (pr < 0) {
-    if (errno == EINTR) return false;
     if (error) *error = "poll failed: " + std::string(std::strerror(errno));
     return false;
   }

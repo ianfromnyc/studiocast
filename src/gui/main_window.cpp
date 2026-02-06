@@ -51,7 +51,7 @@ void MainWindow::BuildUi() {
   auto* layout = new QHBoxLayout(central);
   layout->setContentsMargins(12, 12, 12, 12);
   layout->setSpacing(12);
-  layout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+  layout->setSizeConstraint(QLayout::SetMinimumSize);
 
   nav_ = new QListWidget(central);
   nav_->setFixedWidth(220);

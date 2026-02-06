@@ -29,6 +29,7 @@
 #include "core/video/broadcast_camera_effects_legacy_adapter.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/camera_effects_json.h"
+#include "core/video/capture_error_policy.h"
 #include "core/video/legacy_camera_effects.h"
 #include "core/video/effects/broadcast_effect_maxine_gate.h"
 #include "core/video/effects/broadcast_effect_contract.h"
@@ -94,6 +95,16 @@ namespace {
         expectVecEq("Split", Split("a,b,,c", ','), {"a", "b", "", "c"});
         expectVecEq("SplitLines", SplitLines("a\r\nb\n\nc"), {"a", "b", "", "c"});
         expectEq("FirstNonEmptyLine", FirstNonEmptyLine("\n  \n x \n"), "x");
+
+        // Capture error policy (pure logic; used by the camera pipeline).
+        {
+            using studiocast::video::IsRecoverableCaptureAcquireFailure;
+            expectTrue("IsRecoverableCaptureAcquireFailure(timeout)",
+                       IsRecoverableCaptureAcquireFailure("Timed out waiting for camera frame."));
+            expectTrue("IsRecoverableCaptureAcquireFailure(empty)", IsRecoverableCaptureAcquireFailure(""));
+            expectTrue("IsRecoverableCaptureAcquireFailure(fatal) == false",
+                       !IsRecoverableCaptureAcquireFailure("poll failed: EIO"));
+        }
 
         // `pactl info` parsing helper (deterministic; avoids needing pactl in self-test).
         {

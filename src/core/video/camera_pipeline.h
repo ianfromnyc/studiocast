@@ -74,7 +74,17 @@ namespace studiocast::video {
         void SetMirrorEnabled(bool enabled);
 
     private:
-        bool OpenOutputLocked(const std::string& outDev, int width, int height, int fps, std::string* error);
+        // Opens (or reuses) the loopback writer.
+        //
+        // If `out_opened_or_renegotiated` is non-null, it will be set to true when we actually
+        // performed an open/renegotiation (i.e. the output may have been reset), and false when
+        // the existing writer was reused without changes.
+        bool OpenOutputLocked(const std::string& outDev,
+                              int width,
+                              int height,
+                              int fps,
+                              bool* out_opened_or_renegotiated,
+                              std::string* error);
 
         void ThreadMain(CameraPipelineConfig cfg);
 
