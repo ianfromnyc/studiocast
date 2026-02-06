@@ -50,13 +50,17 @@ features (models/libs) via NGC:
 
 ```bash
 export NGC_CLI_API_KEY="..."   # do not commit this
+export NGC_API_KEY="..."       # do not commit this
 ./scripts/setup_maxine.sh \
   --vfx-tar ~/Downloads/NVIDIA_VFX_SDK_linux_*.tar.gz \
   --ar-tar  ~/Downloads/NVIDIA_AR_SDK_linux_*.tar.gz \
-  --install-features --build-dir ./build
+  --afx-tar ~/Downloads/Audio_Effects_SDK.tar.gz \
+  --install-features --install-afx-features --build-dir ./build
 ```
 
 This runs the SDK-provided `install_feature.sh` scripts under the hood.
+
+For AFX features, the helper uses the SDK-provided `download_features.sh` script and requires `NGC_API_KEY`.
 
 ## 4) Run daemon + use in OBS
 

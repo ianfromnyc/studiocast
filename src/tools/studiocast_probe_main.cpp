@@ -1003,7 +1003,7 @@ namespace {
                 const auto c = studiocast::maxine::BuildCanonicalMaxineBlockedCopy(
                     d, studiocast::maxine::MaxineNeed::afx);
                 expectEq("maxine_copy afx_features summary", c.summary,
-                         "Maxine unavailable: Audio Effects features not installed (run install_feature.sh).");
+                         "Maxine unavailable: Audio Effects features not installed (run download_features.sh).");
             }
 
             // Maxine per-effect availability oracle JSON contract.

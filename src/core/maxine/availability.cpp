@@ -214,9 +214,13 @@ CanonicalMaxineBlockedCopy BuildCanonicalMaxineBlockedCopy(const MaxineDiagnosti
   // Default: SDK present but effect libraries/features are missing.
   if (require_afx) {
     out.summary =
-        "Maxine unavailable: Audio Effects features not installed (run install_feature.sh).";
+        "Maxine unavailable: Audio Effects features not installed (run download_features.sh).";
     add_step("Run `studiocast-probe` to verify GPU/driver.");
     add_step("Run `studiocast-maxine init` then follow `studiocast-maxine install-hints`.");
+    add_step("Export `NGC_API_KEY` (do not commit it).");
+    add_step(
+        "Run: `cd <AFX_ROOT>/features && ./download_features.sh --effects denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k`."
+    );
     add_step(
         "Ensure `libnv_audiofx.so` is under `<AFX_ROOT>/nvafx/lib/` and feature installs exist under `<AFX_ROOT>/features/`.");
     return out;

@@ -99,7 +99,7 @@ if [[ "$YES" -eq 1 ]]; then APT_ARGS+=("-y"); fi
 if [[ "$DO_DEPS" -eq 1 ]]; then
   echo "[setup] Installing build/runtime dependencies..."
   sudo apt update
-  sudo apt install "${APT_ARGS[@]}"     build-essential cmake ninja-build pkg-config     git curl ca-certificates     qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools     qtbase5-dev     clang clang-format clang-tidy     v4l-utils
+  sudo apt install "${APT_ARGS[@]}"     build-essential cmake ninja-build pkg-config     git curl ca-certificates     qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools     qtbase5-dev     libpulse-dev libpulse0     clang clang-format clang-tidy     v4l-utils
 fi
 
 if [[ "$DO_V4L2" -eq 1 ]]; then

@@ -1,5 +1,8 @@
 # Installing Maxine SDK + features
 
+StudioCast does **not** ship or redistribute NVIDIA Maxine SDK assets (SDK tarballs, binaries, models, feature packs, or NGC keys).
+You must obtain them yourself from NVIDIA and comply with NVIDIA's licensing terms.
+
 `studiocast-maxine` prints the **authoritative** install commands for your machine.
 
 Build and run:
@@ -73,5 +76,9 @@ must be run on a Tensor Core GPU machine.
 
 ```bash
 export NGC_API_KEY="<your_api_key>"
-cd "<AFX root>/features" && ./download_features.sh
+cd "<AFX root>/features" && ./download_features.sh --effects denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k
 ```
+
+This downloads only the **minimal** AFX effect set needed for the MVP (48 kHz variants).
+
+After installing, `studiocastctl status` / `studiocastd status` (and the GUI) should report that AFX/audio effects are ready.
