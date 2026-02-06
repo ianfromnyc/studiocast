@@ -472,7 +472,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     std::lock_guard<std::mutex> lock(mu_);
     bool opened_or_renegotiated = false;
     std::string oerr;
-    if (!OpenOutputLocked(outDev, capA.width, capA.height, capA.fps, &opened_or_renegotiated, &oerr)) {
+    // Keep output size aligned with the configured (requested) width/height.
+    // Many webcams silently negotiate down when requesting YUYV at HD sizes; if
+    // we switch the loopback format to that smaller negotiated size, consumers
+    // (OBS/preview) that still request the configured size can display the frame
+    // in the top-left quadrant.
+    if (!OpenOutputLocked(outDev, cfg.width, cfg.height, cfg.fps, &opened_or_renegotiated, &oerr)) {
       last_error_ = oerr;
       running_ = false;
       start_notified_ = true;
@@ -485,6 +490,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
   const std::size_t rgbStride = static_cast<std::size_t>(capA.width) * 3u;
   std::vector<std::uint8_t> rgb(rgbStride * static_cast<std::size_t>(capA.height));
+
+  std::vector<std::uint8_t> rgbScaled;
 
   std::vector<std::uint8_t> outBuf(outA.size_image);
 
@@ -2828,21 +2835,58 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       break;
     }
 
-    // Pack/write to output format
-    if (outA.format == PixelFormat::rgb24) {
-      const std::size_t wantRow = static_cast<std::size_t>(capA.width) * 3u;
+    // Pack/write to output format.
+    //
+    // IMPORTANT: The negotiated camera capture size (capA) can differ from the loopback output
+    // size (outA) due to camera format negotiation (common with YUYV) and/or consumers requesting
+    // a preferred resolution. v4l2loopback does not always scale between these sizes, so if we
+    // only populate the top-left portion of a larger output buffer, consumers will display the
+    // frame in the top-left quadrant.
+    //
+    // To keep output stable, scale the internal RGB frame to the writer's negotiated output
+    // dimensions before packing to RGB24/YUYV.
+    const std::uint8_t* rgbOut = rgb.data();
+    std::size_t rgbOutStride = rgbStride;
+    std::size_t rgbOutBytes = rgb.size();
 
-      if (outA.bytes_per_line == wantRow && outA.size_image == rgb.size()) {
+    const int outW = outA.width;
+    const int outH = outA.height;
+
+    if (capA.width != outW || capA.height != outH) {
+      std::string resizeErr;
+      const std::size_t tightDstStride = static_cast<std::size_t>(outW) * 3u;
+      if (!ResizeRgb24Bilinear(rgb.data(),
+                               capA.width,
+                               capA.height,
+                               rgbStride,
+                               outW,
+                               outH,
+                               &rgbScaled,
+                               tightDstStride,
+                               &resizeErr)) {
+        std::lock_guard<std::mutex> lock(mu_);
+        last_error_ = "Resize failed: " + resizeErr;
+        break;
+      }
+      rgbOut = rgbScaled.data();
+      rgbOutStride = tightDstStride;
+      rgbOutBytes = rgbScaled.size();
+    }
+
+    if (outA.format == PixelFormat::rgb24) {
+      const std::size_t wantRow = static_cast<std::size_t>(outW) * 3u;
+
+      if (outA.bytes_per_line == wantRow && outA.size_image == rgbOutBytes) {
         std::string werr;
-        if (!writer_.WriteFrame(rgb.data(), rgb.size(), &werr)) {
+        if (!writer_.WriteFrame(rgbOut, rgbOutBytes, &werr)) {
           std::lock_guard<std::mutex> lock(mu_);
           last_error_ = "Write failed: " + werr;
           break;
         }
       } else {
-        // Copy into padded output buffer
-        for (int y = 0; y < capA.height; ++y) {
-          const std::uint8_t* srcRow = rgb.data() + static_cast<std::size_t>(y) * rgbStride;
+        // Copy into padded output buffer.
+        for (int y = 0; y < outH; ++y) {
+          const std::uint8_t* srcRow = rgbOut + static_cast<std::size_t>(y) * rgbOutStride;
           std::uint8_t* dstRow = outBuf.data() + static_cast<std::size_t>(y) * outA.bytes_per_line;
 
           for (std::size_t i = 0; i < wantRow; ++i) dstRow[i] = srcRow[i];
@@ -2859,7 +2903,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
     } else {
       // Output is YUYV; convert RGB -> YUYV into outBuf with output stride.
-      Rgb24ToYuyv(rgb.data(), capA.width, capA.height, rgbStride, outBuf.data(), outA.bytes_per_line);
+      Rgb24ToYuyv(rgbOut, outW, outH, rgbOutStride, outBuf.data(), outA.bytes_per_line);
 
       std::string werr;
       if (!writer_.WriteFrame(outBuf.data(), outBuf.size(), &werr)) {
