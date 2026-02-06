@@ -35,4 +35,26 @@ private:
   bool loaded_ = false;
 };
 
+// Bilinear resize for chunky BGR U8 GPU images using a tiny CUDA kernel.
+//
+// The kernel uses image pitch (bytes per row) from the NvCVImage plane.
+class CudaBgrResizeBilinear {
+public:
+  bool Initialize(CudaDriverApi* cuda, std::string* error_out);
+
+  // Source/destination images must already be allocated and be BGR/U8/GPU.
+  bool Resize(const NvCVImage& src_bgr_gpu,
+              NvCVImage* dst_bgr_gpu,
+              CUstream stream,
+              std::string* error_out);
+
+private:
+  bool EnsureKernelLoaded(std::string* error_out);
+
+  CudaDriverApi* cuda_ = nullptr; // non-owning
+  CUmodule module_ = nullptr;
+  CUfunction fn_ = nullptr;
+  bool loaded_ = false;
+};
+
 }  // namespace studiocast::maxine

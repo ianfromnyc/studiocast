@@ -541,6 +541,23 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   studiocast::video::effects::BroadcastCameraEffects appliedFx{};
   studiocast::video::effects::BroadcastEffectsPlan appliedPlan{};
 
+  // Optional deferred GPU output (used to avoid CPU resize when scaling is needed and no CPU tail effects are active).
+  struct GpuBgrOutputRef {
+    const studiocast::maxine::NvCVImage* img = nullptr;  // non-owning
+    studiocast::maxine::CUstream stream = nullptr;
+    studiocast::maxine::CudaDriverApi* cuda = nullptr;   // non-owning
+    studiocast::maxine::NvcvApi* nvcv = nullptr;         // non-owning
+  };
+
+  // GPU resize cache (allocated on demand when we can defer readback).
+  studiocast::maxine::CudaBgrResizeBilinear gpu_resize_bilinear;
+  studiocast::maxine::CudaDriverApi* gpu_resize_cuda = nullptr;  // non-owning
+  studiocast::maxine::NvcvApi* gpu_resize_nvcv = nullptr;        // non-owning
+  studiocast::maxine::NvCVImage gpu_bgr_scaled{};
+  bool gpu_bgr_scaled_allocated = false;
+  std::vector<std::uint8_t> bgr_scaled_out;
+  studiocast::maxine::NvCVImage cpu_bgr_scaled{};
+
   struct MaxineBackgroundBlurContext {
     bool initialized = false;
     bool enabled = false;
@@ -941,7 +958,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          bool apply_vignette,
                          float vignette_center_x_px,
                          float vignette_center_y_px,
-                         std::string* error) {
+                         std::string* error,
+                         bool defer_readback,
+                         GpuBgrOutputRef* deferred_out) {
       if (!initialized || !greenscreen || !blur) {
         if (error) *error = "Maxine virtual background not initialized.";
         return false;
@@ -978,6 +997,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
+      const studiocast::maxine::NvCVImage* out_gpu = nullptr;
+      const auto stream = greenscreen->cuda_stream();
+
       if (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::blur) {
         if (!blur->Configure(fx, &cfg_err)) {
           if (error) *error = cfg_err;
@@ -1007,7 +1029,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           return false;
         }
 
-        const auto* out_gpu = blur->OutputGpu();
+        out_gpu = blur->OutputGpu();
         if (!out_gpu) {
           if (error) *error = "Background Blur did not produce an output image.";
           return false;
@@ -1029,6 +1051,18 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           }
         }
 
+        if (defer_readback) {
+          if (!deferred_out) {
+            if (error) *error = "defer_readback requires deferred_out.";
+            return false;
+          }
+          deferred_out->img = out_gpu;
+          deferred_out->stream = blur->cuda_stream();
+          deferred_out->cuda = &cuda;
+          deferred_out->nvcv = &nvcv;
+          return true;
+        }
+
         const auto down = nvcv.f().NvCVImage_Transfer(out_gpu, &cpu_bgr_out, 1.0f, blur->cuda_stream(), nullptr);
         if (down != studiocast::maxine::NVCV_SUCCESS) {
           if (error) *error = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(down);
@@ -1041,7 +1075,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           return false;
         }
 
-        const auto stream = greenscreen->cuda_stream();
         std::string bg_err;
         if (!EnsureBackgroundGpu(width, height, fx, stream, &bg_err)) {
           if (error) *error = bg_err;
@@ -1068,6 +1101,18 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
               return false;
             }
           }
+        }
+
+        if (defer_readback) {
+          if (!deferred_out) {
+            if (error) *error = "defer_readback requires deferred_out.";
+            return false;
+          }
+          deferred_out->img = &gpu_bgr_out_img;
+          deferred_out->stream = stream;
+          deferred_out->cuda = &cuda;
+          deferred_out->nvcv = &nvcv;
+          return true;
         }
 
         const auto down = nvcv.f().NvCVImage_Transfer(&gpu_bgr_out_img, &cpu_bgr_out, 1.0f, stream, nullptr);
@@ -1475,7 +1520,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          bool apply_vignette,
                          float vignette_center_x_px,
                          float vignette_center_y_px,
-                         std::string* error) {
+                         std::string* error,
+                         bool defer_readback,
+                         GpuBgrOutputRef* deferred_out) {
       if (!initialized || !greenscreen || !relight) {
         if (error) *error = "Maxine relighting not initialized.";
         return false;
@@ -1597,6 +1644,18 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             return false;
           }
         }
+      }
+
+      if (defer_readback) {
+        if (!deferred_out) {
+          if (error) *error = "defer_readback requires deferred_out.";
+          return false;
+        }
+        deferred_out->img = &gpu_bgr_out_img;
+        deferred_out->stream = stream;
+        deferred_out->cuda = &cuda;
+        deferred_out->nvcv = &nvcv;
+        return true;
       }
 
       const auto down = nvcv.f().NvCVImage_Transfer(&gpu_bgr_out_img, &cpu_bgr_out, 1.0f, stream, nullptr);
@@ -1824,7 +1883,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          bool apply_vignette,
                          float vignette_center_x_px,
                          float vignette_center_y_px,
-                         std::string* error) {
+                         std::string* error,
+                         bool defer_readback,
+                         GpuBgrOutputRef* deferred_out) {
       if (!rgb || width <= 0 || height <= 0) return true;
       std::string init_err;
       if (!EnsureInitialized(width, height, fx, &init_err)) {
@@ -1876,6 +1937,18 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             return false;
           }
         }
+      }
+
+      if (defer_readback) {
+        if (!deferred_out) {
+          if (error) *error = "defer_readback requires deferred_out.";
+          return false;
+        }
+        deferred_out->img = &gpu_bgr_out;
+        deferred_out->stream = stream;
+        deferred_out->cuda = &cuda;
+        deferred_out->nvcv = &nvcv;
+        return true;
       }
 
       // GPU -> CPU
@@ -2109,7 +2182,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          bool apply_vignette,
                          float vignette_center_x_px,
                          float vignette_center_y_px,
-                         std::string* error) {
+                         std::string* error,
+                         bool defer_readback,
+                         GpuBgrOutputRef* deferred_out) {
       if (!rgb || width <= 0 || height <= 0) return true;
 
       std::string init_err;
@@ -2179,6 +2254,18 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             return false;
           }
         }
+      }
+
+      if (defer_readback) {
+        if (!deferred_out) {
+          if (error) *error = "defer_readback requires deferred_out.";
+          return false;
+        }
+        deferred_out->img = &gpu_bgr_out;
+        deferred_out->stream = stream;
+        deferred_out->cuda = &cuda;
+        deferred_out->nvcv = &nvcv;
+        return true;
       }
 
       // GPU -> CPU
@@ -2327,7 +2414,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          const studiocast::video::effects::BroadcastCameraEffects& fx,
                          float vignette_center_x_px,
                          float vignette_center_y_px,
-                         std::string* error) {
+                         std::string* error,
+                         bool defer_readback,
+                         GpuBgrOutputRef* deferred_out) {
       if (!rgb || width <= 0 || height <= 0) return true;
       if (!fx.vignette.enabled) return true;
 
@@ -2364,6 +2453,18 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                 &ve)) {
         if (error) *error = ve;
         return false;
+      }
+
+      if (defer_readback) {
+        if (!deferred_out) {
+          if (error) *error = "defer_readback requires deferred_out.";
+          return false;
+        }
+        deferred_out->img = &gpu_bgr;
+        deferred_out->stream = nullptr;
+        deferred_out->cuda = &cuda;
+        deferred_out->nvcv = &nvcv;
+        return true;
       }
 
       // GPU -> CPU
@@ -2726,6 +2827,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     std::string rerr;
     (void)cap.ReleaseFrame(f, &rerr);
 
+    GpuBgrOutputRef deferred_gpu_out{};
+    bool have_deferred_gpu_out = false;
+
     // Apply effects (in-place on RGB buffer).
     bool fx_failed = false;
     {
@@ -2758,6 +2862,21 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       const bool vignette_requested = has_stage(studiocast::video::effects::contract::kEffectIdVignette);
       const std::string& vig_attach = plan.vignette_attach_to_effect_id;
 
+      // Defer GPU->CPU readback for the last GPU stage only when:
+      // - output scaling is needed
+      // - no CPU tail effects (mirror) are active
+      // This allows us to resize on GPU and perform a single GPU->CPU transfer for output.
+      std::string last_stage_for_defer;
+      for (auto it = plan.ordered_effect_ids.rbegin(); it != plan.ordered_effect_ids.rend(); ++it) {
+        if (*it == studiocast::video::effects::contract::kEffectIdMirror) continue;
+        if (*it == studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) continue;
+        last_stage_for_defer = *it;
+        break;
+      }
+      const bool mirror_enabled = has_stage(studiocast::video::effects::contract::kEffectIdMirror);
+      const bool scaling_needed = (capA.width != outA.width || capA.height != outA.height);
+      const bool allow_defer_readback = scaling_needed && !mirror_enabled && !last_stage_for_defer.empty();
+
       // Apply vignette exactly once, either attached to the planned last GPU stage,
       // or as a standalone GPU stage when no other GPU stage is active.
       const bool apply_vignette_on_eye_contact =
@@ -2772,6 +2891,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           vignette_requested && (vig_attach == studiocast::video::effects::contract::kEffectIdAutoFrame);
 
       auto apply_stage = [&](const std::string& stage_id) {
+        const bool defer_readback = allow_defer_readback && (stage_id == last_stage_for_defer);
+
         // Note: video noise removal exists in the effect schema but is not
         // currently applied in the pipeline.
         if (stage_id == studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) {
@@ -2789,13 +2910,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                                   apply_vignette_on_eye_contact,
                                                   vignette_center_x_px,
                                                   vignette_center_y_px,
-                                                  &mx_err)) {
+                                                  &mx_err,
+                                                  defer_readback,
+                                                  &deferred_gpu_out)) {
             {
               std::lock_guard<std::mutex> lock(mu_);
               last_error_ = "Maxine eye contact failed: " + mx_err;
             }
             fx_failed = true;
           }
+          if (defer_readback && deferred_gpu_out.img) have_deferred_gpu_out = true;
           return;
         }
 
@@ -2810,13 +2934,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                               apply_vignette_on_relight,
                                               vignette_center_x_px,
                                               vignette_center_y_px,
-                                              &mx_err)) {
+                                              &mx_err,
+                                              defer_readback,
+                                              &deferred_gpu_out)) {
             {
               std::lock_guard<std::mutex> lock(mu_);
               last_error_ = "Maxine relighting failed: " + mx_err;
             }
             fx_failed = true;
           }
+          if (defer_readback && deferred_gpu_out.img) have_deferred_gpu_out = true;
           return;
         }
 
@@ -2833,13 +2960,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                               apply_vignette_on_bg,
                                               vignette_center_x_px,
                                               vignette_center_y_px,
-                                              &mx_err)) {
+                                              &mx_err,
+                                              defer_readback,
+                                              &deferred_gpu_out)) {
             {
               std::lock_guard<std::mutex> lock(mu_);
               last_error_ = "Maxine virtual background failed: " + mx_err;
             }
             fx_failed = true;
           }
+          if (defer_readback && deferred_gpu_out.img) have_deferred_gpu_out = true;
           return;
         }
 
@@ -2854,13 +2984,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                                  apply_vignette_on_auto_frame,
                                                  vignette_center_x_px,
                                                  vignette_center_y_px,
-                                                 &mx_err)) {
+                                                 &mx_err,
+                                                 defer_readback,
+                                                 &deferred_gpu_out)) {
             {
               std::lock_guard<std::mutex> lock(mu_);
               last_error_ = "Maxine auto frame failed: " + mx_err;
             }
             fx_failed = true;
           }
+          if (defer_readback && deferred_gpu_out.img) have_deferred_gpu_out = true;
           return;
         }
 
@@ -2874,13 +3007,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                              fx,
                                              vignette_center_x_px,
                                              vignette_center_y_px,
-                                             &mx_err)) {
+                                             &mx_err,
+                                             defer_readback,
+                                             &deferred_gpu_out)) {
             {
               std::lock_guard<std::mutex> lock(mu_);
               last_error_ = "CUDA vignette failed: " + mx_err;
             }
             fx_failed = true;
           }
+          if (defer_readback && deferred_gpu_out.img) have_deferred_gpu_out = true;
           return;
         }
       };
@@ -2911,20 +3047,165 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     //
     // To keep output stable, scale the internal RGB frame to the writer's negotiated output
     // dimensions before packing to RGB24/YUYV.
+    const int outW = outA.width;
+    const int outH = outA.height;
+
+    int frameW = capA.width;
+    int frameH = capA.height;
+
     const std::uint8_t* rgbOut = rgb.data();
     std::size_t rgbOutStride = rgbStride;
     std::size_t rgbOutBytes = rgb.size();
 
-    const int outW = outA.width;
-    const int outH = outA.height;
+    // If we deferred GPU readback, perform GPU resize (bilinear) to output dimensions and
+    // do a single GPU->CPU transfer for the final output buffer.
+    if (have_deferred_gpu_out) {
+      std::string gerr;
+      bool ok = true;
 
-    if (capA.width != outW || capA.height != outH) {
+      if (!deferred_gpu_out.img || !deferred_gpu_out.cuda || !deferred_gpu_out.nvcv) {
+        ok = false;
+        gerr = "Deferred GPU output reference is incomplete.";
+      }
+
+      if (ok) {
+        if (gpu_resize_cuda != deferred_gpu_out.cuda) {
+          gpu_resize_cuda = deferred_gpu_out.cuda;
+          if (!gpu_resize_bilinear.Initialize(gpu_resize_cuda, &gerr)) {
+            ok = false;
+          }
+        }
+      }
+
+      auto ensure_scaled_gpu = [&](unsigned w, unsigned h) {
+        if (!ok) return;
+        auto& nvcv = *deferred_gpu_out.nvcv;
+        if (!nvcv.IsInitialized() || !nvcv.f().NvCVImage_Alloc) {
+          ok = false;
+          gerr = "NvCVImage runtime not initialized.";
+          return;
+        }
+
+        if (gpu_bgr_scaled_allocated) {
+          if (gpu_bgr_scaled.width == w && gpu_bgr_scaled.height == h && gpu_bgr_scaled.pixelFormat == studiocast::maxine::NVCV_BGR &&
+              gpu_bgr_scaled.componentType == studiocast::maxine::NVCV_U8 && gpu_bgr_scaled.planar == studiocast::maxine::NVCV_CHUNKY &&
+              gpu_bgr_scaled.gpuMem == studiocast::maxine::NVCV_GPU) {
+            return;
+          }
+
+          if (nvcv.f().NvCVImage_Realloc) {
+            const auto st = nvcv.f().NvCVImage_Realloc(&gpu_bgr_scaled,
+                                                       w,
+                                                       h,
+                                                       studiocast::maxine::NVCV_BGR,
+                                                       studiocast::maxine::NVCV_U8,
+                                                       studiocast::maxine::NVCV_CHUNKY,
+                                                       studiocast::maxine::NVCV_GPU,
+                                                       /*alignment=*/0);
+            if (st == studiocast::maxine::NVCV_SUCCESS) {
+              return;
+            }
+          }
+
+          if (nvcv.f().NvCVImage_Dealloc) {
+            (void)nvcv.f().NvCVImage_Dealloc(&gpu_bgr_scaled);
+          }
+          gpu_bgr_scaled = studiocast::maxine::NvCVImage{};
+          gpu_bgr_scaled_allocated = false;
+        }
+
+        const auto st = nvcv.f().NvCVImage_Alloc(&gpu_bgr_scaled,
+                                                 w,
+                                                 h,
+                                                 studiocast::maxine::NVCV_BGR,
+                                                 studiocast::maxine::NVCV_U8,
+                                                 studiocast::maxine::NVCV_CHUNKY,
+                                                 studiocast::maxine::NVCV_GPU,
+                                                 /*alignment=*/0);
+        if (st != studiocast::maxine::NVCV_SUCCESS) {
+          ok = false;
+          gerr = "NvCVImage_Alloc(gpu scaled) failed: " + std::to_string(st);
+          return;
+        }
+        gpu_bgr_scaled_allocated = true;
+        gpu_resize_nvcv = deferred_gpu_out.nvcv;
+      };
+
+      ensure_scaled_gpu(static_cast<unsigned>(outW), static_cast<unsigned>(outH));
+
+      if (ok) {
+        if (!gpu_resize_bilinear.Resize(*deferred_gpu_out.img, &gpu_bgr_scaled, deferred_gpu_out.stream, &gerr)) {
+          ok = false;
+        }
+      }
+
+      if (ok) {
+        if (!deferred_gpu_out.nvcv->f().NvCVImage_Init || !deferred_gpu_out.nvcv->f().NvCVImage_Transfer) {
+          ok = false;
+          gerr = "NvCVImage_Init/Transfer unavailable.";
+        }
+      }
+
+      if (ok) {
+        const std::size_t tightStride = static_cast<std::size_t>(outW) * 3u;
+        bgr_scaled_out.resize(tightStride * static_cast<std::size_t>(outH));
+
+        const auto init = deferred_gpu_out.nvcv->f().NvCVImage_Init(&cpu_bgr_scaled,
+                                                                    outW,
+                                                                    outH,
+                                                                    static_cast<int>(tightStride),
+                                                                    bgr_scaled_out.data(),
+                                                                    studiocast::maxine::NVCV_BGR,
+                                                                    studiocast::maxine::NVCV_U8,
+                                                                    studiocast::maxine::NVCV_CHUNKY,
+                                                                    studiocast::maxine::NVCV_CPU);
+        if (init != studiocast::maxine::NVCV_SUCCESS) {
+          ok = false;
+          gerr = "NvCVImage_Init(cpu scaled) failed: " + std::to_string(init);
+        }
+
+        if (ok) {
+          const auto down = deferred_gpu_out.nvcv->f().NvCVImage_Transfer(&gpu_bgr_scaled,
+                                                                          &cpu_bgr_scaled,
+                                                                          1.0f,
+                                                                          deferred_gpu_out.stream,
+                                                                          nullptr);
+          if (down != studiocast::maxine::NVCV_SUCCESS) {
+            ok = false;
+            gerr = "NvCVImage_Transfer(gpu->cpu scaled) failed: " + std::to_string(down);
+          }
+        }
+
+        if (ok) {
+          rgbScaled.resize(tightStride * static_cast<std::size_t>(outH));
+          studiocast::video::Bgr24ToRgb24(bgr_scaled_out.data(),
+                                         rgbScaled.data(),
+                                         outW,
+                                         outH,
+                                         tightStride,
+                                         tightStride);
+          frameW = outW;
+          frameH = outH;
+          rgbOut = rgbScaled.data();
+          rgbOutStride = tightStride;
+          rgbOutBytes = rgbScaled.size();
+        }
+      }
+
+      if (!ok) {
+        // Fall back to the existing CPU resize path.
+        std::lock_guard<std::mutex> lock(mu_);
+        last_error_ = "GPU resize path failed (falling back to CPU resize): " + gerr;
+      }
+    }
+
+    if (frameW != outW || frameH != outH) {
       std::string resizeErr;
       const std::size_t tightDstStride = static_cast<std::size_t>(outW) * 3u;
-      if (!ResizeRgb24Bilinear(rgb.data(),
-                               capA.width,
-                               capA.height,
-                               rgbStride,
+      if (!ResizeRgb24Bilinear(rgbOut,
+                               frameW,
+                               frameH,
+                               rgbOutStride,
                                outW,
                                outH,
                                &rgbScaled,
@@ -2985,6 +3266,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       frame_index_ = frameIndex;
     }
   }
+
+  // Cleanup cached GPU resize output.
+  if (gpu_bgr_scaled_allocated && gpu_resize_nvcv && gpu_resize_nvcv->IsInitialized() &&
+      gpu_resize_nvcv->f().NvCVImage_Dealloc) {
+    (void)gpu_resize_nvcv->f().NvCVImage_Dealloc(&gpu_bgr_scaled);
+  }
+  gpu_bgr_scaled = studiocast::maxine::NvCVImage{};
+  gpu_bgr_scaled_allocated = false;
 
   {
     std::lock_guard<std::mutex> lock(mu_);
