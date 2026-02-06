@@ -1,12 +1,17 @@
 #include "main_window.h"
 
+#include <algorithm>
 #include <QAction>
 #include <QApplication>
+#include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QLayout>
 #include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QScrollArea>
+#include <QScreen>
 #include <QStackedWidget>
 #include <QWidget>
 
@@ -18,7 +23,20 @@ namespace studiocast::gui {
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   setWindowTitle("StudioCast");
-  resize(1100, 700);
+
+  // Choose a sane initial size that fits on smaller displays.
+  // If the UI ends up taller than the screen, the central scroll area will
+  // allow reaching everything.
+  constexpr QSize kDesiredSize{1100, 700};
+  const QScreen* screen = QGuiApplication::primaryScreen();
+  if (screen) {
+    const QSize avail = screen->availableGeometry().size();
+    const int w = std::min(kDesiredSize.width(), avail.width() * 95 / 100);
+    const int h = std::min(kDesiredSize.height(), avail.height() * 95 / 100);
+    resize(std::max(1, w), std::max(1, h));
+  } else {
+    resize(kDesiredSize);
+  }
 
   BuildUi();
   BuildMenu();
@@ -26,10 +44,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 void MainWindow::BuildUi() {
-  auto* central = new QWidget(this);
+  auto* scrollArea = new QScrollArea(this);
+  scrollArea->setWidgetResizable(true);
+
+  auto* central = new QWidget(scrollArea);
   auto* layout = new QHBoxLayout(central);
   layout->setContentsMargins(12, 12, 12, 12);
   layout->setSpacing(12);
+  layout->setSizeConstraint(QLayout::SetMinAndMaxSize);
 
   nav_ = new QListWidget(central);
   nav_->setFixedWidth(220);
@@ -44,7 +66,8 @@ void MainWindow::BuildUi() {
   layout->addWidget(nav_);
   layout->addWidget(pages_, /*stretch*/ 1);
 
-  setCentralWidget(central);
+  scrollArea->setWidget(central);
+  setCentralWidget(scrollArea);
 }
 
 void MainWindow::BuildMenu() {
