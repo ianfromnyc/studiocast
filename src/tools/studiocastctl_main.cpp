@@ -6,6 +6,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -168,54 +169,143 @@ void PrintMaxinePrettyFromStatusJson(const std::string& statusJson) {
     return;
   }
 
-  const auto itMax = o->find("maxine");
-  if (itMax == o->end()) {
-    std::cout << "Maxine: (not reported by daemon)\n";
-    return;
-  }
+  // ----------------
+  // Maxine (effects)
+  // ----------------
+  if (auto itMax = o->find("maxine"); itMax != o->end()) {
+    const auto* max = itMax->second.AsObject();
+    if (!max) {
+      std::cout << "Maxine: (invalid maxine object)\n";
+    } else {
+      bool supported = false;
+      if (auto it = max->find("supported"); it != max->end()) {
+        if (const auto* b = it->second.AsBool()) supported = *b;
+      }
 
-  const auto* max = itMax->second.AsObject();
-  if (!max) {
-    std::cout << "Maxine: (invalid maxine object)\n";
-    return;
-  }
+      std::string blockedReason;
+      if (auto it = max->find("blocked_reason"); it != max->end()) {
+        if (const auto* s = it->second.AsString()) blockedReason = *s;
+      }
 
-  bool supported = false;
-  if (auto it = max->find("supported"); it != max->end()) {
-    if (const auto* b = it->second.AsBool()) supported = *b;
-  }
+      std::string summary;
+      if (auto it = max->find("summary"); it != max->end()) {
+        if (const auto* s = it->second.AsString()) summary = *s;
+      }
 
-  std::string blockedReason;
-  if (auto it = max->find("blocked_reason"); it != max->end()) {
-    if (const auto* s = it->second.AsString()) blockedReason = *s;
-  }
+      std::cout << "Maxine: "
+                << (supported ? std::string("OK")
+                              : MaxineReasonToEnglish(blockedReason.empty()
+                                                          ? std::string(studiocast::maxine::reasons::kUnknown)
+                                                          : blockedReason))
+                << "\n";
+      if (!summary.empty()) {
+        std::cout << "  " << summary << "\n";
+      }
 
-  std::string summary;
-  if (auto it = max->find("summary"); it != max->end()) {
-    if (const auto* s = it->second.AsString()) summary = *s;
-  }
-
-  std::cout << "Maxine: "
-            << (supported ? std::string("OK")
-                          : MaxineReasonToEnglish(blockedReason.empty()
-                                                      ? std::string(studiocast::maxine::reasons::kUnknown)
-                                                      : blockedReason))
-            << "\n";
-  if (!summary.empty()) {
-    std::cout << "  " << summary << "\n";
-  }
-
-  if (!supported) {
-    if (auto it = max->find("blocked_details"); it != max->end()) {
-      if (const auto* arr = it->second.AsArray()) {
-        for (const auto& v : *arr) {
-          if (const auto* s = v.AsString()) {
-            if (!s->empty()) std::cout << "  - " << *s << "\n";
+      if (!supported) {
+        if (auto it = max->find("blocked_details"); it != max->end()) {
+          if (const auto* arr = it->second.AsArray()) {
+            for (const auto& v : *arr) {
+              if (const auto* s = v.AsString()) {
+                if (!s->empty()) std::cout << "  - " << *s << "\n";
+              }
+            }
           }
         }
       }
     }
+  } else {
+    std::cout << "Maxine: (not reported by daemon)\n";
   }
+
+  // ----------------
+  // Video negotiated formats
+  // ----------------
+  auto getString = [](const Value::Object* obj, const char* key) -> std::string {
+    if (!obj) return {};
+    if (auto it = obj->find(key); it != obj->end()) {
+      if (const auto* s = it->second.AsString()) return *s;
+    }
+    return {};
+  };
+  auto getInt = [](const Value::Object* obj, const char* key) -> int {
+    if (!obj) return 0;
+    if (auto it = obj->find(key); it != obj->end()) {
+      if (const auto* n = it->second.AsNumber()) return static_cast<int>(*n);
+    }
+    return 0;
+  };
+  auto getDouble = [](const Value::Object* obj, const char* key) -> std::optional<double> {
+    if (!obj) return std::nullopt;
+    if (auto it = obj->find(key); it != obj->end()) {
+      if (const auto* n = it->second.AsNumber()) return *n;
+    }
+    return std::nullopt;
+  };
+
+  const Value::Object* video = nullptr;
+  if (auto it = o->find("video"); it != o->end()) {
+    video = it->second.AsObject();
+  }
+  if (!video) {
+    std::cout << "Video: (not reported by daemon)\n";
+    return;
+  }
+
+  std::cout << "Video:\n";
+  {
+    std::string inDev = getString(video, "input_device");
+    std::string outDev = getString(video, "output_device");
+    if (inDev.empty()) inDev = "(auto)";
+    if (outDev.empty()) outDev = "(auto)";
+    std::cout << "  source_device: " << inDev << "\n";
+    std::cout << "  loopback_device: " << outDev << "\n";
+  }
+
+  auto printFmt = [&](const char* label, const char* key) {
+    const Value::Object* fmt = nullptr;
+    if (auto it = video->find(key); it != video->end()) {
+      fmt = it->second.AsObject();
+    }
+    if (!fmt) {
+      std::cout << "  " << label << ": (not reported)\n";
+      return;
+    }
+
+    const std::string pixfmt = getString(fmt, "pixfmt");
+    const int w = getInt(fmt, "width");
+    const int h = getInt(fmt, "height");
+    const int fpsNum = getInt(fmt, "fps_num");
+    const int fpsDen = getInt(fmt, "fps_den");
+    const auto fps = getDouble(fmt, "fps");
+    const int bpl = getInt(fmt, "bytesperline");
+    const int sz = getInt(fmt, "sizeimage");
+
+    if (pixfmt.empty() && w == 0 && h == 0 && bpl == 0 && sz == 0) {
+      std::cout << "  " << label << ": (not negotiated yet)\n";
+      return;
+    }
+
+    std::ostringstream fpsPretty;
+    if (fpsNum > 0 && fpsDen > 0) {
+      fpsPretty << fpsNum << "/" << fpsDen;
+      if (fps.has_value()) {
+        fpsPretty << " (~" << std::fixed << std::setprecision(3) << *fps << ")";
+      }
+    } else if (fps.has_value()) {
+      fpsPretty << std::fixed << std::setprecision(3) << *fps;
+    } else {
+      fpsPretty << "?";
+    }
+
+    std::cout << "  " << label << ": "
+              << (pixfmt.empty() ? std::string("(unknown)") : pixfmt) << " "
+              << w << "x" << h << " @ " << fpsPretty.str() << " fps"
+              << " (bytesperline=" << bpl << ", sizeimage=" << sz << ")\n";
+  };
+
+  printFmt("capture_format", "capture_format");
+  printFmt("output_format", "output_format");
 }
 
 bool IsKnownEffectId(const std::string& id) {

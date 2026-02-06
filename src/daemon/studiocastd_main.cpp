@@ -220,6 +220,43 @@ std::string FormatKeyLightTemperaturePreset(int preset) {
     }
 }
 
+static double FpsToDouble(int fps, int fps_num, int fps_den) {
+    if (fps_den > 0 && fps_num > 0) {
+        return static_cast<double>(fps_num) / static_cast<double>(fps_den);
+    }
+    return static_cast<double>(fps);
+}
+
+static std::string CaptureFormatToJson(const studiocast::video::CaptureFormat& f) {
+    std::ostringstream oss;
+    oss << "{";
+    oss << "\"pixfmt\":\"" << JsonEscape(f.pixfmt) << "\",";
+    oss << "\"width\":" << f.width << ",";
+    oss << "\"height\":" << f.height << ",";
+    oss << "\"fps\":" << std::setprecision(6) << FpsToDouble(f.fps, f.fps_num, f.fps_den) << ",";
+    oss << "\"fps_num\":" << f.fps_num << ",";
+    oss << "\"fps_den\":" << f.fps_den << ",";
+    oss << "\"bytesperline\":" << f.bytes_per_line << ",";
+    oss << "\"sizeimage\":" << f.size_image;
+    oss << "}";
+    return oss.str();
+}
+
+static std::string ActualFormatToJson(const studiocast::video::ActualFormat& f) {
+    std::ostringstream oss;
+    oss << "{";
+    oss << "\"pixfmt\":\"" << JsonEscape(f.pixfmt) << "\",";
+    oss << "\"width\":" << f.width << ",";
+    oss << "\"height\":" << f.height << ",";
+    oss << "\"fps\":" << std::setprecision(6) << FpsToDouble(f.fps, f.fps_num, f.fps_den) << ",";
+    oss << "\"fps_num\":" << f.fps_num << ",";
+    oss << "\"fps_den\":" << f.fps_den << ",";
+    oss << "\"bytesperline\":" << f.bytes_per_line << ",";
+    oss << "\"sizeimage\":" << f.size_image;
+    oss << "}";
+    return oss.str();
+}
+
 std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st,
                          const studiocast::video::VirtualCameraServiceConfig& cfg,
                          const studiocast::audio::VirtualAudioServiceStatus& ast,
@@ -246,6 +283,10 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
 
     oss << "\"input_device\":\"" << JsonEscape(st.pipeline.input_device) << "\",";
     oss << "\"output_device\":\"" << JsonEscape(st.pipeline.output_device) << "\",";
+
+    // Negotiated formats (what the driver actually gave us / accepted).
+    oss << "\"capture_format\":" << CaptureFormatToJson(st.pipeline.capture) << ",";
+    oss << "\"output_format\":" << ActualFormatToJson(st.pipeline.output) << ",";
 
     oss << "\"width\":" << cfg.pipeline.width << ",";
     oss << "\"height\":" << cfg.pipeline.height << ",";
