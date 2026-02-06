@@ -20,6 +20,7 @@ struct DaemonConfig {
   int video_width = 1280;
   int video_height = 720;
   int video_fps = 30;
+  bool video_prefer_mjpeg = true;
 
   // Audio
   bool audio_enabled = false;

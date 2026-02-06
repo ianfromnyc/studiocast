@@ -1311,9 +1311,21 @@ void VideoPage::StartPreview() {
   const int wantFps = fpsSpin_->value();
 
   std::string err;
-  if (!previewCapture_.Open(outDev.toStdString(), wantW, wantH, wantFps, studiocast::video::CapturePixelFormat::rgb24, &err)) {
+  if (!previewCapture_.Open(outDev.toStdString(),
+                            wantW,
+                            wantH,
+                            wantFps,
+                            studiocast::video::CapturePixelFormat::rgb24,
+                            false,
+                            &err)) {
     std::string err2;
-    if (!previewCapture_.Open(outDev.toStdString(), wantW, wantH, wantFps, studiocast::video::CapturePixelFormat::yuyv, &err2)) {
+    if (!previewCapture_.Open(outDev.toStdString(),
+                              wantW,
+                              wantH,
+                              wantFps,
+                              studiocast::video::CapturePixelFormat::yuyv,
+                              false,
+                              &err2)) {
       preview_->SetStatusText("Preview open failed:\n" + QString::fromStdString(err2));
       return;
     }

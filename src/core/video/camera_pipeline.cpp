@@ -23,6 +23,7 @@
 #include "core/video/convert.h"
 #include "core/video/capture_error_policy.h"
 #include "core/video/image_ppm.h"
+#include "core/video/mjpeg_decode.h"
 #include "core/video/effects/effect_chain.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/broadcast_effect_rules.h"
@@ -410,7 +411,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
   if (!inDev.empty()) {
     std::string cerr;
-    if (!cap.Open(inDev, cfg.width, cfg.height, cfg.fps, CapturePixelFormat::yuyv, &cerr)) {
+    if (!cap.Open(inDev,
+                  cfg.width,
+                  cfg.height,
+                  cfg.fps,
+                  CapturePixelFormat::yuyv,
+                  cfg.prefer_mjpeg,
+                  &cerr)) {
       std::lock_guard<std::mutex> lock(mu_);
       last_error_ = "Failed to open capture device " + inDev + ":\n" + cerr;
       running_ = false;
@@ -432,7 +439,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     bool opened = false;
     for (const auto& d : candidates) {
       std::string cerr;
-      if (cap.Open(d.dev_node, cfg.width, cfg.height, cfg.fps, CapturePixelFormat::yuyv, &cerr)) {
+      if (cap.Open(d.dev_node,
+                   cfg.width,
+                   cfg.height,
+                   cfg.fps,
+                   CapturePixelFormat::yuyv,
+                   cfg.prefer_mjpeg,
+                   &cerr)) {
         inDev = d.dev_node;
         opened = true;
         break;
@@ -446,7 +459,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     if (!opened) {
       std::ostringstream oss;
-      oss << "Failed to auto-select a usable camera (YUYV).\n";
+      oss << "Failed to auto-select a usable camera.\n";
       oss << "Tried the following devices:\n";
       oss << inAttempts.str();
       oss << "\nTip: specify an input explicitly (e.g. studiocastd --input /dev/video0)\n";
@@ -498,8 +511,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
   const auto outA = writer_.Actual();
 
-  const std::size_t rgbStride = static_cast<std::size_t>(capA.width) * 3u;
-  std::vector<std::uint8_t> rgb(rgbStride * static_cast<std::size_t>(capA.height));
+  studiocast::video::Rgb24Frame rgb;
+  rgb.ResizeTight(capA.width, capA.height);
+  const std::size_t rgbStride = rgb.stride_bytes;
 
   std::vector<std::uint8_t> rgbScaled;
 
@@ -2664,8 +2678,26 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       break;
     }
 
-    // Convert capture YUYV -> internal RGB (tight stride)
-    YuyvToRgb24(f.data, capA.width, capA.height, capA.bytes_per_line, rgb.data(), rgbStride);
+    // Convert capture -> internal RGB (tight stride)
+    if (capA.format == CapturePixelFormat::yuyv) {
+      YuyvToRgb24(f.data, capA.width, capA.height, capA.bytes_per_line, rgb.data(), rgbStride);
+    } else if (capA.format == CapturePixelFormat::mjpeg) {
+      int decW = 0;
+      int decH = 0;
+      if (!DecodeMjpegToRgb24(f.data, f.bytes, rgb, decW, decH) || decW != capA.width || decH != capA.height) {
+        std::string rerr;
+        (void)cap.ReleaseFrame(f, &rerr);
+        std::lock_guard<std::mutex> lock(mu_);
+        last_error_ = "MJPEG decode failed.";
+        break;
+      }
+    } else {
+      std::string rerr;
+      (void)cap.ReleaseFrame(f, &rerr);
+      std::lock_guard<std::mutex> lock(mu_);
+      last_error_ = "Unsupported negotiated capture format: " + capA.pixfmt;
+      break;
+    }
 
     std::string rerr;
     (void)cap.ReleaseFrame(f, &rerr);

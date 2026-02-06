@@ -34,6 +34,9 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PULSE_SIMPLE QUIET IMPORTED_TARGET libpulse-simple)
 
+# MJPEG decode (libjpeg-turbo recommended; provided as `JPEG`).
+find_package(JPEG REQUIRED)
+
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
@@ -145,6 +148,8 @@ add_library(studiocast_core
         src/core/video/feed.cpp
         src/core/video/convert.h
         src/core/video/convert.cpp
+        src/core/video/mjpeg_decode.h
+        src/core/video/mjpeg_decode.cpp
         src/core/video/effects/effect_types.h
         src/core/video/effects/effect_types.cpp
         src/core/video/effects/broadcast_effect_contract.h
@@ -200,6 +205,13 @@ target_include_directories(studiocast_core PUBLIC
 )
 
 target_link_libraries(studiocast_core PUBLIC ${CMAKE_DL_LIBS})
+
+if (TARGET JPEG::JPEG)
+    target_link_libraries(studiocast_core PUBLIC JPEG::JPEG)
+else()
+    target_include_directories(studiocast_core PUBLIC ${JPEG_INCLUDE_DIRS})
+    target_link_libraries(studiocast_core PUBLIC ${JPEG_LIBRARIES})
+endif()
 
 if (PULSE_SIMPLE_FOUND)
     target_sources(studiocast_core PRIVATE

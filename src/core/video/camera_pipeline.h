@@ -23,6 +23,8 @@ namespace studiocast::video {
         int height = 720;
         int fps = 30;
 
+        bool prefer_mjpeg = true;
+
         studiocast::video::effects::BroadcastCameraEffects effects{};
     };
 

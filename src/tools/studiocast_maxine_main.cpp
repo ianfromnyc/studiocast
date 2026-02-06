@@ -346,7 +346,13 @@ int main(int argc, char** argv) {
     // Attempt to capture from V4L2; fall back to synthetic.
     studiocast::video::V4l2Capture cap;
     bool have_camera = false;
-    if (cap.Open(device, width, height, fps, studiocast::video::CapturePixelFormat::yuyv, &err)) {
+    if (cap.Open(device,
+                 width,
+                 height,
+                 fps,
+                 studiocast::video::CapturePixelFormat::yuyv,
+                 /*prefer_mjpeg=*/true,
+                 &err)) {
       have_camera = true;
       width = cap.Actual().width;
       height = cap.Actual().height;
@@ -576,7 +582,13 @@ int main(int argc, char** argv) {
     // Attempt to capture from V4L2; fall back to synthetic.
     studiocast::video::V4l2Capture cap;
     bool have_camera = false;
-    if (cap.Open(device, width, height, fps, studiocast::video::CapturePixelFormat::yuyv, &err)) {
+    if (cap.Open(device,
+                 width,
+                 height,
+                 fps,
+                 studiocast::video::CapturePixelFormat::yuyv,
+                 /*prefer_mjpeg=*/true,
+                 &err)) {
       have_camera = true;
       width = cap.Actual().width;
       height = cap.Actual().height;

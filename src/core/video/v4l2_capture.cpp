@@ -38,6 +38,7 @@ std::string FourccToString(std::uint32_t f) {
 std::uint32_t FourccFor(CapturePixelFormat fmt) {
   switch (fmt) {
     case CapturePixelFormat::yuyv: return V4L2_PIX_FMT_YUYV;
+    case CapturePixelFormat::mjpeg: return V4L2_PIX_FMT_MJPEG;
     case CapturePixelFormat::rgb24: return V4L2_PIX_FMT_RGB24;
   }
   return V4L2_PIX_FMT_YUYV;
@@ -46,6 +47,7 @@ std::uint32_t FourccFor(CapturePixelFormat fmt) {
 std::string CapturePixelFormatLabel(CapturePixelFormat fmt) {
   switch (fmt) {
     case CapturePixelFormat::yuyv: return "YUYV";
+    case CapturePixelFormat::mjpeg: return "MJPG";
     case CapturePixelFormat::rgb24: return "RGB24";
   }
   return "UNKNOWN";
@@ -57,9 +59,40 @@ bool ParseCapturePixelFormat(std::uint32_t fourcc, CapturePixelFormat* out) {
     *out = CapturePixelFormat::yuyv;
     return true;
   }
+  if (fourcc == V4L2_PIX_FMT_MJPEG || fourcc == V4L2_PIX_FMT_JPEG) {
+    *out = CapturePixelFormat::mjpeg;
+    return true;
+  }
   if (fourcc == V4L2_PIX_FMT_RGB24) {
     *out = CapturePixelFormat::rgb24;
     return true;
+  }
+  return false;
+}
+
+std::vector<std::uint32_t> EnumeratePixelFormats(int fd, unsigned int type) {
+  std::vector<std::uint32_t> out;
+  v4l2_fmtdesc desc{};
+  desc.type = type;
+
+  for (desc.index = 0; IoctlRetry(fd, VIDIOC_ENUM_FMT, &desc) == 0; ++desc.index) {
+    if (desc.pixelformat == 0) continue;
+    // Deduplicate while preserving order.
+    bool exists = false;
+    for (const auto f : out) {
+      if (f == desc.pixelformat) {
+        exists = true;
+        break;
+      }
+    }
+    if (!exists) out.push_back(desc.pixelformat);
+  }
+  return out;
+}
+
+bool SupportsFourcc(const std::vector<std::uint32_t>& fmts, std::uint32_t fourcc) {
+  for (const auto f : fmts) {
+    if (f == fourcc) return true;
   }
   return false;
 }
@@ -173,21 +206,37 @@ bool ParseChosenCaptureFmt(const v4l2_format& f,
   a.pixfmt_fourcc = fourcc;
   a.pixfmt = FourccToString(fourcc);
 
-  // Provide conservative minima.
-  const std::size_t bpp = (a.format == CapturePixelFormat::rgb24) ? 3u : 2u;
-  const std::size_t minBpl = static_cast<std::size_t>(a.width) * bpp;
-  if (bpl < minBpl) bpl = minBpl;
-  a.bytes_per_line = bpl;
+  if (a.format == CapturePixelFormat::mjpeg) {
+    // Compressed: `bytes_per_line` is not meaningful and drivers often report 0.
+    // Keep the negotiated values as-is.
+    a.bytes_per_line = bpl;
+    a.size_image = size;
+  } else {
+    // Provide conservative minima for uncompressed formats.
+    const std::size_t bpp = (a.format == CapturePixelFormat::rgb24) ? 3u : 2u;
+    const std::size_t minBpl = static_cast<std::size_t>(a.width) * bpp;
+    if (bpl < minBpl) bpl = minBpl;
+    a.bytes_per_line = bpl;
 
-  const std::size_t minSize = bpl * static_cast<std::size_t>(a.height);
-  if (size < minSize) size = minSize;
-  a.size_image = size;
+    const std::size_t minSize = bpl * static_cast<std::size_t>(a.height);
+    if (size < minSize) size = minSize;
+    a.size_image = size;
+  }
 
   *out = a;
   return true;
 }
 
 }  // namespace
+
+bool ShouldPreferMjpegForResolution(int width, int height) {
+  // Heuristic: uncompressed YUYV at >720p tends to be unsupported or unstable on many UVC webcams,
+  // while MJPEG often supports 1080p+.
+  if (width <= 0 || height <= 0) return false;
+  const std::int64_t pixels = static_cast<std::int64_t>(width) * static_cast<std::int64_t>(height);
+  const std::int64_t yuyvLikelyMax = 1280LL * 720LL;
+  return pixels > yuyvLikelyMax;
+}
 
 V4l2Capture::~V4l2Capture() { Close(); }
 
@@ -196,6 +245,7 @@ bool V4l2Capture::Open(const std::string& device,
                        int height,
                        int fps,
                        CapturePixelFormat fmt,
+                       bool prefer_mjpeg,
                        std::string* error) {
   Close();
 
@@ -240,25 +290,57 @@ bool V4l2Capture::Open(const std::string& device,
   std::ostringstream attempts;
 
   for (const auto& t : types) {
-    std::string err;
-    v4l2_format f{};
-    if (TrySetFmtCapture(fd_, t, width, height, fmt, &f, &err)) {
-      chosen = f;
-      chosenMplane = t.mplane;
-      buf_type_ = t.type;
-      mplane_ = t.mplane;
-      ok = true;
-      break;
+    const auto supported = EnumeratePixelFormats(fd_, t.type);
+
+    const bool supportsMjpeg = SupportsFourcc(supported, V4L2_PIX_FMT_MJPEG) ||
+                               SupportsFourcc(supported, V4L2_PIX_FMT_JPEG);
+    const bool supportsYuyv = SupportsFourcc(supported, V4L2_PIX_FMT_YUYV);
+
+    // Only apply MJPEG preference when the caller requested the normal uncompressed YUYV path.
+    // (Other callers can explicitly request other formats.)
+    const bool mjpegFirst = (fmt == CapturePixelFormat::yuyv) && prefer_mjpeg && supportsMjpeg &&
+                            ShouldPreferMjpegForResolution(width, height);
+
+    std::vector<CapturePixelFormat> tryOrder;
+    if (mjpegFirst) {
+      tryOrder.push_back(CapturePixelFormat::mjpeg);
+      tryOrder.push_back(CapturePixelFormat::yuyv);
+    } else {
+      tryOrder.push_back(fmt);
+      // Fallback: if we asked for YUYV first and it fails, try MJPEG if enabled and supported.
+      if (fmt == CapturePixelFormat::yuyv && prefer_mjpeg && supportsMjpeg) {
+        tryOrder.push_back(CapturePixelFormat::mjpeg);
+      }
     }
-    attempts << "Try S_FMT (" << (t.mplane ? "CAPTURE_MPLANE" : "CAPTURE")
-             << "): " << (err.empty() ? "(no detail)" : err) << "\n";
+
+    for (const auto fTry : tryOrder) {
+      if (fTry == CapturePixelFormat::mjpeg && !supportsMjpeg) continue;
+      if (fTry == CapturePixelFormat::yuyv && !supportsYuyv) continue;
+
+      std::string err;
+      v4l2_format f{};
+      if (TrySetFmtCapture(fd_, t, width, height, fTry, &f, &err)) {
+        chosen = f;
+        chosenMplane = t.mplane;
+        buf_type_ = t.type;
+        mplane_ = t.mplane;
+        ok = true;
+        break;
+      }
+
+      attempts << "Try S_FMT (" << (t.mplane ? "CAPTURE_MPLANE" : "CAPTURE")
+               << ", " << CapturePixelFormatLabel(fTry) << "): "
+               << (err.empty() ? "(no detail)" : err) << "\n";
+    }
+
+    if (ok) break;
   }
 
   if (!ok) {
     if (error) {
       std::ostringstream oss;
-      oss << "Failed to set capture format to " << CapturePixelFormatLabel(fmt)
-          << " on " << device << ".\n"
+      oss << "Failed to set capture format on " << device << " (requested "
+          << CapturePixelFormatLabel(fmt) << ").\n"
           << attempts.str()
           << "Tip: check supported formats with:\n"
           << "  v4l2-ctl --device " << device << " --list-formats-ext\n";

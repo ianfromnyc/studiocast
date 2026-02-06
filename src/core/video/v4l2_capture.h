@@ -10,8 +10,13 @@ namespace studiocast::video {
 
   enum class CapturePixelFormat {
     yuyv,
+    mjpeg,
     rgb24,
   };
+
+  // Heuristic used by `V4l2Capture::Open()` to decide whether to prefer MJPEG at a given
+  // requested resolution (many webcams cap uncompressed YUYV at ~720p, but can do 1080p+ in MJPEG).
+  bool ShouldPreferMjpegForResolution(int width, int height);
 
   struct CaptureFormat {
     int width = 0;
@@ -50,6 +55,7 @@ namespace studiocast::video {
               int height,
               int fps,
               CapturePixelFormat fmt,
+              bool prefer_mjpeg,
               std::string* error);
 
     void Close();

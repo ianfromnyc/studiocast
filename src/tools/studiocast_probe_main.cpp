@@ -1,12 +1,15 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
+#include <csetjmp>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <jpeglib.h>
 
 #include "core/audio/pulse/pactl.h"
 #include "core/config/daemon_config.h"
@@ -35,7 +38,9 @@
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/broadcast_effect_rules.h"
 #include "core/video/effects/broadcast_effects_json.h"
+#include "core/video/v4l2_capture.h"
 #include "core/video/image_ppm.h"
+#include "core/video/mjpeg_decode.h"
 #include "core/video/effects/effect_types.h"
 #include "studiocast/version.h"
 
@@ -104,6 +109,140 @@ namespace {
             expectTrue("IsRecoverableCaptureAcquireFailure(empty)", IsRecoverableCaptureAcquireFailure(""));
             expectTrue("IsRecoverableCaptureAcquireFailure(fatal) == false",
                        !IsRecoverableCaptureAcquireFailure("poll failed: EIO"));
+        }
+
+        // MJPEG preference heuristic (pure logic; used by V4L2 capture negotiation).
+        {
+            using studiocast::video::ShouldPreferMjpegForResolution;
+            expectTrue("ShouldPreferMjpegForResolution(1920x1080)",
+                       ShouldPreferMjpegForResolution(1920, 1080));
+            expectTrue("ShouldPreferMjpegForResolution(1280x720) == false",
+                       !ShouldPreferMjpegForResolution(1280, 720));
+            expectTrue("ShouldPreferMjpegForResolution(invalid) == false",
+                       !ShouldPreferMjpegForResolution(0, 720));
+        }
+
+        // MJPEG decode: encode a simple RGB test pattern to JPEG in-memory, then decode back to RGB24.
+        {
+            struct JpegErr {
+                jpeg_error_mgr pub;
+                jmp_buf jmp;
+            } jerr;
+
+            auto encodeRgb24ToJpeg = [&](const std::uint8_t* rgb,
+                                         int w,
+                                         int h,
+                                         int quality,
+                                         std::vector<std::uint8_t>* outJpeg) -> bool {
+                if (!rgb || w <= 0 || h <= 0 || !outJpeg) return false;
+                outJpeg->clear();
+
+                jpeg_compress_struct cinfo{};
+                cinfo.err = jpeg_std_error(&jerr.pub);
+                jerr.pub.error_exit = [](j_common_ptr ci) {
+                    auto* e = reinterpret_cast<JpegErr*>(ci->err);
+                    longjmp(e->jmp, 1);
+                };
+
+                if (setjmp(jerr.jmp) != 0) {
+                    jpeg_destroy_compress(&cinfo);
+                    return false;
+                }
+
+                jpeg_create_compress(&cinfo);
+                unsigned char* dst = nullptr;
+                unsigned long dstLen = 0;
+                jpeg_mem_dest(&cinfo, &dst, &dstLen);
+
+                cinfo.image_width = static_cast<JDIMENSION>(w);
+                cinfo.image_height = static_cast<JDIMENSION>(h);
+                cinfo.input_components = 3;
+                cinfo.in_color_space = JCS_RGB;
+
+                jpeg_set_defaults(&cinfo);
+                jpeg_set_quality(&cinfo, quality, TRUE);
+                jpeg_start_compress(&cinfo, TRUE);
+
+                const std::size_t stride = static_cast<std::size_t>(w) * 3u;
+                while (cinfo.next_scanline < cinfo.image_height) {
+                    JSAMPROW row[1];
+                    row[0] = const_cast<JSAMPROW>(reinterpret_cast<const JSAMPLE*>(rgb +
+                                                                                static_cast<std::size_t>(cinfo.next_scanline) * stride));
+                    if (jpeg_write_scanlines(&cinfo, row, 1) != 1) {
+                        jpeg_finish_compress(&cinfo);
+                        jpeg_destroy_compress(&cinfo);
+                        return false;
+                    }
+                }
+
+                jpeg_finish_compress(&cinfo);
+                jpeg_destroy_compress(&cinfo);
+
+                if (!dst || dstLen == 0) return false;
+                outJpeg->assign(dst, dst + dstLen);
+                // `jpeg_mem_dest` uses `malloc`.
+                std::free(dst);
+                return true;
+            };
+
+            const int w = 16;
+            const int h = 16;
+            std::vector<std::uint8_t> src(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3u);
+
+            auto setPixel = [&](int x, int y, std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+                const std::size_t i = (static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                                       static_cast<std::size_t>(x)) * 3u;
+                src[i + 0] = r;
+                src[i + 1] = g;
+                src[i + 2] = b;
+            };
+
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const bool right = x >= (w / 2);
+                    const bool bottom = y >= (h / 2);
+                    if (!right && !bottom) {
+                        setPixel(x, y, 255, 0, 0);  // red
+                    } else if (right && !bottom) {
+                        setPixel(x, y, 0, 255, 0);  // green
+                    } else if (!right && bottom) {
+                        setPixel(x, y, 0, 0, 255);  // blue
+                    } else {
+                        setPixel(x, y, 255, 255, 255);  // white
+                    }
+                }
+            }
+
+            std::vector<std::uint8_t> jpeg;
+            expectTrue("EncodeRgb24ToJpeg(in-memory)", encodeRgb24ToJpeg(src.data(), w, h, 95, &jpeg));
+
+            studiocast::video::Rgb24Frame decoded;
+            int dw = 0;
+            int dh = 0;
+            expectTrue("DecodeMjpegToRgb24", studiocast::video::DecodeMjpegToRgb24(jpeg.data(), jpeg.size(), decoded, dw, dh));
+            expectIntEq("DecodeMjpegToRgb24 width", dw, w);
+            expectIntEq("DecodeMjpegToRgb24 height", dh, h);
+
+            auto get = [&](int x, int y) {
+                const std::size_t i = (static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                                       static_cast<std::size_t>(x)) * 3u;
+                struct RGB {
+                    int r;
+                    int g;
+                    int b;
+                };
+                return RGB{decoded.data()[i + 0], decoded.data()[i + 1], decoded.data()[i + 2]};
+            };
+
+            const auto a = get(4, 4);
+            const auto b = get(12, 4);
+            const auto c = get(4, 12);
+            const auto d = get(12, 12);
+
+            expectTrue("DecodeMjpegToRgb24 TL is red-ish", a.r >= 180 && a.g <= 80 && a.b <= 80);
+            expectTrue("DecodeMjpegToRgb24 TR is green-ish", b.g >= 180 && b.r <= 80 && b.b <= 80);
+            expectTrue("DecodeMjpegToRgb24 BL is blue-ish", c.b >= 180 && c.r <= 80 && c.g <= 80);
+            expectTrue("DecodeMjpegToRgb24 BR is white-ish", d.r >= 180 && d.g >= 180 && d.b >= 180);
         }
 
         // `pactl info` parsing helper (deterministic; avoids needing pactl in self-test).

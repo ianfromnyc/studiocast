@@ -46,7 +46,8 @@ bool VirtualCameraService::NeedsPipelineRestart(const CameraPipelineConfig& a, c
            a.output_device != b.output_device ||
            a.width != b.width ||
            a.height != b.height ||
-           a.fps != b.fps;
+           a.fps != b.fps ||
+           a.prefer_mjpeg != b.prefer_mjpeg;
 }
 
 bool VirtualCameraService::Start(const VirtualCameraServiceConfig& cfg, std::string* error) {

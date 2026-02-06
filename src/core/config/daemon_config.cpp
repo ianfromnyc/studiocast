@@ -108,6 +108,9 @@ DaemonConfig LoadDaemonConfig() {
       if (auto it = kv.find("video.fps"); it != kv.end()) {
         s.video_fps = ParseInt(it->second, s.video_fps);
       }
+      if (auto it = kv.find("video.prefer_mjpeg"); it != kv.end()) {
+        s.video_prefer_mjpeg = ParseBool(it->second, s.video_prefer_mjpeg);
+      }
 
       // Audio
       if (auto it = kv.find("audio.enabled"); it != kv.end()) {
@@ -436,6 +439,7 @@ bool SaveDaemonConfig(const DaemonConfig& s, std::string* error) {
   out << "video.width = " << s.video_width << "\n";
   out << "video.height = " << s.video_height << "\n";
   out << "video.fps = " << s.video_fps << "\n";
+  out << "video.prefer_mjpeg = " << (s.video_prefer_mjpeg ? "true" : "false") << "\n";
   out << "\n";
 
   out << "# Audio\n";
@@ -469,6 +473,7 @@ studiocast::video::VirtualCameraServiceConfig ToVideoServiceConfig(const DaemonC
   cfg.pipeline.width = s.video_width;
   cfg.pipeline.height = s.video_height;
   cfg.pipeline.fps = s.video_fps;
+  cfg.pipeline.prefer_mjpeg = s.video_prefer_mjpeg;
   cfg.pipeline.effects = s.video_effects;
 
   cfg.consumer_poll_ms = s.consumer_poll_ms;
@@ -486,6 +491,7 @@ void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCamer
   out->video_width = cfg.pipeline.width;
   out->video_height = cfg.pipeline.height;
   out->video_fps = cfg.pipeline.fps;
+  out->video_prefer_mjpeg = cfg.pipeline.prefer_mjpeg;
   out->video_effects = cfg.pipeline.effects;
 
   out->consumer_poll_ms = cfg.consumer_poll_ms;
