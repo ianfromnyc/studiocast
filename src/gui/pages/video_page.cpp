@@ -176,6 +176,11 @@ struct DaemonVideoStatus {
   NegotiatedFormat capture_format;
   NegotiatedFormat output_format;
 
+  // Output scaling info (from daemon status).
+  QString scaling_backend_active;
+  NegotiatedFormat scaling_from;
+  NegotiatedFormat scaling_to;
+
   studiocast::video::effects::BroadcastCameraEffects effects{};
   bool effects_valid = false;
 
@@ -247,6 +252,17 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
 
   out->capture_format = parseFormat(video.value("capture_format").toObject());
   out->output_format = parseFormat(video.value("output_format").toObject());
+
+  const QJsonObject scaling = video.value("scaling").toObject();
+  if (!scaling.isEmpty()) {
+    out->scaling_backend_active = scaling.value("backend_active").toString();
+    out->scaling_from = parseFormat(scaling.value("from").toObject());
+    out->scaling_to = parseFormat(scaling.value("to").toObject());
+  } else {
+    out->scaling_backend_active.clear();
+    out->scaling_from = {};
+    out->scaling_to = {};
+  }
 
   out->input_device = video.value("input_device").toString();
   out->output_device = video.value("output_device").toString();
@@ -1711,17 +1727,28 @@ void VideoPage::UpdateStatusText() {
   if (st.pipeline_running) {
     oss << "  Capture:    " << fmtLine(st.capture_format, /*withPixfmtFirst=*/true) << "\n";
     oss << "  Output:     " << fmtLine(st.output_format, /*withPixfmtFirst=*/false) << "\n";
-    if (st.capture_format.present && st.output_format.present &&
-        st.capture_format.width > 0 && st.capture_format.height > 0 &&
-        st.output_format.width > 0 && st.output_format.height > 0 &&
-        (st.capture_format.width != st.output_format.width || st.capture_format.height != st.output_format.height)) {
-      oss << "  Scaling:    " << fmtDims(st.capture_format.width, st.capture_format.height) << " "
-          << "→"
-          << " " << fmtDims(st.output_format.width, st.output_format.height) << "\n";
+
+    {
+      std::ostringstream line;
+      if (!st.scaling_backend_active.isEmpty()) {
+        line << st.scaling_backend_active.toStdString();
+      } else {
+        line << "—";
+      }
+
+      const auto& from = st.scaling_from.present ? st.scaling_from : st.capture_format;
+      const auto& to = st.scaling_to.present ? st.scaling_to : st.output_format;
+
+      if (from.present && to.present && from.width > 0 && from.height > 0 && to.width > 0 && to.height > 0) {
+        line << " (" << fmtDims(from.width, from.height) << " → " << fmtDims(to.width, to.height) << ")";
+      }
+
+      oss << "  Scaling:    " << line.str() << "\n";
     }
   } else {
     oss << "  Capture:    —\n";
     oss << "  Output:     —\n";
+    oss << "  Scaling:    —\n";
   }
 
   oss << "  input:      " << st.input_device.toStdString() << "\n";

@@ -757,6 +757,7 @@ namespace {
                 {
                     std::ofstream out(confPath);
                     out << "video.mirror = true\n";
+                    out << "video.scaling.backend = gpu\n";
                     out << "video.background = blur\n";
                     out << "video.background_backend = maxine\n";
                     out << "video.background_strength = 13\n";
@@ -788,6 +789,8 @@ namespace {
 
                 const auto vc = studiocast::config::ToVideoServiceConfig(dc);
                 expectTrue("ToVideoServiceConfig mirror", vc.pipeline.effects.mirror);
+                expectTrue("ToVideoServiceConfig scaling backend gpu",
+                           vc.pipeline.scaling_backend == studiocast::video::ScalingBackendPreference::gpu);
                 expectTrue("ToVideoServiceConfig vb blur",
                            vc.pipeline.effects.virtual_background.mode ==
                                studiocast::video::effects::VirtualBackgroundMode::blur);
@@ -841,6 +844,8 @@ namespace {
                         const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
                         expectTrue("saved config has video.effects.json", content.find("video.effects.json") != std::string::npos);
                         expectTrue("saved config has audio.effects.json", content.find("audio.effects.json") != std::string::npos);
+                        expectTrue("saved config has video.scaling.backend",
+                                   content.find("video.scaling.backend") != std::string::npos);
                         expectTrue("saved config removes video.mirror", content.find("video.mirror") == std::string::npos);
                         expectTrue("saved config removes video.background", content.find("video.background") == std::string::npos);
                         expectTrue("saved config removes video.effects.virtual_background",
