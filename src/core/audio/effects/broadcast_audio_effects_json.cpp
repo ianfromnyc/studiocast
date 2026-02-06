@@ -83,6 +83,22 @@ bool TryGetInt(const Value::Object& obj,
     return true;
 }
 
+bool TryGetString(const Value::Object& obj,
+                  std::string_view path,
+                  std::string_view key,
+                  bool* found,
+                  std::string* out,
+                  std::string* error) {
+    *found = false;
+    const Value* v = Find(obj, std::string(key));
+    if (!v) return true;
+    const std::string* s = v->AsString();
+    if (!s) return Fail(error, JoinPath(path, key) + " must be a string");
+    *found = true;
+    *out = *s;
+    return true;
+}
+
 const Value::Object* GetObj(const Value::Object& obj,
                             std::string_view path,
                             std::string_view key,
@@ -136,12 +152,28 @@ std::string BroadcastAudioEffectsToJson(const BroadcastAudioEffects& effects) {
     oss << "\"noise_removal_enabled\":" << (effects.microphone.noise_removal_enabled ? "true" : "false") << ",";
     oss << "\"room_echo_removal_enabled\":" << (effects.microphone.room_echo_removal_enabled ? "true" : "false") << ",";
     oss << "\"strength\":" << effects.microphone.strength << ",";
-    oss << "\"studio_voice_enabled\":" << (effects.microphone.studio_voice_enabled ? "true" : "false");
+    oss << "\"studio_voice_enabled\":" << (effects.microphone.studio_voice_enabled ? "true" : "false") << ",";
+
+    oss << "\"aec\":{";
+    oss << "\"enabled\":" << (effects.microphone.aec.enabled ? "true" : "false") << ",";
+    oss << "\"reference_source\":\""
+        << studiocast::util::json::EscapeString(effects.microphone.aec.reference_source) << "\"";
+    oss << "},";
+
+    oss << "\"superres\":{";
+    oss << "\"enabled\":" << (effects.microphone.superres.enabled ? "true" : "false") << ",";
+    oss << "\"mode\":\"" << ToString(effects.microphone.superres.mode) << "\"";
+    oss << "}";
     oss << "},";
 
     oss << "\"speaker\":{";
     oss << "\"noise_removal_enabled\":" << (effects.speaker.noise_removal_enabled ? "true" : "false") << ",";
-    oss << "\"strength\":" << effects.speaker.strength;
+    oss << "\"strength\":" << effects.speaker.strength << ",";
+
+    oss << "\"superres\":{";
+    oss << "\"enabled\":" << (effects.speaker.superres.enabled ? "true" : "false") << ",";
+    oss << "\"mode\":\"" << ToString(effects.speaker.superres.mode) << "\"";
+    oss << "}";
     oss << "}";
 
     oss << "}";
@@ -166,12 +198,18 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
     int schema = out->schema_version;
     if (!TryGetInt(*obj, "", "schema_version", &found, &schema, error)) return false;
     if (found) {
-        if (schema != kBroadcastAudioEffectsSchemaVersion) {
+        if (schema != 1 && schema != kBroadcastAudioEffectsSchemaVersion) {
             return Fail(error,
                         "unsupported schema_version " + std::to_string(schema) +
-                            " (expected " + std::to_string(kBroadcastAudioEffectsSchemaVersion) + ")");
+                            " (expected 1 or " + std::to_string(kBroadcastAudioEffectsSchemaVersion) + ")");
         }
-        out->schema_version = schema;
+        if (schema == 1) {
+            AddWarning(warnings,
+                       "schema_version 1 detected; upgrading to " + std::to_string(kBroadcastAudioEffectsSchemaVersion));
+            out->schema_version = kBroadcastAudioEffectsSchemaVersion;
+        } else {
+            out->schema_version = schema;
+        }
     } else {
         AddWarning(warnings, "schema_version missing; assuming " + std::to_string(kBroadcastAudioEffectsSchemaVersion));
         out->schema_version = kBroadcastAudioEffectsSchemaVersion;
@@ -179,7 +217,12 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
 
     if (const auto* mic = GetObj(*obj, "", "microphone", error)) {
         if (!CheckUnknownKeys(*mic,
-                              {"noise_removal_enabled", "room_echo_removal_enabled", "strength", "studio_voice_enabled"},
+                              {"noise_removal_enabled",
+                               "room_echo_removal_enabled",
+                               "strength",
+                               "studio_voice_enabled",
+                               "aec",
+                               "superres"},
                               "microphone",
                               options,
                               warnings,
@@ -205,10 +248,45 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
         en = out->microphone.studio_voice_enabled;
         if (!TryGetBool(*mic, "microphone", "studio_voice_enabled", &found, &en, error)) return false;
         if (found) out->microphone.studio_voice_enabled = en;
+
+        if (const auto* aec = GetObj(*mic, "microphone", "aec", error)) {
+            if (!CheckUnknownKeys(*aec, {"enabled", "reference_source"}, "microphone.aec", options, warnings, error)) {
+                return false;
+            }
+
+            en = out->microphone.aec.enabled;
+            if (!TryGetBool(*aec, "microphone.aec", "enabled", &found, &en, error)) return false;
+            if (found) out->microphone.aec.enabled = en;
+
+            std::string ref = out->microphone.aec.reference_source;
+            if (!TryGetString(*aec, "microphone.aec", "reference_source", &found, &ref, error)) return false;
+            if (found) out->microphone.aec.reference_source = ref;
+        }
+
+        if (const auto* sr = GetObj(*mic, "microphone", "superres", error)) {
+            if (!CheckUnknownKeys(*sr, {"enabled", "mode"}, "microphone.superres", options, warnings, error)) return false;
+
+            en = out->microphone.superres.enabled;
+            if (!TryGetBool(*sr, "microphone.superres", "enabled", &found, &en, error)) return false;
+            if (found) out->microphone.superres.enabled = en;
+
+            std::string mode;
+            if (!TryGetString(*sr, "microphone.superres", "mode", &found, &mode, error)) return false;
+            if (found) {
+                SuperresMode m = out->microphone.superres.mode;
+                if (!TryParseSuperresMode(mode, &m)) {
+                    return Fail(error,
+                                "microphone.superres.mode must be one of \"8k_to_16k\" or \"16k_to_48k\"");
+                }
+                out->microphone.superres.mode = m;
+            }
+        }
     }
 
     if (const auto* spk = GetObj(*obj, "", "speaker", error)) {
-        if (!CheckUnknownKeys(*spk, {"noise_removal_enabled", "strength"}, "speaker", options, warnings, error)) return false;
+        if (!CheckUnknownKeys(*spk, {"noise_removal_enabled", "strength", "superres"}, "speaker", options, warnings, error)) {
+            return false;
+        }
 
         bool en = out->speaker.noise_removal_enabled;
         if (!TryGetBool(*spk, "speaker", "noise_removal_enabled", &found, &en, error)) return false;
@@ -219,6 +297,24 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
         if (found) {
             if (!RequireRangeInt("speaker.strength", strength, kStrengthMin, kStrengthMax, error)) return false;
             out->speaker.strength = strength;
+        }
+
+        if (const auto* sr = GetObj(*spk, "speaker", "superres", error)) {
+            if (!CheckUnknownKeys(*sr, {"enabled", "mode"}, "speaker.superres", options, warnings, error)) return false;
+
+            bool en2 = out->speaker.superres.enabled;
+            if (!TryGetBool(*sr, "speaker.superres", "enabled", &found, &en2, error)) return false;
+            if (found) out->speaker.superres.enabled = en2;
+
+            std::string mode;
+            if (!TryGetString(*sr, "speaker.superres", "mode", &found, &mode, error)) return false;
+            if (found) {
+                SuperresMode m = out->speaker.superres.mode;
+                if (!TryParseSuperresMode(mode, &m)) {
+                    return Fail(error, "speaker.superres.mode must be one of \"8k_to_16k\" or \"16k_to_48k\"");
+                }
+                out->speaker.superres.mode = m;
+            }
         }
     }
 

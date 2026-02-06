@@ -25,6 +25,7 @@
 #include "core/util/json.h"
 #include "core/util/strings.h"
 #include "core/audio/effects/broadcast_audio_effects_json.h"
+#include "core/audio/effects/broadcast_audio_effects_plan.h"
 #include "core/video/broadcast_camera_effects_legacy_adapter.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/camera_effects_json.h"
@@ -131,16 +132,30 @@ namespace {
             using studiocast::audio::effects::BroadcastAudioEffectsJsonParseOptions;
             using studiocast::audio::effects::BroadcastAudioEffectsToJson;
             using studiocast::audio::effects::ParseBroadcastAudioEffectsJsonText;
+            using studiocast::audio::effects::SuperresMode;
 
             BroadcastAudioEffects fx;
             fx.microphone.noise_removal_enabled = true;
             fx.microphone.room_echo_removal_enabled = true;
             fx.microphone.strength = 42;
             fx.microphone.studio_voice_enabled = false;
+            fx.microphone.aec.enabled = true;
+            fx.microphone.aec.reference_source = "monitor_source0";
+            fx.microphone.superres.enabled = true;
+            fx.microphone.superres.mode = SuperresMode::k8kTo16k;
             fx.speaker.noise_removal_enabled = true;
             fx.speaker.strength = 33;
+            fx.speaker.superres.enabled = true;
+            fx.speaker.superres.mode = SuperresMode::k16kTo48k;
 
             const auto json = BroadcastAudioEffectsToJson(fx);
+            expectContains("BroadcastAudioEffectsToJson includes mic.aec", json, "\"aec\":{");
+            expectContains("BroadcastAudioEffectsToJson includes aec reference_source", json,
+                           "\"reference_source\":\"monitor_source0\"");
+            expectContains("BroadcastAudioEffectsToJson includes mic.superres mode", json,
+                           "\"microphone\":{");
+            expectContains("BroadcastAudioEffectsToJson includes mic.superres mode", json,
+                           "\"mode\":\"8k_to_16k\"");
             BroadcastAudioEffects parsed;
             std::vector<std::string> warnings;
             std::string error;
@@ -149,6 +164,33 @@ namespace {
             expectEq("ParseBroadcastAudioEffectsJsonText: error empty", error, "");
             expectVecEq("ParseBroadcastAudioEffectsJsonText: warnings empty", warnings, {});
             expectTrue("BroadcastAudioEffects JSON round-trip equality", parsed == fx);
+
+            // Superres mode validation.
+            {
+                const std::string badMode =
+                    "{"\
+                    "\"schema_version\":2,"\
+                    "\"microphone\":{"\
+                    "\"superres\":{"\
+                    "\"enabled\":true,"\
+                    "\"mode\":\"12k_to_48k\""\
+                    "}"\
+                    "}"\
+                    "}";
+
+                BroadcastAudioEffects parsedBadMode;
+                warnings.clear();
+                error.clear();
+                expectTrue("ParseBroadcastAudioEffectsJsonText: invalid superres mode rejects",
+                           !ParseBroadcastAudioEffectsJsonText(badMode,
+                                                              &parsedBadMode,
+                                                              BroadcastAudioEffectsJsonParseOptions{},
+                                                              &warnings,
+                                                              &error));
+                expectContains("ParseBroadcastAudioEffectsJsonText: invalid superres mode error text",
+                               error,
+                               "superres.mode");
+            }
 
             // Studio Voice must be mutually exclusive with mic noise/echo removal.
             const std::string bad =
@@ -1097,6 +1139,48 @@ namespace {
                                                               /*strength=*/50);
                 expectEq("afx_plan echo selector", p4.effect_selector, "dereverb");
                 expectEq("afx_plan echo feature_id", p4.feature_id, "dereverb");
+            }
+
+            // Canonical audio effects planner: AEC + Superres validation / reason strings.
+            {
+                using studiocast::audio::effects::BroadcastAudioEffects;
+                using studiocast::audio::effects::BroadcastAudioEffectsPlanInputs;
+                using studiocast::audio::effects::PlanBroadcastAudioEffects;
+                using studiocast::audio::effects::SuperresMode;
+
+                BroadcastAudioEffects fx;
+                BroadcastAudioEffectsPlanInputs in;
+                in.available_pulse_sources = {"monitor0"};
+                in.float32_pcm = true;
+
+                fx.microphone.aec.enabled = true;
+                fx.microphone.aec.reference_source.clear();
+                const auto p0 = PlanBroadcastAudioEffects(fx, in);
+                expectTrue("audio_plan aec missing reference_source disabled", !p0.microphone_aec.enabled);
+                expectContains("audio_plan aec missing reference_source reason", p0.microphone_aec.reason, "reference_source is empty");
+
+                fx.microphone.aec.reference_source = "monitor0";
+                const auto p1 = PlanBroadcastAudioEffects(fx, in);
+                expectTrue("audio_plan aec enabled when reference_source available", p1.microphone_aec.enabled);
+                expectEq("audio_plan aec planned reference_source", p1.microphone_aec.reference_source, "monitor0");
+
+                fx.microphone.aec.reference_source = "monitor_missing";
+                const auto p2 = PlanBroadcastAudioEffects(fx, in);
+                expectTrue("audio_plan aec disabled when reference_source unavailable", !p2.microphone_aec.enabled);
+                expectContains("audio_plan aec unavailable reason", p2.microphone_aec.reason, "not available");
+
+                fx.microphone.superres.enabled = true;
+                fx.microphone.superres.mode = SuperresMode::k16kTo48k;
+                in.float32_pcm = false;
+                const auto p3 = PlanBroadcastAudioEffects(fx, in);
+                expectTrue("audio_plan mic superres disabled when not float32", !p3.microphone_superres.enabled);
+                expectContains("audio_plan mic superres not float32 reason", p3.microphone_superres.reason, "not float32");
+
+                in.float32_pcm = true;
+                const auto p4 = PlanBroadcastAudioEffects(fx, in);
+                expectTrue("audio_plan mic superres enabled when float32", p4.microphone_superres.enabled);
+                expectEq("audio_plan mic superres planned mode", std::string(studiocast::audio::effects::ToString(p4.microphone_superres.mode)),
+                         "16k_to_48k");
             }
 
             // AFX: wrapper error messaging should be clean + actionable even without AFX installed.
