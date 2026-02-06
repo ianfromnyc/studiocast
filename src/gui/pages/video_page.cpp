@@ -34,6 +34,7 @@
 #include <sstream>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <unordered_map>
 
@@ -144,6 +145,18 @@ EffectAvailabilityKind AvailabilityKindForEffectId(const QString& id) {
 }
 
 struct DaemonVideoStatus {
+  struct NegotiatedFormat {
+    bool present = false;
+    QString pixfmt;
+    int width = 0;
+    int height = 0;
+    double fps = 0.0;
+    int fps_num = 0;
+    int fps_den = 0;
+    int bytes_per_line = 0;
+    int size_image = 0;
+  };
+
   bool reachable = false;
 
   bool enabled = false;
@@ -159,6 +172,9 @@ struct DaemonVideoStatus {
   int width = 0;
   int height = 0;
   int fps = 0;
+
+  NegotiatedFormat capture_format;
+  NegotiatedFormat output_format;
 
   studiocast::video::effects::BroadcastCameraEffects effects{};
   bool effects_valid = false;
@@ -212,6 +228,25 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
   out->width = video.value("width").toInt(0);
   out->height = video.value("height").toInt(0);
   out->fps = video.value("fps").toInt(0);
+
+  const auto parseFormat = [](const QJsonObject& fmt) -> DaemonVideoStatus::NegotiatedFormat {
+    DaemonVideoStatus::NegotiatedFormat f;
+    if (fmt.isEmpty()) return f;
+
+    f.present = true;
+    f.pixfmt = fmt.value("pixfmt").toString();
+    f.width = fmt.value("width").toInt(0);
+    f.height = fmt.value("height").toInt(0);
+    f.fps = fmt.value("fps").toDouble(0);
+    f.fps_num = fmt.value("fps_num").toInt(0);
+    f.fps_den = fmt.value("fps_den").toInt(0);
+    f.bytes_per_line = fmt.value("bytesperline").toInt(0);
+    f.size_image = fmt.value("sizeimage").toInt(0);
+    return f;
+  };
+
+  out->capture_format = parseFormat(video.value("capture_format").toObject());
+  out->output_format = parseFormat(video.value("output_format").toObject());
 
   out->input_device = video.value("input_device").toString();
   out->output_device = video.value("output_device").toString();
@@ -1616,6 +1651,67 @@ void VideoPage::UpdateStatusText() {
   oss << "  consumers:  " << st.consumer_count << (st.consumer_present ? " (present)" : "") << "\n";
   oss << "  pipeline:   " << (st.pipeline_running ? "running" : (st.pipeline_starting ? "starting" : "stopped"))
       << "\n";
+
+  const auto fmtPixfmt = [](const QString& pixfmt) -> QString {
+    if (pixfmt == QStringLiteral("RGB3")) return QStringLiteral("RGB24");
+    if (pixfmt == QStringLiteral("BGR3")) return QStringLiteral("BGR24");
+    return pixfmt;
+  };
+
+  const auto fmtFps = [](double fps) -> std::string {
+    if (fps <= 0.0) return {};
+    const double r = std::round(fps);
+    if (std::fabs(fps - r) < 0.01) {
+      return std::to_string(static_cast<int>(r));
+    }
+    QString s = QString::number(fps, 'f', 2);
+    while (s.contains('.') && (s.endsWith('0') || s.endsWith('.'))) s.chop(1);
+    return s.toStdString();
+  };
+
+  const auto fmtDims = [](int w, int h) -> std::string {
+    return (QString::number(w) + QChar(0x00D7) + QString::number(h)).toStdString();
+  };
+
+  const auto fmtLine = [&](const DaemonVideoStatus::NegotiatedFormat& f, bool withPixfmtFirst) -> std::string {
+    if (!f.present || f.width <= 0 || f.height <= 0) return "—";
+
+    std::ostringstream line;
+    const QString pix = fmtPixfmt(f.pixfmt);
+    const std::string fpsStr = fmtFps(f.fps);
+
+    if (withPixfmtFirst && !pix.isEmpty()) {
+      line << pix.toStdString() << " ";
+    }
+    line << fmtDims(f.width, f.height);
+    if (!fpsStr.empty()) {
+      line << " @ " << fpsStr;
+    }
+    if (!withPixfmtFirst && !pix.isEmpty()) {
+      line << " (" << pix.toStdString() << ")";
+    }
+    if (f.bytes_per_line > 0) {
+      line << " (stride " << f.bytes_per_line << ")";
+    }
+    return line.str();
+  };
+
+  if (st.pipeline_running) {
+    oss << "  Capture:    " << fmtLine(st.capture_format, /*withPixfmtFirst=*/true) << "\n";
+    oss << "  Output:     " << fmtLine(st.output_format, /*withPixfmtFirst=*/false) << "\n";
+    if (st.capture_format.present && st.output_format.present &&
+        st.capture_format.width > 0 && st.capture_format.height > 0 &&
+        st.output_format.width > 0 && st.output_format.height > 0 &&
+        (st.capture_format.width != st.output_format.width || st.capture_format.height != st.output_format.height)) {
+      oss << "  Scaling:    " << fmtDims(st.capture_format.width, st.capture_format.height) << " "
+          << "→"
+          << " " << fmtDims(st.output_format.width, st.output_format.height) << "\n";
+    }
+  } else {
+    oss << "  Capture:    —\n";
+    oss << "  Output:     —\n";
+  }
+
   oss << "  input:      " << st.input_device.toStdString() << "\n";
   oss << "  output:     " << st.output_device.toStdString() << "\n";
   oss << "  requested:  " << st.width << "x" << st.height << " @ " << st.fps << " fps\n";
