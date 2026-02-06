@@ -513,7 +513,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
   studiocast::video::Rgb24Frame rgb;
   rgb.ResizeTight(capA.width, capA.height);
-  const std::size_t rgbStride = rgb.stride_bytes;
+  std::size_t rgbStride = rgb.stride_bytes;
 
   std::vector<std::uint8_t> rgbScaled;
 
@@ -2682,15 +2682,39 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     if (capA.format == CapturePixelFormat::yuyv) {
       YuyvToRgb24(f.data, capA.width, capA.height, capA.bytes_per_line, rgb.data(), rgbStride);
     } else if (capA.format == CapturePixelFormat::mjpeg) {
-      int decW = 0;
-      int decH = 0;
-      if (!DecodeMjpegToRgb24(f.data, f.bytes, rgb, decW, decH) || decW != capA.width || decH != capA.height) {
+      if (f.bytes == 0) {
         std::string rerr;
         (void)cap.ReleaseFrame(f, &rerr);
         std::lock_guard<std::mutex> lock(mu_);
-        last_error_ = "MJPEG decode failed.";
+        last_error_ = "MJPEG frame was empty (bytesused=0).";
         break;
       }
+      int decW = 0;
+      int decH = 0;
+      std::string decErr;
+      if (!DecodeMjpegToRgb24(f.data, f.bytes, rgb, decW, decH, &decErr)) {
+        std::string rerr;
+        (void)cap.ReleaseFrame(f, &rerr);
+        std::lock_guard<std::mutex> lock(mu_);
+        last_error_ = "MJPEG decode failed";
+        if (!decErr.empty()) last_error_ += ": " + decErr;
+        last_error_ += ".";
+        break;
+      }
+
+      if (decW != capA.width || decH != capA.height) {
+        std::string rerr;
+        (void)cap.ReleaseFrame(f, &rerr);
+        std::lock_guard<std::mutex> lock(mu_);
+        std::ostringstream oss;
+        oss << "MJPEG decode size mismatch: got " << decW << "x" << decH << ", expected " << capA.width << "x"
+            << capA.height << ".";
+        last_error_ = oss.str();
+        break;
+      }
+
+      // The decoder is allowed to resize the RGB frame; keep our cached stride in sync.
+      rgbStride = rgb.stride_bytes;
     } else {
       std::string rerr;
       (void)cap.ReleaseFrame(f, &rerr);

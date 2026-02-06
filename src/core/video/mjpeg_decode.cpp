@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <csetjmp>
+#include <sstream>
+#include <string>
 
 #include <jpeglib.h>
 
@@ -20,6 +22,14 @@ void JpegErrorExit(j_common_ptr cinfo) {
   longjmp(err->jmp, 1);
 }
 
+void JpegEmitMessage(j_common_ptr /*cinfo*/, int /*msg_level*/) {
+  // Silence libjpeg warnings/trace messages (stderr) to keep logs and self-tests deterministic.
+}
+
+void JpegOutputMessage(j_common_ptr /*cinfo*/) {
+  // Silence libjpeg formatted output (stderr).
+}
+
 }  // namespace
 
 void Rgb24Frame::ResizeTight(int w, int h) {
@@ -30,18 +40,30 @@ void Rgb24Frame::ResizeTight(int w, int h) {
   buf.resize(total);
 }
 
-bool DecodeMjpegToRgb24(const std::uint8_t* mjpg, std::size_t len, Rgb24Frame& out, int& w, int& h) {
+bool DecodeMjpegToRgb24(const std::uint8_t* mjpg,
+                        std::size_t len,
+                        Rgb24Frame& out,
+                        int& w,
+                        int& h,
+                        std::string* error) {
+  if (error) error->clear();
   w = 0;
   h = 0;
-  if (!mjpg || len == 0) return false;
+  if (!mjpg || len == 0) {
+    if (error) *error = "Empty MJPEG buffer.";
+    return false;
+  }
 
   jpeg_decompress_struct cinfo{};
   JpegErr jerr{};
 
   cinfo.err = jpeg_std_error(&jerr.pub);
   jerr.pub.error_exit = JpegErrorExit;
+  jerr.pub.emit_message = JpegEmitMessage;
+  jerr.pub.output_message = JpegOutputMessage;
 
   if (setjmp(jerr.jmp) != 0) {
+    if (error) *error = jerr.msg;
     jpeg_destroy_decompress(&cinfo);
     return false;
   }
@@ -51,6 +73,7 @@ bool DecodeMjpegToRgb24(const std::uint8_t* mjpg, std::size_t len, Rgb24Frame& o
                static_cast<unsigned long>(len));
 
   if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+    if (error) *error = "jpeg_read_header failed.";
     jpeg_destroy_decompress(&cinfo);
     return false;
   }
@@ -58,6 +81,7 @@ bool DecodeMjpegToRgb24(const std::uint8_t* mjpg, std::size_t len, Rgb24Frame& o
   cinfo.out_color_space = JCS_RGB;
 
   if (jpeg_start_decompress(&cinfo) != TRUE) {
+    if (error) *error = "jpeg_start_decompress failed.";
     jpeg_destroy_decompress(&cinfo);
     return false;
   }
@@ -66,6 +90,11 @@ bool DecodeMjpegToRgb24(const std::uint8_t* mjpg, std::size_t len, Rgb24Frame& o
   h = static_cast<int>(cinfo.output_height);
   const int comps = static_cast<int>(cinfo.output_components);
   if (w <= 0 || h <= 0 || comps != 3) {
+    if (error) {
+      std::ostringstream oss;
+      oss << "Unexpected decompressor output (w=" << w << ", h=" << h << ", comps=" << comps << ").";
+      *error = oss.str();
+    }
     jpeg_finish_decompress(&cinfo);
     jpeg_destroy_decompress(&cinfo);
     w = 0;
@@ -82,6 +111,7 @@ bool DecodeMjpegToRgb24(const std::uint8_t* mjpg, std::size_t len, Rgb24Frame& o
     row[0] = reinterpret_cast<JSAMPROW>(out.data() + y * row_stride);
     const JDIMENSION n = jpeg_read_scanlines(&cinfo, row, 1);
     if (n != 1) {
+      if (error) *error = "jpeg_read_scanlines failed.";
       jpeg_finish_decompress(&cinfo);
       jpeg_destroy_decompress(&cinfo);
       w = 0;

@@ -219,9 +219,25 @@ namespace {
             studiocast::video::Rgb24Frame decoded;
             int dw = 0;
             int dh = 0;
-            expectTrue("DecodeMjpegToRgb24", studiocast::video::DecodeMjpegToRgb24(jpeg.data(), jpeg.size(), decoded, dw, dh));
+            std::string decErr;
+            const bool decOk = studiocast::video::DecodeMjpegToRgb24(jpeg.data(), jpeg.size(), decoded, dw, dh, &decErr);
+            expectTrue("DecodeMjpegToRgb24", decOk);
+            expectTrue("DecodeMjpegToRgb24 error empty on success", decOk && decErr.empty());
             expectIntEq("DecodeMjpegToRgb24 width", dw, w);
             expectIntEq("DecodeMjpegToRgb24 height", dh, h);
+
+            // Negative: decode should fail on truncated JPEG and provide an error.
+            {
+                std::vector<std::uint8_t> truncated = jpeg;
+                if (truncated.size() > 8) truncated.resize(truncated.size() / 2);
+                studiocast::video::Rgb24Frame bad;
+                int bw = 0;
+                int bh = 0;
+                std::string badErr;
+                const bool badOk = studiocast::video::DecodeMjpegToRgb24(truncated.data(), truncated.size(), bad, bw, bh, &badErr);
+                expectTrue("DecodeMjpegToRgb24(truncated) fails", !badOk);
+                expectTrue("DecodeMjpegToRgb24(truncated) sets error", !badOk && !badErr.empty());
+            }
 
             auto get = [&](int x, int y) {
                 const std::size_t i = (static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +

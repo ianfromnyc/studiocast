@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace studiocast::video {
@@ -26,6 +27,15 @@ struct Rgb24Frame {
 //
 // Returns false on decode errors.
 // Thread-safe: no shared global decoder state.
-bool DecodeMjpegToRgb24(const std::uint8_t* mjpg, std::size_t len, Rgb24Frame& out, int& w, int& h);
+bool DecodeMjpegToRgb24(const std::uint8_t* mjpg,
+                        std::size_t len,
+                        Rgb24Frame& out,
+                        int& w,
+                        int& h,
+                        std::string* error);
+
+inline bool DecodeMjpegToRgb24(const std::uint8_t* mjpg, std::size_t len, Rgb24Frame& out, int& w, int& h) {
+  return DecodeMjpegToRgb24(mjpg, len, out, w, h, nullptr);
+}
 
 }  // namespace studiocast::video
