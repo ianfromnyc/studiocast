@@ -35,7 +35,12 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(PULSE_SIMPLE QUIET IMPORTED_TARGET libpulse-simple)
 
 # MJPEG decode (libjpeg-turbo recommended; provided as `JPEG`).
-find_package(JPEG REQUIRED)
+find_package(JPEG QUIET)
+if (NOT JPEG_FOUND)
+    message(FATAL_ERROR
+            "JPEG (libjpeg) development files not found. MJPEG decode requires libjpeg-turbo (recommended) or libjpeg. "
+            "On Ubuntu 22.04: sudo apt install libjpeg-turbo8 libjpeg-turbo8-dev")
+endif ()
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)

@@ -12,6 +12,12 @@ testers and contributors to install prerequisites without guessing.
 This installs build dependencies (Qt6/CMake/Ninja/etc) and runtime dependencies (v4l2loopback DKMS, v4l-utils),
 then creates a virtual camera device (by default at `/dev/video10` with label **StudioCast Camera**).
 
+MJPEG decode uses **libjpeg-turbo** (via CMake `FindJPEG`). If you are installing dependencies manually:
+
+```bash
+sudo apt install libjpeg-turbo8 libjpeg-turbo8-dev
+```
+
 Verify:
 
 ```bash
