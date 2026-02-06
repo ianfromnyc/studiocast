@@ -58,6 +58,12 @@ export NGC_API_KEY="..."       # do not commit this
   --install-features --install-afx-features --build-dir ./build
 ```
 
+By default, `--install-afx-features` downloads the MVP AFX feature set (AEC + Superres). To customize:
+
+```bash
+./scripts/setup_maxine.sh --install-afx-features --afx-effects "superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
+```
+
 This runs the SDK-provided `install_feature.sh` scripts under the hood.
 
 For AFX features, the helper uses the SDK-provided `download_features.sh` script and requires `NGC_API_KEY`.

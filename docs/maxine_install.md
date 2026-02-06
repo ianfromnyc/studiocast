@@ -76,9 +76,15 @@ must be run on a Tensor Core GPU machine.
 
 ```bash
 export NGC_API_KEY="<your_api_key>"
-cd "<AFX root>/features" && ./download_features.sh --effects denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k
+cd "<AFX root>/features" && ./download_features.sh --effects superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k
 ```
 
-This downloads only the **minimal** AFX effect set needed for the MVP (48 kHz variants).
+This downloads only the **minimal** AFX effect set needed for the MVP (AEC + Superres).
+
+Optional (noise removal / room echo / studio voice):
+
+```bash
+cd "<AFX root>/features" && ./download_features.sh --effects denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k
+```
 
 After installing, `studiocastctl status` / `studiocastd status` (and the GUI) should report that AFX/audio effects are ready.

@@ -27,6 +27,7 @@ Options:
   --extract             Extract provided tarballs (default if any tarball arg is given)
   --install-features    Run install_feature.sh for VFX/AR (requires NGC_CLI_API_KEY)
   --install-afx-features  Download AFX features needed for the MVP (requires NGC_API_KEY)
+  --afx-effects CSV     AFX effect list to pass to download_features.sh --effects (default: MVP AEC + Superres)
   --gpu ARG             Maxine --gpu argument to pass to install_feature.sh. Can be repeated.
   --build-dir DIR       Build dir containing studiocast-maxine (default: ./build). Used to auto-detect --gpu args.
   --ngc-org ORG         NGC org (default: nvidia)
@@ -49,6 +50,10 @@ Examples:
   # Download AFX features for the audio MVP (does not require --gpu):
   export NGC_API_KEY="..."
   ./scripts/setup_maxine.sh --afx-tar ~/Downloads/Audio_Effects_SDK.tar.gz --install-afx-features
+
+  # Download a custom AFX feature set:
+  export NGC_API_KEY="..."
+  ./scripts/setup_maxine.sh --install-afx-features --afx-effects "superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
 EOF
 }
 
@@ -64,6 +69,7 @@ AFX_TAR=""
 DO_EXTRACT=0
 DO_INSTALL_FEATURES=0
 DO_INSTALL_AFX_FEATURES=0
+AFX_EFFECTS_CSV=""
 declare -a GPU_ARGS=()
 BUILD_DIR="./build"
 NGC_ORG="nvidia"
@@ -78,6 +84,7 @@ while [[ $# -gt 0 ]]; do
     --extract) DO_EXTRACT=1; shift ;;
     --install-features) DO_INSTALL_FEATURES=1; shift ;;
     --install-afx-features) DO_INSTALL_AFX_FEATURES=1; shift ;;
+    --afx-effects) AFX_EFFECTS_CSV="${2:-}"; shift 2 ;;
     --gpu) GPU_ARGS+=("${2:-}"); shift 2 ;;
     --build-dir) BUILD_DIR="${2:-}"; shift 2 ;;
     --ngc-org) NGC_ORG="${2:-}"; shift 2 ;;
@@ -198,9 +205,15 @@ if [[ "$DO_INSTALL_AFX_FEATURES" -eq 1 ]]; then
     exit 1
   fi
 
-  # MVP minimal list (48k variants): denoiser + dereverb + combined + studio voice.
-  AFX_EFFECTS="denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k"
-  echo "[maxine] Downloading AFX features (MVP): ${AFX_EFFECTS}"
+  # MVP minimal list: AEC + Superres.
+  AFX_EFFECTS_DEFAULT="superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
+  AFX_EFFECTS="${AFX_EFFECTS_CSV:-$AFX_EFFECTS_DEFAULT}"
+  if [[ -z "$AFX_EFFECTS" ]]; then
+    echo "[maxine] ERROR: --afx-effects was provided but empty."
+    exit 1
+  fi
+
+  echo "[maxine] Downloading AFX features: ${AFX_EFFECTS}"
   ( cd "${AFX_ROOT}/features" && ./download_features.sh --effects "${AFX_EFFECTS}" )
 
   echo "[maxine] AFX feature download complete."
