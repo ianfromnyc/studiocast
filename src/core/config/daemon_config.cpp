@@ -74,6 +74,30 @@ int ParseKeyLightTemperaturePreset(const std::string& raw, int fallback) {
   return fallback;
 }
 
+studiocast::video::ScalingBackendPreference ParseScalingBackendPreference(
+    const std::string& raw,
+    studiocast::video::ScalingBackendPreference fallback) {
+  auto v = studiocast::util::TrimCopy(raw);
+  std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (v == "cpu") return studiocast::video::ScalingBackendPreference::cpu;
+  if (v == "gpu") return studiocast::video::ScalingBackendPreference::gpu;
+  if (v == "auto" || v == "auto_select" || v == "autoselect") {
+    return studiocast::video::ScalingBackendPreference::auto_select;
+  }
+  return fallback;
+}
+
+std::string ScalingBackendPreferenceToString(studiocast::video::ScalingBackendPreference v) {
+  switch (v) {
+    case studiocast::video::ScalingBackendPreference::cpu:
+      return "cpu";
+    case studiocast::video::ScalingBackendPreference::gpu:
+      return "gpu";
+    default:
+      return "auto";
+  }
+}
+
 }  // namespace
 
 std::filesystem::path DaemonConfigPath() {
@@ -110,6 +134,13 @@ DaemonConfig LoadDaemonConfig() {
       }
       if (auto it = kv.find("video.prefer_mjpeg"); it != kv.end()) {
         s.video_prefer_mjpeg = ParseBool(it->second, s.video_prefer_mjpeg);
+      }
+
+      if (auto it = kv.find("video.scaling.backend"); it != kv.end()) {
+        const auto pref = ParseScalingBackendPreference(it->second,
+                                                        ParseScalingBackendPreference(s.video_scaling_backend,
+                                                                                     studiocast::video::ScalingBackendPreference::auto_select));
+        s.video_scaling_backend = ScalingBackendPreferenceToString(pref);
       }
 
       // Audio
@@ -440,6 +471,7 @@ bool SaveDaemonConfig(const DaemonConfig& s, std::string* error) {
   out << "video.height = " << s.video_height << "\n";
   out << "video.fps = " << s.video_fps << "\n";
   out << "video.prefer_mjpeg = " << (s.video_prefer_mjpeg ? "true" : "false") << "\n";
+  out << "video.scaling.backend = " << s.video_scaling_backend << "\n";
   out << "\n";
 
   out << "# Audio\n";
@@ -474,6 +506,8 @@ studiocast::video::VirtualCameraServiceConfig ToVideoServiceConfig(const DaemonC
   cfg.pipeline.height = s.video_height;
   cfg.pipeline.fps = s.video_fps;
   cfg.pipeline.prefer_mjpeg = s.video_prefer_mjpeg;
+  cfg.pipeline.scaling_backend =
+      ParseScalingBackendPreference(s.video_scaling_backend, studiocast::video::ScalingBackendPreference::auto_select);
   cfg.pipeline.effects = s.video_effects;
 
   cfg.consumer_poll_ms = s.consumer_poll_ms;
@@ -492,6 +526,7 @@ void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCamer
   out->video_height = cfg.pipeline.height;
   out->video_fps = cfg.pipeline.fps;
   out->video_prefer_mjpeg = cfg.pipeline.prefer_mjpeg;
+  out->video_scaling_backend = ScalingBackendPreferenceToString(cfg.pipeline.scaling_backend);
   out->video_effects = cfg.pipeline.effects;
 
   out->consumer_poll_ms = cfg.consumer_poll_ms;

@@ -288,6 +288,13 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"capture_format\":" << CaptureFormatToJson(st.pipeline.capture) << ",";
     oss << "\"output_format\":" << ActualFormatToJson(st.pipeline.output) << ",";
 
+    // Scaling status (active backend + from/to formats).
+    oss << "\"scaling\":{";
+    oss << "\"backend_active\":\"" << JsonEscape(st.pipeline.scaling_backend_active) << "\",";
+    oss << "\"from\":" << CaptureFormatToJson(st.pipeline.scaling_from) << ",";
+    oss << "\"to\":" << ActualFormatToJson(st.pipeline.scaling_to);
+    oss << "},";
+
     oss << "\"width\":" << cfg.pipeline.width << ",";
     oss << "\"height\":" << cfg.pipeline.height << ",";
     oss << "\"fps\":" << cfg.pipeline.fps << ",";

@@ -15,6 +15,12 @@
 
 namespace studiocast::video {
 
+    enum class ScalingBackendPreference {
+        auto_select,
+        cpu,
+        gpu,
+    };
+
     struct CameraPipelineConfig {
         std::string input_device;   // e.g. /dev/video0
         std::string output_device;  // e.g. /dev/video10 (v4l2loopback)
@@ -24,6 +30,12 @@ namespace studiocast::video {
         int fps = 30;
 
         bool prefer_mjpeg = true;
+
+        // Output scaling backend selection.
+        // - auto_select: use GPU scaling when available, otherwise CPU.
+        // - cpu: force CPU scaling.
+        // - gpu: prefer GPU scaling, falling back to CPU when unavailable.
+        ScalingBackendPreference scaling_backend = ScalingBackendPreference::auto_select;
 
         studiocast::video::effects::BroadcastCameraEffects effects{};
     };
@@ -37,6 +49,10 @@ namespace studiocast::video {
 
         CaptureFormat capture{};
         ActualFormat output{};
+
+        std::string scaling_backend_active;  // "cpu" | "gpu" (empty when idle)
+        CaptureFormat scaling_from{};
+        ActualFormat scaling_to{};
 
         int frame_index = 0;
 
@@ -103,6 +119,9 @@ namespace studiocast::video {
         std::string output_device_;
         CaptureFormat capture_{};
         ActualFormat output_{};
+        std::string scaling_backend_active_;
+        CaptureFormat scaling_from_{};
+        ActualFormat scaling_to_{};
         int frame_index_ = 0;
 
         // Effects: updated live by SetEffects.

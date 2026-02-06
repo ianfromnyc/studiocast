@@ -22,6 +22,10 @@ struct DaemonConfig {
   int video_fps = 30;
   bool video_prefer_mjpeg = true;
 
+  // Output scaling backend preference: "cpu" | "gpu" | "auto".
+  // "auto" = use GPU scaling when available; otherwise CPU.
+  std::string video_scaling_backend = "auto";
+
   // Audio
   bool audio_enabled = false;
   bool audio_create_virtual_mic = true;
