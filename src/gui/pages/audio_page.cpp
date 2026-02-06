@@ -47,11 +47,11 @@ namespace studiocast::gui {
         // -----------------------
         // Input selection
         // -----------------------
-        auto *inputBox = new QGroupBox("Input", this);
+        auto *inputBox = new QGroupBox("Input (legacy loopback)", this);
         auto *inputLayout = new QVBoxLayout(inputBox);
 
         auto *sourceRow = new QHBoxLayout();
-        sourceRow->addWidget(new QLabel("Loopback source:", inputBox));
+        sourceRow->addWidget(new QLabel("Input source:", inputBox));
 
         sourceCombo_ = new QComboBox(inputBox);
         sourceRow->addWidget(sourceCombo_, 1);
@@ -106,7 +106,9 @@ namespace studiocast::gui {
 
         vmicLayout->addWidget(new QLabel(
             "Tip: In other apps, select “StudioCast Microphone”.\n"
-            "This uses pactl (PipeWire-PulseAudio compatibility layer or PulseAudio).",
+            "Processed feed: the audio pipeline should play into “StudioCast Sink”, and apps should use\n"
+            "“StudioCast Microphone” (sink monitor).\n"
+            "This UI uses pactl (PipeWire-PulseAudio compatibility layer or PulseAudio).",
             vmicBox));
 
         root->addWidget(vmicBox);
@@ -153,6 +155,15 @@ namespace studiocast::gui {
 
         RefreshSources();
         RefreshStatus();
+
+#ifdef NDEBUG
+        // In release/production builds we do not support pass-through routing via module-loopback.
+        // The processed feed is expected to come from the audio pipeline (Maxine AFX -> studiocast_sink).
+        inputBox->setTitle("Input (legacy loopback - disabled in release builds)");
+        inputBox->setEnabled(false);
+        startBtn_->setVisible(false);
+        stopBtn_->setVisible(false);
+#endif
     }
 
     void AudioPage::ShowError(const QString &title, const QString &details) {

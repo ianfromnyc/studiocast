@@ -8,6 +8,7 @@
 #include <thread>
 
 #include "core/audio/audio_pipeline.h"
+#include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_mic.h"
 #include "core/config/settings.h"
 #include "core/maxine/afx/afx_effect.h"
@@ -17,6 +18,12 @@
 
 namespace {
 
+[[maybe_unused]] bool LooksLikeFeedbackLoopSource(const std::string& name) {
+  if (name == "studiocast_mic") return true;
+  if (name.find(".monitor") != std::string::npos) return true;
+  return false;
+}
+
 void Usage(const char* argv0) {
   std::cout
       << "StudioCast Audio Tool\n\n"
@@ -24,7 +31,7 @@ void Usage(const char* argv0) {
       << "  " << argv0 << " status\n"
       << "  " << argv0 << " create\n"
       << "  " << argv0 << " destroy\n"
-      << "  " << argv0 << " loopback-start [--source <name>] [--latency-ms <n>]\n"
+      << "  " << argv0 << " loopback-start [--source <name>] [--latency-ms <n>]  (debug-only)\n"
       << "  " << argv0 << " loopback-stop\n"
       << "  " << argv0 << " pipeline-run [--source <name>] [--strength <0..100>] [--noise] [--echo] [--studio-voice]\n"
       << "               [--denoiser-v2] [--duration-sec <n>] [--status-interval-ms <n>]\n";
@@ -141,6 +148,25 @@ int main(int argc, char** argv) {
       }
       // Avoid double-routing; best-effort.
       studiocast::audio::StopLoopback(&err);
+    }
+
+    // Feedback-loop guard: don't let the pipeline capture from our own virtual mic or any monitor source.
+    // If the user didn't specify --source, resolve default source name via pactl so we can validate it.
+    std::string chosenSource = source;
+    if (chosenSource.empty()) {
+      std::string derr;
+      const auto def = studiocast::audio::pulse::GetDefaultSourceName(&derr);
+      if (!def) {
+        std::cerr << "ERROR: Failed to query default Pulse source via pactl: " << derr << "\n"
+                  << "Please rerun with an explicit --source (a real microphone source).\n";
+        return 2;
+      }
+      chosenSource = *def;
+    }
+    if (LooksLikeFeedbackLoopSource(chosenSource)) {
+      std::cerr << "ERROR: Refusing to capture from '" << chosenSource << "' to avoid a feedback loop.\n"
+                << "Pick a real microphone source (try: studiocast-audio status).\n";
+      return 2;
     }
 
     const auto settings = studiocast::config::LoadSettings();

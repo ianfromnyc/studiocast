@@ -149,8 +149,8 @@ bool CreateVirtualMic(std::string* error) {
   // Persist
   state.null_sink_module_id = loaded.null_sink_module_id;
   state.remap_source_module_id = loaded.remap_source_module_id;
-  // keep loopback id if present
-  if (loaded.loopback_module_id) state.loopback_module_id = loaded.loopback_module_id;
+  // Processed mode does not use module-loopback; keep the field only for migration/debug visibility.
+  state.loopback_module_id.reset();
 
   std::string err;
   if (!SaveVirtualMicState(state, &err)) {
@@ -189,6 +189,15 @@ bool StopLoopback(std::string* error) {
 }
 
 bool StartLoopback(const std::string& source_name, int latency_ms, std::string* error) {
+#ifdef NDEBUG
+  if (error) {
+    *error = "Legacy pass-through loopback is disabled in release builds. "
+             "Run the processed pipeline (Maxine AFX -> studiocast_sink) instead.";
+  }
+  (void)source_name;
+  (void)latency_ms;
+  return false;
+#else
   std::string details;
   if (!pulse::PactlAvailable(&details)) {
     if (error) *error = "pactl not available: " + details;
@@ -242,6 +251,7 @@ bool StartLoopback(const std::string& source_name, int latency_ms, std::string* 
   }
 
   return true;
+#endif
 }
 
 bool DestroyVirtualMic(std::string* error) {

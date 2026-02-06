@@ -9,6 +9,8 @@ namespace studiocast::audio {
     struct VirtualMicState {
         std::optional<int> null_sink_module_id;
         std::optional<int> remap_source_module_id;
+        // Legacy compatibility only.
+        // Production “processed feed” mode does not create or rely on module-loopback.
         std::optional<int> loopback_module_id;
     };
 
