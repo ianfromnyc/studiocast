@@ -170,8 +170,14 @@ CameraPipelineStatus CameraPipeline::Status() const {
   s.starting = starting_;
   s.input_device = input_device_;
   s.output_device = output_device_;
-  s.capture = capture_;
-  s.output = output_;
+  if (running_ || starting_) {
+    s.capture = capture_;
+    s.output = output_;
+  } else {
+    // Avoid exposing stale negotiated formats when the pipeline is idle.
+    s.capture = CaptureFormat{};
+    s.output = ActualFormat{};
+  }
   s.frame_index = frame_index_;
   s.effects_backends = effects_backends_;
   s.effects_note = effects_note_;
@@ -381,6 +387,8 @@ void CameraPipeline::Stop() {
     } else {
       running_ = false;
       starting_ = false;
+      capture_ = CaptureFormat{};
+      output_ = ActualFormat{};
       return;
     }
   }
@@ -390,6 +398,8 @@ void CameraPipeline::Stop() {
   std::lock_guard<std::mutex> lock(mu_);
   running_ = false;
   starting_ = false;
+  capture_ = CaptureFormat{};
+  output_ = ActualFormat{};
 }
 
 void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {

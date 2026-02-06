@@ -19,7 +19,14 @@ namespace studiocast::video {
         int width = 0;
         int height = 0;
         int fps = 0;
+        int fps_num = 0;
+        int fps_den = 0;
         PixelFormat format = PixelFormat::yuyv;
+
+        // V4L2 negotiated pixel format, as FourCC.
+        // Example: V4L2_PIX_FMT_YUYV -> "YUYV".
+        std::uint32_t pixfmt_fourcc = 0;
+        std::string pixfmt;
 
         std::size_t bytes_per_line = 0;
         std::size_t size_image = 0;

@@ -1,5 +1,6 @@
 #include "v4l2_writer.h"
 
+#include <cmath>
 #include <cerrno>
 #include <cstring>
 #include <optional>
@@ -60,6 +61,14 @@ std::size_t MinBytesPerLine(int width, PixelFormat fmt) {
     case PixelFormat::rgb24: return w * 3u;
   }
   return w * 2u;
+}
+
+bool IsOutputBufType(__u32 t) {
+  if (t == V4L2_BUF_TYPE_VIDEO_OUTPUT) return true;
+#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+  if (t == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) return true;
+#endif
+  return false;
 }
 
 const char* BufTypeName(__u32 t) {
@@ -297,7 +306,11 @@ bool ParseChosenFormat(const v4l2_format& f,
   a.width = w;
   a.height = h;
   a.fps = fps;
+  a.fps_num = 1;
+  a.fps_den = fps;
   a.format = *pf;
+  a.pixfmt_fourcc = fourcc;
+  a.pixfmt = FourccToString(fourcc);
 
   const std::size_t minBpl = MinBytesPerLine(a.width, a.format);
   if (bpl < minBpl) bpl = minBpl;
@@ -314,6 +327,8 @@ bool ParseChosenFormat(const v4l2_format& f,
 struct NegotiationResult {
   bool ok = false;
   ActualFormat actual{};
+  __u32 chosen_buf_type = 0;
+  bool chosen_mplane = false;
   std::string error;
 };
 
@@ -359,6 +374,8 @@ NegotiationResult NegotiateFormat(int fd,
         TrySetFmtAny(fd, t, width, height, desiredFmt, false, &f, &e2)) {
       chosen = f;
       chosenMplane = t.mplane;
+      res.chosen_buf_type = t.type;
+      res.chosen_mplane = t.mplane;
       ok = true;
       break;
     }
@@ -377,6 +394,8 @@ NegotiationResult NegotiateFormat(int fd,
       if (TryGetFmtAny(fd, t, &f, &ge)) {
         chosen = f;
         chosenMplane = t.mplane;
+        res.chosen_buf_type = t.type;
+        res.chosen_mplane = t.mplane;
         ok = true;
         break;
       }
@@ -398,17 +417,44 @@ NegotiationResult NegotiateFormat(int fd,
 
   // Best-effort fps set (ignore failures)
   v4l2_streamparm p{};
-  p.type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-  p.parm.output.timeperframe.numerator = 1;
-  p.parm.output.timeperframe.denominator = static_cast<__u32>(fps);
+  p.type = (res.chosen_buf_type != 0) ? res.chosen_buf_type
+                                      : static_cast<__u32>(V4L2_BUF_TYPE_VIDEO_OUTPUT);
+  if (IsOutputBufType(p.type)) {
+    p.parm.output.timeperframe.numerator = 1;
+    p.parm.output.timeperframe.denominator = static_cast<__u32>(fps);
+  } else {
+    p.parm.capture.timeperframe.numerator = 1;
+    p.parm.capture.timeperframe.denominator = static_cast<__u32>(fps);
+  }
   (void)IoctlRetry(fd, VIDIOC_S_PARM, &p);
+
+  int negotiatedFps = fps;
+  int fpsNum = 1;
+  int fpsDen = fps;
+  v4l2_streamparm gp{};
+  gp.type = p.type;
+  if (IoctlRetry(fd, VIDIOC_G_PARM, &gp) == 0) {
+    const v4l2_fract tpf = IsOutputBufType(gp.type) ? gp.parm.output.timeperframe
+                                                    : gp.parm.capture.timeperframe;
+    const int num = static_cast<int>(tpf.numerator);
+    const int den = static_cast<int>(tpf.denominator);
+    if (num > 0 && den > 0) {
+      fpsNum = num;
+      fpsDen = den;
+      const double f = static_cast<double>(den) / static_cast<double>(num);
+      if (f > 0.0) negotiatedFps = static_cast<int>(std::floor(f + 0.5));
+    }
+  }
 
   std::string perr;
   ActualFormat a;
-  if (!ParseChosenFormat(chosen, chosenMplane, fps, &a, &perr)) {
+  if (!ParseChosenFormat(chosen, chosenMplane, negotiatedFps, &a, &perr)) {
     res.error = "Format negotiation succeeded but parsing failed: " + perr;
     return res;
   }
+
+  a.fps_num = fpsNum;
+  a.fps_den = fpsDen;
 
   res.ok = true;
   res.actual = a;

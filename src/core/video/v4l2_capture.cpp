@@ -1,5 +1,6 @@
 #include "v4l2_capture.h"
 
+#include <cmath>
 #include <cerrno>
 #include <cstring>
 #include <optional>
@@ -22,6 +23,16 @@ int IoctlRetry(int fd, unsigned long req, void* arg) {
     if (errno == EINTR) continue;
     return -1;
   }
+}
+
+std::string FourccToString(std::uint32_t f) {
+  char s[5];
+  s[0] = static_cast<char>(f & 0xFFu);
+  s[1] = static_cast<char>((f >> 8) & 0xFFu);
+  s[2] = static_cast<char>((f >> 16) & 0xFFu);
+  s[3] = static_cast<char>((f >> 24) & 0xFFu);
+  s[4] = '\0';
+  return std::string(s);
 }
 
 std::uint32_t FourccFor(CapturePixelFormat fmt) {
@@ -103,10 +114,17 @@ bool TrySetFmtCapture(int fd,
   return false;
 }
 
-bool ParseChosenCaptureFmt(const v4l2_format& f, bool mplane, int fps, CaptureFormat* out, std::string* outErr) {
+bool ParseChosenCaptureFmt(const v4l2_format& f,
+                           bool mplane,
+                           int fps,
+                           int fps_num,
+                           int fps_den,
+                           CaptureFormat* out,
+                           std::string* outErr) {
   if (!out) return false;
 
   int w = 0, h = 0;
+  std::uint32_t fourcc = 0;
   std::size_t bpl = 0;
   std::size_t size = 0;
 
@@ -115,10 +133,11 @@ bool ParseChosenCaptureFmt(const v4l2_format& f, bool mplane, int fps, CaptureFo
   if (!mplane) {
     w = static_cast<int>(f.fmt.pix.width);
     h = static_cast<int>(f.fmt.pix.height);
+    fourcc = f.fmt.pix.pixelformat;
     bpl = static_cast<std::size_t>(f.fmt.pix.bytesperline);
     size = static_cast<std::size_t>(f.fmt.pix.sizeimage);
 
-    if (!ParseCapturePixelFormat(f.fmt.pix.pixelformat, &parsedFmt)) {
+    if (!ParseCapturePixelFormat(fourcc, &parsedFmt)) {
       if (outErr) *outErr = "Unsupported capture pixel format";
       return false;
     }
@@ -126,6 +145,7 @@ bool ParseChosenCaptureFmt(const v4l2_format& f, bool mplane, int fps, CaptureFo
 #ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
     w = static_cast<int>(f.fmt.pix_mp.width);
     h = static_cast<int>(f.fmt.pix_mp.height);
+    fourcc = f.fmt.pix_mp.pixelformat;
     if (f.fmt.pix_mp.num_planes < 1) {
       if (outErr) *outErr = "mplane format returned num_planes=0";
       return false;
@@ -133,7 +153,7 @@ bool ParseChosenCaptureFmt(const v4l2_format& f, bool mplane, int fps, CaptureFo
     bpl = static_cast<std::size_t>(f.fmt.pix_mp.plane_fmt[0].bytesperline);
     size = static_cast<std::size_t>(f.fmt.pix_mp.plane_fmt[0].sizeimage);
 
-    if (!ParseCapturePixelFormat(f.fmt.pix_mp.pixelformat, &parsedFmt)) {
+    if (!ParseCapturePixelFormat(fourcc, &parsedFmt)) {
       if (outErr) *outErr = "Unsupported capture pixel format (mplane)";
       return false;
     }
@@ -147,7 +167,11 @@ bool ParseChosenCaptureFmt(const v4l2_format& f, bool mplane, int fps, CaptureFo
   a.width = w;
   a.height = h;
   a.fps = fps;
+  a.fps_num = fps_num;
+  a.fps_den = fps_den;
   a.format = parsedFmt;
+  a.pixfmt_fourcc = fourcc;
+  a.pixfmt = FourccToString(fourcc);
 
   // Provide conservative minima.
   const std::size_t bpp = (a.format == CapturePixelFormat::rgb24) ? 3u : 2u;
@@ -251,8 +275,32 @@ bool V4l2Capture::Open(const std::string& device,
   sp.parm.capture.timeperframe.denominator = static_cast<__u32>(fps);
   (void)IoctlRetry(fd_, VIDIOC_S_PARM, &sp);
 
+  int negotiatedFps = fps;
+  int fpsNum = 1;
+  int fpsDen = fps;
+  v4l2_streamparm gp{};
+  gp.type = buf_type_;
+  if (IoctlRetry(fd_, VIDIOC_G_PARM, &gp) == 0) {
+    const auto num = static_cast<int>(gp.parm.capture.timeperframe.numerator);
+    const auto den = static_cast<int>(gp.parm.capture.timeperframe.denominator);
+    if (num > 0 && den > 0) {
+      fpsNum = num;
+      fpsDen = den;
+      const double f = static_cast<double>(den) / static_cast<double>(num);
+      if (f > 0.0) negotiatedFps = static_cast<int>(std::floor(f + 0.5));
+    }
+  }
+
+  // Query the active format (best-effort). Many drivers already return the negotiated
+  // format via S_FMT, but G_FMT makes the intent explicit.
+  v4l2_format active = chosen;
+  active.type = buf_type_;
+  if (IoctlRetry(fd_, VIDIOC_G_FMT, &active) == 0) {
+    chosen = active;
+  }
+
   std::string perr;
-  if (!ParseChosenCaptureFmt(chosen, chosenMplane, fps, &actual_, &perr)) {
+  if (!ParseChosenCaptureFmt(chosen, chosenMplane, negotiatedFps, fpsNum, fpsDen, &actual_, &perr)) {
     if (error) *error = "Capture negotiation succeeded but parsing failed: " + perr;
     Close();
     return false;
