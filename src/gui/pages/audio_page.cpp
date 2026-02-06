@@ -1,12 +1,18 @@
 #include "audio_page.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSlider>
 #include <QSpinBox>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -18,6 +24,8 @@
 #include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_mic.h"
 #include "core/audio/virtual_speaker.h"
+#include "core/ipc/daemon_client.h"
+#include "core/maxine/reason_codes.h"
 
 namespace studiocast::gui {
     namespace {
@@ -35,6 +43,38 @@ namespace studiocast::gui {
         bool Contains(const std::string &hay, const std::string &needle) {
             return hay.find(needle) != std::string::npos;
         }
+
+        bool ParseJsonObject(const std::string& json, QJsonObject* outRoot, QString* error) {
+            QJsonParseError perr;
+            const auto doc = QJsonDocument::fromJson(QByteArray::fromStdString(json), &perr);
+            if (perr.error != QJsonParseError::NoError || !doc.isObject()) {
+                if (error) *error = "JSON parse error: " + perr.errorString();
+                return false;
+            }
+            if (outRoot) *outRoot = doc.object();
+            return true;
+        }
+
+        QString FormatMaxineReasonCode(const QString& code) {
+            if (code.isEmpty()) return {};
+            const std::string s = code.toStdString();
+            return QString::fromStdString(studiocast::maxine::reasons::ToEnglish(s));
+        }
+
+        bool DaemonRequest(const std::string& request, std::string* outJson, QString* outErr) {
+            studiocast::ipc::DaemonCallResult res;
+            std::string err;
+            if (!studiocast::ipc::DaemonCall(request, &res, &err)) {
+                if (outErr) *outErr = QString::fromStdString(err);
+                return false;
+            }
+            if (!res.ok) {
+                if (outErr) *outErr = QString::fromStdString(res.error_json.empty() ? "daemon_error" : res.error_json);
+                return false;
+            }
+            if (outJson) *outJson = res.json;
+            return true;
+        }
     } // namespace
 
     AudioPage::AudioPage(QWidget *parent) : QWidget(parent) {
@@ -44,6 +84,59 @@ namespace studiocast::gui {
         auto *title = new QLabel("Microphone", this);
         title->setStyleSheet("font-size: 20px; font-weight: 600;");
         root->addWidget(title);
+
+        // -----------------------
+        // AI effects (daemon-driven)
+        // -----------------------
+        auto* aiBox = new QGroupBox("AI microphone effects (Maxine AFX via daemon)", this);
+        auto* aiLayout = new QVBoxLayout(aiBox);
+
+        aiBanner_ = new QLabel(aiBox);
+        aiBanner_->setWordWrap(true);
+        aiBanner_->setStyleSheet(
+            "background: #3a1414; border: 1px solid #663333; color: #f0d0d0; padding: 8px; border-radius: 4px;");
+        aiBanner_->setVisible(false);
+        aiLayout->addWidget(aiBanner_);
+
+        auto* aiRow = new QHBoxLayout();
+        noiseRemovalCb_ = new QCheckBox("Noise removal", aiBox);
+        echoRemovalCb_ = new QCheckBox("Echo removal", aiBox);
+        studioVoiceCb_ = new QCheckBox("Studio Voice", aiBox);
+        aiRow->addWidget(noiseRemovalCb_);
+        aiRow->addWidget(echoRemovalCb_);
+        aiRow->addWidget(studioVoiceCb_);
+        aiRow->addStretch(1);
+        aiLayout->addLayout(aiRow);
+
+        auto* strengthRow = new QHBoxLayout();
+        strengthRow->addWidget(new QLabel("Strength:", aiBox));
+        strengthSlider_ = new QSlider(Qt::Horizontal, aiBox);
+        strengthSlider_->setRange(0, 100);
+        strengthSlider_->setValue(50);
+        strengthRow->addWidget(strengthSlider_, 1);
+        strengthValueLabel_ = new QLabel("50", aiBox);
+        strengthValueLabel_->setMinimumWidth(32);
+        strengthValueLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        strengthRow->addWidget(strengthValueLabel_);
+        aiLayout->addLayout(strengthRow);
+
+        auto* aiBtnRow = new QHBoxLayout();
+        aiStartBtn_ = new QPushButton("Start", aiBox);
+        aiStopBtn_ = new QPushButton("Stop", aiBox);
+        aiRefreshBtn_ = new QPushButton("Refresh", aiBox);
+        aiBtnRow->addWidget(aiStartBtn_);
+        aiBtnRow->addWidget(aiStopBtn_);
+        aiBtnRow->addSpacing(12);
+        aiBtnRow->addWidget(aiRefreshBtn_);
+        aiBtnRow->addStretch(1);
+        aiLayout->addLayout(aiBtnRow);
+
+        aiLayout->addWidget(new QLabel(
+            "Noise removal and echo removal share a single strength slider (Broadcast behavior).\n"
+            "Studio Voice is exclusive with noise/echo removal.",
+            aiBox));
+
+        root->addWidget(aiBox);
 
         // -----------------------
         // Input selection
@@ -167,6 +260,14 @@ namespace studiocast::gui {
         // -----------------------
         connect(refreshSourcesBtn_, &QPushButton::clicked, this, &AudioPage::RefreshSources);
         connect(refreshStatusBtn_, &QPushButton::clicked, this, &AudioPage::RefreshStatus);
+
+        connect(noiseRemovalCb_, &QCheckBox::toggled, this, &AudioPage::OnAiNoiseToggled);
+        connect(echoRemovalCb_, &QCheckBox::toggled, this, &AudioPage::OnAiEchoToggled);
+        connect(studioVoiceCb_, &QCheckBox::toggled, this, &AudioPage::OnAiStudioVoiceToggled);
+        connect(strengthSlider_, &QSlider::valueChanged, this, &AudioPage::OnAiStrengthChanged);
+        connect(aiStartBtn_, &QPushButton::clicked, this, &AudioPage::OnAiStart);
+        connect(aiStopBtn_, &QPushButton::clicked, this, &AudioPage::OnAiStop);
+        connect(aiRefreshBtn_, &QPushButton::clicked, this, &AudioPage::RefreshStatus);
 
         connect(createBtn_, &QPushButton::clicked, this, &AudioPage::OnCreateVirtualMic);
         connect(destroyBtn_, &QPushButton::clicked, this, &AudioPage::OnDestroyVirtualMic);
@@ -309,11 +410,20 @@ namespace studiocast::gui {
         if (activeIdx >= 0) portCombo_->setCurrentIndex(activeIdx);
         else if (firstAvailable >= 0) portCombo_->setCurrentIndex(firstAvailable);
         else portCombo_->setCurrentIndex(0);
+
+        PushDaemonSourceSelection();
     }
 
     void AudioPage::RefreshStatus() {
-        // Always show the detailed status string.
-        statusText_->setPlainText(QString::fromStdString(studiocast::audio::StatusText()));
+        // Always show the detailed legacy status string, plus daemon status.
+        RefreshDaemonAudioStatus();
+
+        QString text = QString::fromStdString(studiocast::audio::StatusText());
+        if (!daemonStatusText_.isEmpty()) {
+            text += "\n\n---\nDaemon audio status:\n";
+            text += daemonStatusText_;
+        }
+        statusText_->setPlainText(text);
 
         // Enable/disable buttons based on current loaded modules (best-effort).
         std::string pactlDetails;
@@ -365,6 +475,225 @@ namespace studiocast::gui {
 
         destroySpeakersBtn_->setEnabled(hasSpeakersSink);
         stopSpeakersBtn_->setEnabled(hasSpeakersLoopback);
+    }
+
+    void AudioPage::SetAiControlsEnabled(bool enabled, const QString& reason) {
+        daemonAiSupported_ = enabled;
+        daemonAiDisableReason_ = reason;
+
+        noiseRemovalCb_->setEnabled(enabled);
+        echoRemovalCb_->setEnabled(enabled);
+        studioVoiceCb_->setEnabled(enabled);
+        strengthSlider_->setEnabled(enabled);
+        aiStartBtn_->setEnabled(enabled);
+        aiStopBtn_->setEnabled(enabled);
+
+        aiBanner_->setVisible(!enabled && !reason.isEmpty());
+        aiBanner_->setText(reason);
+    }
+
+    void AudioPage::RefreshDaemonAudioStatus() {
+        daemonStatusText_.clear();
+
+        std::string json;
+        QString err;
+        if (!DaemonRequest("GET_STATUS", &json, &err)) {
+            SetAiControlsEnabled(false, "Daemon unavailable: " + err);
+            daemonStatusText_ = "daemon_unavailable: " + err;
+            return;
+        }
+
+        QJsonObject root;
+        QString jerr;
+        if (!ParseJsonObject(json, &root, &jerr)) {
+            SetAiControlsEnabled(false, "Daemon returned invalid JSON: " + jerr);
+            daemonStatusText_ = "invalid_json";
+            return;
+        }
+
+        const auto maxine = root.value("maxine").toObject();
+        const bool supported = maxine.value("supported").toBool(false);
+        const QString summary = maxine.value("summary").toString();
+        const QString blockedReason = maxine.value("blocked_reason").toString();
+        const auto blockedDetails = maxine.value("blocked_details").toArray();
+
+        bool gpuOk = true;
+        if (maxine.contains("gpu")) {
+            gpuOk = maxine.value("gpu").toObject().value("ok").toBool(true);
+        }
+
+        bool afxOk = true;
+        if (maxine.contains("afx")) {
+            afxOk = maxine.value("afx").toObject().value("ok").toBool(true);
+        } else if (maxine.contains("components")) {
+            afxOk = maxine.value("components").toObject().value("afx").toObject().value("found").toBool(true);
+        }
+
+        QString disableReason;
+        if (!supported || !gpuOk || !afxOk) {
+            disableReason = "AI audio effects are not available on this system.";
+            if (!summary.isEmpty()) disableReason += "\n\n" + summary;
+            const auto english = FormatMaxineReasonCode(blockedReason);
+            if (!english.isEmpty()) disableReason += "\n\nReason: " + english;
+            if (!blockedDetails.isEmpty()) {
+                disableReason += "\n\n";
+                for (const auto& v : blockedDetails) {
+                    disableReason += "- " + v.toString() + "\n";
+                }
+            }
+        }
+
+        SetAiControlsEnabled(disableReason.isEmpty(), disableReason);
+
+        const auto audio = root.value("audio").toObject();
+        const bool audioEnabled = audio.value("enabled").toBool(false);
+        const QString micMode = audio.value("mic_mode").toString();
+        const auto pipeline = audio.value("pipeline").toObject();
+        const bool running = pipeline.value("running").toBool(false);
+        const bool starting = pipeline.value("starting").toBool(false);
+        const QString lastErr = pipeline.value("last_error").toString();
+
+        daemonStatusText_ = QString("enabled=%1\nmic_mode=%2\npipeline=%3\n")
+                                .arg(audioEnabled ? "true" : "false")
+                                .arg(micMode.isEmpty() ? "(none)" : micMode)
+                                .arg(running ? "running" : (starting ? "starting" : "stopped"));
+        if (!lastErr.isEmpty()) daemonStatusText_ += "last_error: " + lastErr + "\n";
+
+        if (!daemonAiSupported_) {
+            // Keep widget states but prevent edits.
+            return;
+        }
+
+        // Sync UI from daemon config.
+        const auto fx = audio.value("audio_effects").toObject();
+        const auto mic = fx.value("microphone").toObject();
+        const bool noise = mic.value("noise_removal_enabled").toBool(false);
+        const bool echo = mic.value("room_echo_removal_enabled").toBool(false);
+        const bool studio = mic.value("studio_voice_enabled").toBool(false);
+        const int strength = mic.value("strength").toInt(50);
+
+        updatingAiUi_ = true;
+        noiseRemovalCb_->setChecked(noise);
+        echoRemovalCb_->setChecked(echo);
+        studioVoiceCb_->setChecked(studio);
+        strengthSlider_->setValue(std::max(0, std::min(100, strength)));
+        strengthValueLabel_->setText(QString::number(strengthSlider_->value()));
+        aiStartBtn_->setEnabled(!audioEnabled);
+        aiStopBtn_->setEnabled(audioEnabled);
+        updatingAiUi_ = false;
+    }
+
+    void AudioPage::PushDaemonSourceSelection() {
+        if (!daemonAiSupported_) return;
+        if (!sourceCombo_->isEnabled()) return;
+
+        const std::string srcName = sourceCombo_->currentData().toString().toStdString();
+        if (srcName.empty()) return;
+
+        QJsonObject patch;
+        patch.insert("source", QString::fromStdString(srcName));
+        const auto json = QJsonDocument(patch).toJson(QJsonDocument::Compact);
+
+        std::string out;
+        QString err;
+        if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(), &out, &err)) {
+            // Non-fatal: show in status.
+            daemonStatusText_ += "\nfailed_to_set_source: " + err;
+        }
+    }
+
+    void AudioPage::PushDaemonAudioConfig() {
+        if (!daemonAiSupported_) return;
+
+        const bool studio = studioVoiceCb_->isChecked();
+        const bool noise = !studio && noiseRemovalCb_->isChecked();
+        const bool echo = !studio && echoRemovalCb_->isChecked();
+        const int strength = std::max(0, std::min(100, strengthSlider_->value()));
+
+        const bool enabled = (studio || noise || echo);
+
+        QJsonObject mic;
+        mic.insert("studio_voice_enabled", studio);
+        mic.insert("noise_removal_enabled", noise);
+        mic.insert("room_echo_removal_enabled", echo);
+        mic.insert("strength", strength);
+
+        QJsonObject spk;
+        spk.insert("enabled", false);
+
+        QJsonObject effects;
+        effects.insert("schema_version", 1);
+        effects.insert("microphone", mic);
+        effects.insert("speaker", spk);
+
+        QJsonObject patch;
+        patch.insert("enabled", enabled);
+        patch.insert("create_virtual_mic", true);
+        patch.insert("audio_effects", effects);
+
+        const auto json = QJsonDocument(patch).toJson(QJsonDocument::Compact);
+
+        std::string out;
+        QString err;
+        if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(), &out, &err)) {
+            ShowError("Audio", "Failed to update daemon audio config:\n\n" + err);
+        }
+        RefreshDaemonAudioStatus();
+    }
+
+    void AudioPage::OnAiNoiseToggled(bool checked) {
+        if (updatingAiUi_) return;
+        if (checked && studioVoiceCb_->isChecked()) {
+            updatingAiUi_ = true;
+            studioVoiceCb_->setChecked(false);
+            updatingAiUi_ = false;
+        }
+        PushDaemonAudioConfig();
+    }
+
+    void AudioPage::OnAiEchoToggled(bool checked) {
+        if (updatingAiUi_) return;
+        if (checked && studioVoiceCb_->isChecked()) {
+            updatingAiUi_ = true;
+            studioVoiceCb_->setChecked(false);
+            updatingAiUi_ = false;
+        }
+        PushDaemonAudioConfig();
+    }
+
+    void AudioPage::OnAiStudioVoiceToggled(bool checked) {
+        if (updatingAiUi_) return;
+        if (checked) {
+            updatingAiUi_ = true;
+            noiseRemovalCb_->setChecked(false);
+            echoRemovalCb_->setChecked(false);
+            updatingAiUi_ = false;
+        }
+        PushDaemonAudioConfig();
+    }
+
+    void AudioPage::OnAiStrengthChanged(int v) {
+        strengthValueLabel_->setText(QString::number(std::max(0, std::min(100, v))));
+        if (updatingAiUi_) return;
+        PushDaemonAudioConfig();
+    }
+
+    void AudioPage::OnAiStart() {
+        std::string out;
+        QString err;
+        if (!DaemonRequest("AUDIO_START", &out, &err)) {
+            ShowError("Audio", "Failed to start daemon audio:\n\n" + err);
+        }
+        RefreshDaemonAudioStatus();
+    }
+
+    void AudioPage::OnAiStop() {
+        std::string out;
+        QString err;
+        if (!DaemonRequest("AUDIO_STOP", &out, &err)) {
+            ShowError("Audio", "Failed to stop daemon audio:\n\n" + err);
+        }
+        RefreshDaemonAudioStatus();
     }
 
     void AudioPage::OnCreateVirtualMic() {

@@ -5,8 +5,11 @@
 #include "core/audio/pulse/pactl.h"
 
 class QComboBox;
+class QCheckBox;
+class QLabel;
 class QPlainTextEdit;
 class QPushButton;
+class QSlider;
 class QSpinBox;
 class QTimer;
 
@@ -21,6 +24,13 @@ namespace studiocast::gui {
         void RefreshSources();
 
         void RefreshStatus();
+
+        void OnAiNoiseToggled(bool checked);
+        void OnAiEchoToggled(bool checked);
+        void OnAiStudioVoiceToggled(bool checked);
+        void OnAiStrengthChanged(int v);
+        void OnAiStart();
+        void OnAiStop();
 
         void OnCreateVirtualMic();
 
@@ -41,6 +51,11 @@ namespace studiocast::gui {
     private:
         void ShowError(const QString &title, const QString &details);
 
+        void RefreshDaemonAudioStatus();
+        void PushDaemonAudioConfig();
+        void PushDaemonSourceSelection();
+        void SetAiControlsEnabled(bool enabled, const QString& reason);
+
         QComboBox *sourceCombo_ = nullptr;
         QPushButton *refreshSourcesBtn_ = nullptr;
 
@@ -49,6 +64,22 @@ namespace studiocast::gui {
 
 
         QSpinBox *latencySpin_ = nullptr;
+
+        // Daemon-driven AFX controls (MVP).
+        QLabel* aiBanner_ = nullptr;
+        QCheckBox* noiseRemovalCb_ = nullptr;
+        QCheckBox* echoRemovalCb_ = nullptr;
+        QCheckBox* studioVoiceCb_ = nullptr;
+        QSlider* strengthSlider_ = nullptr;
+        QLabel* strengthValueLabel_ = nullptr;
+        QPushButton* aiStartBtn_ = nullptr;
+        QPushButton* aiStopBtn_ = nullptr;
+        QPushButton* aiRefreshBtn_ = nullptr;
+
+        bool updatingAiUi_ = false;
+        bool daemonAiSupported_ = false;
+        QString daemonAiDisableReason_;
+        QString daemonStatusText_;
 
         QPushButton *createBtn_ = nullptr;
         QPushButton *destroyBtn_ = nullptr;

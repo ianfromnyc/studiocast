@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <string>
 
+#include "core/audio/virtual_audio_service.h"
+#include "core/audio/effects/broadcast_audio_effects.h"
 #include "core/video/virtual_camera_service.h"
 #include "core/video/effects/broadcast_effects.h"
 
@@ -18,6 +20,15 @@ struct DaemonConfig {
   int video_width = 1280;
   int video_height = 720;
   int video_fps = 30;
+
+  // Audio
+  bool audio_enabled = false;
+  bool audio_create_virtual_mic = true;
+  std::string audio_source; // empty = Pulse default
+
+  // Canonical Broadcast-style audio effects.
+  // Persisted as a single JSON blob under `audio.effects.json`.
+  studiocast::audio::effects::BroadcastAudioEffects audio_effects{};
 
   // Canonical Broadcast-style camera effects (video).
   //
@@ -41,6 +52,13 @@ studiocast::video::VirtualCameraServiceConfig ToVideoServiceConfig(const DaemonC
 
 // Update a DaemonConfig from a runtime service config (useful for persistence on IPC changes).
 void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCameraServiceConfig& cfg,
+                                          DaemonConfig* out);
+
+// Convert persisted settings into the runtime VirtualAudioServiceConfig used by the daemon.
+studiocast::audio::VirtualAudioServiceConfig ToAudioServiceConfig(const DaemonConfig& s);
+
+// Update a DaemonConfig from a runtime audio service config (useful for persistence on IPC changes).
+void ApplyAudioServiceConfigToDaemonConfig(const studiocast::audio::VirtualAudioServiceConfig& cfg,
                                           DaemonConfig* out);
 
 }  // namespace studiocast::config

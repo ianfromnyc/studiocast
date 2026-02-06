@@ -425,6 +425,10 @@ void Usage(const char* argv0) {
       << "  " << argv0 << " config\n"
       << "  " << argv0 << " effects get\n"
       << "  " << argv0 << " effects set --file <effects.json|->\n"
+      << "  " << argv0 << " audio get\n"
+      << "  " << argv0 << " audio set --file <audio.json|->\n"
+      << "  " << argv0 << " audio start\n"
+      << "  " << argv0 << " audio stop\n"
       << "  " << argv0 << " effects enable <effect_id> [--engine auto|maxine] [--strength N|0..1] [--intensity N|0..1] ...\n"
       << "  " << argv0 << " effects disable <effect_id>\n"
       << "  " << argv0 << " enable <0|1>\n"
@@ -872,6 +876,54 @@ int main(int argc, char** argv) {
       return 2;
     }
     return CallOrDie(std::string("SET_ENABLED ") + argv[2]) ? 0 : 1;
+  }
+
+  if (cmd == "audio") {
+    if (argc < 3) {
+      Usage(argv[0]);
+      return 2;
+    }
+
+    const std::string sub = argv[2];
+    if (sub == "get" || sub == "config") {
+      return CallOrDie("GET_AUDIO_CONFIG") ? 0 : 1;
+    }
+    if (sub == "start") {
+      return CallOrDie("AUDIO_START") ? 0 : 1;
+    }
+    if (sub == "stop") {
+      return CallOrDie("AUDIO_STOP") ? 0 : 1;
+    }
+    if (sub == "set") {
+      std::string path;
+      for (int i = 3; i < argc; ++i) {
+        const std::string_view a = argv[i] ? std::string_view(argv[i]) : std::string_view();
+        if (a == "--file") {
+          if (i + 1 >= argc) {
+            std::cerr << "--file requires a file path (or - for stdin)\n";
+            return 2;
+          }
+          path = argv[i + 1] ? std::string(argv[i + 1]) : std::string();
+          break;
+        }
+      }
+      if (path.empty()) {
+        std::cerr << "audio set requires --file <audio.json|->\n";
+        return 2;
+      }
+
+      std::string text;
+      if (!ReadTextFileOrStdin(path, &text)) {
+        std::cerr << "ERROR: failed to read input: " << path << "\n";
+        return 2;
+      }
+      const std::string minified = studiocast::util::json::Minify(text);
+      const std::string req = std::string("SET_AUDIO_CONFIG ") + minified;
+      return CallOrDie(req) ? 0 : 1;
+    }
+
+    std::cerr << "Unknown audio subcommand: " << sub << "\n";
+    return 2;
   }
 
   if (cmd == "video") {

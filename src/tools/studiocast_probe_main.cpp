@@ -588,10 +588,41 @@ namespace {
                            vc.pipeline.effects.engine == studiocast::video::effects::EffectsEnginePreference::maxine);
                 expectTrue("ToVideoServiceConfig eye_contact enabled", vc.pipeline.effects.eye_contact.enabled);
 
+                // Audio config: ensure new persisted fields are wired.
+                {
+                    auto dc_audio = dc;
+                    dc_audio.audio_enabled = true;
+                    dc_audio.audio_create_virtual_mic = true;
+                    dc_audio.audio_source = "dummy_source";
+                    dc_audio.audio_effects.microphone.noise_removal_enabled = true;
+                    dc_audio.audio_effects.microphone.room_echo_removal_enabled = true;
+                    dc_audio.audio_effects.microphone.strength = 55;
+                    dc_audio.audio_effects.microphone.studio_voice_enabled = false;
+
+                    const auto ac = studiocast::config::ToAudioServiceConfig(dc_audio);
+                    expectTrue("ToAudioServiceConfig enabled", ac.enabled);
+                    expectTrue("ToAudioServiceConfig create_virtual_mic", ac.create_virtual_mic);
+                    expectEq("ToAudioServiceConfig source", ac.source_name, "dummy_source");
+                    expectTrue("ToAudioServiceConfig noise enabled",
+                               ac.effects.microphone.noise_removal_enabled);
+                    expectTrue("ToAudioServiceConfig echo enabled",
+                               ac.effects.microphone.room_echo_removal_enabled);
+                    expectIntEq("ToAudioServiceConfig strength", ac.effects.microphone.strength, 55);
+                }
+
                 // New schema should round-trip through Save/Load.
                 {
+                    // Ensure audio fields are persisted too.
+                    auto dc_save = dc;
+                    dc_save.audio_enabled = true;
+                    dc_save.audio_create_virtual_mic = true;
+                    dc_save.audio_source = "dummy_source";
+                    dc_save.audio_effects.microphone.noise_removal_enabled = true;
+                    dc_save.audio_effects.microphone.room_echo_removal_enabled = true;
+                    dc_save.audio_effects.microphone.strength = 55;
+
                     std::string err;
-                    if (!studiocast::config::SaveDaemonConfig(dc, &err)) {
+                    if (!studiocast::config::SaveDaemonConfig(dc_save, &err)) {
                         ++failures;
                         std::printf("[FAIL] SaveDaemonConfig: %s\n", err.c_str());
                     }
@@ -601,6 +632,7 @@ namespace {
                         std::ifstream in(confPath);
                         const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
                         expectTrue("saved config has video.effects.json", content.find("video.effects.json") != std::string::npos);
+                        expectTrue("saved config has audio.effects.json", content.find("audio.effects.json") != std::string::npos);
                         expectTrue("saved config removes video.mirror", content.find("video.mirror") == std::string::npos);
                         expectTrue("saved config removes video.background", content.find("video.background") == std::string::npos);
                         expectTrue("saved config removes video.effects.virtual_background",
@@ -615,6 +647,30 @@ namespace {
                     expectIntEq("roundtrip vb strength", vc2.pipeline.effects.virtual_background.strength, 13);
                     expectTrue("roundtrip eye_contact enabled", vc2.pipeline.effects.eye_contact.enabled);
                     expectTrue("roundtrip key_light enabled", vc2.pipeline.effects.virtual_key_light.enabled);
+
+                    const auto ac2 = studiocast::config::ToAudioServiceConfig(dc2);
+                    expectTrue("roundtrip audio enabled", ac2.enabled);
+                    expectTrue("roundtrip audio create_virtual_mic", ac2.create_virtual_mic);
+                    expectEq("roundtrip audio source", ac2.source_name, "dummy_source");
+                    expectTrue("roundtrip audio noise enabled", ac2.effects.microphone.noise_removal_enabled);
+                    expectTrue("roundtrip audio echo enabled", ac2.effects.microphone.room_echo_removal_enabled);
+                    expectIntEq("roundtrip audio strength", ac2.effects.microphone.strength, 55);
+                }
+
+                // Audio effects JSON parsing should tolerate unknown keys (forward/backward drift).
+                {
+                    std::ofstream out(confPath);
+                    out << "audio.enabled = true\n";
+                    out << "audio.source = dummy_source\n";
+                    out << "audio.effects.json = {\"schema_version\":1,\"microphone\":{\"noise_removal_enabled\":true,\"room_echo_removal_enabled\":false,\"strength\":42,\"studio_voice_enabled\":false,\"future_key\":123},\"speaker\":{\"enabled\":false}}\n";
+                }
+                {
+                    const auto dcu = studiocast::config::LoadDaemonConfig();
+                    const auto acu = studiocast::config::ToAudioServiceConfig(dcu);
+                    expectTrue("audio unknown-key parse enabled", acu.enabled);
+                    expectEq("audio unknown-key parse source", acu.source_name, "dummy_source");
+                    expectTrue("audio unknown-key parse noise enabled", acu.effects.microphone.noise_removal_enabled);
+                    expectIntEq("audio unknown-key parse strength", acu.effects.microphone.strength, 42);
                 }
 
                 // Legacy auto_frame should migrate into the canonical effects blob.

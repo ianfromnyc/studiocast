@@ -128,6 +128,8 @@ add_library(studiocast_core
         src/core/audio/virtual_speaker_state.cpp
         src/core/audio/virtual_speaker.h
         src/core/audio/virtual_speaker.cpp
+        src/core/audio/virtual_audio_service.h
+        src/core/audio/virtual_audio_service.cpp
         src/core/video/v4l2loopback.h
         src/core/video/v4l2loopback.cpp
         src/core/video/v4l2_writer.h

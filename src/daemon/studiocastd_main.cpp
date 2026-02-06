@@ -15,10 +15,12 @@
 #include <thread>
 #include <vector>
 
+#include "core/audio/effects/broadcast_audio_effects_json.h"
 #include "core/config/daemon_config.h"
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
 #include "core/maxine/maxine_manager.h"
+#include "core/util/json.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/camera_effects_json.h"
 #include "core/video/effects/broadcast_effect_rules.h"
@@ -220,6 +222,8 @@ std::string FormatKeyLightTemperaturePreset(int preset) {
 
 std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st,
                          const studiocast::video::VirtualCameraServiceConfig& cfg,
+                         const studiocast::audio::VirtualAudioServiceStatus& ast,
+                         const studiocast::audio::VirtualAudioServiceConfig& acfg,
                          const std::filesystem::path& socketPath,
                          const std::string& maxineJson) {
     std::ostringstream oss;
@@ -300,6 +304,48 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"last_error\":\"" << JsonEscape(st.last_error) << "\"";
     oss << "}";  // video
 
+    // Audio status (MVP: microphone processing only).
+    oss << ",\"audio\":{";
+    oss << "\"enabled\":" << BoolJson(acfg.enabled) << ",";
+    oss << "\"create_virtual_mic\":" << BoolJson(acfg.create_virtual_mic) << ",";
+    oss << "\"source\":\"" << JsonEscape(acfg.source_name.empty() ? std::string("auto") : acfg.source_name) << "\",";
+    oss << "\"mic_present\":" << BoolJson(ast.mic_present) << ",";
+
+    // Canonical effect model for GUI/CLI.
+    oss << "\"audio_effects\":"
+        << studiocast::audio::effects::BroadcastAudioEffectsToJson(acfg.effects)
+        << ",";
+
+    // What effect is currently active (stable-ish summary string).
+    std::string mic_mode = "none";
+    if (acfg.effects.microphone.studio_voice_enabled) {
+        mic_mode = "studio_voice";
+    } else if (acfg.effects.microphone.noise_removal_enabled && acfg.effects.microphone.room_echo_removal_enabled) {
+        mic_mode = "noise_echo_removal";
+    } else if (acfg.effects.microphone.noise_removal_enabled) {
+        mic_mode = "noise_removal";
+    } else if (acfg.effects.microphone.room_echo_removal_enabled) {
+        mic_mode = "room_echo_removal";
+    }
+    oss << "\"mic_mode\":\"" << JsonEscape(mic_mode) << "\",";
+
+    oss << "\"pipeline\":{";
+    oss << "\"running\":" << BoolJson(ast.pipeline_running) << ",";
+    oss << "\"starting\":" << BoolJson(ast.pipeline_starting) << ",";
+    oss << "\"sink\":\"" << JsonEscape(ast.pipeline_sink) << "\",";
+    oss << "\"effect_selector\":\"" << JsonEscape(ast.effect_selector) << "\",";
+    oss << "\"feature_id\":\"" << JsonEscape(ast.feature_id) << "\",";
+    oss << "\"intensity\":" << ast.intensity << ",";
+    oss << "\"gpu\":{";
+    oss << "\"index\":" << ast.gpu_index << ",";
+    oss << "\"name\":\"" << JsonEscape(ast.gpu_name) << "\",";
+    oss << "\"compute_cap\":\"" << JsonEscape(ast.gpu_compute_cap) << "\"";
+    oss << "},";
+    oss << "\"last_error\":\"" << JsonEscape(ast.last_error) << "\"";
+    oss << "}"; // pipeline
+
+    oss << "}"; // audio
+
     oss << "}";
     return oss.str();
 }
@@ -341,6 +387,95 @@ std::string ConfigToJson(const studiocast::video::VirtualCameraServiceConfig& cf
         << studiocast::video::BroadcastCameraEffectsContractToJson(cfg.pipeline.effects);
     oss << "}";
     return oss.str();
+}
+
+std::string AudioConfigToJson(const studiocast::audio::VirtualAudioServiceConfig& cfg) {
+    std::ostringstream oss;
+    oss << "{";
+    oss << "\"enabled\":" << BoolJson(cfg.enabled) << ",";
+    oss << "\"create_virtual_mic\":" << BoolJson(cfg.create_virtual_mic) << ",";
+    oss << "\"source\":\"" << JsonEscape(cfg.source_name.empty() ? std::string("auto") : cfg.source_name) << "\",";
+    oss << "\"audio_effects\":" << studiocast::audio::effects::BroadcastAudioEffectsToJson(cfg.effects);
+    oss << "}";
+    return oss.str();
+}
+
+bool ApplyAudioConfigPatchJsonText(const std::string& jsonText,
+                                  studiocast::audio::VirtualAudioServiceConfig* cfg,
+                                  std::vector<std::string>* warnings,
+                                  std::string* error) {
+    if (!cfg) {
+        if (error) *error = "config pointer is null";
+        return false;
+    }
+
+    studiocast::util::json::Value root;
+    if (!studiocast::util::json::Parse(jsonText, &root, error)) return false;
+    const auto* obj = root.AsObject();
+    if (!obj) {
+        if (error) *error = "audio config must be a JSON object";
+        return false;
+    }
+
+    // enabled
+    if (auto it = obj->find("enabled"); it != obj->end()) {
+        const bool* b = it->second.AsBool();
+        if (!b) {
+            if (error) *error = "enabled must be a boolean";
+            return false;
+        }
+        cfg->enabled = *b;
+    }
+
+    // create_virtual_mic
+    if (auto it = obj->find("create_virtual_mic"); it != obj->end()) {
+        const bool* b = it->second.AsBool();
+        if (!b) {
+            if (error) *error = "create_virtual_mic must be a boolean";
+            return false;
+        }
+        cfg->create_virtual_mic = *b;
+    }
+
+    // source
+    if (auto it = obj->find("source"); it != obj->end()) {
+        const std::string* s = it->second.AsString();
+        if (!s) {
+            if (error) *error = "source must be a string";
+            return false;
+        }
+        cfg->source_name = (*s == "auto") ? std::string() : *s;
+    }
+
+    // effects blob
+    const studiocast::util::json::Value* fxVal = nullptr;
+    if (auto it = obj->find("audio_effects"); it != obj->end()) {
+        fxVal = &it->second;
+    } else if (auto it2 = obj->find("effects"); it2 != obj->end()) {
+        // Accept alias for convenience.
+        fxVal = &it2->second;
+        if (warnings) warnings->push_back("effects: alias accepted; please use audio_effects");
+    }
+
+    if (fxVal) {
+        studiocast::audio::effects::BroadcastAudioEffects parsed;
+        studiocast::audio::effects::BroadcastAudioEffectsJsonParseOptions options;
+        options.allow_unknown_keys = true;
+        std::vector<std::string> parseWarnings;
+        std::string parseError;
+        if (!studiocast::audio::effects::ParseBroadcastAudioEffectsJson(*fxVal,
+                                                                        &parsed,
+                                                                        options,
+                                                                        &parseWarnings,
+                                                                        &parseError)) {
+            if (error) *error = parseError;
+            return false;
+        }
+        cfg->effects = parsed;
+        if (warnings) warnings->insert(warnings->end(), parseWarnings.begin(), parseWarnings.end());
+    }
+
+    return true;
 }
 
 std::string ExtractRawTailAfterCmd(const std::string& line, const std::string& cmd) {
@@ -419,6 +554,7 @@ int main(int argc, char** argv) {
     // Load persisted config and then apply CLI overrides for this run.
     auto daemonCfg = studiocast::config::LoadDaemonConfig();
     studiocast::video::VirtualCameraServiceConfig cfg = studiocast::config::ToVideoServiceConfig(daemonCfg);
+    studiocast::audio::VirtualAudioServiceConfig acfg = studiocast::config::ToAudioServiceConfig(daemonCfg);
 
     if (const auto v = GetArgValue(argc, argv, "--input"); !v.empty()) cfg.pipeline.input_device = v;
     if (const auto v = GetArgValue(argc, argv, "--output"); !v.empty()) cfg.pipeline.output_device = v;
@@ -493,6 +629,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    studiocast::audio::VirtualAudioService audioSvc;
+    std::string aerr;
+    if (!audioSvc.Start(acfg, &aerr)) {
+        std::cerr << "ERROR: " << aerr << "\n";
+        svc.Stop();
+        return 1;
+    }
+
     // Start IPC server for GUI / studiocastctl.
     studiocast::ipc::DaemonServer server;
     std::string sockErr;
@@ -500,6 +644,7 @@ int main(int argc, char** argv) {
     if (socketPath.empty()) {
         std::cerr << "ERROR: failed to compute socket path: " << sockErr << "\n";
         svc.Stop();
+        audioSvc.Stop();
         return 2;
     }
 
@@ -517,6 +662,9 @@ int main(int argc, char** argv) {
                           if (pc.cmd == "GET_STATUS") {
                               const auto st = svc.Status();
                               const auto current = svc.Config();
+
+                              const auto ast = audioSvc.Status();
+                              const auto acurrent = audioSvc.Config();
 
                               // Cache diagnostics to avoid heavy probing on every GUI poll.
                               static std::mutex diagMu;
@@ -537,13 +685,18 @@ int main(int argc, char** argv) {
                                   diagJson = lastDiagJson;
                               }
 
-                              return std::string("OK ") + StatusToJson(st, current, socketPath, diagJson);
+                              return std::string("OK ") + StatusToJson(st, current, ast, acurrent, socketPath, diagJson);
                           }
 
                           if (pc.cmd == "GET_CONFIG") {
                               const auto current = svc.Config();
                               return std::string("OK ") +
                                      studiocast::video::BroadcastCameraEffectsContractToJson(current.pipeline.effects);
+                          }
+
+                          if (pc.cmd == "GET_AUDIO_CONFIG") {
+                              const auto current = audioSvc.Config();
+                              return std::string("OK ") + AudioConfigToJson(current);
                           }
 
                           if (pc.cmd == "SET_ENABLED") {
@@ -569,6 +722,56 @@ int main(int argc, char** argv) {
                               (void)studiocast::config::SaveDaemonConfig(daemonCfg, &perr);
 
                               return std::string("OK {\"enabled\":") + BoolJson(enabled) + "}";
+                          }
+
+                          if (pc.cmd == "AUDIO_START") {
+                              std::lock_guard<std::mutex> lock(controlMu);
+                              auto newCfg = audioSvc.Config();
+                              newCfg.enabled = true;
+                              audioSvc.UpdateConfig(newCfg);
+
+                              studiocast::config::ApplyAudioServiceConfigToDaemonConfig(newCfg, &daemonCfg);
+                              std::string perr;
+                              (void)studiocast::config::SaveDaemonConfig(daemonCfg, &perr);
+
+                              return std::string("OK {\"enabled\":true}");
+                          }
+
+                          if (pc.cmd == "AUDIO_STOP") {
+                              std::lock_guard<std::mutex> lock(controlMu);
+                              auto newCfg = audioSvc.Config();
+                              newCfg.enabled = false;
+                              audioSvc.UpdateConfig(newCfg);
+
+                              studiocast::config::ApplyAudioServiceConfigToDaemonConfig(newCfg, &daemonCfg);
+                              std::string perr;
+                              (void)studiocast::config::SaveDaemonConfig(daemonCfg, &perr);
+
+                              return std::string("OK {\"enabled\":false}");
+                          }
+
+                          if (pc.cmd == "SET_AUDIO_CONFIG") {
+                              const std::string jsonText = ExtractRawTailAfterCmd(line, pc.cmd);
+                              if (jsonText.empty()) {
+                                  return std::string("ERR ") + ErrorJson("SET_AUDIO_CONFIG requires a JSON object argument");
+                              }
+
+                              std::lock_guard<std::mutex> lock(controlMu);
+                              auto newCfg = audioSvc.Config();
+
+                              std::vector<std::string> warnings;
+                              std::string jerr;
+                              if (!ApplyAudioConfigPatchJsonText(jsonText, &newCfg, &warnings, &jerr)) {
+                                  return std::string("ERR ") + ErrorJson(jerr.empty() ? "invalid audio config JSON" : jerr);
+                              }
+
+                              audioSvc.UpdateConfig(newCfg);
+
+                              studiocast::config::ApplyAudioServiceConfigToDaemonConfig(newCfg, &daemonCfg);
+                              std::string perr;
+                              (void)studiocast::config::SaveDaemonConfig(daemonCfg, &perr);
+
+                              return std::string("OK ") + AppendWarningsToObjectJson(AudioConfigToJson(newCfg), warnings);
                           }
 
                           if (pc.cmd == "SET_VIDEO_CONFIG") {
@@ -801,6 +1004,7 @@ int main(int argc, char** argv) {
                       &serverErr)) {
         std::cerr << "ERROR: failed to start IPC server: " << serverErr << "\n";
         svc.Stop();
+        audioSvc.Stop();
         return 3;
     }
 
@@ -853,5 +1057,6 @@ int main(int argc, char** argv) {
     std::cout << "\nStopping...\n";
     server.Stop();
     svc.Stop();
+    audioSvc.Stop();
     return 0;
 }

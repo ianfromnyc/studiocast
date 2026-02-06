@@ -15,6 +15,8 @@
 #include "core/util/fs.h"
 #include "core/util/strings.h"
 #include "core/util/xdg.h"
+
+#include "core/audio/effects/broadcast_audio_effects_json.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/effects/broadcast_effects_json.h"
 #include "core/video/effects/effect_types.h"
@@ -105,6 +107,33 @@ DaemonConfig LoadDaemonConfig() {
       }
       if (auto it = kv.find("video.fps"); it != kv.end()) {
         s.video_fps = ParseInt(it->second, s.video_fps);
+      }
+
+      // Audio
+      if (auto it = kv.find("audio.enabled"); it != kv.end()) {
+        s.audio_enabled = ParseBool(it->second, s.audio_enabled);
+      }
+      if (auto it = kv.find("audio.create_virtual_mic"); it != kv.end()) {
+        s.audio_create_virtual_mic = ParseBool(it->second, s.audio_create_virtual_mic);
+      }
+      if (auto it = kv.find("audio.source"); it != kv.end()) {
+        s.audio_source = it->second;
+      }
+
+      // Canonical audio effects persistence.
+      if (auto it = kv.find("audio.effects.json"); it != kv.end() && !it->second.empty()) {
+        studiocast::audio::effects::BroadcastAudioEffects parsed;
+        studiocast::audio::effects::BroadcastAudioEffectsJsonParseOptions options;
+        options.allow_unknown_keys = true;  // tolerate forward/backward drift
+        std::vector<std::string> warnings;
+        std::string parse_error;
+        if (studiocast::audio::effects::ParseBroadcastAudioEffectsJsonText(it->second,
+                                                                          &parsed,
+                                                                          options,
+                                                                          &warnings,
+                                                                          &parse_error)) {
+          s.audio_effects = parsed;
+        }
       }
 
       // Canonical effects persistence: prefer `video.effects.json`.
@@ -409,6 +438,17 @@ bool SaveDaemonConfig(const DaemonConfig& s, std::string* error) {
   out << "video.fps = " << s.video_fps << "\n";
   out << "\n";
 
+  out << "# Audio\n";
+  out << "audio.enabled = " << (s.audio_enabled ? "true" : "false") << "\n";
+  out << "audio.create_virtual_mic = " << (s.audio_create_virtual_mic ? "true" : "false") << "\n";
+  if (!s.audio_source.empty()) out << "audio.source = " << s.audio_source << "\n";
+  out << "\n";
+
+  out << "# Canonical audio effects (Broadcast schema)\n";
+  out << "# Single-line JSON blob, managed by the StudioCast GUI / studiocastctl.\n";
+  out << "audio.effects.json = "
+      << studiocast::audio::effects::BroadcastAudioEffectsToJson(s.audio_effects) << "\n\n";
+
   out << "# Canonical video effects (Broadcast schema)\n";
   out << "# Single-line JSON blob, managed by the StudioCast GUI / studiocastctl.\n";
   out << "video.effects.json = "
@@ -451,6 +491,25 @@ void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCamer
   out->consumer_poll_ms = cfg.consumer_poll_ms;
   out->stop_grace_ms = cfg.stop_grace_ms;
   out->always_on = cfg.always_on;
+}
+
+studiocast::audio::VirtualAudioServiceConfig ToAudioServiceConfig(const DaemonConfig& s) {
+  studiocast::audio::VirtualAudioServiceConfig cfg;
+  cfg.enabled = s.audio_enabled;
+  cfg.create_virtual_mic = s.audio_create_virtual_mic;
+  cfg.source_name = s.audio_source;
+  cfg.effects = s.audio_effects;
+  // Use defaults for polling/retry for now.
+  return cfg;
+}
+
+void ApplyAudioServiceConfigToDaemonConfig(const studiocast::audio::VirtualAudioServiceConfig& cfg,
+                                          DaemonConfig* out) {
+  if (!out) return;
+  out->audio_enabled = cfg.enabled;
+  out->audio_create_virtual_mic = cfg.create_virtual_mic;
+  out->audio_source = cfg.source_name;
+  out->audio_effects = cfg.effects;
 }
 
 }  // namespace studiocast::config
