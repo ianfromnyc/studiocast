@@ -138,6 +138,8 @@ namespace studiocast::gui {
 
         root->addWidget(aiBox);
 
+        UpdateMicInterlocks();
+
         // -----------------------
         // Input selection
         // -----------------------
@@ -212,6 +214,36 @@ namespace studiocast::gui {
         root->addWidget(speakersTitle);
 
         // -----------------------
+        // AI effects (daemon-driven)
+        // -----------------------
+        auto* aiSpkBox = new QGroupBox("AI speaker effects (Maxine AFX via daemon)", this);
+        auto* aiSpkLayout = new QVBoxLayout(aiSpkBox);
+
+        auto* aiSpkRow = new QHBoxLayout();
+        speakerNoiseRemovalCb_ = new QCheckBox("Noise removal", aiSpkBox);
+        aiSpkRow->addWidget(speakerNoiseRemovalCb_);
+        aiSpkRow->addStretch(1);
+        aiSpkLayout->addLayout(aiSpkRow);
+
+        auto* spkStrengthRow = new QHBoxLayout();
+        spkStrengthRow->addWidget(new QLabel("Strength:", aiSpkBox));
+        speakerStrengthSlider_ = new QSlider(Qt::Horizontal, aiSpkBox);
+        speakerStrengthSlider_->setRange(0, 100);
+        speakerStrengthSlider_->setValue(50);
+        spkStrengthRow->addWidget(speakerStrengthSlider_, 1);
+        speakerStrengthValueLabel_ = new QLabel("50", aiSpkBox);
+        speakerStrengthValueLabel_->setMinimumWidth(32);
+        speakerStrengthValueLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        spkStrengthRow->addWidget(speakerStrengthValueLabel_);
+        aiSpkLayout->addLayout(spkStrengthRow);
+
+        aiSpkLayout->addWidget(new QLabel(
+            "Applies noise removal to speaker output (where supported).",
+            aiSpkBox));
+
+        root->addWidget(aiSpkBox);
+
+        // -----------------------
         // Virtual speakers controls
         // -----------------------
         auto *spkBox = new QGroupBox("StudioCast Speakers", this);
@@ -265,6 +297,8 @@ namespace studiocast::gui {
         connect(echoRemovalCb_, &QCheckBox::toggled, this, &AudioPage::OnAiEchoToggled);
         connect(studioVoiceCb_, &QCheckBox::toggled, this, &AudioPage::OnAiStudioVoiceToggled);
         connect(strengthSlider_, &QSlider::valueChanged, this, &AudioPage::OnAiStrengthChanged);
+        connect(speakerNoiseRemovalCb_, &QCheckBox::toggled, this, &AudioPage::OnAiSpeakerNoiseToggled);
+        connect(speakerStrengthSlider_, &QSlider::valueChanged, this, &AudioPage::OnAiSpeakerStrengthChanged);
         connect(aiStartBtn_, &QPushButton::clicked, this, &AudioPage::OnAiStart);
         connect(aiStopBtn_, &QPushButton::clicked, this, &AudioPage::OnAiStop);
         connect(aiRefreshBtn_, &QPushButton::clicked, this, &AudioPage::RefreshStatus);
@@ -485,11 +519,29 @@ namespace studiocast::gui {
         echoRemovalCb_->setEnabled(enabled);
         studioVoiceCb_->setEnabled(enabled);
         strengthSlider_->setEnabled(enabled);
+        strengthValueLabel_->setEnabled(enabled);
+
+        speakerNoiseRemovalCb_->setEnabled(enabled);
+        speakerStrengthSlider_->setEnabled(enabled);
+        speakerStrengthValueLabel_->setEnabled(enabled);
         aiStartBtn_->setEnabled(enabled);
         aiStopBtn_->setEnabled(enabled);
 
         aiBanner_->setVisible(!enabled && !reason.isEmpty());
         aiBanner_->setText(reason);
+
+        UpdateMicInterlocks();
+    }
+
+    void AudioPage::UpdateMicInterlocks() {
+        if (!noiseRemovalCb_ || !echoRemovalCb_ || !studioVoiceCb_ || !strengthSlider_) return;
+
+        const bool studio = studioVoiceCb_->isChecked();
+        const bool allowNoiseEcho = daemonAiSupported_ && !studio;
+        noiseRemovalCb_->setEnabled(allowNoiseEcho);
+        echoRemovalCb_->setEnabled(allowNoiseEcho);
+        strengthSlider_->setEnabled(allowNoiseEcho);
+        if (strengthValueLabel_) strengthValueLabel_->setEnabled(allowNoiseEcho);
     }
 
     void AudioPage::RefreshDaemonAudioStatus() {
@@ -557,6 +609,19 @@ namespace studiocast::gui {
                                 .arg(audioEnabled ? "true" : "false")
                                 .arg(micMode.isEmpty() ? "(none)" : micMode)
                                 .arg(running ? "running" : (starting ? "starting" : "stopped"));
+
+        if (pipeline.contains("gpu")) {
+            const auto gpu = pipeline.value("gpu").toObject();
+            const int idx = gpu.value("index").toInt(-1);
+            const QString name = gpu.value("name").toString();
+            const QString cc = gpu.value("compute_cap").toString();
+            if (idx >= 0 || !name.isEmpty()) {
+                daemonStatusText_ += QString("gpu: #%1 %2%3\n")
+                                        .arg(idx)
+                                        .arg(name.isEmpty() ? "(unknown)" : name)
+                                        .arg(cc.isEmpty() ? "" : (" (cc " + cc + ")"));
+            }
+        }
         if (!lastErr.isEmpty()) daemonStatusText_ += "last_error: " + lastErr + "\n";
 
         if (!daemonAiSupported_) {
@@ -572,15 +637,26 @@ namespace studiocast::gui {
         const bool studio = mic.value("studio_voice_enabled").toBool(false);
         const int strength = mic.value("strength").toInt(50);
 
+        const auto spk = fx.value("speaker").toObject();
+        const bool spkNoise = spk.value("noise_removal_enabled").toBool(false);
+        const int spkStrength = spk.value("strength").toInt(50);
+
         updatingAiUi_ = true;
         noiseRemovalCb_->setChecked(noise);
         echoRemovalCb_->setChecked(echo);
         studioVoiceCb_->setChecked(studio);
         strengthSlider_->setValue(std::max(0, std::min(100, strength)));
         strengthValueLabel_->setText(QString::number(strengthSlider_->value()));
+
+        speakerNoiseRemovalCb_->setChecked(spkNoise);
+        speakerStrengthSlider_->setValue(std::max(0, std::min(100, spkStrength)));
+        speakerStrengthValueLabel_->setText(QString::number(speakerStrengthSlider_->value()));
+
         aiStartBtn_->setEnabled(!audioEnabled);
         aiStopBtn_->setEnabled(audioEnabled);
         updatingAiUi_ = false;
+
+        UpdateMicInterlocks();
     }
 
     void AudioPage::PushDaemonSourceSelection() {
@@ -618,8 +694,12 @@ namespace studiocast::gui {
         mic.insert("room_echo_removal_enabled", echo);
         mic.insert("strength", strength);
 
+        const bool spkNoise = speakerNoiseRemovalCb_ && speakerNoiseRemovalCb_->isChecked();
+        const int spkStrength = speakerStrengthSlider_ ? std::max(0, std::min(100, speakerStrengthSlider_->value())) : 50;
+
         QJsonObject spk;
-        spk.insert("enabled", false);
+        spk.insert("noise_removal_enabled", spkNoise);
+        spk.insert("strength", spkStrength);
 
         QJsonObject effects;
         effects.insert("schema_version", 1);
@@ -648,6 +728,7 @@ namespace studiocast::gui {
             studioVoiceCb_->setChecked(false);
             updatingAiUi_ = false;
         }
+        UpdateMicInterlocks();
         PushDaemonAudioConfig();
     }
 
@@ -658,6 +739,7 @@ namespace studiocast::gui {
             studioVoiceCb_->setChecked(false);
             updatingAiUi_ = false;
         }
+        UpdateMicInterlocks();
         PushDaemonAudioConfig();
     }
 
@@ -669,6 +751,20 @@ namespace studiocast::gui {
             echoRemovalCb_->setChecked(false);
             updatingAiUi_ = false;
         }
+        UpdateMicInterlocks();
+        PushDaemonAudioConfig();
+    }
+
+    void AudioPage::OnAiSpeakerNoiseToggled(bool /*checked*/) {
+        if (updatingAiUi_) return;
+        PushDaemonAudioConfig();
+    }
+
+    void AudioPage::OnAiSpeakerStrengthChanged(int v) {
+        if (speakerStrengthValueLabel_) {
+            speakerStrengthValueLabel_->setText(QString::number(std::max(0, std::min(100, v))));
+        }
+        if (updatingAiUi_) return;
         PushDaemonAudioConfig();
     }
 

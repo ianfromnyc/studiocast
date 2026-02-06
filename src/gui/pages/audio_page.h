@@ -29,6 +29,10 @@ namespace studiocast::gui {
         void OnAiEchoToggled(bool checked);
         void OnAiStudioVoiceToggled(bool checked);
         void OnAiStrengthChanged(int v);
+
+        void OnAiSpeakerNoiseToggled(bool checked);
+        void OnAiSpeakerStrengthChanged(int v);
+
         void OnAiStart();
         void OnAiStop();
 
@@ -56,6 +60,8 @@ namespace studiocast::gui {
         void PushDaemonSourceSelection();
         void SetAiControlsEnabled(bool enabled, const QString& reason);
 
+        void UpdateMicInterlocks();
+
         QComboBox *sourceCombo_ = nullptr;
         QPushButton *refreshSourcesBtn_ = nullptr;
 
@@ -72,6 +78,11 @@ namespace studiocast::gui {
         QCheckBox* studioVoiceCb_ = nullptr;
         QSlider* strengthSlider_ = nullptr;
         QLabel* strengthValueLabel_ = nullptr;
+
+        QCheckBox* speakerNoiseRemovalCb_ = nullptr;
+        QSlider* speakerStrengthSlider_ = nullptr;
+        QLabel* speakerStrengthValueLabel_ = nullptr;
+
         QPushButton* aiStartBtn_ = nullptr;
         QPushButton* aiStopBtn_ = nullptr;
         QPushButton* aiRefreshBtn_ = nullptr;
