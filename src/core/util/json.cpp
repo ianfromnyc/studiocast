@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <charconv>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -27,7 +28,7 @@ namespace studiocast::util::json {
         struct Parser {
             const std::string& s;
             std::size_t i = 0;
-            std::string* err;
+            std::string* err{};
 
             void SkipWs() {
                 while (i < s.size() && std::isspace(static_cast<unsigned char>(s[i]))) ++i;

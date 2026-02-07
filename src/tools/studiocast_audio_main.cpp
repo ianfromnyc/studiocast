@@ -380,7 +380,7 @@ int main(int argc, char** argv) {
     const int durationSec = GetArgInt(argc, argv, "--duration-sec", 0);
     const int statusIntervalMs = GetArgInt(argc, argv, "--status-interval-ms", 1000);
 
-    std::string chosenSink = util::TrimCopy(GetArgValue(argc, argv, "--sink"));
+    std::string chosenSink = studiocast::util::TrimCopy(GetArgValue(argc, argv, "--sink"));
     if (chosenSink.empty()) {
       std::string err;
       const auto s = ChooseDefaultPhysicalSink(&err);
