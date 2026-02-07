@@ -36,7 +36,7 @@ build/studiocast
 
 Notes:
 
-- CLion’s default build directory in this repo is `cmake-build-debug/`.
+- CLion’s (the IDE I use) default build directory in this repo is `cmake-build-debug/`.
 - If you hit a compiler/libstdc++ mismatch, explicitly pick a distro-matching compiler and re-configure (e.g. `g++-12` on 22.04, `g++-13` on 24.04).
 - See `docs/SETUP.md` for the full quickstart, including v4l2loopback and optional Maxine setup.
 
