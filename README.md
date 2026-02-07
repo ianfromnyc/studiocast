@@ -1,9 +1,11 @@
 # StudioCast
 
 StudioCast is intended to be an open-source Linux desktop application with a Broadcast-style UI for managing
-real-time audio and video effects (planned: NVIDIA Maxine on Linux + PipeWire + v4l2loopback).
+real-time audio and video effects (planned: NVIDIA Maxine on Linux + PipeWire + v4l2loopback). Open sourced equivalents 
+for the Maxine SDK will be implemented in the future.
 
-**Status:** Currently under development for initial POC/MVP
+**Status:** Currently under development for initial POC/MVP. Current build is usable on Ubuntu 22.04+ with the Maxine 
+SDK as a dependency.
 
 ## Not affiliated with NVIDIA
 StudioCast is independent and does **not** ship or redistribute NVIDIA Broadcast binaries.
