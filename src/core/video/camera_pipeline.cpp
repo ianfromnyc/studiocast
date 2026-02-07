@@ -1,6 +1,7 @@
 #include "camera_pipeline.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <filesystem>
 #include <memory>
@@ -105,6 +106,23 @@ int ParseVideoIndex(const std::string& sys_name) {
   return v;
 }
 
+bool CheckedPositiveDims(int width, int height, unsigned* out_w, unsigned* out_h, std::string* error, const char* what) {
+  if (!out_w || !out_h) return false;
+
+  if (width <= 0 || height <= 0) {
+    if (error) {
+      std::ostringstream oss;
+      oss << (what ? what : "") << " invalid frame size: " << width << "x" << height << ".";
+      *error = oss.str();
+    }
+    return false;
+  }
+
+  *out_w = static_cast<unsigned>(width);
+  *out_h = static_cast<unsigned>(height);
+  return true;
+}
+
 int ScoreCamera(const VideoDevice& d) {
   // Heuristic score for "auto" camera selection.
   // Prefer typical UVC webcams, avoid IR/depth/metadata nodes when possible.
@@ -177,6 +195,9 @@ CameraPipelineStatus CameraPipeline::Status() const {
     s.scaling_backend_active = scaling_backend_active_;
     s.scaling_from = scaling_from_;
     s.scaling_to = scaling_to_;
+    s.ms_per_frame = ms_per_frame_;
+    s.fps_actual = fps_actual_;
+    s.perf_sample_frames = perf_sample_frames_;
   } else {
     // Avoid exposing stale negotiated formats when the pipeline is idle.
     s.capture = CaptureFormat{};
@@ -184,6 +205,9 @@ CameraPipelineStatus CameraPipeline::Status() const {
     s.scaling_backend_active.clear();
     s.scaling_from = CaptureFormat{};
     s.scaling_to = ActualFormat{};
+    s.ms_per_frame = CameraPipelineStatus::MsPerFrame{};
+    s.fps_actual = 0.0;
+    s.perf_sample_frames = 0;
   }
   s.frame_index = frame_index_;
   s.effects_backends = effects_backends_;
@@ -230,6 +254,9 @@ bool CameraPipeline::Start(const CameraPipelineConfig& cfg, std::string* error) 
   scaling_from_ = CaptureFormat{};
   scaling_to_ = ActualFormat{};
   frame_index_ = 0;
+  ms_per_frame_ = CameraPipelineStatus::MsPerFrame{};
+  fps_actual_ = 0.0;
+  perf_sample_frames_ = 0;
 
   effects_backends_.clear();
   effects_note_.clear();
@@ -1816,6 +1843,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return true;
       }
 
+      unsigned w = 0;
+      unsigned h = 0;
+      {
+        std::string dim_err;
+        if (!CheckedPositiveDims(width, height, &w, &h, &dim_err, "Maxine eye contact:")) {
+          if (error) *error = dim_err;
+          last_error = dim_err;
+          return false;
+        }
+      }
+
       std::string ar_err;
       if (!ar.Initialize(&ar_err)) {
         if (error) *error = ar_err;
@@ -1866,13 +1904,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         stream_owned = true;
       }
 
-      bgr_in.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u);
+      bgr_in.resize(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3u);
       bgr_out.resize(bgr_in.size());
 
       const auto init_in = nvcv.f().NvCVImage_Init(&cpu_bgr_in,
-                                                  width,
-                                                  height,
-                                                  static_cast<int>(width * 3),
+                                                  w,
+                                                  h,
+                                                  static_cast<int>(static_cast<std::size_t>(w) * 3u),
                                                   bgr_in.data(),
                                                   studiocast::maxine::NVCV_BGR,
                                                   studiocast::maxine::NVCV_U8,
@@ -1886,9 +1924,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       const auto init_out = nvcv.f().NvCVImage_Init(&cpu_bgr_out,
-                                                   width,
-                                                   height,
-                                                   static_cast<int>(width * 3),
+                                                   w,
+                                                   h,
+                                                   static_cast<int>(static_cast<std::size_t>(w) * 3u),
                                                    bgr_out.data(),
                                                    studiocast::maxine::NVCV_BGR,
                                                    studiocast::maxine::NVCV_U8,
@@ -1902,8 +1940,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       const auto alloc_in = nvcv.f().NvCVImage_Alloc(&gpu_bgr_in,
-                                                    width,
-                                                    height,
+                                                    w,
+                                                    h,
                                                     studiocast::maxine::NVCV_BGR,
                                                     studiocast::maxine::NVCV_U8,
                                                     studiocast::maxine::NVCV_CHUNKY,
@@ -1918,8 +1956,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       gpu_bgr_in_allocated = true;
 
       const auto alloc_out = nvcv.f().NvCVImage_Alloc(&gpu_bgr_out,
-                                                     width,
-                                                     height,
+                                                     w,
+                                                     h,
                                                      studiocast::maxine::NVCV_BGR,
                                                      studiocast::maxine::NVCV_U8,
                                                      studiocast::maxine::NVCV_CHUNKY,
@@ -2103,6 +2141,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                            std::string* error) {
       if (initialized) return true;
 
+      unsigned w = 0;
+      unsigned h = 0;
+      {
+        std::string dim_err;
+        if (!CheckedPositiveDims(width, height, &w, &h, &dim_err, "Maxine auto frame:")) {
+          if (error) *error = dim_err;
+          last_error = dim_err;
+          return false;
+        }
+      }
+
       std::string ar_err;
       if (!ar.Initialize(&ar_err)) {
         if (error) *error = ar_err;
@@ -2143,13 +2192,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         stream_owned = true;
       }
 
-      bgr_in.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u);
+      bgr_in.resize(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3u);
       bgr_out.resize(bgr_in.size());
 
       const auto init_in = nvcv.f().NvCVImage_Init(&cpu_bgr_in,
-                                                  width,
-                                                  height,
-                                                  static_cast<int>(width * 3),
+                                                  w,
+                                                  h,
+                                                  static_cast<int>(static_cast<std::size_t>(w) * 3u),
                                                   bgr_in.data(),
                                                   studiocast::maxine::NVCV_BGR,
                                                   studiocast::maxine::NVCV_U8,
@@ -2163,9 +2212,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       const auto init_out = nvcv.f().NvCVImage_Init(&cpu_bgr_out,
-                                                   width,
-                                                   height,
-                                                   static_cast<int>(width * 3),
+                                                   w,
+                                                   h,
+                                                   static_cast<int>(static_cast<std::size_t>(w) * 3u),
                                                    bgr_out.data(),
                                                    studiocast::maxine::NVCV_BGR,
                                                    studiocast::maxine::NVCV_U8,
@@ -2179,8 +2228,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       const auto alloc_in = nvcv.f().NvCVImage_Alloc(&gpu_bgr_in,
-                                                    width,
-                                                    height,
+                                                    w,
+                                                    h,
                                                     studiocast::maxine::NVCV_BGR,
                                                     studiocast::maxine::NVCV_U8,
                                                     studiocast::maxine::NVCV_CHUNKY,
@@ -2195,8 +2244,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       gpu_bgr_in_allocated = true;
 
       const auto alloc_out = nvcv.f().NvCVImage_Alloc(&gpu_bgr_out,
-                                                     width,
-                                                     height,
+                                                     w,
+                                                     h,
                                                      studiocast::maxine::NVCV_BGR,
                                                      studiocast::maxine::NVCV_U8,
                                                      studiocast::maxine::NVCV_CHUNKY,
@@ -2399,6 +2448,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       last_error.clear();
       if (initialized) return true;
 
+      unsigned w = 0;
+      unsigned h = 0;
+      {
+        std::string dim_err;
+        if (!CheckedPositiveDims(width, height, &w, &h, &dim_err, "Vignette:")) {
+          last_error = dim_err;
+          if (error) *error = last_error;
+          return false;
+        }
+      }
+
       std::string nvcv_err;
       if (!nvcv.Initialize(studiocast::maxine::NvcvApi::Requirement::VfxCompat, &nvcv_err)) {
         last_error = "NvCVImage runtime unavailable: " + nvcv_err;
@@ -2426,13 +2486,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      bgr_in.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3u);
+      bgr_in.resize(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3u);
       bgr_out.resize(bgr_in.size());
 
       const auto init_in = nvcv.f().NvCVImage_Init(&cpu_bgr_in,
-                                                  width,
-                                                  height,
-                                                  static_cast<int>(width * 3),
+                                                  w,
+                                                  h,
+                                                  static_cast<int>(static_cast<std::size_t>(w) * 3u),
                                                   bgr_in.data(),
                                                   studiocast::maxine::NVCV_BGR,
                                                   studiocast::maxine::NVCV_U8,
@@ -2445,9 +2505,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       const auto init_out = nvcv.f().NvCVImage_Init(&cpu_bgr_out,
-                                                   width,
-                                                   height,
-                                                   static_cast<int>(width * 3),
+                                                   w,
+                                                   h,
+                                                   static_cast<int>(static_cast<std::size_t>(w) * 3u),
                                                    bgr_out.data(),
                                                    studiocast::maxine::NVCV_BGR,
                                                    studiocast::maxine::NVCV_U8,
@@ -2460,8 +2520,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       const auto alloc = nvcv.f().NvCVImage_Alloc(&gpu_bgr,
-                                                 width,
-                                                 height,
+                                                 w,
+                                                 h,
                                                  studiocast::maxine::NVCV_BGR,
                                                  studiocast::maxine::NVCV_U8,
                                                  studiocast::maxine::NVCV_CHUNKY,
@@ -2834,6 +2894,38 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     rebuildChain(fx);
   }
 
+  struct Ema {
+    double alpha = 0.05;
+    bool initialized = false;
+    double v = 0.0;
+
+    void Add(double x) {
+      if (!initialized) {
+        v = x;
+        initialized = true;
+        return;
+      }
+      v = (1.0 - alpha) * v + alpha * x;
+    }
+
+    double ValueOrZero() const { return initialized ? v : 0.0; }
+  };
+
+  using Clock = std::chrono::steady_clock;
+  const auto ToMs = [](Clock::duration d) {
+    return std::chrono::duration<double, std::milli>(d).count();
+  };
+
+  Ema ema_capture;
+  Ema ema_scale;
+  Ema ema_effects;
+  Ema ema_write;
+  Ema ema_period;
+
+  Clock::time_point last_frame_end{};
+  bool have_last_frame_end = false;
+  int perf_frames = 0;
+
   while (!stop_.load()) {
     CapturedFrameView f{};
     std::string ferr;
@@ -2849,6 +2941,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       last_error_ = "Capture acquire failed: " + ferr;
       break;
     }
+
+    const auto t_capture_start = Clock::now();
 
     // Convert capture -> internal RGB (tight stride)
     if (capA.format == CapturePixelFormat::yuyv) {
@@ -2898,10 +2992,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     std::string rerr;
     (void)cap.ReleaseFrame(f, &rerr);
 
+    const auto t_capture_end = Clock::now();
+    const double capture_ms = ToMs(t_capture_end - t_capture_start);
+
     GpuBgrOutputRef deferred_gpu_out{};
     bool have_deferred_gpu_out = false;
 
     // Apply effects (in-place on RGB buffer).
+    const auto t_effects_start = Clock::now();
     bool fx_failed = false;
     {
       studiocast::video::effects::BroadcastCameraEffects fx;
@@ -3105,9 +3203,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
     }
 
+    const auto t_effects_end = Clock::now();
+    const double effects_ms = ToMs(t_effects_end - t_effects_start);
+
     if (fx_failed) {
       break;
     }
+
+    const auto t_scale_start = Clock::now();
 
     // Pack/write to output format.
     //
@@ -3121,6 +3224,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     // dimensions before packing to RGB24/YUYV.
     const int outW = outA.width;
     const int outH = outA.height;
+    const bool scaling_needed = (capA.width != outW || capA.height != outH);
 
     int frameW = capA.width;
     int frameH = capA.height;
@@ -3219,12 +3323,21 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       if (ok) {
+        if (outW <= 0 || outH <= 0) {
+          ok = false;
+          gerr = "Invalid output size for GPU resize: " + std::to_string(outW) + "x" + std::to_string(outH) + ".";
+        }
+      }
+
+      if (ok) {
+        const unsigned out_w = static_cast<unsigned>(outW);
+        const unsigned out_h = static_cast<unsigned>(outH);
         const std::size_t tightStride = static_cast<std::size_t>(outW) * 3u;
         bgr_scaled_out.resize(tightStride * static_cast<std::size_t>(outH));
 
         const auto init = deferred_gpu_out.nvcv->f().NvCVImage_Init(&cpu_bgr_scaled,
-                                                                    outW,
-                                                                    outH,
+                                                                    out_w,
+                                                                    out_h,
                                                                     static_cast<int>(tightStride),
                                                                     bgr_scaled_out.data(),
                                                                     studiocast::maxine::NVCV_BGR,
@@ -3281,9 +3394,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       const auto& nvcv = gpu_scaler.nvcv;
-      const auto& f = nvcv.f();
+      const auto& nvcv_f = nvcv.f();
       if (ok) {
-        if (!f.NvCVImage_Init || !f.NvCVImage_Transfer || !f.NvCVImage_Alloc || !f.NvCVImage_Dealloc) {
+        if (!nvcv_f.NvCVImage_Init || !nvcv_f.NvCVImage_Transfer || !nvcv_f.NvCVImage_Alloc || !nvcv_f.NvCVImage_Dealloc) {
           ok = false;
           gerr = "NvCVImage API incomplete.";
         }
@@ -3303,33 +3416,33 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             return;
           }
 
-          if (f.NvCVImage_Realloc) {
-            const auto st = f.NvCVImage_Realloc(img,
-                                                w,
-                                                h,
-                                                studiocast::maxine::NVCV_BGR,
-                                                studiocast::maxine::NVCV_U8,
-                                                studiocast::maxine::NVCV_CHUNKY,
-                                                studiocast::maxine::NVCV_GPU,
-                                                /*alignment=*/0);
+          if (nvcv_f.NvCVImage_Realloc) {
+            const auto st = nvcv_f.NvCVImage_Realloc(img,
+                                                     w,
+                                                     h,
+                                                     studiocast::maxine::NVCV_BGR,
+                                                     studiocast::maxine::NVCV_U8,
+                                                     studiocast::maxine::NVCV_CHUNKY,
+                                                     studiocast::maxine::NVCV_GPU,
+                                                     /*alignment=*/0);
             if (st == studiocast::maxine::NVCV_SUCCESS) {
               return;
             }
           }
 
-          (void)f.NvCVImage_Dealloc(img);
+          (void)nvcv_f.NvCVImage_Dealloc(img);
           *img = studiocast::maxine::NvCVImage{};
           *allocated = false;
         }
 
-        const auto st = f.NvCVImage_Alloc(img,
-                                          w,
-                                          h,
-                                          studiocast::maxine::NVCV_BGR,
-                                          studiocast::maxine::NVCV_U8,
-                                          studiocast::maxine::NVCV_CHUNKY,
-                                          studiocast::maxine::NVCV_GPU,
-                                          /*alignment=*/0);
+        const auto st = nvcv_f.NvCVImage_Alloc(img,
+                                               w,
+                                               h,
+                                               studiocast::maxine::NVCV_BGR,
+                                               studiocast::maxine::NVCV_U8,
+                                               studiocast::maxine::NVCV_CHUNKY,
+                                               studiocast::maxine::NVCV_GPU,
+                                               /*alignment=*/0);
         if (st != studiocast::maxine::NVCV_SUCCESS) {
           ok = false;
           gerr = std::string("NvCVImage_Alloc(") + what + ") failed: " + std::to_string(st);
@@ -3364,22 +3477,22 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                         rgbOutStride,
                                         srcTightStride);
 
-        const auto init = f.NvCVImage_Init(&gpu_scaler.cpu_bgr_in,
-                                           static_cast<unsigned>(frameW),
-                                           static_cast<unsigned>(frameH),
-                                           static_cast<int>(srcTightStride),
-                                           gpu_scaler.bgr_in.data(),
-                                           studiocast::maxine::NVCV_BGR,
-                                           studiocast::maxine::NVCV_U8,
-                                           studiocast::maxine::NVCV_CHUNKY,
-                                           studiocast::maxine::NVCV_CPU);
+        const auto init = nvcv_f.NvCVImage_Init(&gpu_scaler.cpu_bgr_in,
+                                                static_cast<unsigned>(frameW),
+                                                static_cast<unsigned>(frameH),
+                                                static_cast<int>(srcTightStride),
+                                                gpu_scaler.bgr_in.data(),
+                                                studiocast::maxine::NVCV_BGR,
+                                                studiocast::maxine::NVCV_U8,
+                                                studiocast::maxine::NVCV_CHUNKY,
+                                                studiocast::maxine::NVCV_CPU);
         if (init != studiocast::maxine::NVCV_SUCCESS) {
           ok = false;
           gerr = "NvCVImage_Init(cpu in) failed: " + std::to_string(init);
         }
 
         if (ok) {
-          const auto up = f.NvCVImage_Transfer(&gpu_scaler.cpu_bgr_in, &gpu_scaler.gpu_in, 1.0f, nullptr, nullptr);
+          const auto up = nvcv_f.NvCVImage_Transfer(&gpu_scaler.cpu_bgr_in, &gpu_scaler.gpu_in, 1.0f, nullptr, nullptr);
           if (up != studiocast::maxine::NVCV_SUCCESS) {
             ok = false;
             gerr = "NvCVImage_Transfer(cpu->gpu in) failed: " + std::to_string(up);
@@ -3397,22 +3510,22 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         const std::size_t dstTightStride = static_cast<std::size_t>(outW) * 3u;
         gpu_scaler.bgr_out.resize(dstTightStride * static_cast<std::size_t>(outH));
 
-        const auto init = f.NvCVImage_Init(&gpu_scaler.cpu_bgr_out,
-                                           static_cast<unsigned>(outW),
-                                           static_cast<unsigned>(outH),
-                                           static_cast<int>(dstTightStride),
-                                           gpu_scaler.bgr_out.data(),
-                                           studiocast::maxine::NVCV_BGR,
-                                           studiocast::maxine::NVCV_U8,
-                                           studiocast::maxine::NVCV_CHUNKY,
-                                           studiocast::maxine::NVCV_CPU);
+        const auto init = nvcv_f.NvCVImage_Init(&gpu_scaler.cpu_bgr_out,
+                                                static_cast<unsigned>(outW),
+                                                static_cast<unsigned>(outH),
+                                                static_cast<int>(dstTightStride),
+                                                gpu_scaler.bgr_out.data(),
+                                                studiocast::maxine::NVCV_BGR,
+                                                studiocast::maxine::NVCV_U8,
+                                                studiocast::maxine::NVCV_CHUNKY,
+                                                studiocast::maxine::NVCV_CPU);
         if (init != studiocast::maxine::NVCV_SUCCESS) {
           ok = false;
           gerr = "NvCVImage_Init(cpu out) failed: " + std::to_string(init);
         }
 
         if (ok) {
-          const auto down = f.NvCVImage_Transfer(&gpu_scaler.gpu_scaled, &gpu_scaler.cpu_bgr_out, 1.0f, nullptr, nullptr);
+          const auto down = nvcv_f.NvCVImage_Transfer(&gpu_scaler.gpu_scaled, &gpu_scaler.cpu_bgr_out, 1.0f, nullptr, nullptr);
           if (down != studiocast::maxine::NVCV_SUCCESS) {
             ok = false;
             gerr = "NvCVImage_Transfer(gpu->cpu out) failed: " + std::to_string(down);
@@ -3462,6 +3575,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       rgbOutBytes = rgbScaled.size();
     }
 
+    const auto t_scale_end = Clock::now();
+    const double scale_ms = scaling_needed ? ToMs(t_scale_end - t_scale_start) : 0.0;
+
+    const auto t_write_start = Clock::now();
+
     if (outA.format == PixelFormat::rgb24) {
       const std::size_t wantRow = static_cast<std::size_t>(outW) * 3u;
 
@@ -3502,10 +3620,39 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
     }
 
+    const auto t_write_end = Clock::now();
+    const double write_ms = ToMs(t_write_end - t_write_start);
+
+    ema_capture.Add(capture_ms);
+    ema_effects.Add(effects_ms);
+    ema_scale.Add(scale_ms);
+    ema_write.Add(write_ms);
+
+    ++perf_frames;
+
+    double fps_actual = 0.0;
+    if (have_last_frame_end) {
+      const double period_ms = ToMs(t_write_end - last_frame_end);
+      if (period_ms > 0.0) {
+        ema_period.Add(period_ms);
+        const double avg_period = ema_period.ValueOrZero();
+        if (avg_period > 0.0) fps_actual = 1000.0 / avg_period;
+      }
+    }
+    last_frame_end = t_write_end;
+    have_last_frame_end = true;
+
     ++frameIndex;
-    if ((frameIndex % 10) == 0) {
+    const bool publish_perf = (frameIndex == 1) || ((frameIndex % 10) == 0);
+    if (publish_perf) {
       std::lock_guard<std::mutex> lock(mu_);
       frame_index_ = frameIndex;
+      ms_per_frame_.capture = ema_capture.ValueOrZero();
+      ms_per_frame_.scale = ema_scale.ValueOrZero();
+      ms_per_frame_.effects = ema_effects.ValueOrZero();
+      ms_per_frame_.write = ema_write.ValueOrZero();
+      fps_actual_ = fps_actual;
+      perf_sample_frames_ = perf_frames;
     }
   }
 

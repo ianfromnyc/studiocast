@@ -128,7 +128,7 @@ namespace studiocast::video {
             return studiocast::video::effects::EffectBackend::auto_select;
         }
 
-        std::string VbModeToString(studiocast::video::effects::BackgroundEffect b) {
+        [[maybe_unused]] std::string VbModeToString(studiocast::video::effects::BackgroundEffect b) {
             using studiocast::video::effects::BackgroundEffect;
             switch (b) {
                 case BackgroundEffect::none: return "none";

@@ -56,6 +56,18 @@ namespace studiocast::video {
 
         int frame_index = 0;
 
+        struct MsPerFrame {
+            double capture = 0.0;
+            double scale = 0.0;
+            double effects = 0.0;
+            double write = 0.0;
+        };
+
+        // Rolling averages of per-frame stage times (milliseconds).
+        MsPerFrame ms_per_frame{};
+        double fps_actual = 0.0;
+        int perf_sample_frames = 0;
+
         // Debug/status for effects.
         std::string effects_backends;  // e.g. "mirror:builtin,virtual_background.blur:maxine"
         std::string effects_note;      // e.g. "Maxine requested but unavailable; effects disabled"
@@ -123,6 +135,10 @@ namespace studiocast::video {
         CaptureFormat scaling_from_{};
         ActualFormat scaling_to_{};
         int frame_index_ = 0;
+
+        CameraPipelineStatus::MsPerFrame ms_per_frame_{};
+        double fps_actual_ = 0.0;
+        int perf_sample_frames_ = 0;
 
         // Effects: updated live by SetEffects.
         mutable std::mutex effects_mu_;

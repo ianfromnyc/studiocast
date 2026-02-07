@@ -325,6 +325,16 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"effects_backends\":\"" << JsonEscape(st.pipeline.effects_backends) << "\",";
     oss << "\"effects_note\":\"" << JsonEscape(st.pipeline.effects_note) << "\",";
 
+    // Lightweight rolling perf counters for quick CPU vs GPU scaling comparisons.
+    oss << "\"fps_actual\":" << std::setprecision(6) << st.pipeline.fps_actual << ",";
+    oss << "\"ms_per_frame\":{";
+    oss << "\"capture\":" << std::setprecision(6) << st.pipeline.ms_per_frame.capture << ",";
+    oss << "\"scale\":" << std::setprecision(6) << st.pipeline.ms_per_frame.scale << ",";
+    oss << "\"effects\":" << std::setprecision(6) << st.pipeline.ms_per_frame.effects << ",";
+    oss << "\"write\":" << std::setprecision(6) << st.pipeline.ms_per_frame.write;
+    oss << "},";
+    oss << "\"perf_sample_frames\":" << st.pipeline.perf_sample_frames << ",";
+
     // Deterministic effect ordering + rule-based disable reasons.
     const auto plan = studiocast::video::effects::BuildBroadcastEffectsPlan(cfg.pipeline.effects);
     oss << "\"effects_plan\":{";

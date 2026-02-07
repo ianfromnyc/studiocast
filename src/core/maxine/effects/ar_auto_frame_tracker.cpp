@@ -160,7 +160,7 @@ bool ArAutoFrameTracker::EnsureInitialized(NvCVImage* input_bgr_gpu, std::string
 }
 
 float ArAutoFrameTracker::SmoothingAlpha(int smoothing_percent) {
-  const float s = std::max(0, std::min(100, smoothing_percent)) / 100.0f;
+  const float s = static_cast<float>(std::clamp(smoothing_percent, 0, 100)) / 100.0f;
   // Map [0..1] to [1.0 .. ~0.1].
   return 1.0f / (1.0f + 9.0f * s);
 }
@@ -206,7 +206,7 @@ RectF ArAutoFrameTracker::ComputeTargetCropFromBoxPx(const RectF& box_px,
                                                      int frame_h,
                                                      float output_aspect,
                                                      const AutoFrameKnobs& knobs) {
-  const float strength = std::max(0, std::min(100, knobs.strength)) / 100.0f;
+  const float strength = static_cast<float>(std::clamp(knobs.strength, 0, 100)) / 100.0f;
   const float headroom = std::max(0.0f, std::min(1.0f, knobs.headroom));
 
   const float fw = static_cast<float>(frame_w);
@@ -337,7 +337,7 @@ bool ArAutoFrameTracker::Update(int frame_w, int frame_h, std::string* error_out
   if (found) {
     target = ComputeTargetCropFromBoxPx(best, frame_w, frame_h, output_aspect_, knobs_);
   } else {
-    const float strength = std::max(0, std::min(100, knobs_.strength)) / 100.0f;
+    const float strength = static_cast<float>(std::clamp(knobs_.strength, 0, 100)) / 100.0f;
     const float zoom = 1.0f + strength * 0.5f;
     target = CenterCrop(frame_w, frame_h, output_aspect_, zoom);
   }
