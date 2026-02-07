@@ -15,7 +15,7 @@ StudioCast is independent and does **not** ship or redistribute NVIDIA Broadcast
 
 ## Build (Ubuntu 22.04 / 24.04)
 
-StudioCast is developed primarily on Ubuntu **22.04** and **24.04**.
+StudioCast is known to build on Ubuntu **22.04** and **24.04**.
 
 For a one-shot prerequisites install (tuned for Ubuntu 22.04+, including 24.04):
 
@@ -29,31 +29,33 @@ Manual build:
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --target studiocast
-./build/studiocast
+build/studiocast
 ```
 
 Notes:
 
+- CLion’s default build directory in this repo is `cmake-build-debug/`.
 - If you hit a compiler/libstdc++ mismatch, explicitly pick a distro-matching compiler and re-configure (e.g. `g++-12` on 22.04, `g++-13` on 24.04).
 - See `docs/SETUP.md` for the full quickstart, including v4l2loopback and optional Maxine setup.
 
 
 ## Dev tooling
 - Formatting: `./scripts/format.sh`
-- Version: `./build/studiocast --version`
-- Maxine install (SDK + features): see `docs/maxine_install.md` (or run `studiocast-maxine install-hints` for authoritative commands)
-- Support bundle: `./build/studiocastctl debug-report --out studiocast-debug-report.txt`
+- Version: `build/studiocast --version`
+- Maxine install (SDK + features): see `docs/maxine_install.md` (or run `build/studiocast-maxine install-hints` for authoritative commands)
+- Support bundle: `build/studiocastctl debug-report --out studiocast-debug-report.txt`
 
 ## Effects model & availability (canonical)
 
-- The single canonical effect schema is `BroadcastCameraEffects` (see `src/core/video/effects/broadcast_effect_contract.h`).
+- The canonical effect schema type is `BroadcastCameraEffects` (see `src/core/video/effects/broadcast_effects.h`).
+  Stable effect IDs / parameter IDs / ranges for IPC + JSON live in `src/core/video/effects/broadcast_effect_contract.h`.
 - Persistence + control plane use JSON:
-  - `studiocastctl effects get` / `GET_CONFIG` returns the canonical effects JSON.
-  - `studiocastctl effects set --file ...` sends a JSON patch (`SET_VIDEO_EFFECTS_JSON`) to update effects without shell-quoting issues.
+  - `build/studiocastctl effects get` / `GET_CONFIG` returns the canonical effects JSON.
+  - `build/studiocastctl effects set --file ...` sends a JSON patch (`SET_VIDEO_EFFECTS_JSON`) to update effects without shell-quoting issues.
 - Effect availability is computed **only** by the daemon via `MaxineManager` and exposed in `GET_STATUS`.
   - The GUI must not try to “guess” availability client-side.
-- There is **no CPU fallback**: effects are GPU-only (Maxine + small CUDA post-process where needed). If Maxine/GPU/driver/features are missing,
-  effects must be treated as unavailable.
+- Maxine/AI effects are GPU-only (no CPU fallback). If Maxine/GPU/driver/features are missing, those effects must be treated as unavailable.
+- Simple transforms (e.g., mirror) may still run on CPU.
 
 ## Daemon mode (studiocastd)
 
@@ -63,8 +65,8 @@ starts heavy video processing when a consumer opens the v4l2loopback device (OBS
 During development you can run it manually:
 
 ```bash
-./build/studiocastd
-./build/studiocastctl status
+build/studiocastd
+build/studiocastctl status
 ```
 
 The GUI (`studiocast`) acts as a thin controller by talking to the daemon over a Unix socket in

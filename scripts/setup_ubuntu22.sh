@@ -15,7 +15,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/setup_ubuntu.sh [options]
+  scripts/setup_ubuntu22.sh [options]
 
 Options:
   --deps               Install build/runtime deps via apt.
@@ -33,8 +33,8 @@ Options:
   -h, --help           Show help.
 
 Examples:
-  ./scripts/setup_ubuntu.sh --deps --v4l2loopback --load-loopback --persist-loopback
-  ./scripts/setup_ubuntu.sh --build --build-type Release
+  ./scripts/setup_ubuntu22.sh --deps --v4l2loopback --load-loopback --persist-loopback
+  ./scripts/setup_ubuntu22.sh --build --build-type Release
 EOF
 }
 
