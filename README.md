@@ -8,9 +8,16 @@ real-time audio and video effects (planned: NVIDIA Maxine on Linux + PipeWire + 
 ## Not affiliated with NVIDIA
 StudioCast is independent and does **not** ship or redistribute NVIDIA Broadcast binaries.
 
-## Build (Ubuntu 22.04)
+## Use cases
 
-For a one-shot prerequisites install on Ubuntu 22.04+:
+- **Video calls / streaming with a virtual camera:** run the daemon to keep a v4l2loopback camera available, then use OBS/Zoom/etc. as the consumer. When supported (and when optional Maxine components are present), enable effects like noise removal or virtual background.
+- **Headless / scripted control:** run `studiocastd` as a background service and use `studiocastctl` to query status, apply effect JSON, and gather a debug report.
+
+## Build (Ubuntu 22.04 / 24.04)
+
+StudioCast is developed primarily on Ubuntu **22.04** and **24.04**.
+
+For a one-shot prerequisites install (tuned for Ubuntu 22.04+, including 24.04):
 
 ```bash
 ./scripts/setup_ubuntu22.sh --deps --v4l2loopback --load-loopback --persist-loopback
@@ -21,11 +28,14 @@ Manual build:
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
+cmake --build build --target studiocast
 ./build/studiocast
 ```
 
-See `docs/SETUP.md` for the full quickstart, including v4l2loopback and Maxine setup.
+Notes:
+
+- If you hit a compiler/libstdc++ mismatch, explicitly pick a distro-matching compiler and re-configure (e.g. `g++-12` on 22.04, `g++-13` on 24.04).
+- See `docs/SETUP.md` for the full quickstart, including v4l2loopback and optional Maxine setup.
 
 
 ## Dev tooling
@@ -62,6 +72,6 @@ The GUI (`studiocast`) acts as a thin controller by talking to the daemon over a
 
 There is also a systemd user service template in `packaging/systemd/user/studiocastd.service` (installation/packaging step).
 
-## Next steps (Phase 1)
+## Next steps
 - Add Maxine SDK probing tooling (no redistribution of proprietary SDK assets)
 - Expand daemon control plane to audio (PipeWire-Pulse) and add more CPU/GPU effects
