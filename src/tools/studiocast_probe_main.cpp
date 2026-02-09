@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <csetjmp>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -14,6 +15,9 @@
 #include "core/audio/pulse/pactl.h"
 #include "core/config/daemon_config.h"
 #include "core/cuda/cuda_image.h"
+#include "core/cuda/cuda_tensor.h"
+#include "core/cuda/kernels/preprocess_to_nchw.h"
+#include "core/cuda/kernels/resize_bilinear.h"
 #include "core/maxine/availability.h"
 #include "core/maxine/afx/afx_effect.h"
 #include "core/maxine/afx_api.h"
@@ -168,6 +172,200 @@ namespace {
                     }
 
                     (void)img.Free(&cuda, nullptr);
+                    (void)cuda.DestroyStream(stream, nullptr);
+                }
+            }
+        }
+
+        // CUDA kernels (optional build): bilinear resize + preprocess-to-NCHW.
+        {
+            studiocast::maxine::CudaDriverApi cuda;
+            std::string err;
+            if (!cuda.Initialize(&err)) {
+                std::printf("[SKIP] CudaKernels (CUDA unavailable): %s\n", err.c_str());
+            } else if (!cuda.EnsureContext(&err)) {
+                std::printf("[SKIP] CudaKernels (no CUDA context/device): %s\n", err.c_str());
+            } else {
+                studiocast::maxine::CUstream stream = nullptr;
+                if (!cuda.CreateStream(&stream, &err)) {
+                    ++failures;
+                    std::printf("[FAIL] CudaKernels\n  CreateStream failed: %s\n", err.c_str());
+                } else {
+                    auto fail = [&](const char* name, const std::string& msg) {
+                        ++failures;
+                        std::printf("[FAIL] %s\n  %s\n", name, msg.c_str());
+                    };
+
+                    // ---------------------------
+                    // ResizeBilinear vs CPU reference
+                    // ---------------------------
+                    const int src_w = 13;
+                    const int src_h = 7;
+                    const int dst_w = 19;
+                    const int dst_h = 11;
+                    const std::size_t src_stride = static_cast<std::size_t>(src_w) * 3u;
+                    const std::size_t dst_stride = static_cast<std::size_t>(dst_w) * 3u;
+
+                    std::vector<std::uint8_t> src_rgb(src_stride * static_cast<std::size_t>(src_h));
+                    for (int y = 0; y < src_h; ++y) {
+                        for (int x = 0; x < src_w; ++x) {
+                            const std::size_t i = static_cast<std::size_t>(y) * src_stride +
+                                                  static_cast<std::size_t>(x) * 3u;
+                            src_rgb[i + 0] = static_cast<std::uint8_t>((x * 3 + y * 7) & 0xFF);
+                            src_rgb[i + 1] = static_cast<std::uint8_t>((x * 5 + y * 11) & 0xFF);
+                            src_rgb[i + 2] = static_cast<std::uint8_t>((x * 13 + y * 17) & 0xFF);
+                        }
+                    }
+
+                    std::vector<std::uint8_t> cpu_resized;
+                    std::string resizeErr;
+                    if (!studiocast::video::ResizeRgb24Bilinear(src_rgb.data(),
+                                                               src_w,
+                                                               src_h,
+                                                               src_stride,
+                                                               dst_w,
+                                                               dst_h,
+                                                               &cpu_resized,
+                                                               dst_stride,
+                                                               &resizeErr)) {
+                        fail("CudaResizeBilinear", "CPU reference resize failed: " + resizeErr);
+                    } else {
+                        studiocast::cuda::CudaImage gpu_src;
+                        studiocast::cuda::CudaImage gpu_dst;
+                        if (!gpu_src.Allocate(&cuda, src_w, src_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &err)) {
+                            fail("CudaResizeBilinear", "Allocate src failed: " + err);
+                        } else if (!gpu_dst.Allocate(&cuda, dst_w, dst_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &err)) {
+                            fail("CudaResizeBilinear", "Allocate dst failed: " + err);
+                        } else if (!gpu_src.UploadFromCpuRgb24(&cuda, src_rgb.data(), src_stride, stream, &err)) {
+                            fail("CudaResizeBilinear", "Upload failed: " + err);
+                        } else if (!studiocast::cuda::kernels::ResizeBilinear(gpu_src, gpu_dst, stream, &err)) {
+                            fail("CudaResizeBilinear", "Kernel failed: " + err);
+                        } else {
+                            std::vector<std::uint8_t> gpu_resized(dst_stride * static_cast<std::size_t>(dst_h), 0xCD);
+                            if (!gpu_dst.DownloadToCpuRgb24(&cuda, gpu_resized.data(), dst_stride, stream, &err)) {
+                                fail("CudaResizeBilinear", "Download failed: " + err);
+                            } else if (!cuda.StreamSynchronize(stream, &err)) {
+                                fail("CudaResizeBilinear", "StreamSynchronize failed: " + err);
+                            } else {
+                                int max_abs_diff = 0;
+                                for (std::size_t i = 0; i < cpu_resized.size() && i < gpu_resized.size(); ++i) {
+                                    const int d = static_cast<int>(cpu_resized[i]) - static_cast<int>(gpu_resized[i]);
+                                    const int ad = (d < 0) ? -d : d;
+                                    if (ad > max_abs_diff) max_abs_diff = ad;
+                                }
+                                if (max_abs_diff > 1) {
+                                    ++failures;
+                                    std::printf("[FAIL] CudaResizeBilinear\n  max_abs_diff=%d (want <= 1)\n", max_abs_diff);
+                                }
+                            }
+                        }
+
+                        (void)gpu_src.Free(&cuda, nullptr);
+                        (void)gpu_dst.Free(&cuda, nullptr);
+                    }
+
+                    // ---------------------------
+                    // PreprocessToTensor vs CPU reference
+                    // ---------------------------
+                    {
+                        studiocast::cuda::kernels::ModelPreprocessSpec spec;
+                        spec.dst_w = 9;
+                        spec.dst_h = 5;
+                        spec.dst_order = studiocast::cuda::kernels::ChannelOrder::rgb;
+                        spec.mean[0] = 0.5f;
+                        spec.mean[1] = 0.25f;
+                        spec.mean[2] = 0.75f;
+                        spec.std[0] = 0.25f;
+                        spec.std[1] = 0.5f;
+                        spec.std[2] = 0.125f;
+
+                        studiocast::cuda::CudaImage gpu_src;
+                        studiocast::cuda::CudaTensor tensor;
+                        if (!gpu_src.Allocate(&cuda, src_w, src_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &err)) {
+                            fail("CudaPreprocessToTensor", "Allocate src failed: " + err);
+                        } else if (!gpu_src.UploadFromCpuRgb24(&cuda, src_rgb.data(), src_stride, stream, &err)) {
+                            fail("CudaPreprocessToTensor", "Upload failed: " + err);
+                        } else if (!tensor.AllocateNchwF32(&cuda, 1, 3, spec.dst_h, spec.dst_w, &err)) {
+                            fail("CudaPreprocessToTensor", "Allocate tensor failed: " + err);
+                        } else if (!studiocast::cuda::kernels::PreprocessToTensor(gpu_src, tensor, spec, stream, &err)) {
+                            fail("CudaPreprocessToTensor", "Kernel failed: " + err);
+                        } else {
+                            std::vector<float> gpu_out;
+                            if (!tensor.DownloadToCpuF32(&cuda, &gpu_out, stream, &err)) {
+                                fail("CudaPreprocessToTensor", "Download failed: " + err);
+                            } else if (!cuda.StreamSynchronize(stream, &err)) {
+                                fail("CudaPreprocessToTensor", "StreamSynchronize failed: " + err);
+                            } else {
+                                auto clampInt = [](int v, int lo, int hi) {
+                                    if (v < lo) return lo;
+                                    if (v > hi) return hi;
+                                    return v;
+                                };
+                                const auto cpu_ref = [&]() {
+                                    std::vector<float> ref(static_cast<std::size_t>(3) *
+                                                          static_cast<std::size_t>(spec.dst_h) *
+                                                          static_cast<std::size_t>(spec.dst_w));
+                                    const float scale_x = static_cast<float>(src_w) / static_cast<float>(spec.dst_w);
+                                    const float scale_y = static_cast<float>(src_h) / static_cast<float>(spec.dst_h);
+                                    for (int y = 0; y < spec.dst_h; ++y) {
+                                        const float sy = (static_cast<float>(y) + 0.5f) * scale_y - 0.5f;
+                                        const int y0 = clampInt(static_cast<int>(std::floor(sy)), 0, src_h - 1);
+                                        const int y1 = clampInt(y0 + 1, 0, src_h - 1);
+                                        const float fy = sy - static_cast<float>(y0);
+                                        const auto* row0 = src_rgb.data() + static_cast<std::size_t>(y0) * src_stride;
+                                        const auto* row1 = src_rgb.data() + static_cast<std::size_t>(y1) * src_stride;
+                                        for (int x = 0; x < spec.dst_w; ++x) {
+                                            const float sx = (static_cast<float>(x) + 0.5f) * scale_x - 0.5f;
+                                            const int x0 = clampInt(static_cast<int>(std::floor(sx)), 0, src_w - 1);
+                                            const int x1 = clampInt(x0 + 1, 0, src_w - 1);
+                                            const float fx = sx - static_cast<float>(x0);
+
+                                            const auto* p00 = row0 + static_cast<std::size_t>(x0) * 3u;
+                                            const auto* p10 = row0 + static_cast<std::size_t>(x1) * 3u;
+                                            const auto* p01 = row1 + static_cast<std::size_t>(x0) * 3u;
+                                            const auto* p11 = row1 + static_cast<std::size_t>(x1) * 3u;
+
+                                            const std::size_t base = static_cast<std::size_t>(y) *
+                                                                     static_cast<std::size_t>(spec.dst_w) +
+                                                                     static_cast<std::size_t>(x);
+                                            for (int c = 0; c < 3; ++c) {
+                                                const float p00f = static_cast<float>(p00[c]);
+                                                const float p10f = static_cast<float>(p10[c]);
+                                                const float p01f = static_cast<float>(p01[c]);
+                                                const float p11f = static_cast<float>(p11[c]);
+
+                                                const float v0 = p00f + fx * (p10f - p00f);
+                                                const float v1 = p01f + fx * (p11f - p01f);
+                                                const float v = v0 + fy * (v1 - v0);
+                                                const float vf = v * (1.0f / 255.0f);
+                                                const float norm = (vf - spec.mean[c]) / spec.std[c];
+                                                ref[static_cast<std::size_t>(c) *
+                                                        static_cast<std::size_t>(spec.dst_h) *
+                                                        static_cast<std::size_t>(spec.dst_w) +
+                                                    base] = norm;
+                                            }
+                                        }
+                                    }
+                                    return ref;
+                                }();
+
+                                float max_abs_diff = 0.0f;
+                                for (std::size_t i = 0; i < cpu_ref.size() && i < gpu_out.size(); ++i) {
+                                    const float d = std::fabs(cpu_ref[i] - gpu_out[i]);
+                                    if (d > max_abs_diff) max_abs_diff = d;
+                                }
+                                if (max_abs_diff > 1e-4f) {
+                                    ++failures;
+                                    std::printf("[FAIL] CudaPreprocessToTensor\n  max_abs_diff=%g (want <= 1e-4)\n",
+                                                static_cast<double>(max_abs_diff));
+                                }
+                            }
+                        }
+
+                        (void)gpu_src.Free(&cuda, nullptr);
+                        (void)tensor.Free(&cuda, nullptr);
+                    }
+
                     (void)cuda.DestroyStream(stream, nullptr);
                 }
             }

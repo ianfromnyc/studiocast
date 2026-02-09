@@ -117,6 +117,9 @@ bool CudaDriverApi::LoadSymbols(std::string* error_out) {
 
   // Optional: cuGetErrorString.
   (void)lib_.GetSymbol("cuGetErrorString", &f_.cuGetErrorString, nullptr);
+
+  // Optional: cuModuleLoadDataEx (used for PTX JIT diagnostics when available).
+  (void)lib_.GetSymbol("cuModuleLoadDataEx", &f_.cuModuleLoadDataEx, nullptr);
   return true;
 }
 
@@ -149,7 +152,33 @@ bool CudaDriverApi::EnsureContext(std::string* error_out) {
     if (error_out) *error_out = "cuCtxGetCurrent failed: " + StatusToString(st);
     return false;
   }
-  if (cur) return true;
+  if (cur) {
+    // Validate that the current context is still usable.
+    // In some cases (e.g. primary context released elsewhere) a stale/destroyed
+    // context handle can remain current and cause subsequent API calls (like
+    // cuStreamCreate) to fail.
+    st = f_.cuCtxSetCurrent(cur);
+    if (st == CUDA_SUCCESS) {
+      // Functional validation: try to create/destroy a temporary stream.
+      // This is lightweight and catches cases where cuCtxSetCurrent succeeds
+      // but the context is no longer usable.
+      if (f_.cuStreamCreate && f_.cuStreamDestroy) {
+        CUstream tmp = nullptr;
+        const CUresult st_stream = f_.cuStreamCreate(&tmp, 0);
+        if (st_stream == CUDA_SUCCESS && tmp) {
+          (void)f_.cuStreamDestroy(tmp);
+          return true;
+        }
+      } else {
+        return true;
+      }
+    }
+
+    // Try to clear the current context and fall through to re-acquire the
+    // primary context.
+    (void)f_.cuCtxSetCurrent(nullptr);
+    cur = nullptr;
+  }
 
   // If we've already retained a primary context previously, re-bind it.
   if (retained_primary_ctx_ && primary_ctx_) {

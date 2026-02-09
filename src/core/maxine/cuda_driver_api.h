@@ -63,10 +63,23 @@ struct CUDA_MEMCPY2D {
 using CUresult = int;
 inline constexpr CUresult CUDA_SUCCESS = 0;
 
+// Minimal CUDA JIT option ABI surface (for cuModuleLoadDataEx diagnostics).
+using CUjit_option = unsigned int;
+inline constexpr CUjit_option CU_JIT_INFO_LOG_BUFFER = 3;
+inline constexpr CUjit_option CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES = 4;
+inline constexpr CUjit_option CU_JIT_ERROR_LOG_BUFFER = 5;
+inline constexpr CUjit_option CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES = 6;
+inline constexpr CUjit_option CU_JIT_LOG_VERBOSE = 12;
+
 class CudaDriverApi {
 public:
   using cuInit_t = CUresult (*)(unsigned int flags);
   using cuModuleLoadData_t = CUresult (*)(CUmodule* module, const void* image);
+  using cuModuleLoadDataEx_t = CUresult (*)(CUmodule* module,
+                                            const void* image,
+                                            unsigned int numOptions,
+                                            CUjit_option* options,
+                                            void** optionValues);
   using cuModuleGetFunction_t = CUresult (*)(CUfunction* hfunc, CUmodule hmod, const char* name);
   using cuLaunchKernel_t = CUresult (*)(CUfunction f,
                                        unsigned int gridDimX,
@@ -100,6 +113,7 @@ public:
   struct Functions {
     cuInit_t cuInit = nullptr;
     cuModuleLoadData_t cuModuleLoadData = nullptr;
+    cuModuleLoadDataEx_t cuModuleLoadDataEx = nullptr;
     cuModuleGetFunction_t cuModuleGetFunction = nullptr;
     cuLaunchKernel_t cuLaunchKernel = nullptr;
     cuMemAllocPitch_t cuMemAllocPitch = nullptr;

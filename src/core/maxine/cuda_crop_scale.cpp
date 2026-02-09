@@ -253,11 +253,11 @@ static constexpr const char* kResizeBilinearPtx = R"ptx(
     cvt.rn.f32.u32 %f17, %r26;
     cvt.rn.f32.u32 %f18, %r27;
     sub.f32 %f19, %f16, %f15;
-    mad.f32 %f20, %f12, %f19, %f15;    // v0
+    mad.rn.f32 %f20, %f12, %f19, %f15;    // v0
     sub.f32 %f21, %f18, %f17;
-    mad.f32 %f22, %f12, %f21, %f17;    // v1
+    mad.rn.f32 %f22, %f12, %f21, %f17;    // v1
     sub.f32 %f23, %f22, %f20;
-    mad.f32 %f24, %f14, %f23, %f20;    // v
+    mad.rn.f32 %f24, %f14, %f23, %f20;    // v
     add.f32 %f24, %f24, 0f3F000000;    // +0.5
     max.f32 %f24, %f24, 0f00000000;
     min.f32 %f24, %f24, 0f437F0000;    // 255
@@ -274,11 +274,11 @@ static constexpr const char* kResizeBilinearPtx = R"ptx(
     cvt.rn.f32.u32 %f27, %r31;
     cvt.rn.f32.u32 %f28, %r32;
     sub.f32 %f29, %f26, %f25;
-    mad.f32 %f30, %f12, %f29, %f25;
+    mad.rn.f32 %f30, %f12, %f29, %f25;
     sub.f32 %f31, %f28, %f27;
-    mad.f32 %f32, %f12, %f31, %f27;
+    mad.rn.f32 %f32, %f12, %f31, %f27;
     sub.f32 %f33, %f32, %f30;
-    mad.f32 %f34, %f14, %f33, %f30;
+    mad.rn.f32 %f34, %f14, %f33, %f30;
     add.f32 %f34, %f34, 0f3F000000;
     max.f32 %f34, %f34, 0f00000000;
     min.f32 %f34, %f34, 0f437F0000;
@@ -295,11 +295,11 @@ static constexpr const char* kResizeBilinearPtx = R"ptx(
     cvt.rn.f32.u32 %f37, %r36;
     cvt.rn.f32.u32 %f38, %r37;
     sub.f32 %f39, %f36, %f35;
-    mad.f32 %f40, %f12, %f39, %f35;
+    mad.rn.f32 %f40, %f12, %f39, %f35;
     sub.f32 %f41, %f38, %f37;
-    mad.f32 %f42, %f12, %f41, %f37;
+    mad.rn.f32 %f42, %f12, %f41, %f37;
     sub.f32 %f43, %f42, %f40;
-    mad.f32 %f44, %f14, %f43, %f40;
+    mad.rn.f32 %f44, %f14, %f43, %f40;
     add.f32 %f44, %f44, 0f3F000000;
     max.f32 %f44, %f44, 0f00000000;
     min.f32 %f44, %f44, 0f437F0000;
