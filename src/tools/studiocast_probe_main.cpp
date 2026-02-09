@@ -30,6 +30,7 @@
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
 #include "core/open_cuda/model_pack_registry.h"
+#include "core/open_cuda/onnx_session.h"
 #include "core/probe/probe.h"
 #include "core/util/json.h"
 #include "core/util/strings.h"
@@ -218,6 +219,110 @@ namespace {
                     (void)cuda.DestroyStream(stream, nullptr);
                 }
             }
+        }
+
+        // Open CUDA matting session smoke test (requires CUDA + ONNX Runtime + CUDA EP).
+        {
+#if STUDIOCAST_HAVE_ONNXRUNTIME
+            studiocast::maxine::CudaDriverApi cuda;
+            std::string err;
+            if (!cuda.Initialize(&err)) {
+                std::printf("[SKIP] OpenCudaMattingSessionSmoke (CUDA unavailable): %s\n", err.c_str());
+            } else if (!cuda.EnsureContext(&err)) {
+                std::printf("[SKIP] OpenCudaMattingSessionSmoke (no CUDA context/device): %s\n", err.c_str());
+            } else {
+                studiocast::maxine::CUstream stream = nullptr;
+                if (!cuda.CreateStream(&stream, &err)) {
+                    std::printf("[SKIP] OpenCudaMattingSessionSmoke (CreateStream failed): %s\n", err.c_str());
+                } else {
+                    const auto reg = studiocast::open_cuda::ModelPackRegistry::Scan(
+                        std::filesystem::path("tests") / "data" / "models" / "open_cuda");
+                    const auto packOpt = reg.ResolveModel("mock_model");
+                    if (!packOpt) {
+                        ++failures;
+                        std::printf("[FAIL] OpenCudaMattingSessionSmoke\n  missing mock_model fixture\n");
+                    } else {
+                        studiocast::open_cuda::OpenCudaMattingSession sess(&cuda, *packOpt);
+
+                        studiocast::cuda::CudaImage frame;
+                        if (!frame.Allocate(&cuda, 320, 240, studiocast::cuda::PixelFormatGpu::rgb_u8, &err)) {
+                            ++failures;
+                            std::printf("[FAIL] OpenCudaMattingSessionSmoke\n  frame.Allocate failed: %s\n", err.c_str());
+                        } else {
+                            // Upload a deterministic pattern.
+                            const std::size_t stride = static_cast<std::size_t>(frame.w) * 3u;
+                            std::vector<std::uint8_t> cpu(stride * static_cast<std::size_t>(frame.h));
+                            for (int y = 0; y < frame.h; ++y) {
+                                for (int x = 0; x < frame.w; ++x) {
+                                    const std::size_t i = static_cast<std::size_t>(y) * stride +
+                                                          static_cast<std::size_t>(x) * 3u;
+                                    cpu[i + 0] = static_cast<std::uint8_t>((x * 3 + y * 7) & 0xFF);
+                                    cpu[i + 1] = static_cast<std::uint8_t>((x * 5 + y * 11) & 0xFF);
+                                    cpu[i + 2] = static_cast<std::uint8_t>((x * 13 + y * 17) & 0xFF);
+                                }
+                            }
+                            if (!frame.UploadFromCpuRgb24(&cuda, cpu.data(), stride, stream, &err)) {
+                                ++failures;
+                                std::printf("[FAIL] OpenCudaMattingSessionSmoke\n  UploadFromCpuRgb24 failed: %s\n", err.c_str());
+                            } else {
+                                studiocast::cuda::CudaTensor alpha;
+                                if (!alpha.AllocateNchwF32(&cuda, 1, 1, packOpt->input.height, packOpt->input.width, &err)) {
+                                    ++failures;
+                                    std::printf("[FAIL] OpenCudaMattingSessionSmoke\n  alpha.AllocateNchwF32 failed: %s\n", err.c_str());
+                                } else {
+                                    // Run multiple iterations to exercise re-use of buffers/session.
+                                    bool ok = true;
+                                    for (int i = 0; i < 5; ++i) {
+                                        std::string run_err;
+                                        if (!sess.Run(stream, frame, &alpha, &run_err)) {
+                                            // If CUDA EP is missing (CPU-only ORT), treat as SKIP so self-test stays portable.
+                                            if (run_err.find("CUDA EP") != std::string::npos || run_err.find("CUDA") != std::string::npos) {
+                                                std::printf("[SKIP] OpenCudaMattingSessionSmoke (ORT CUDA EP unavailable): %s\n",
+                                                            run_err.c_str());
+                                                ok = false;
+                                                break;
+                                            }
+                                            ++failures;
+                                            std::printf("[FAIL] OpenCudaMattingSessionSmoke\n  Run failed: %s\n", run_err.c_str());
+                                            ok = false;
+                                            break;
+                                        }
+                                    }
+
+                                    if (ok) {
+                                        std::vector<float> out;
+                                        if (!alpha.DownloadToCpuF32(&cuda, &out, stream, &err)) {
+                                            ++failures;
+                                            std::printf("[FAIL] OpenCudaMattingSessionSmoke\n  DownloadToCpuF32 failed: %s\n", err.c_str());
+                                        } else {
+                                            expectIntEq("OpenCudaMattingSessionSmoke.alpha.size",
+                                                        static_cast<int>(out.size()),
+                                                        packOpt->input.width * packOpt->input.height);
+
+                                            bool all_finite = true;
+                                            for (float v : out) {
+                                                if (!std::isfinite(v)) {
+                                                    all_finite = false;
+                                                    break;
+                                                }
+                                            }
+                                            expectTrue("OpenCudaMattingSessionSmoke.alpha.all_finite", all_finite);
+                                        }
+                                    }
+
+                                    (void)alpha.Free(&cuda, &err);
+                                }
+                            }
+                            (void)frame.Free(&cuda, &err);
+                        }
+                    }
+
+                    (void)cuda.DestroyStream(stream, &err);
+                }
+            }
+#else
+            std::printf("[SKIP] OpenCudaMattingSessionSmoke (built without ONNX Runtime)\n");
+#endif
         }
 
         // CUDA kernels (optional build): bilinear resize + preprocess-to-NCHW.

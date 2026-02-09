@@ -75,6 +75,8 @@ add_library(studiocast_core
         src/core/open_cuda/open_cuda_diagnostics.cpp
         src/core/open_cuda/model_pack_registry.h
         src/core/open_cuda/model_pack_registry.cpp
+        src/core/open_cuda/onnx_session.h
+        src/core/open_cuda/onnx_session.cpp
         src/core/util/dynlib.h
         src/core/util/dynlib.cpp
         src/core/util/json.h
