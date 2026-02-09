@@ -21,6 +21,8 @@ std::string ToString(EffectsEnginePreference v) {
             return "auto";
         case EffectsEnginePreference::maxine:
             return "maxine";
+        case EffectsEnginePreference::open_cuda:
+            return "open_cuda";
     }
     return "auto";
 }
@@ -35,6 +37,10 @@ bool ParseEffectsEnginePreference(const std::string& s, EffectsEnginePreference*
     }
     if (v == "maxine" || v == "gpu" || v == "nvidia") {
         *out = EffectsEnginePreference::maxine;
+        return true;
+    }
+    if (v == "open_cuda" || v == "open" || v == "onnx" || v == "ort" || v == "cuda") {
+        *out = EffectsEnginePreference::open_cuda;
         return true;
     }
 

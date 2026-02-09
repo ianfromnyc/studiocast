@@ -71,7 +71,7 @@ void Usage(const char* argv0) {
         << "  --fps N                  Requested fps (default: 30)\n"
         << "  --mirror                 Enable mirror (horizontal flip)\n"
         << "  --background MODE         Background effect: none|blur|remove|replace|auto_frame (default: none)\n"
-        << "  --background-backend B    Effects engine preference: auto|maxine (default: auto)\n"
+        << "  --background-backend B    Effects engine preference: auto|maxine|open_cuda (default: auto)\n"
         << "  --background-strength N   Intensity knob (default: 8)\n"
         << "  --background-remove-color #RRGGBB  Remove-mode background color (default: #000000)\n"
         << "  --background-replace-image PATH    Replace-mode background image path\n"
@@ -643,7 +643,7 @@ int main(int argc, char** argv) {
             cfg.pipeline.effects.engine = eng;
         } else {
             std::cerr << "WARN: unknown --background-backend value: " << v
-                      << " (expected auto_select|maxine)\n";
+                      << " (expected auto|maxine|open_cuda)\n";
         }
     }
     if (const int v = GetArgInt(argc, argv, "--background-strength", -1); v > 0) {
@@ -952,7 +952,7 @@ int main(int argc, char** argv) {
 
                                   studiocast::video::effects::EffectsEnginePreference eng{};
                                   if (!studiocast::video::effects::ParseEffectsEnginePreference(it->second, &eng)) {
-                                      return std::string("ERR ") + ErrorJson("background_backend must be auto|maxine");
+                                      return std::string("ERR ") + ErrorJson("background_backend must be auto|maxine|open_cuda");
                                   }
                                   bfx.engine = eng;
                               }

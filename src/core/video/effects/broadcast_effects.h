@@ -12,6 +12,7 @@ inline constexpr int kBroadcastEffectsSchemaVersion = 1;
 enum class EffectsEnginePreference {
     auto_select = 0,
     maxine = 1,
+    open_cuda = 2,
 };
 
 std::string ToString(EffectsEnginePreference v);

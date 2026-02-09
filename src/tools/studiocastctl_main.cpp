@@ -20,6 +20,7 @@
 #include "core/maxine/reason_codes.h"
 #include "core/util/fs.h"
 #include "core/util/json.h"
+#include "core/video/effects/broadcast_effects.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "studiocast/version.h"
 
@@ -354,12 +355,13 @@ bool ValidateNoCpuOptions(const Value& root, std::vector<std::string>* warnings,
     if (const auto* s = it->second.AsString()) {
       const std::string v = ToLower(*s);
       if (v == "cpu") {
-        warn("backend 'cpu' is not supported; use engine=auto|maxine");
-        if (error) *error = "engine must be 'auto' or 'maxine'";
+        warn("backend 'cpu' is not supported; use engine=auto|maxine|open_cuda");
+        if (error) *error = "engine must be one of: auto, maxine, open_cuda";
         return false;
       }
-      if (v != "auto" && v != "maxine") {
-        if (error) *error = "engine must be 'auto' or 'maxine'";
+      studiocast::video::effects::EffectsEnginePreference ep{};
+      if (!studiocast::video::effects::ParseEffectsEnginePreference(v, &ep)) {
+        if (error) *error = "engine must be one of: auto, maxine, open_cuda";
         return false;
       }
     }
@@ -372,9 +374,9 @@ bool ValidateNoCpuOptions(const Value& root, std::vector<std::string>* warnings,
       if (const auto* s = v.AsString()) {
         const std::string vv = ToLower(*s);
         if (vv == "cpu") {
-          warn("backend 'cpu' is not supported; use engine=auto|maxine");
+          warn("backend 'cpu' is not supported; use engine=auto|maxine|open_cuda");
         } else {
-          warn("legacy backend key '" + k + "' is ignored; use engine=auto|maxine");
+          warn("legacy backend key '" + k + "' is ignored; use engine=auto|maxine|open_cuda");
         }
       }
     }
@@ -519,12 +521,12 @@ void Usage(const char* argv0) {
       << "  " << argv0 << " audio set --file <audio.json|->\n"
       << "  " << argv0 << " audio start\n"
       << "  " << argv0 << " audio stop\n"
-      << "  " << argv0 << " effects enable <effect_id> [--engine auto|maxine] [--strength N|0..1] [--intensity N|0..1] ...\n"
+      << "  " << argv0 << " effects enable <effect_id> [--engine auto|maxine|open_cuda] [--strength N|0..1] [--intensity N|0..1] ...\n"
       << "  " << argv0 << " effects disable <effect_id>\n"
       << "  " << argv0 << " enable <0|1>\n"
       << "  " << argv0 << " video set [input=/dev/videoX|auto] [output=/dev/videoY|auto] [width=N] [height=N] [fps=N]\n"
       << "  " << argv0 << " video effects [mirror=0|1] [background=none|blur|remove|replace|auto_frame] "
-      << "[background_backend=auto|maxine] [background_strength=N] [background_remove_color=#RRGGBB] [background_replace_image=/path]\n"
+      << "[background_backend=auto|maxine|open_cuda] [background_strength=N] [background_remove_color=#RRGGBB] [background_replace_image=/path]\n"
       << "  " << argv0 << " video effects --from <effects.json>\n\n"
       << "Examples:\n"
       << "  " << argv0 << " status\n"
@@ -833,15 +835,16 @@ int main(int argc, char** argv) {
         if (auto v = needValue("--engine")) {
           const std::string vv = ToLower(std::string(*v));
           if (vv == "cpu") {
-            std::cerr << "WARNING: backend 'cpu' is not supported; use engine=auto|maxine\n";
-            std::cerr << "ERROR: engine must be auto|maxine\n";
+            std::cerr << "WARNING: backend 'cpu' is not supported; use engine=auto|maxine|open_cuda\n";
+            std::cerr << "ERROR: engine must be auto|maxine|open_cuda\n";
             return 2;
           }
-          if (vv != "auto" && vv != "maxine") {
-            std::cerr << "ERROR: engine must be auto|maxine\n";
+          studiocast::video::effects::EffectsEnginePreference ep{};
+          if (!studiocast::video::effects::ParseEffectsEnginePreference(vv, &ep)) {
+            std::cerr << "ERROR: engine must be auto|maxine|open_cuda\n";
             return 2;
           }
-          engine = vv;
+          engine = studiocast::video::effects::ToString(ep);
           continue;
         }
         if (auto v = needValue("--strength")) {

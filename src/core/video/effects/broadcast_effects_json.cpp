@@ -317,7 +317,7 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
     if (found) {
         EffectsEnginePreference ep{};
         if (!ParseEffectsEnginePreference(engine, &ep)) {
-            return Fail(error, "engine must be 'auto' or 'maxine'");
+            return Fail(error, "engine must be one of: auto, maxine, open_cuda");
         }
         out->engine = ep;
     }

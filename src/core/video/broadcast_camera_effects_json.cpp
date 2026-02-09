@@ -383,7 +383,7 @@ bool ApplyBroadcastCameraEffectsPatchJson(const studiocast::util::json::Value& r
     if (found) {
         EffectsEnginePreference ep{};
         if (!ParseEffectsEnginePreference(engine, &ep)) {
-            if (error) *error = "engine must be 'auto' or 'maxine'";
+            if (error) *error = "engine must be one of: auto, maxine, open_cuda";
             return false;
         }
         effects->engine = ep;

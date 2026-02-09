@@ -456,10 +456,46 @@ namespace {
         }
 
         {
-            studiocast::video::effects::EffectsEnginePreference ep{};
+            using studiocast::video::effects::EffectsEnginePreference;
+            EffectsEnginePreference ep{};
+
             expectTrue("ParseEffectsEnginePreference(maxine)",
                        studiocast::video::effects::ParseEffectsEnginePreference("maxine", &ep) &&
-                           ep == studiocast::video::effects::EffectsEnginePreference::maxine);
+                           ep == EffectsEnginePreference::maxine);
+
+            expectTrue("ParseEffectsEnginePreference(open_cuda)",
+                       studiocast::video::effects::ParseEffectsEnginePreference("open_cuda", &ep) &&
+                           ep == EffectsEnginePreference::open_cuda);
+
+            expectTrue("ParseEffectsEnginePreference alias onnx",
+                       studiocast::video::effects::ParseEffectsEnginePreference("onnx", &ep) &&
+                           ep == EffectsEnginePreference::open_cuda);
+
+            expectTrue("ParseEffectsEnginePreference alias cuda",
+                       studiocast::video::effects::ParseEffectsEnginePreference("cuda", &ep) &&
+                           ep == EffectsEnginePreference::open_cuda);
+
+            expectEq("ToString(open_cuda)",
+                     studiocast::video::effects::ToString(EffectsEnginePreference::open_cuda),
+                     "open_cuda");
+
+            // Round-trip: ToString() must be parseable.
+            expectTrue("EffectsEnginePreference roundtrip auto",
+                       studiocast::video::effects::ParseEffectsEnginePreference(
+                           studiocast::video::effects::ToString(EffectsEnginePreference::auto_select),
+                           &ep) &&
+                           ep == EffectsEnginePreference::auto_select);
+            expectTrue("EffectsEnginePreference roundtrip maxine",
+                       studiocast::video::effects::ParseEffectsEnginePreference(
+                           studiocast::video::effects::ToString(EffectsEnginePreference::maxine),
+                           &ep) &&
+                           ep == EffectsEnginePreference::maxine);
+            expectTrue("EffectsEnginePreference roundtrip open_cuda",
+                       studiocast::video::effects::ParseEffectsEnginePreference(
+                           studiocast::video::effects::ToString(EffectsEnginePreference::open_cuda),
+                           &ep) &&
+                           ep == EffectsEnginePreference::open_cuda);
+
             expectTrue("ParseEffectsEnginePreference rejects cpu",
                        !studiocast::video::effects::ParseEffectsEnginePreference("cpu", &ep));
         }
@@ -479,9 +515,19 @@ namespace {
 
             warnings.clear();
             perr.clear();
+            expectTrue("ParseBroadcastCameraEffectsJsonText engine=open_cuda",
+                       studiocast::video::effects::ParseBroadcastCameraEffectsJsonText(
+                           "{\"engine\":\"open_cuda\"}", &parsed, options, &warnings, &perr) &&
+                           parsed.engine == studiocast::video::effects::EffectsEnginePreference::open_cuda);
+
+            warnings.clear();
+            perr.clear();
             expectTrue("ParseBroadcastCameraEffectsJsonText rejects engine=cpu",
                        !studiocast::video::effects::ParseBroadcastCameraEffectsJsonText(
                            "{\"engine\":\"cpu\"}", &parsed, options, &warnings, &perr));
+            expectEq("ParseBroadcastCameraEffectsJsonText rejects engine=cpu msg",
+                     perr,
+                     "engine must be one of: auto, maxine, open_cuda");
         }
 
         {
@@ -961,6 +1007,22 @@ namespace {
                 expectIntEq("effects patch blur_strength", fx.virtual_background.strength, 9);
             }
 
+            const std::string eng = "{\"engine\":\"open_cuda\"}";
+            jerr.clear();
+            if (!studiocast::video::ApplyBroadcastCameraEffectsPatchJsonText(eng, &fx, &jerr)) {
+                ++failures;
+                std::printf("[FAIL] ApplyBroadcastCameraEffectsPatchJsonText engine: %s\n", jerr.c_str());
+            } else {
+                expectTrue("effects patch engine=open_cuda",
+                           fx.engine == studiocast::video::effects::EffectsEnginePreference::open_cuda);
+            }
+
+            const std::string badEng = "{\"engine\":\"wat\"}";
+            jerr.clear();
+            expectTrue("effects patch engine rejects unknown",
+                       !studiocast::video::ApplyBroadcastCameraEffectsPatchJsonText(badEng, &fx, &jerr));
+            expectEq("effects patch engine unknown msg", jerr, "engine must be one of: auto, maxine, open_cuda");
+
             // Serializer output should be valid JSON and re-applicable.
             const std::string fxJson = studiocast::video::BroadcastCameraEffectsContractToJson(fx);
             studiocast::util::json::Value parsed;
@@ -996,7 +1058,7 @@ namespace {
             BroadcastCameraEffects fx;
             fx.schema_version = studiocast::video::effects::kBroadcastEffectsSchemaVersion;
             fx.mirror = true;
-            fx.engine = EffectsEnginePreference::maxine;
+            fx.engine = EffectsEnginePreference::open_cuda;
             fx.virtual_background.mode = VirtualBackgroundMode::replace;
             fx.virtual_background.strength = 9;
             fx.virtual_background.replace_path = "/tmp/bg.ppm";
