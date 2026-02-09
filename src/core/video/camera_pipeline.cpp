@@ -7,6 +7,7 @@
 #include <memory>
 #include <set>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 #include "core/cuda/cuda_image.h"
@@ -3000,24 +3001,35 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   auto rebuildChain = [&](const studiocast::video::effects::BroadcastCameraEffects& fx) {
     chain.Clear();
 
-    const auto plan = studiocast::video::effects::BuildBroadcastEffectsPlan(fx);
-    appliedPlan = plan;
+    auto plan = studiocast::video::effects::BuildBroadcastEffectsPlan(fx);
 
     std::string note;
 
-    if (!plan.disabled.empty()) {
+    std::optional<studiocast::maxine::MaxineDiagnostics> maxine_diag;
+    auto get_maxine_diag = [&]() -> const studiocast::maxine::MaxineDiagnostics& {
+      if (!maxine_diag.has_value()) {
+        studiocast::maxine::MaxineManager mgr;
+        maxine_diag = mgr.Diagnose(false);
+      }
+      return *maxine_diag;
+    };
+    auto append_canonical_maxine_blocked = [&](studiocast::maxine::MaxineNeed need) {
+      const auto& d = get_maxine_diag();
+      const auto c = studiocast::maxine::BuildCanonicalMaxineBlockedCopy(d, need);
+      std::string s = studiocast::maxine::FormatCanonicalMaxineBlockedCopy(c);
+      if (s.empty()) s = c.summary;
+      if (!s.empty()) {
+        if (!note.empty()) note += "\n";
+        note += s;
+      }
+    };
+
+    auto append_rule_notes = [&] {
+      if (plan.disabled.empty()) return;
+      if (!note.empty()) note += "\n";
       note += "Effect rules:";
       for (const auto& d : plan.disabled) {
         note += "\n - " + d.id + ": " + d.reason;
-      }
-    }
-
-    auto finalize_note_and_backends = [&] {
-      std::lock_guard<std::mutex> lock(mu_);
-      effects_backends_ = chain.BackendSummary();
-      effects_note_ = note;
-      if (!note.empty()) {
-        last_error_ = note;
       }
     };
 
@@ -3049,102 +3061,70 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return planned.count(std::string(id)) != 0;
     };
 
-    // If Maxine-backed effects are requested but are not available, stop the
-    // pipeline with a canonical, actionable message.
-    //
-    // Virtual background can run via Open CUDA (fx.engine=open_cuda) or fall
-    // back to Open CUDA (fx.engine=auto_select), so only treat it as "Maxine
-    // required" when Maxine is explicitly requested.
     const bool vb_requested =
         has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) ||
         has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove) ||
         has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace);
-    const bool vb_requires_maxine =
-        vb_requested && (fx.engine == studiocast::video::effects::EffectsEnginePreference::maxine);
 
-    const bool wants_vfx =
-        vb_requires_maxine ||
-        has(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) ||
-        has(studiocast::video::effects::contract::kEffectIdVirtualKeyLight);
-    const bool wants_ar =
-        has(studiocast::video::effects::contract::kEffectIdEyeContact) ||
-        has(studiocast::video::effects::contract::kEffectIdAutoFrame);
+    const bool engine_maxine = (fx.engine == studiocast::video::effects::EffectsEnginePreference::maxine);
+    const bool engine_open_cuda = (fx.engine == studiocast::video::effects::EffectsEnginePreference::open_cuda);
 
-    if (wants_vfx || wants_ar) {
-      studiocast::maxine::MaxineManager mgr;
-      const auto diag = mgr.Diagnose(false);
-      const std::set<std::string> avail(diag.available_effects.begin(), diag.available_effects.end());
+    bool maxine_strict_blocked = false;
 
-      auto set_blocked = [&](studiocast::maxine::MaxineNeed need) {
-        const auto c = studiocast::maxine::BuildCanonicalMaxineBlockedCopy(diag, need);
-        note = studiocast::maxine::FormatCanonicalMaxineBlockedCopy(c);
-        if (note.empty()) {
-          note = c.summary;
-        }
-        stop_.store(true);
-      };
+    std::unordered_map<std::string, std::string> backend_for_effect;
+    auto set_backend = [&](std::string_view effect_id, std::string_view backend) {
+      backend_for_effect[std::string(effect_id)] = std::string(backend);
+    };
 
-      // AR effects.
-      if (!stop_.load() && has(studiocast::video::effects::contract::kEffectIdEyeContact) &&
-          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdEyeContact))) {
-        set_blocked(studiocast::maxine::MaxineNeed::ar);
+    auto remove_stage_from_plan = [&](std::string_view effect_id) {
+      const std::string id(effect_id);
+      plan.ordered_effect_ids.erase(std::remove(plan.ordered_effect_ids.begin(),
+                                                plan.ordered_effect_ids.end(),
+                                                id),
+                                   plan.ordered_effect_ids.end());
+      if (plan.vignette_attach_to_effect_id == id) {
+        plan.vignette_attach_to_effect_id.clear();
       }
-      if (!stop_.load() &&
-          has(studiocast::video::effects::contract::kEffectIdAutoFrame) &&
-          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdAutoFrame))) {
-        set_blocked(studiocast::maxine::MaxineNeed::ar);
-      }
-
-      // VFX effects.
-      // Virtual background only hard-requires Maxine when explicitly requested.
-      if (!stop_.load() && vb_requires_maxine && has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) &&
-          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur))) {
-        set_blocked(studiocast::maxine::MaxineNeed::vfx);
-      }
-      if (!stop_.load() && vb_requires_maxine && has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove) &&
-          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove))) {
-        set_blocked(studiocast::maxine::MaxineNeed::vfx);
-      }
-      if (!stop_.load() && vb_requires_maxine && has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace) &&
-          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace))) {
-        set_blocked(studiocast::maxine::MaxineNeed::vfx);
-      }
-      if (!stop_.load() && has(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) &&
-          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval))) {
-        set_blocked(studiocast::maxine::MaxineNeed::vfx);
-      }
-      if (!stop_.load() && has(studiocast::video::effects::contract::kEffectIdVirtualKeyLight) &&
-          !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualKeyLight))) {
-        set_blocked(studiocast::maxine::MaxineNeed::vfx);
-      }
-
-      if (stop_.load()) {
-        finalize_note_and_backends();
-        appliedFx = fx;
-        return;
-      }
-    }
+    };
 
     // Eye Contact (AR)
     if (has(studiocast::video::effects::contract::kEffectIdEyeContact)) {
-      want_maxine_eye_contact = true;
+      if (engine_open_cuda) {
+        if (!note.empty()) note += "\n";
+        note += "Eye Contact unavailable: requires Maxine backend.";
+      } else if (!maxine_strict_blocked) {
+        want_maxine_eye_contact = true;
 
-      std::string mx_err;
-      if (maxine_eye_contact.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
-        have_maxine_eye_contact = true;
-        if (!note.empty()) note += "\n";
-        note += "Maxine AR: Eye Contact.";
-      } else {
-        if (!note.empty()) note += "\n";
-        note += mx_err;
-        // No CPU fallback when Maxine is not available.
-        stop_.store(true);
+        std::string mx_err;
+        if (maxine_eye_contact.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
+          have_maxine_eye_contact = true;
+          set_backend(studiocast::video::effects::contract::kEffectIdEyeContact, "maxine_ar");
+          if (!note.empty()) note += "\n";
+          note += "Maxine AR: Eye Contact.";
+        } else {
+          if (engine_maxine) {
+            append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::ar);
+            maxine_strict_blocked = true;
+          } else {
+            if (!note.empty()) note += "\n";
+            note += mx_err;
+          }
+        }
       }
     }
 
     // Background effects.
     if (vb_requested) {
       const auto vb_mode = fx.virtual_background.mode;
+
+      std::optional<std::string_view> vb_effect_id;
+      if (has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur)) {
+        vb_effect_id = studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur;
+      } else if (has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove)) {
+        vb_effect_id = studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove;
+      } else if (has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace)) {
+        vb_effect_id = studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace;
+      }
 
       auto append_backend_note = [&](const char* backend) {
         if (!note.empty()) note += "\n";
@@ -3162,22 +3142,28 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         std::string oc_err;
         if (open_cuda_vb.EnsureInitialized(capA.width, capA.height, fx, &oc_err)) {
           have_open_cuda_vb = true;
+          if (vb_effect_id.has_value()) set_backend(*vb_effect_id, "open_cuda");
           append_backend_note("Open CUDA");
         } else {
           if (!note.empty()) note += "\n";
           note += oc_err;
-          stop_.store(true);
+          if (vb_effect_id.has_value()) remove_stage_from_plan(*vb_effect_id);
         }
       } else if (fx.engine == studiocast::video::effects::EffectsEnginePreference::maxine) {
-        want_maxine_bg_blur = true;
-        std::string mx_err;
-        if (maxine_bg_blur.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
-          have_maxine_bg_blur = true;
-          append_backend_note("Maxine VFX");
+        if (!maxine_strict_blocked) {
+          want_maxine_bg_blur = true;
+          std::string mx_err;
+          if (maxine_bg_blur.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
+            have_maxine_bg_blur = true;
+            if (vb_effect_id.has_value()) set_backend(*vb_effect_id, "maxine");
+            append_backend_note("Maxine VFX");
+          } else {
+            append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::vfx);
+            maxine_strict_blocked = true;
+            if (vb_effect_id.has_value()) remove_stage_from_plan(*vb_effect_id);
+          }
         } else {
-          if (!note.empty()) note += "\n";
-          note += mx_err;
-          stop_.store(true);
+          if (vb_effect_id.has_value()) remove_stage_from_plan(*vb_effect_id);
         }
       } else {
         // auto_select: prefer Maxine when available; otherwise try Open CUDA.
@@ -3185,66 +3171,87 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         std::string mx_err;
         if (maxine_bg_blur.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
           have_maxine_bg_blur = true;
+          if (vb_effect_id.has_value()) set_backend(*vb_effect_id, "maxine");
           append_backend_note("Maxine VFX");
         } else {
           want_open_cuda_vb = true;
           std::string oc_err;
           if (open_cuda_vb.EnsureInitialized(capA.width, capA.height, fx, &oc_err)) {
             have_open_cuda_vb = true;
+            if (vb_effect_id.has_value()) set_backend(*vb_effect_id, "open_cuda");
             append_backend_note("Open CUDA");
           } else {
             if (!note.empty()) note += "\n";
             note += mx_err;
             if (!note.empty()) note += "\n";
             note += oc_err;
-            stop_.store(true);
+            if (vb_effect_id.has_value()) remove_stage_from_plan(*vb_effect_id);
           }
         }
       }
 
       // Prevent silent vignette skip: vignette attachment is only implemented on Maxine/CUDA(BGR)
       // paths today.
-      if (!stop_.load() && have_open_cuda_vb && has(studiocast::video::effects::contract::kEffectIdVignette)) {
+      if (have_open_cuda_vb && has(studiocast::video::effects::contract::kEffectIdVignette)) {
         const std::string& attach = plan.vignette_attach_to_effect_id;
         if (attach == std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) ||
             attach == std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove) ||
             attach == std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace)) {
           if (!note.empty()) note += "\n";
           note += "Vignette unavailable: Open CUDA virtual background does not support vignette yet.";
-          stop_.store(true);
+          remove_stage_from_plan(studiocast::video::effects::contract::kEffectIdVignette);
+          plan.vignette_attach_to_effect_id.clear();
         }
       }
 
     } else if (has(studiocast::video::effects::contract::kEffectIdAutoFrame)) {
       // Auto Frame is Maxine-only (AR + GPU crop/scale).
-      want_maxine_auto_frame = true;
+      if (engine_open_cuda) {
+        if (!note.empty()) note += "\n";
+        note += "Auto Frame unavailable: requires Maxine backend.";
+      } else if (!maxine_strict_blocked) {
+        want_maxine_auto_frame = true;
 
-      std::string mx_err;
-      if (maxine_auto_frame.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
-        have_maxine_auto_frame = true;
-        if (!note.empty()) note += "\n";
-        note += "Maxine AR: Auto Frame (FaceBoxDetection + CUDA crop/scale).";
-      } else {
-        if (!note.empty()) note += "\n";
-        note += mx_err;
-        // No fallback.
-        stop_.store(true);
+        std::string mx_err;
+        if (maxine_auto_frame.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
+          have_maxine_auto_frame = true;
+          set_backend(studiocast::video::effects::contract::kEffectIdAutoFrame, "maxine_ar_cuda");
+          if (!note.empty()) note += "\n";
+          note += "Maxine AR: Auto Frame (FaceBoxDetection + CUDA crop/scale).";
+        } else {
+          if (engine_maxine) {
+            append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::ar);
+            maxine_strict_blocked = true;
+          } else {
+            if (!note.empty()) note += "\n";
+            note += mx_err;
+          }
+        }
       }
     }
 
     // Virtual Key Light (Maxine-only).
     if (has(studiocast::video::effects::contract::kEffectIdVirtualKeyLight)) {
-      want_maxine_relight = true;
-      std::string mx_err;
-      if (maxine_relight.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
-        have_maxine_relight = true;
-        if (!note.empty()) note += " ";
-        note += "Maxine VFX: Video Relighting (Virtual Key Light).";
-      } else {
-        if (!note.empty()) note += " ";
-        note += mx_err;
-        // No fallback.
-        stop_.store(true);
+      if (engine_open_cuda) {
+        if (!note.empty()) note += "\n";
+        note += "Virtual Key Light unavailable: requires Maxine backend.";
+      } else if (!maxine_strict_blocked) {
+        want_maxine_relight = true;
+        std::string mx_err;
+        if (maxine_relight.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
+          have_maxine_relight = true;
+          set_backend(studiocast::video::effects::contract::kEffectIdVirtualKeyLight, "maxine");
+          if (!note.empty()) note += " ";
+          note += "Maxine VFX: Video Relighting (Virtual Key Light).";
+        } else {
+          if (engine_maxine) {
+            append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::vfx);
+            maxine_strict_blocked = true;
+          } else {
+            if (!note.empty()) note += " ";
+            note += mx_err;
+          }
+        }
       }
     }
 
@@ -3260,13 +3267,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         std::string mx_err;
         if (vignette_only.EnsureInitialized(capA.width, capA.height, &mx_err)) {
           have_maxine_vignette_only = true;
+          set_backend(studiocast::video::effects::contract::kEffectIdVignette, "cuda");
           if (!note.empty()) note += "\n";
           note += "CUDA: Vignette.";
         } else {
           if (!note.empty()) note += "\n";
           note += "Vignette unavailable: " + mx_err;
-          // No fallback.
-          stop_.store(true);
         }
       }
     }
@@ -3274,41 +3280,29 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     // Mirror (CPU) last.
     if (has(studiocast::video::effects::contract::kEffectIdMirror)) {
       chain.Add(std::make_unique<studiocast::video::effects::MirrorEffect>());
+      set_backend(studiocast::video::effects::contract::kEffectIdMirror, "builtin");
     }
 
     {
+      append_rule_notes();
+
       std::lock_guard<std::mutex> lock(mu_);
-      std::string backends = chain.BackendSummary();
-      if (have_maxine_bg_blur) {
+      std::string backends;
+      for (const auto& id : plan.ordered_effect_ids) {
+        const auto it = backend_for_effect.find(id);
+        if (it == backend_for_effect.end()) continue;
         if (!backends.empty()) backends += ",";
-        backends += "virtual_background." +
-                    studiocast::video::effects::ToString(fx.virtual_background.mode) + ":maxine";
+        backends += id + ":" + it->second;
       }
-      if (have_open_cuda_vb) {
-        if (!backends.empty()) backends += ",";
-        backends += "virtual_background." +
-                    studiocast::video::effects::ToString(fx.virtual_background.mode) + ":open_cuda";
-      }
-      if (have_maxine_relight) {
-        if (!backends.empty()) backends += ",";
-        backends += "virtual_key_light:maxine";
-      }
-      if (have_maxine_eye_contact) {
-        if (!backends.empty()) backends += ",";
-        backends += "eye_contact:maxine_ar";
-      }
-      if (have_maxine_auto_frame) {
-        if (!backends.empty()) backends += ",";
-        backends += "auto_frame:maxine_ar_cuda";
-      }
-      if (have_maxine_vignette_only) {
-        if (!backends.empty()) backends += ",";
-        backends += "vignette:cuda";
-      }
+
       effects_backends_ = backends;
       effects_note_ = note;
+      if (!note.empty()) {
+        last_error_ = note;
+      }
     }
 
+    appliedPlan = plan;
     appliedFx = fx;
   };
 

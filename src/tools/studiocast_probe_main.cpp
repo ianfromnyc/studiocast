@@ -119,6 +119,44 @@ namespace {
                        !IsRecoverableCaptureAcquireFailure("poll failed: EIO"));
         }
 
+        // Backend resolver policy (pure logic).
+        // Mirrors CameraPipeline behavior for maxine vs open_cuda selection.
+        {
+            using studiocast::video::effects::EffectsEnginePreference;
+
+            auto resolveVb = [&](EffectsEnginePreference engine,
+                                 bool maxine_runnable,
+                                 bool open_cuda_runnable) -> std::string {
+                switch (engine) {
+                    case EffectsEnginePreference::maxine:
+                        return maxine_runnable ? "maxine" : "";
+                    case EffectsEnginePreference::open_cuda:
+                        return open_cuda_runnable ? "open_cuda" : "";
+                    case EffectsEnginePreference::auto_select:
+                    default:
+                        if (maxine_runnable) return "maxine";
+                        if (open_cuda_runnable) return "open_cuda";
+                        return "";
+                }
+            };
+
+            expectEq("ResolveVB(auto_select prefers maxine)",
+                     resolveVb(EffectsEnginePreference::auto_select, /*maxine=*/true, /*open_cuda=*/true),
+                     "maxine");
+            expectEq("ResolveVB(auto_select falls back to open_cuda)",
+                     resolveVb(EffectsEnginePreference::auto_select, /*maxine=*/false, /*open_cuda=*/true),
+                     "open_cuda");
+            expectEq("ResolveVB(auto_select none)",
+                     resolveVb(EffectsEnginePreference::auto_select, /*maxine=*/false, /*open_cuda=*/false),
+                     "");
+            expectEq("ResolveVB(maxine strict; no fallback)",
+                     resolveVb(EffectsEnginePreference::maxine, /*maxine=*/false, /*open_cuda=*/true),
+                     "");
+            expectEq("ResolveVB(open_cuda strict; no fallback)",
+                     resolveVb(EffectsEnginePreference::open_cuda, /*maxine=*/true, /*open_cuda=*/false),
+                     "");
+        }
+
         // Open CUDA model pack registry (pure filesystem + JSON; no GPU/ORT required).
         {
             const auto reg = studiocast::open_cuda::ModelPackRegistry::Scan(
