@@ -63,6 +63,12 @@ namespace studiocast::util {
         return dataHome / "studiocast";
     }
 
+    fs::path StudioCastModelsDir() {
+        const auto dataDir = StudioCastDataDir();
+        if (dataDir.empty()) return {};
+        return dataDir / "models";
+    }
+
     fs::path StudioCastConfigDir() {
         const auto configHome = XdgConfigHome();
         if (configHome.empty()) return {};

@@ -1,0 +1,2 @@
+This is a synthetic model pack used only for StudioCast self-tests.
+It does not contain a real ONNX model.

@@ -29,6 +29,7 @@
 #include "core/maxine/reason_codes.h"
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
+#include "core/open_cuda/model_pack_registry.h"
 #include "core/probe/probe.h"
 #include "core/util/json.h"
 #include "core/util/strings.h"
@@ -114,6 +115,48 @@ namespace {
             expectTrue("IsRecoverableCaptureAcquireFailure(empty)", IsRecoverableCaptureAcquireFailure(""));
             expectTrue("IsRecoverableCaptureAcquireFailure(fatal) == false",
                        !IsRecoverableCaptureAcquireFailure("poll failed: EIO"));
+        }
+
+        // Open CUDA model pack registry (pure filesystem + JSON; no GPU/ORT required).
+        {
+            const auto reg = studiocast::open_cuda::ModelPackRegistry::Scan(
+                std::filesystem::path("tests") / "data" / "models" / "open_cuda");
+
+            std::vector<std::string> ids;
+            for (const auto& m : reg.ListModels()) ids.push_back(m.id);
+            expectVecEq("OpenCudaModelRegistry.ListModels", ids, {"mock_model"});
+
+            const auto packOpt = reg.ResolveModel("mock_model");
+            expectTrue("OpenCudaModelRegistry.ResolveModel(mock_model)", packOpt.has_value());
+            if (packOpt) {
+                expectEq("OpenCudaModelRegistry.mock_model.display_name", packOpt->display_name, "Mock Matting Model");
+                expectEq("OpenCudaModelRegistry.mock_model.task", packOpt->task, "matting");
+                expectEq("OpenCudaModelRegistry.mock_model.input.layout", packOpt->input.layout, "nchw");
+                expectIntEq("OpenCudaModelRegistry.mock_model.input.width", packOpt->input.width, 256);
+                expectIntEq("OpenCudaModelRegistry.mock_model.input.height", packOpt->input.height, 256);
+                expectIntEq("OpenCudaModelRegistry.mock_model.input.channels", packOpt->input.channels, 3);
+                expectEq("OpenCudaModelRegistry.mock_model.output.kind", packOpt->output.kind, "alpha");
+                expectEq("OpenCudaModelRegistry.mock_model.preprocess.color", packOpt->preprocess.color, "rgb");
+                expectEq("OpenCudaModelRegistry.mock_model.preprocess.range", packOpt->preprocess.range, "0..1");
+            }
+
+            const auto& problems = reg.Problems();
+            {
+                auto it = problems.find("missing_onnx");
+                expectTrue("OpenCudaModelRegistry.Problems(missing_onnx)", it != problems.end());
+                if (it != problems.end()) {
+                    expectContains("OpenCudaModelRegistry.Problems(missing_onnx).reason",
+                                   it->second,
+                                   "missing ONNX file");
+                }
+            }
+            {
+                auto it = problems.find("invalid_json");
+                expectTrue("OpenCudaModelRegistry.Problems(invalid_json)", it != problems.end());
+                if (it != problems.end()) {
+                    expectContains("OpenCudaModelRegistry.Problems(invalid_json).reason", it->second, "model.json");
+                }
+            }
         }
 
         // GPU buffer roundtrip (CUDA driver only; no Maxine/NvCV dependencies).

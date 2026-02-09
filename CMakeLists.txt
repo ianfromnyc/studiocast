@@ -73,6 +73,8 @@ add_library(studiocast_core
         src/core/probe/probe.cpp
         src/core/open_cuda/open_cuda_diagnostics.h
         src/core/open_cuda/open_cuda_diagnostics.cpp
+        src/core/open_cuda/model_pack_registry.h
+        src/core/open_cuda/model_pack_registry.cpp
         src/core/util/dynlib.h
         src/core/util/dynlib.cpp
         src/core/util/json.h
@@ -339,6 +341,25 @@ studiocast_set_project_warnings(studiocast-maxine)
 studiocast_enable_sanitizers(studiocast-maxine)
 
 # -----------------------------
+# Open CUDA helper tool
+# -----------------------------
+add_executable(studiocast-open
+        src/tools/studiocast_open_main.cpp
+)
+
+set_target_properties(studiocast-open PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+
+target_link_libraries(studiocast-open PRIVATE studiocast_core)
+
+target_include_directories(studiocast-open PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${STUDIOCAST_GENERATED_DIR}"
+)
+
+studiocast_set_project_warnings(studiocast-open)
+studiocast_enable_sanitizers(studiocast-open)
+
+# -----------------------------
 # Audio tool 
 # -----------------------------
 add_executable(studiocast-audio
@@ -439,7 +460,7 @@ set_target_properties(studiocastd PROPERTIES
 # Install step
 # -----------------------------
 include(GNUInstallDirs)
-install(TARGETS studiocast studiocast-probe studiocast-maxine studiocast-audio studiocast-video studiocastctl
+install(TARGETS studiocast studiocast-probe studiocast-maxine studiocast-open studiocast-audio studiocast-video studiocastctl
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
 

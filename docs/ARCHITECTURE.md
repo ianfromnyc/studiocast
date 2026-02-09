@@ -51,6 +51,31 @@ Effect availability must be computed **only** by the daemon and exposed via `GET
   - which effects are available vs blocked (with reason codes)
   - what remediation/install hints to show
 
+## Open CUDA model packs (XDG)
+
+The `open_cuda` backend (ONNX Runtime CUDA EP) discovers user-supplied model packs at runtime.
+
+Default root:
+
+- `~/.local/share/studiocast/models/open_cuda/<model_id>/`
+
+Each pack contains:
+
+- `model.json` (schema v1; see below)
+- `model.onnx` (filename configurable via `onnx_filename`)
+- `LICENSE.txt`
+
+### `model.json` schema v1 (draft)
+
+Required top-level fields:
+
+- `id`, `display_name`
+- `task`: currently only `"matting"`
+- `onnx_filename`
+- `input`: `{ name, layout, dtype, width, height, channels }`
+- `output`: `{ name, kind, dtype }` where `kind` is `"alpha"`
+- `preprocess`: `{ mean[3], std[3], color, range }` where `color` is `"rgb"` and `range` is `"0..1"`
+
 ## No CPU fallback (product rule)
 
 Effects are GPU-only (Maxine + small CUDA post-process where needed). If Maxine, drivers, supported GPU, or feature

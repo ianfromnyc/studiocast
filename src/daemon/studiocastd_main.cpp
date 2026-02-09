@@ -21,7 +21,9 @@
 #include "core/ipc/daemon_socket.h"
 #include "core/maxine/maxine_manager.h"
 #include "core/open_cuda/open_cuda_diagnostics.h"
+#include "core/open_cuda/model_pack_registry.h"
 #include "core/util/json.h"
+#include "core/util/xdg.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/camera_effects_json.h"
 #include "core/video/effects/broadcast_effect_rules.h"
@@ -759,12 +761,31 @@ int main(int argc, char** argv) {
                               }
 
                               studiocast::open_cuda::OpenCudaDiagnostics od;
-                              od.ok = false;
-                              od.install_hints = {
-                                  "Open CUDA backend is not available in this build.",
-                                  "Model packs (future): ~/.local/share/studiocast/models/open_cuda/<model_id>/",
-                                  "See docs/ for setup notes (Open CUDA docs will be added separately).",
-                              };
+                              {
+                                  const auto reg = studiocast::open_cuda::ModelPackRegistry::ScanDefault();
+                                  for (const auto& m : reg.ListModels()) od.installed_models.push_back(m.id);
+                                  od.missing_models = reg.Problems();
+
+                                  const auto modelsRoot = studiocast::util::StudioCastModelsDir();
+                                  const auto openCudaRoot = modelsRoot.empty() ? std::string("~/.local/share/studiocast/models/open_cuda")
+                                                                             : (modelsRoot / "open_cuda").string();
+
+                                  od.install_hints.push_back(std::string("Model packs: ") + openCudaRoot + "/<model_id>/");
+                                  od.install_hints.push_back("Each pack must contain: model.json, model.onnx, LICENSE.txt");
+
+#if STUDIOCAST_HAVE_ONNXRUNTIME
+                                  if (od.installed_models.empty()) {
+                                      od.ok = false;
+                                      od.install_hints.push_back("No usable Open CUDA model packs were found.");
+                                  } else {
+                                      od.ok = true;
+                                  }
+#else
+                                  od.ok = false;
+                                  od.install_hints.push_back("Open CUDA backend is disabled in this build (ONNX Runtime not found). ");
+                                  od.install_hints.push_back("Rebuild with -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON and ensure ONNXRUNTIME_ROOT is set.");
+#endif
+                              }
                               const std::string openCudaJson = od.ToJson();
 
                               return std::string("OK ") +

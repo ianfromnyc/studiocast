@@ -10,6 +10,7 @@ namespace studiocast::util {
     std::filesystem::path XdgRuntimeDir();
 
     std::filesystem::path StudioCastDataDir();     // ~/.local/share/studiocast (by default)
+    std::filesystem::path StudioCastModelsDir();   // ~/.local/share/studiocast/models (by default)
     std::filesystem::path StudioCastConfigDir();   // ~/.config/studiocast (by default)
     std::filesystem::path StudioCastMaxineDir();   // ~/.local/share/studiocast/maxine (by default)
 
