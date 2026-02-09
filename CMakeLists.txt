@@ -58,6 +58,8 @@ studiocast_generate_version_header(
 add_library(studiocast_core
         src/core/probe/probe.h
         src/core/probe/probe.cpp
+        src/core/open_cuda/open_cuda_diagnostics.h
+        src/core/open_cuda/open_cuda_diagnostics.cpp
         src/core/util/dynlib.h
         src/core/util/dynlib.cpp
         src/core/util/json.h

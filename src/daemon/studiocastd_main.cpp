@@ -20,6 +20,7 @@
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
 #include "core/maxine/maxine_manager.h"
+#include "core/open_cuda/open_cuda_diagnostics.h"
 #include "core/util/json.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/camera_effects_json.h"
@@ -262,7 +263,8 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
                          const studiocast::audio::VirtualAudioServiceStatus& ast,
                          const studiocast::audio::VirtualAudioServiceConfig& acfg,
                          const std::filesystem::path& socketPath,
-                         const std::string& maxineJson) {
+                         const std::string& maxineJson,
+                         const std::string& openCudaJson) {
     std::ostringstream oss;
     oss << "{";
     oss << "\"version\":\"" << JsonEscape(STUDIOCAST_VERSION) << "\",";
@@ -273,6 +275,19 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     // Global Maxine diagnostics payload (used by GUI/CLI to disable unsupported effects).
     if (!maxineJson.empty()) {
         oss << "\"maxine\":" << maxineJson << ",";
+    }
+
+    // Engine diagnostics (preferred scalable shape). Keep top-level `maxine` for compatibility.
+    oss << "\"engines\":{";
+    if (!maxineJson.empty()) {
+        oss << "\"maxine\":" << maxineJson << ",";
+    }
+    oss << "\"open_cuda\":" << (openCudaJson.empty() ? std::string("{}") : openCudaJson);
+    oss << "},";
+
+    // Convenience top-level alias.
+    if (!openCudaJson.empty()) {
+        oss << "\"open_cuda\":" << openCudaJson << ",";
     }
 
     oss << "\"video\":{";
@@ -743,7 +758,17 @@ int main(int argc, char** argv) {
                                   diagJson = lastDiagJson;
                               }
 
-                              return std::string("OK ") + StatusToJson(st, current, ast, acurrent, socketPath, diagJson);
+                              studiocast::open_cuda::OpenCudaDiagnostics od;
+                              od.ok = false;
+                              od.install_hints = {
+                                  "Open CUDA backend is not available in this build.",
+                                  "Model packs (future): ~/.local/share/studiocast/models/open_cuda/<model_id>/",
+                                  "See docs/ for setup notes (Open CUDA docs will be added separately).",
+                              };
+                              const std::string openCudaJson = od.ToJson();
+
+                              return std::string("OK ") +
+                                     StatusToJson(st, current, ast, acurrent, socketPath, diagJson, openCudaJson);
                           }
 
                           if (pc.cmd == "GET_CONFIG") {
