@@ -26,6 +26,7 @@
 #include "core/util/xdg.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/camera_effects_json.h"
+#include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/broadcast_effect_rules.h"
 #include "core/video/virtual_camera_service.h"
 #include "core/video/v4l2loopback.h"
@@ -776,12 +777,30 @@ int main(int argc, char** argv) {
 #if STUDIOCAST_HAVE_ONNXRUNTIME
                                   if (od.installed_models.empty()) {
                                       od.ok = false;
+                                      od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur)] =
+                                          "missing_model_packs";
+                                      od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove)] =
+                                          "missing_model_packs";
+                                      od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace)] =
+                                          "missing_model_packs";
                                       od.install_hints.push_back("No usable Open CUDA model packs were found.");
                                   } else {
                                       od.ok = true;
+                                      od.available_effects.push_back(
+                                          std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur));
+                                      od.available_effects.push_back(
+                                          std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove));
+                                      od.available_effects.push_back(
+                                          std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace));
                                   }
 #else
                                   od.ok = false;
+                                  od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur)] =
+                                      "onnxruntime_not_found";
+                                  od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove)] =
+                                      "onnxruntime_not_found";
+                                  od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace)] =
+                                      "onnxruntime_not_found";
                                   od.install_hints.push_back("Open CUDA backend is disabled in this build (ONNX Runtime not found). ");
                                   od.install_hints.push_back("Rebuild with -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON and ensure ONNXRUNTIME_ROOT is set.");
 #endif

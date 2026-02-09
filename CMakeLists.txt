@@ -130,6 +130,8 @@ add_library(studiocast_core
         src/core/cuda/kernels/resize_bilinear_ptx.cpp
         src/core/cuda/kernels/preprocess_to_nchw.h
         src/core/cuda/kernels/preprocess_to_nchw_ptx.cpp
+        src/core/cuda/kernels/open_cuda_vb_kernels.h
+        src/core/cuda/kernels/open_cuda_vb_kernels_ptx.cpp
         src/core/maxine/cuda_crop_scale.h
         src/core/maxine/cuda_crop_scale.cpp
         src/core/maxine/cuda_vignette.h

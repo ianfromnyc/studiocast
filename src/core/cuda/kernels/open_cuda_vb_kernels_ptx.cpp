@@ -616,6 +616,28 @@ bool BoxBlurSeparableU8x3(const CudaImage& src,
 
   studiocast::maxine::CudaDriverApi* cuda = nullptr;
   if (!EnsureCudaReady(&cuda, error_out)) return false;
+
+  // radius==0 is an identity operation; use a device-to-device copy to avoid
+  // kernel edge cases.
+  if (radius == 0) {
+    const auto& f = cuda->f();
+    studiocast::maxine::CUDA_MEMCPY2D cp{};
+    cp.srcMemoryType = studiocast::maxine::CU_MEMORYTYPE_DEVICE;
+    cp.srcDevice = src.ptr;
+    cp.srcPitch = src.pitch;
+    cp.dstMemoryType = studiocast::maxine::CU_MEMORYTYPE_DEVICE;
+    cp.dstDevice = dst.ptr;
+    cp.dstPitch = dst.pitch;
+    cp.WidthInBytes = src.RowBytes();
+    cp.Height = static_cast<std::size_t>(src.h);
+    const auto rc = f.cuMemcpy2DAsync(&cp, stream);
+    if (rc != studiocast::maxine::CUDA_SUCCESS) {
+      if (error_out) *error_out = "cuMemcpy2DAsync(BoxBlurSeparableU8x3 copy) failed: " + cuda->StatusToString(rc);
+      return false;
+    }
+    return true;
+  }
+
   if (!EnsureKernelsLoaded(cuda, error_out)) return false;
 
   KernelState& st = k();
@@ -716,6 +738,28 @@ bool BoxBlurSeparableF32_1(const CudaImage& src,
 
   studiocast::maxine::CudaDriverApi* cuda = nullptr;
   if (!EnsureCudaReady(&cuda, error_out)) return false;
+
+  // radius==0 is an identity operation; use a device-to-device copy to avoid
+  // kernel edge cases.
+  if (radius == 0) {
+    const auto& f = cuda->f();
+    studiocast::maxine::CUDA_MEMCPY2D cp{};
+    cp.srcMemoryType = studiocast::maxine::CU_MEMORYTYPE_DEVICE;
+    cp.srcDevice = src.ptr;
+    cp.srcPitch = src.pitch;
+    cp.dstMemoryType = studiocast::maxine::CU_MEMORYTYPE_DEVICE;
+    cp.dstDevice = dst.ptr;
+    cp.dstPitch = dst.pitch;
+    cp.WidthInBytes = src.RowBytes();
+    cp.Height = static_cast<std::size_t>(src.h);
+    const auto rc = f.cuMemcpy2DAsync(&cp, stream);
+    if (rc != studiocast::maxine::CUDA_SUCCESS) {
+      if (error_out) *error_out = "cuMemcpy2DAsync(BoxBlurSeparableF32_1 copy) failed: " + cuda->StatusToString(rc);
+      return false;
+    }
+    return true;
+  }
+
   if (!EnsureKernelsLoaded(cuda, error_out)) return false;
 
   KernelState& st = k();

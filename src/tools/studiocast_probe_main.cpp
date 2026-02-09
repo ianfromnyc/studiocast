@@ -16,6 +16,7 @@
 #include "core/config/daemon_config.h"
 #include "core/cuda/cuda_image.h"
 #include "core/cuda/cuda_tensor.h"
+#include "core/cuda/kernels/open_cuda_vb_kernels.h"
 #include "core/cuda/kernels/preprocess_to_nchw.h"
 #include "core/cuda/kernels/resize_bilinear.h"
 #include "core/maxine/availability.h"
@@ -216,6 +217,290 @@ namespace {
                     }
 
                     (void)img.Free(&cuda, nullptr);
+                    (void)cuda.DestroyStream(stream, nullptr);
+                }
+            }
+        }
+
+        // Open CUDA VB kernels smoke test (CUDA driver only; no ORT required).
+        {
+            studiocast::maxine::CudaDriverApi cuda;
+            std::string err;
+            if (!cuda.Initialize(&err)) {
+                std::printf("[SKIP] OpenCudaVbKernelsSmoke (CUDA unavailable): %s\n", err.c_str());
+            } else if (!cuda.EnsureContext(&err)) {
+                std::printf("[SKIP] OpenCudaVbKernelsSmoke (no CUDA context/device): %s\n", err.c_str());
+            } else {
+                studiocast::maxine::CUstream stream = nullptr;
+                if (!cuda.CreateStream(&stream, &err)) {
+                    ++failures;
+                    std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  CreateStream failed: %s\n", err.c_str());
+                } else {
+                    const int w = 13;
+                    const int h = 7;
+                    const std::size_t stride = static_cast<std::size_t>(w) * 3u;
+
+                    std::vector<std::uint8_t> fg_cpu(stride * static_cast<std::size_t>(h));
+                    std::vector<std::uint8_t> bg_cpu(stride * static_cast<std::size_t>(h));
+                    std::vector<std::uint8_t> out_cpu(stride * static_cast<std::size_t>(h), 0xCC);
+
+                    for (int y = 0; y < h; ++y) {
+                        for (int x = 0; x < w; ++x) {
+                            const std::size_t i = static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 3u;
+                            fg_cpu[i + 0] = static_cast<std::uint8_t>((x * 9 + y * 3) & 0xFF);
+                            fg_cpu[i + 1] = static_cast<std::uint8_t>((x * 7 + y * 11) & 0xFF);
+                            fg_cpu[i + 2] = static_cast<std::uint8_t>((x * 5 + y * 13) & 0xFF);
+
+                            bg_cpu[i + 0] = static_cast<std::uint8_t>((200 + x * 2 + y * 1) & 0xFF);
+                            bg_cpu[i + 1] = static_cast<std::uint8_t>((100 + x * 3 + y * 4) & 0xFF);
+                            bg_cpu[i + 2] = static_cast<std::uint8_t>((50 + x * 5 + y * 6) & 0xFF);
+                        }
+                    }
+
+                    // Alpha: left half 0, right half 1.
+                    std::vector<float> alpha_cpu(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
+                    for (int y = 0; y < h; ++y) {
+                        for (int x = 0; x < w; ++x) {
+                            alpha_cpu[static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x)] =
+                                (x < (w / 2)) ? 0.0f : 1.0f;
+                        }
+                    }
+
+                    studiocast::cuda::CudaImage fg;
+                    studiocast::cuda::CudaImage bg;
+                    studiocast::cuda::CudaImage tmp;
+                    studiocast::cuda::CudaImage blurred;
+                    studiocast::cuda::CudaImage out;
+                    studiocast::cuda::CudaTensor alpha_tensor;
+
+                    bool ok = true;
+                    if (!fg.Allocate(&cuda, w, h, studiocast::cuda::PixelFormatGpu::rgb_u8, &err) ||
+                        !bg.Allocate(&cuda, w, h, studiocast::cuda::PixelFormatGpu::rgb_u8, &err) ||
+                        !tmp.Allocate(&cuda, w, h, studiocast::cuda::PixelFormatGpu::rgb_u8, &err) ||
+                        !blurred.Allocate(&cuda, w, h, studiocast::cuda::PixelFormatGpu::rgb_u8, &err) ||
+                        !out.Allocate(&cuda, w, h, studiocast::cuda::PixelFormatGpu::rgb_u8, &err) ||
+                        !alpha_tensor.AllocateNchwF32(&cuda, 1, 1, h, w, &err)) {
+                        ++failures;
+                        std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  Allocate failed: %s\n", err.c_str());
+                        ok = false;
+                    }
+
+                    studiocast::cuda::CudaImage alpha_img;
+                    if (ok) {
+                        // Upload buffers.
+                        if (!fg.UploadFromCpuRgb24(&cuda, fg_cpu.data(), stride, stream, &err) ||
+                            !bg.UploadFromCpuRgb24(&cuda, bg_cpu.data(), stride, stream, &err)) {
+                            ++failures;
+                            std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  Upload failed: %s\n", err.c_str());
+                            ok = false;
+                        }
+                    }
+                    if (ok) {
+                        const std::size_t alpha_bytes = alpha_cpu.size() * sizeof(float);
+                        if (!cuda.MemcpyHtoD2DAsync(alpha_tensor.ptr,
+                                                    alpha_tensor.pitch,
+                                                    alpha_cpu.data(),
+                                                    alpha_bytes,
+                                                    alpha_bytes,
+                                                    1,
+                                                    stream,
+                                                    &err)) {
+                            ++failures;
+                            std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  Alpha upload failed: %s\n", err.c_str());
+                            ok = false;
+                        }
+
+                        alpha_img.ptr = alpha_tensor.ptr;
+                        alpha_img.pitch = static_cast<std::size_t>(w) * 4u;
+                        alpha_img.w = w;
+                        alpha_img.h = h;
+                        alpha_img.format = studiocast::cuda::PixelFormatGpu::f32_1;
+                        alpha_img.owns_memory = false;
+                    }
+
+                    // Blur radius=0 should be identity.
+                    if (ok) {
+                        std::string kerr;
+                        if (!studiocast::cuda::kernels::BoxBlurSeparableU8x3(fg, tmp, blurred, /*radius=*/0, stream, &kerr)) {
+                            ++failures;
+                            std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  BoxBlurSeparableU8x3 failed: %s\n", kerr.c_str());
+                            ok = false;
+                        } else if (!blurred.DownloadToCpuRgb24(&cuda, out_cpu.data(), stride, stream, &err) ||
+                                   !cuda.StreamSynchronize(stream, &err)) {
+                            ++failures;
+                            std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  Blur download/sync failed: %s\n", err.c_str());
+                            ok = false;
+                        } else if (out_cpu != fg_cpu) {
+                            ++failures;
+                            std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  BoxBlur radius=0 mismatch\n");
+                            ok = false;
+                        }
+                    }
+
+                    // Composite alpha against bg image / solid.
+                    // Validate hard 0/1 cases first (should be exact), then validate the half-mask.
+                    if (ok) {
+                        const std::size_t alpha_bytes = alpha_cpu.size() * sizeof(float);
+                        auto upload_alpha = [&](const std::vector<float>& a) -> bool {
+                            if (!cuda.MemcpyHtoD2DAsync(alpha_tensor.ptr,
+                                                        alpha_tensor.pitch,
+                                                        a.data(),
+                                                        alpha_bytes,
+                                                        alpha_bytes,
+                                                        1,
+                                                        stream,
+                                                        &err)) {
+                                return false;
+                            }
+                            return true;
+                        };
+
+                        auto first_mismatch_rgb = [&](const std::vector<std::uint8_t>& got,
+                                                     const std::vector<std::uint8_t>& want,
+                                                     int* out_x,
+                                                     int* out_y) -> bool {
+                            for (int y = 0; y < h; ++y) {
+                                for (int x = 0; x < w; ++x) {
+                                    const std::size_t i = static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 3u;
+                                    if (got[i + 0] != want[i + 0] || got[i + 1] != want[i + 1] || got[i + 2] != want[i + 2]) {
+                                        *out_x = x;
+                                        *out_y = y;
+                                        return true;
+                                    }
+                                }
+                            }
+                            return false;
+                        };
+
+                        std::vector<float> alpha0(alpha_cpu.size(), 0.0f);
+                        std::vector<float> alpha1(alpha_cpu.size(), 1.0f);
+
+                        auto run_comp_bg_expect = [&](const std::vector<float>& a, const std::vector<std::uint8_t>& want) -> bool {
+                            std::string kerr;
+                            if (!upload_alpha(a)) {
+                                std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  Alpha upload failed: %s\n", err.c_str());
+                                return false;
+                            }
+                            if (!studiocast::cuda::kernels::CompositeAlphaU8x3(fg, bg, alpha_img, out, stream, &kerr)) {
+                                std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  CompositeAlphaU8x3 failed: %s\n", kerr.c_str());
+                                return false;
+                            }
+                            if (!out.DownloadToCpuRgb24(&cuda, out_cpu.data(), stride, stream, &err) ||
+                                !cuda.StreamSynchronize(stream, &err)) {
+                                std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  Composite download/sync failed: %s\n", err.c_str());
+                                return false;
+                            }
+                            int mx = 0, my = 0;
+                            if (first_mismatch_rgb(out_cpu, want, &mx, &my)) {
+                                const std::size_t i = static_cast<std::size_t>(my) * stride + static_cast<std::size_t>(mx) * 3u;
+                                std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  Composite result mismatch at (%d,%d): got=(%u,%u,%u) want=(%u,%u,%u)\n",
+                                            mx,
+                                            my,
+                                            static_cast<unsigned>(out_cpu[i + 0]),
+                                            static_cast<unsigned>(out_cpu[i + 1]),
+                                            static_cast<unsigned>(out_cpu[i + 2]),
+                                            static_cast<unsigned>(want[i + 0]),
+                                            static_cast<unsigned>(want[i + 1]),
+                                            static_cast<unsigned>(want[i + 2]));
+                                return false;
+                            }
+                            return true;
+                        };
+
+                        // Expect exact bg for alpha=0 and exact fg for alpha=1.
+                        if (!run_comp_bg_expect(alpha0, bg_cpu)) {
+                            ++failures;
+                            ok = false;
+                        } else if (!run_comp_bg_expect(alpha1, fg_cpu)) {
+                            ++failures;
+                            ok = false;
+                        } else {
+                            // Restore half-mask alpha and validate mixed output.
+                            if (!upload_alpha(alpha_cpu)) {
+                                ++failures;
+                                std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  Alpha upload failed: %s\n", err.c_str());
+                                ok = false;
+                            } else {
+                                std::vector<std::uint8_t> want(stride * static_cast<std::size_t>(h));
+                                for (int y = 0; y < h; ++y) {
+                                    for (int x = 0; x < w; ++x) {
+                                        const std::size_t i = static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 3u;
+                                        const bool fg_side = (x >= (w / 2));
+                                        const auto* src = fg_side ? &fg_cpu[i] : &bg_cpu[i];
+                                        want[i + 0] = src[0];
+                                        want[i + 1] = src[1];
+                                        want[i + 2] = src[2];
+                                    }
+                                }
+                                if (!run_comp_bg_expect(alpha_cpu, want)) {
+                                    ++failures;
+                                    ok = false;
+                                }
+                            }
+                        }
+
+                        // Solid background composite (exact cases).
+                        if (ok) {
+                            const std::uint8_t sr = 10, sg = 20, sb = 30;
+                            auto run_comp_solid_expect = [&](const std::vector<float>& a,
+                                                             const std::vector<std::uint8_t>& want) -> bool {
+                                std::string kerr;
+                                if (!upload_alpha(a)) {
+                                    std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  Alpha upload failed: %s\n", err.c_str());
+                                    return false;
+                                }
+                                if (!studiocast::cuda::kernels::CompositeAlphaSolidU8x3(fg, alpha_img, sr, sg, sb, out, stream, &kerr)) {
+                                    std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  CompositeAlphaSolidU8x3 failed: %s\n", kerr.c_str());
+                                    return false;
+                                }
+                                if (!out.DownloadToCpuRgb24(&cuda, out_cpu.data(), stride, stream, &err) ||
+                                    !cuda.StreamSynchronize(stream, &err)) {
+                                    std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  Solid composite download/sync failed: %s\n", err.c_str());
+                                    return false;
+                                }
+                                int mx = 0, my = 0;
+                                if (first_mismatch_rgb(out_cpu, want, &mx, &my)) {
+                                    const std::size_t i = static_cast<std::size_t>(my) * stride + static_cast<std::size_t>(mx) * 3u;
+                                    std::printf("[FAIL] OpenCudaVbKernelsSmoke\n  Solid composite mismatch at (%d,%d): got=(%u,%u,%u) want=(%u,%u,%u)\n",
+                                                mx,
+                                                my,
+                                                static_cast<unsigned>(out_cpu[i + 0]),
+                                                static_cast<unsigned>(out_cpu[i + 1]),
+                                                static_cast<unsigned>(out_cpu[i + 2]),
+                                                static_cast<unsigned>(want[i + 0]),
+                                                static_cast<unsigned>(want[i + 1]),
+                                                static_cast<unsigned>(want[i + 2]));
+                                    return false;
+                                }
+                                return true;
+                            };
+
+                            std::vector<std::uint8_t> solid_cpu(stride * static_cast<std::size_t>(h));
+                            for (int y = 0; y < h; ++y) {
+                                for (int x = 0; x < w; ++x) {
+                                    const std::size_t i = static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 3u;
+                                    solid_cpu[i + 0] = sr;
+                                    solid_cpu[i + 1] = sg;
+                                    solid_cpu[i + 2] = sb;
+                                }
+                            }
+
+                            if (!run_comp_solid_expect(alpha0, solid_cpu)) {
+                                ++failures;
+                                ok = false;
+                            } else if (!run_comp_solid_expect(alpha1, fg_cpu)) {
+                                ++failures;
+                                ok = false;
+                            }
+                        }
+                    }
+
+                    (void)fg.Free(&cuda, nullptr);
+                    (void)bg.Free(&cuda, nullptr);
+                    (void)tmp.Free(&cuda, nullptr);
+                    (void)blurred.Free(&cuda, nullptr);
+                    (void)out.Free(&cuda, nullptr);
+                    (void)alpha_tensor.Free(&cuda, nullptr);
                     (void)cuda.DestroyStream(stream, nullptr);
                 }
             }

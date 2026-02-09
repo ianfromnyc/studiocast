@@ -9,6 +9,9 @@
 #include <sstream>
 #include <vector>
 
+#include "core/cuda/cuda_image.h"
+#include "core/cuda/cuda_tensor.h"
+#include "core/cuda/kernels/open_cuda_vb_kernels.h"
 #include "core/maxine/availability.h"
 #include "core/maxine/maxine_manager.h"
 #include "core/maxine/effects/ar_eye_contact_effect.h"
@@ -21,6 +24,8 @@
 #include "core/maxine/cuda_vignette.h"
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
+#include "core/open_cuda/model_pack_registry.h"
+#include "core/open_cuda/onnx_session.h"
 #include "core/video/convert.h"
 #include "core/video/capture_error_policy.h"
 #include "core/video/image_ppm.h"
@@ -1233,6 +1238,364 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return true;
     }
   } maxine_bg_blur;
+
+  struct OpenCudaVirtualBackgroundContext {
+    bool initialized = false;
+    bool enabled = false;
+    std::string last_error;
+
+    studiocast::maxine::CudaDriverApi cuda;
+
+    std::optional<studiocast::open_cuda::ModelPack> pack;
+    std::unique_ptr<studiocast::open_cuda::OpenCudaMattingSession> session;
+
+    // GPU buffers.
+    studiocast::cuda::CudaImage frame_rgb;   // rgb_u8, WxH
+    studiocast::cuda::CudaImage out_rgb;     // rgb_u8, WxH
+
+    studiocast::cuda::CudaTensor alpha_tensor;          // 1x1xH_inxW_in (contiguous)
+    studiocast::cuda::CudaImage alpha_model_view;       // f32_1 view over alpha_tensor (no ownership)
+    studiocast::cuda::CudaImage alpha_resized;          // f32_1, WxH
+    studiocast::cuda::CudaImage alpha_tmp;              // f32_1, WxH
+    studiocast::cuda::CudaImage alpha_feather;          // f32_1, WxH
+
+    studiocast::cuda::CudaImage blur_tmp;  // rgb_u8, WxH
+    studiocast::cuda::CudaImage blurred;   // rgb_u8, WxH
+
+    studiocast::cuda::CudaImage bg_rgb;  // rgb_u8, WxH (replace mode)
+    std::filesystem::path cached_bg_path;
+    std::filesystem::file_time_type cached_bg_mtime{};
+    int cached_bg_w = 0;
+    int cached_bg_h = 0;
+    bool cached_bg_valid = false;
+
+    std::vector<std::uint8_t> tmp_replace_rgb_src;
+    std::vector<std::uint8_t> tmp_replace_rgb_resized;
+
+    ~OpenCudaVirtualBackgroundContext() { Destroy(); }
+
+    void Destroy() {
+      if (cuda.IsInitialized()) {
+        (void)frame_rgb.Free(&cuda, nullptr);
+        (void)out_rgb.Free(&cuda, nullptr);
+        (void)alpha_resized.Free(&cuda, nullptr);
+        (void)alpha_tmp.Free(&cuda, nullptr);
+        (void)alpha_feather.Free(&cuda, nullptr);
+        (void)blur_tmp.Free(&cuda, nullptr);
+        (void)blurred.Free(&cuda, nullptr);
+        (void)bg_rgb.Free(&cuda, nullptr);
+        (void)alpha_tensor.Free(&cuda, nullptr);
+      }
+
+      alpha_model_view = studiocast::cuda::CudaImage{};
+      session.reset();
+      pack.reset();
+
+      cached_bg_path.clear();
+      cached_bg_mtime = {};
+      cached_bg_w = 0;
+      cached_bg_h = 0;
+      cached_bg_valid = false;
+      tmp_replace_rgb_src.clear();
+      tmp_replace_rgb_resized.clear();
+
+      initialized = false;
+      enabled = false;
+      last_error.clear();
+    }
+
+    bool EnsureInitialized(int frame_w,
+                           int frame_h,
+                           const studiocast::video::effects::BroadcastCameraEffects& fx,
+                           std::string* error) {
+      if (error) error->clear();
+      if (frame_w <= 0 || frame_h <= 0) {
+        last_error = "Open CUDA: invalid frame size.";
+        if (error) *error = last_error;
+        return false;
+      }
+
+      std::string err;
+      if (!cuda.IsInitialized()) {
+        if (!cuda.Initialize(&err)) {
+          last_error = "Open CUDA: CUDA unavailable: " + err;
+          if (error) *error = last_error;
+          return false;
+        }
+      }
+      if (!cuda.EnsureContext(&err)) {
+        last_error = "Open CUDA: failed to ensure CUDA context: " + err;
+        if (error) *error = last_error;
+        return false;
+      }
+
+      // Resolve model pack once (deterministic default).
+      if (!pack.has_value()) {
+        const auto reg = studiocast::open_cuda::ModelPackRegistry::ScanDefault();
+        const std::string model_id = reg.DefaultModelId();
+        if (model_id.empty()) {
+          last_error = "Open CUDA: no usable model packs found (install under ~/.local/share/studiocast/models/open_cuda/<model_id>/).";
+          if (error) *error = last_error;
+          return false;
+        }
+        const auto p = reg.ResolveModel(model_id);
+        if (!p.has_value()) {
+          last_error = "Open CUDA: failed to resolve model pack '" + model_id + "'.";
+          if (error) *error = last_error;
+          return false;
+        }
+        pack = *p;
+      }
+
+      if (!session) {
+        session = std::make_unique<studiocast::open_cuda::OpenCudaMattingSession>(&cuda, *pack);
+      }
+
+      // Allocate alpha tensor at model resolution.
+      {
+        std::string aerr;
+        if (!alpha_tensor.ReallocIfNeededNchwF32(&cuda, 1, 1, pack->input.height, pack->input.width, &aerr)) {
+          last_error = "Open CUDA: failed to allocate alpha tensor: " + aerr;
+          if (error) *error = last_error;
+          return false;
+        }
+
+        // View alpha tensor as a 2D f32 image.
+        alpha_model_view.ptr = alpha_tensor.ptr;
+        alpha_model_view.pitch = static_cast<std::size_t>(pack->input.width) * 4u;
+        alpha_model_view.w = pack->input.width;
+        alpha_model_view.h = pack->input.height;
+        alpha_model_view.format = studiocast::cuda::PixelFormatGpu::f32_1;
+        alpha_model_view.owns_memory = false;
+      }
+
+      // Per-frame-size buffers.
+      {
+        std::string berr;
+        if (!frame_rgb.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr) ||
+            !out_rgb.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr) ||
+            !alpha_resized.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::f32_1, &berr) ||
+            !alpha_tmp.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::f32_1, &berr) ||
+            !alpha_feather.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::f32_1, &berr) ||
+            !blur_tmp.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr) ||
+            !blurred.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr)) {
+          last_error = "Open CUDA: failed to allocate GPU buffers: " + berr;
+          if (error) *error = last_error;
+          return false;
+        }
+      }
+
+      // Invalidate replace cache if size changed.
+      if (cached_bg_w != frame_w || cached_bg_h != frame_h) {
+        cached_bg_valid = false;
+        cached_bg_w = frame_w;
+        cached_bg_h = frame_h;
+      }
+
+      // Strength is the canonical knob; clamp once for deterministic behavior.
+      (void)fx;
+
+      initialized = true;
+      enabled = true;
+      return true;
+    }
+
+    bool EnsureReplaceBackgroundGpu(int width,
+                                   int height,
+                                   const std::filesystem::path& path,
+                                   std::string* error) {
+      if (error) error->clear();
+      if (!initialized) {
+        if (error) *error = "Open CUDA: not initialized.";
+        return false;
+      }
+      if (path.empty()) {
+        if (error) *error = "Open CUDA: virtual_background.replace_path not set.";
+        return false;
+      }
+
+      std::error_code ec;
+      const auto mtime = std::filesystem::last_write_time(path, ec);
+      if (ec) {
+        if (error) *error = "Open CUDA: failed to stat replace image: " + ec.message();
+        return false;
+      }
+
+      if (cached_bg_valid && cached_bg_path == path && cached_bg_mtime == mtime && bg_rgb.Valid()) {
+        return true;
+      }
+
+      int iw = 0, ih = 0;
+      std::string img_err;
+      if (!studiocast::video::LoadPpmP6Rgb24(path, &iw, &ih, &tmp_replace_rgb_src, &img_err)) {
+        if (error) *error = "Open CUDA: failed to load replace image (PPM/P6 required): " + img_err;
+        return false;
+      }
+
+      const std::size_t stride = static_cast<std::size_t>(width) * 3u;
+      if (!studiocast::video::ResizeRgb24Bilinear(tmp_replace_rgb_src.data(),
+                                                  iw,
+                                                  ih,
+                                                  static_cast<std::size_t>(iw) * 3u,
+                                                  width,
+                                                  height,
+                                                  &tmp_replace_rgb_resized,
+                                                  stride,
+                                                  &img_err)) {
+        if (error) *error = "Open CUDA: failed to resize replace image: " + img_err;
+        return false;
+      }
+
+      std::string berr;
+      if (!bg_rgb.ReallocIfNeeded(&cuda, width, height, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr)) {
+        if (error) *error = "Open CUDA: failed to allocate bg_rgb: " + berr;
+        return false;
+      }
+
+      if (!bg_rgb.UploadFromCpuRgb24(&cuda, tmp_replace_rgb_resized.data(), stride, /*stream=*/nullptr, &berr)) {
+        if (error) *error = "Open CUDA: failed to upload bg_rgb: " + berr;
+        return false;
+      }
+
+      cached_bg_path = path;
+      cached_bg_mtime = mtime;
+      cached_bg_valid = true;
+      return true;
+    }
+
+    bool ApplyRgbInPlace(std::uint8_t* rgb,
+                         int width,
+                         int height,
+                         std::size_t rgb_stride,
+                         const studiocast::video::effects::BroadcastCameraEffects& fx,
+                         std::string* error) {
+      if (error) error->clear();
+
+      using studiocast::video::effects::VirtualBackgroundMode;
+      if (fx.virtual_background.mode == VirtualBackgroundMode::none) return true;
+      if (!rgb || width <= 0 || height <= 0 || rgb_stride == 0) {
+        if (error) *error = "Open CUDA: invalid RGB buffer.";
+        return false;
+      }
+
+      std::string init_err;
+      if (!EnsureInitialized(width, height, fx, &init_err)) {
+        if (error) *error = init_err;
+        return false;
+      }
+
+      const int strength = std::max(studiocast::video::effects::contract::kVbStrengthMin,
+                                    std::min(studiocast::video::effects::contract::kVbStrengthMax,
+                                             fx.virtual_background.strength));
+
+      // Upload CPU->GPU (default stream for correctness with ORT CUDA EP).
+      std::string up_err;
+      if (!frame_rgb.UploadFromCpuRgb24(&cuda, rgb, rgb_stride, /*stream=*/nullptr, &up_err)) {
+        if (error) *error = "Open CUDA: frame upload failed: " + up_err;
+        return false;
+      }
+
+      // Run matting inference at model resolution.
+      std::string matte_err;
+      if (!session->Run(/*stream=*/nullptr, frame_rgb, &alpha_tensor, &matte_err)) {
+        if (error) *error = matte_err;
+        return false;
+      }
+
+      // Resize alpha to frame size.
+      std::string kerr;
+      if (!studiocast::cuda::kernels::ResizeBilinearF32_1(alpha_model_view, alpha_resized, /*stream=*/nullptr, &kerr)) {
+        if (error) *error = "Open CUDA: alpha resize failed: " + kerr;
+        return false;
+      }
+
+      // Optional feathering: blur alpha with a small radius (scaled by strength).
+      const int feather_radius = std::min(4, strength / 16);
+      const studiocast::cuda::CudaImage* alpha_use = &alpha_resized;
+      if (feather_radius > 0) {
+        if (!studiocast::cuda::kernels::BoxBlurSeparableF32_1(alpha_resized,
+                                                             alpha_tmp,
+                                                             alpha_feather,
+                                                             feather_radius,
+                                                             /*stream=*/nullptr,
+                                                             &kerr)) {
+          if (error) *error = "Open CUDA: alpha feather blur failed: " + kerr;
+          return false;
+        }
+        alpha_use = &alpha_feather;
+      }
+
+      // Build background and composite.
+      if (fx.virtual_background.mode == VirtualBackgroundMode::blur) {
+        if (!studiocast::cuda::kernels::BoxBlurSeparableU8x3(frame_rgb,
+                                                            blur_tmp,
+                                                            blurred,
+                                                            /*radius=*/strength,
+                                                            /*stream=*/nullptr,
+                                                            &kerr)) {
+          if (error) *error = "Open CUDA: background blur failed: " + kerr;
+          return false;
+        }
+        if (!studiocast::cuda::kernels::CompositeAlphaU8x3(frame_rgb,
+                                                          blurred,
+                                                          *alpha_use,
+                                                          out_rgb,
+                                                          /*stream=*/nullptr,
+                                                          &kerr)) {
+          if (error) *error = "Open CUDA: composite failed: " + kerr;
+          return false;
+        }
+      } else if (fx.virtual_background.mode == VirtualBackgroundMode::remove) {
+        std::uint32_t rgb_hex = 0x000000u;
+        if (!ParseRgbHex(fx.virtual_background.remove_color, &rgb_hex)) {
+          rgb_hex = 0x000000u;
+        }
+        const std::uint8_t r = static_cast<std::uint8_t>((rgb_hex >> 16) & 0xFFu);
+        const std::uint8_t g = static_cast<std::uint8_t>((rgb_hex >> 8) & 0xFFu);
+        const std::uint8_t b = static_cast<std::uint8_t>((rgb_hex) & 0xFFu);
+        if (!studiocast::cuda::kernels::CompositeAlphaSolidU8x3(frame_rgb,
+                                                               *alpha_use,
+                                                               r,
+                                                               g,
+                                                               b,
+                                                               out_rgb,
+                                                               /*stream=*/nullptr,
+                                                               &kerr)) {
+          if (error) *error = "Open CUDA: composite(solid) failed: " + kerr;
+          return false;
+        }
+      } else if (fx.virtual_background.mode == VirtualBackgroundMode::replace) {
+        std::string bg_err;
+        if (!EnsureReplaceBackgroundGpu(width, height, fx.virtual_background.replace_path, &bg_err)) {
+          if (error) *error = bg_err;
+          return false;
+        }
+        if (!studiocast::cuda::kernels::CompositeAlphaU8x3(frame_rgb,
+                                                          bg_rgb,
+                                                          *alpha_use,
+                                                          out_rgb,
+                                                          /*stream=*/nullptr,
+                                                          &kerr)) {
+          if (error) *error = "Open CUDA: composite(replace) failed: " + kerr;
+          return false;
+        }
+      } else {
+        return true;
+      }
+
+      // Download GPU->CPU.
+      std::string down_err;
+      if (!out_rgb.DownloadToCpuRgb24(&cuda, rgb, rgb_stride, /*stream=*/nullptr, &down_err)) {
+        if (error) *error = "Open CUDA: frame download failed: " + down_err;
+        return false;
+      }
+      if (!cuda.StreamSynchronize(/*stream=*/nullptr, &down_err)) {
+        if (error) *error = "Open CUDA: StreamSynchronize failed: " + down_err;
+        return false;
+      }
+      return true;
+    }
+  } open_cuda_vb;
 
   struct MaxineRelightingContext {
     bool initialized = false;
@@ -2628,6 +2991,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   bool want_maxine_bg_blur = false;
   bool have_maxine_bg_blur = false;
 
+  bool want_open_cuda_vb = false;
+  bool have_open_cuda_vb = false;
+
   bool want_maxine_vignette_only = false;
   bool have_maxine_vignette_only = false;
 
@@ -2658,6 +3024,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     want_maxine_bg_blur = false;
     have_maxine_bg_blur = false;
 
+    want_open_cuda_vb = false;
+    have_open_cuda_vb = false;
+
     want_maxine_auto_frame = false;
     have_maxine_auto_frame = false;
 
@@ -2682,10 +3051,19 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     // If Maxine-backed effects are requested but are not available, stop the
     // pipeline with a canonical, actionable message.
-    const bool wants_vfx =
+    //
+    // Virtual background can run via Open CUDA (fx.engine=open_cuda) or fall
+    // back to Open CUDA (fx.engine=auto_select), so only treat it as "Maxine
+    // required" when Maxine is explicitly requested.
+    const bool vb_requested =
         has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) ||
         has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove) ||
-        has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace) ||
+        has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace);
+    const bool vb_requires_maxine =
+        vb_requested && (fx.engine == studiocast::video::effects::EffectsEnginePreference::maxine);
+
+    const bool wants_vfx =
+        vb_requires_maxine ||
         has(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) ||
         has(studiocast::video::effects::contract::kEffectIdVirtualKeyLight);
     const bool wants_ar =
@@ -2718,15 +3096,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       // VFX effects.
-      if (!stop_.load() && has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) &&
+      // Virtual background only hard-requires Maxine when explicitly requested.
+      if (!stop_.load() && vb_requires_maxine && has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
-      if (!stop_.load() && has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove) &&
+      if (!stop_.load() && vb_requires_maxine && has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove) &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
-      if (!stop_.load() && has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace) &&
+      if (!stop_.load() && vb_requires_maxine && has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace) &&
           !avail.count(std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace))) {
         set_blocked(studiocast::maxine::MaxineNeed::vfx);
       }
@@ -2764,32 +3143,76 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
 
     // Background effects.
-    if (has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) ||
-        has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove) ||
-        has(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace)) {
+    if (vb_requested) {
+      const auto vb_mode = fx.virtual_background.mode;
 
-      // Maxine-only. (auto_select means "use Maxine if available; otherwise unavailable").
-      // StudioCast no longer runs CPU placeholder background effects in the camera pipeline.
-      want_maxine_bg_blur = true;
+      auto append_backend_note = [&](const char* backend) {
+        if (!note.empty()) note += "\n";
+        if (vb_mode == studiocast::video::effects::VirtualBackgroundMode::blur) {
+          note += std::string(backend) + ": Virtual Background (blur).";
+        } else if (vb_mode == studiocast::video::effects::VirtualBackgroundMode::remove) {
+          note += std::string(backend) + ": Virtual Background (remove).";
+        } else {
+          note += std::string(backend) + ": Virtual Background (replace).";
+        }
+      };
 
-      std::string mx_err;
-      if (maxine_bg_blur.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
-        have_maxine_bg_blur = true;
-        if (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::blur) {
-          if (!note.empty()) note += "\n";
-          note += "Maxine VFX: Green Screen matte + Background Blur.";
-        } else if (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::remove) {
-          if (!note.empty()) note += "\n";
-          note += "Maxine VFX: Green Screen matte + Composite (remove).";
+      if (fx.engine == studiocast::video::effects::EffectsEnginePreference::open_cuda) {
+        want_open_cuda_vb = true;
+        std::string oc_err;
+        if (open_cuda_vb.EnsureInitialized(capA.width, capA.height, fx, &oc_err)) {
+          have_open_cuda_vb = true;
+          append_backend_note("Open CUDA");
         } else {
           if (!note.empty()) note += "\n";
-          note += "Maxine VFX: Green Screen matte + Composite (replace).";
+          note += oc_err;
+          stop_.store(true);
+        }
+      } else if (fx.engine == studiocast::video::effects::EffectsEnginePreference::maxine) {
+        want_maxine_bg_blur = true;
+        std::string mx_err;
+        if (maxine_bg_blur.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
+          have_maxine_bg_blur = true;
+          append_backend_note("Maxine VFX");
+        } else {
+          if (!note.empty()) note += "\n";
+          note += mx_err;
+          stop_.store(true);
         }
       } else {
-        if (!note.empty()) note += "\n";
-        note += mx_err;
-        // No CPU fallback when Maxine is not available.
-        stop_.store(true);
+        // auto_select: prefer Maxine when available; otherwise try Open CUDA.
+        want_maxine_bg_blur = true;
+        std::string mx_err;
+        if (maxine_bg_blur.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
+          have_maxine_bg_blur = true;
+          append_backend_note("Maxine VFX");
+        } else {
+          want_open_cuda_vb = true;
+          std::string oc_err;
+          if (open_cuda_vb.EnsureInitialized(capA.width, capA.height, fx, &oc_err)) {
+            have_open_cuda_vb = true;
+            append_backend_note("Open CUDA");
+          } else {
+            if (!note.empty()) note += "\n";
+            note += mx_err;
+            if (!note.empty()) note += "\n";
+            note += oc_err;
+            stop_.store(true);
+          }
+        }
+      }
+
+      // Prevent silent vignette skip: vignette attachment is only implemented on Maxine/CUDA(BGR)
+      // paths today.
+      if (!stop_.load() && have_open_cuda_vb && has(studiocast::video::effects::contract::kEffectIdVignette)) {
+        const std::string& attach = plan.vignette_attach_to_effect_id;
+        if (attach == std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) ||
+            attach == std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove) ||
+            attach == std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace)) {
+          if (!note.empty()) note += "\n";
+          note += "Vignette unavailable: Open CUDA virtual background does not support vignette yet.";
+          stop_.store(true);
+        }
       }
 
     } else if (has(studiocast::video::effects::contract::kEffectIdAutoFrame)) {
@@ -2860,6 +3283,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (!backends.empty()) backends += ",";
         backends += "virtual_background." +
                     studiocast::video::effects::ToString(fx.virtual_background.mode) + ":maxine";
+      }
+      if (have_open_cuda_vb) {
+        if (!backends.empty()) backends += ",";
+        backends += "virtual_background." +
+                    studiocast::video::effects::ToString(fx.virtual_background.mode) + ":open_cuda";
       }
       if (have_maxine_relight) {
         if (!backends.empty()) backends += ",";
@@ -3120,26 +3548,51 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (stage_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur ||
             stage_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove ||
             stage_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace) {
-          if (!have_maxine_bg_blur) return;
-          std::string mx_err;
-          if (!maxine_bg_blur.ApplyRgbInPlace(rgb.data(),
-                                              capA.width,
-                                              capA.height,
-                                              rgbStride,
-                                              fx,
-                                              apply_vignette_on_bg,
-                                              vignette_center_x_px,
-                                              vignette_center_y_px,
-                                              &mx_err,
-                                              defer_readback,
-                                              &deferred_gpu_out)) {
-            {
-              std::lock_guard<std::mutex> lock(mu_);
-              last_error_ = "Maxine virtual background failed: " + mx_err;
+          if (have_maxine_bg_blur) {
+            std::string mx_err;
+            if (!maxine_bg_blur.ApplyRgbInPlace(rgb.data(),
+                                                capA.width,
+                                                capA.height,
+                                                rgbStride,
+                                                fx,
+                                                apply_vignette_on_bg,
+                                                vignette_center_x_px,
+                                                vignette_center_y_px,
+                                                &mx_err,
+                                                defer_readback,
+                                                &deferred_gpu_out)) {
+              {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = "Maxine virtual background failed: " + mx_err;
+              }
+              fx_failed = true;
             }
-            fx_failed = true;
+            if (defer_readback && deferred_gpu_out.img) have_deferred_gpu_out = true;
+            return;
           }
-          if (defer_readback && deferred_gpu_out.img) have_deferred_gpu_out = true;
+
+          if (have_open_cuda_vb) {
+            // Open CUDA VB does not support vignette attachment yet.
+            if (apply_vignette_on_bg) {
+              {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = "Open CUDA virtual background does not support vignette yet.";
+              }
+              fx_failed = true;
+              return;
+            }
+
+            std::string oc_err;
+            if (!open_cuda_vb.ApplyRgbInPlace(rgb.data(), capA.width, capA.height, rgbStride, fx, &oc_err)) {
+              {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = "Open CUDA virtual background failed: " + oc_err;
+              }
+              fx_failed = true;
+            }
+            return;
+          }
+
           return;
         }
 
