@@ -105,6 +105,8 @@ add_library(studiocast_core
         src/core/maxine/ar_api.cpp
         src/core/maxine/cuda_driver_api.h
         src/core/maxine/cuda_driver_api.cpp
+        src/core/cuda/cuda_image.h
+        src/core/cuda/cuda_image.cpp
         src/core/maxine/cuda_crop_scale.h
         src/core/maxine/cuda_crop_scale.cpp
         src/core/maxine/cuda_vignette.h

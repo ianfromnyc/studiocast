@@ -27,6 +27,7 @@ using CUfunction = CUfunc_st*;
 using CUstream = CUstream_st*;
 using CUarray = CUarray_st*;
 using CUdeviceptr = unsigned long long;
+using CUdevice = int;
 
 // Minimal CUDA Driver API memcopy ABI surface.
 //
@@ -88,6 +89,12 @@ public:
   using cuStreamCreate_t = CUresult (*)(CUstream* phStream, unsigned int Flags);
   using cuStreamDestroy_t = CUresult (*)(CUstream hStream);
   using cuStreamSynchronize_t = CUresult (*)(CUstream hStream);
+  using cuDeviceGetCount_t = CUresult (*)(int* count);
+  using cuDeviceGet_t = CUresult (*)(CUdevice* device, int ordinal);
+  using cuDevicePrimaryCtxRetain_t = CUresult (*)(CUcontext* pctx, CUdevice dev);
+  using cuDevicePrimaryCtxRelease_t = CUresult (*)(CUdevice dev);
+  using cuCtxSetCurrent_t = CUresult (*)(CUcontext ctx);
+  using cuCtxGetCurrent_t = CUresult (*)(CUcontext* pctx);
   using cuGetErrorString_t = CUresult (*)(CUresult error, const char** pStr);
 
   struct Functions {
@@ -101,6 +108,12 @@ public:
     cuStreamCreate_t cuStreamCreate = nullptr;
     cuStreamDestroy_t cuStreamDestroy = nullptr;
     cuStreamSynchronize_t cuStreamSynchronize = nullptr;
+    cuDeviceGetCount_t cuDeviceGetCount = nullptr;
+    cuDeviceGet_t cuDeviceGet = nullptr;
+    cuDevicePrimaryCtxRetain_t cuDevicePrimaryCtxRetain = nullptr;
+    cuDevicePrimaryCtxRelease_t cuDevicePrimaryCtxRelease = nullptr;
+    cuCtxSetCurrent_t cuCtxSetCurrent = nullptr;
+    cuCtxGetCurrent_t cuCtxGetCurrent = nullptr;
     cuGetErrorString_t cuGetErrorString = nullptr;
   };
 
@@ -156,6 +169,12 @@ public:
   bool DestroyStream(CUstream stream, std::string* error_out);
   bool StreamSynchronize(CUstream stream, std::string* error_out);
 
+  // Ensures there is a current CUDA context for subsequent Driver API calls.
+  //
+  // If a context is already current on the calling thread, this is a no-op.
+  // Otherwise, we retain and set the primary context for device 0.
+  bool EnsureContext(std::string* error_out);
+
 private:
   bool LoadSymbols(std::string* error_out);
 
@@ -163,6 +182,10 @@ private:
   util::DynLib lib_{std::filesystem::path("libcuda.so.1")};
   Functions f_{};
   std::string error_;
+
+  bool retained_primary_ctx_ = false;
+  CUdevice primary_dev_ = 0;
+  CUcontext primary_ctx_ = nullptr;
 };
 
 }  // namespace studiocast::maxine

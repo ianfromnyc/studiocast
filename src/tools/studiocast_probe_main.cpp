@@ -13,6 +13,7 @@
 
 #include "core/audio/pulse/pactl.h"
 #include "core/config/daemon_config.h"
+#include "core/cuda/cuda_image.h"
 #include "core/maxine/availability.h"
 #include "core/maxine/afx/afx_effect.h"
 #include "core/maxine/afx_api.h"
@@ -109,6 +110,67 @@ namespace {
             expectTrue("IsRecoverableCaptureAcquireFailure(empty)", IsRecoverableCaptureAcquireFailure(""));
             expectTrue("IsRecoverableCaptureAcquireFailure(fatal) == false",
                        !IsRecoverableCaptureAcquireFailure("poll failed: EIO"));
+        }
+
+        // GPU buffer roundtrip (CUDA driver only; no Maxine/NvCV dependencies).
+        {
+            studiocast::maxine::CudaDriverApi cuda;
+            std::string err;
+            if (!cuda.Initialize(&err)) {
+                std::printf("[SKIP] CudaImageRoundtrip (CUDA unavailable): %s\n", err.c_str());
+            } else if (!cuda.EnsureContext(&err)) {
+                std::printf("[SKIP] CudaImageRoundtrip (no CUDA context/device): %s\n", err.c_str());
+            } else {
+                studiocast::maxine::CUstream stream = nullptr;
+                if (!cuda.CreateStream(&stream, &err)) {
+                    ++failures;
+                    std::printf("[FAIL] CudaImageRoundtrip\n  CreateStream failed: %s\n", err.c_str());
+                } else {
+                    studiocast::cuda::CudaImage img;
+                    if (!img.Allocate(&cuda, 37, 19, studiocast::cuda::PixelFormatGpu::rgb_u8, &err)) {
+                        ++failures;
+                        std::printf("[FAIL] CudaImageRoundtrip\n  Allocate failed: %s\n", err.c_str());
+                    } else {
+                        const std::size_t stride = static_cast<std::size_t>(img.w) * 3u;
+                        std::vector<std::uint8_t> src(stride * static_cast<std::size_t>(img.h));
+                        std::vector<std::uint8_t> dst(stride * static_cast<std::size_t>(img.h), 0xCD);
+
+                        for (int y = 0; y < img.h; ++y) {
+                            for (int x = 0; x < img.w; ++x) {
+                                const std::size_t i = static_cast<std::size_t>(y) * stride +
+                                                      static_cast<std::size_t>(x) * 3u;
+                                src[i + 0] = static_cast<std::uint8_t>((x * 3 + y * 7) & 0xFF);
+                                src[i + 1] = static_cast<std::uint8_t>((x * 5 + y * 11) & 0xFF);
+                                src[i + 2] = static_cast<std::uint8_t>((x * 13 + y * 17) & 0xFF);
+                            }
+                        }
+
+                        if (!img.UploadFromCpuRgb24(&cuda, src.data(), stride, stream, &err)) {
+                            ++failures;
+                            std::printf("[FAIL] CudaImageRoundtrip\n  Upload failed: %s\n", err.c_str());
+                        } else if (!img.DownloadToCpuRgb24(&cuda, dst.data(), stride, stream, &err)) {
+                            ++failures;
+                            std::printf("[FAIL] CudaImageRoundtrip\n  Download failed: %s\n", err.c_str());
+                        } else if (!cuda.StreamSynchronize(stream, &err)) {
+                            ++failures;
+                            std::printf("[FAIL] CudaImageRoundtrip\n  StreamSynchronize failed: %s\n", err.c_str());
+                        } else if (src != dst) {
+                            ++failures;
+                            std::size_t mismatch_i = 0;
+                            for (; mismatch_i < src.size(); ++mismatch_i) {
+                                if (src[mismatch_i] != dst[mismatch_i]) break;
+                            }
+                            std::printf("[FAIL] CudaImageRoundtrip\n  Byte mismatch at index %zu: got=%u want=%u\n",
+                                        mismatch_i,
+                                        static_cast<unsigned int>(dst[mismatch_i]),
+                                        static_cast<unsigned int>(src[mismatch_i]));
+                        }
+                    }
+
+                    (void)img.Free(&cuda, nullptr);
+                    (void)cuda.DestroyStream(stream, nullptr);
+                }
+            }
         }
 
         // MJPEG preference heuristic (pure logic; used by V4L2 capture negotiation).

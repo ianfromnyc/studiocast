@@ -1,16 +1,59 @@
 #include "core/maxine/cuda_driver_api.h"
 
 #include <filesystem>
+#include <utility>
 
 namespace studiocast::maxine {
 
 CudaDriverApi::CudaDriverApi() = default;
 
-CudaDriverApi::~CudaDriverApi() { lib_.Close(); }
+CudaDriverApi::~CudaDriverApi() {
+  if (retained_primary_ctx_ && f_.cuDevicePrimaryCtxRelease) {
+    (void)f_.cuDevicePrimaryCtxRelease(primary_dev_);
+  }
+  lib_.Close();
+}
 
-CudaDriverApi::CudaDriverApi(CudaDriverApi&&) noexcept = default;
+CudaDriverApi::CudaDriverApi(CudaDriverApi&& other) noexcept
+    : initialized_(other.initialized_),
+      lib_(std::move(other.lib_)),
+      f_(other.f_),
+      error_(std::move(other.error_)),
+      retained_primary_ctx_(other.retained_primary_ctx_),
+      primary_dev_(other.primary_dev_),
+      primary_ctx_(other.primary_ctx_) {
+  other.initialized_ = false;
+  other.f_ = Functions{};
+  other.error_.clear();
+  other.retained_primary_ctx_ = false;
+  other.primary_dev_ = 0;
+  other.primary_ctx_ = nullptr;
+}
 
-CudaDriverApi& CudaDriverApi::operator=(CudaDriverApi&&) noexcept = default;
+CudaDriverApi& CudaDriverApi::operator=(CudaDriverApi&& other) noexcept {
+  if (this == &other) return *this;
+
+  if (retained_primary_ctx_ && f_.cuDevicePrimaryCtxRelease) {
+    (void)f_.cuDevicePrimaryCtxRelease(primary_dev_);
+  }
+  lib_.Close();
+
+  initialized_ = other.initialized_;
+  lib_ = std::move(other.lib_);
+  f_ = other.f_;
+  error_ = std::move(other.error_);
+  retained_primary_ctx_ = other.retained_primary_ctx_;
+  primary_dev_ = other.primary_dev_;
+  primary_ctx_ = other.primary_ctx_;
+
+  other.initialized_ = false;
+  other.f_ = Functions{};
+  other.error_.clear();
+  other.retained_primary_ctx_ = false;
+  other.primary_dev_ = 0;
+  other.primary_ctx_ = nullptr;
+  return *this;
+}
 
 bool CudaDriverApi::Initialize(std::string* error_out) {
   if (initialized_) return true;
@@ -44,17 +87,31 @@ bool CudaDriverApi::Initialize(std::string* error_out) {
 bool CudaDriverApi::LoadSymbols(std::string* error_out) {
   std::string err;
 
-  if (!lib_.GetSymbol("cuInit", &f_.cuInit, &err) ||
-      !lib_.GetSymbol("cuModuleLoadData", &f_.cuModuleLoadData, &err) ||
-      !lib_.GetSymbol("cuModuleGetFunction", &f_.cuModuleGetFunction, &err) ||
-      !lib_.GetSymbol("cuLaunchKernel", &f_.cuLaunchKernel, &err) ||
-      !lib_.GetSymbol("cuMemAllocPitch", &f_.cuMemAllocPitch, &err) ||
-      !lib_.GetSymbol("cuMemFree", &f_.cuMemFree, &err) ||
-      !lib_.GetSymbol("cuMemcpy2DAsync", &f_.cuMemcpy2DAsync, &err) ||
-      !lib_.GetSymbol("cuStreamCreate", &f_.cuStreamCreate, &err) ||
-      !lib_.GetSymbol("cuStreamDestroy", &f_.cuStreamDestroy, &err) ||
-      !lib_.GetSymbol("cuStreamSynchronize", &f_.cuStreamSynchronize, &err)) {
+  auto load_req = [&](const char* name, auto* fn_out) {
+    if (lib_.GetSymbol(name, fn_out, &err)) return true;
     if (error_out) *error_out = err;
+    return false;
+  };
+  auto load_req_any = [&](const char* preferred, const char* fallback, auto* fn_out) {
+    if (lib_.GetSymbol(preferred, fn_out, nullptr)) return true;
+    if (lib_.GetSymbol(fallback, fn_out, &err)) return true;
+    if (error_out) *error_out = err;
+    return false;
+  };
+
+  // Prefer the *_v2 entry points where the CUDA headers map macros to v2.
+  if (!load_req("cuInit", &f_.cuInit) || !load_req("cuModuleLoadData", &f_.cuModuleLoadData) ||
+      !load_req("cuModuleGetFunction", &f_.cuModuleGetFunction) || !load_req("cuLaunchKernel", &f_.cuLaunchKernel) ||
+      !load_req_any("cuMemAllocPitch_v2", "cuMemAllocPitch", &f_.cuMemAllocPitch) ||
+      !load_req_any("cuMemFree_v2", "cuMemFree", &f_.cuMemFree) ||
+      !load_req_any("cuMemcpy2DAsync_v2", "cuMemcpy2DAsync", &f_.cuMemcpy2DAsync) ||
+      !load_req("cuStreamCreate", &f_.cuStreamCreate) ||
+      !load_req_any("cuStreamDestroy_v2", "cuStreamDestroy", &f_.cuStreamDestroy) ||
+      !load_req("cuStreamSynchronize", &f_.cuStreamSynchronize) ||
+      !load_req("cuDeviceGetCount", &f_.cuDeviceGetCount) || !load_req("cuDeviceGet", &f_.cuDeviceGet) ||
+      !load_req("cuDevicePrimaryCtxRetain", &f_.cuDevicePrimaryCtxRetain) ||
+      !load_req_any("cuDevicePrimaryCtxRelease_v2", "cuDevicePrimaryCtxRelease", &f_.cuDevicePrimaryCtxRelease) ||
+      !load_req("cuCtxSetCurrent", &f_.cuCtxSetCurrent) || !load_req("cuCtxGetCurrent", &f_.cuCtxGetCurrent)) {
     return false;
   }
 
@@ -74,6 +131,87 @@ std::string CudaDriverApi::StatusToString(CUresult code) const {
   return "CUDA error " + std::to_string(code);
 }
 
+bool CudaDriverApi::EnsureContext(std::string* error_out) {
+  if (error_out) error_out->clear();
+  if (!initialized_) {
+    if (error_out) *error_out = "CudaDriverApi not initialized.";
+    return false;
+  }
+  if (!f_.cuCtxGetCurrent || !f_.cuDeviceGetCount || !f_.cuDeviceGet || !f_.cuDevicePrimaryCtxRetain ||
+      !f_.cuCtxSetCurrent) {
+    if (error_out) *error_out = "CUDA context functions not loaded.";
+    return false;
+  }
+
+  CUcontext cur = nullptr;
+  CUresult st = f_.cuCtxGetCurrent(&cur);
+  if (st != CUDA_SUCCESS) {
+    if (error_out) *error_out = "cuCtxGetCurrent failed: " + StatusToString(st);
+    return false;
+  }
+  if (cur) return true;
+
+  // If we've already retained a primary context previously, re-bind it.
+  if (retained_primary_ctx_ && primary_ctx_) {
+    st = f_.cuCtxSetCurrent(primary_ctx_);
+    if (st != CUDA_SUCCESS) {
+      if (error_out) *error_out = "cuCtxSetCurrent(primary) failed: " + StatusToString(st);
+      return false;
+    }
+    cur = nullptr;
+    st = f_.cuCtxGetCurrent(&cur);
+    if (st != CUDA_SUCCESS || !cur) {
+      if (error_out) *error_out = "Failed to validate current CUDA context after set: " + StatusToString(st);
+      return false;
+    }
+    return true;
+  }
+
+  int count = 0;
+  st = f_.cuDeviceGetCount(&count);
+  if (st != CUDA_SUCCESS) {
+    if (error_out) *error_out = "cuDeviceGetCount failed: " + StatusToString(st);
+    return false;
+  }
+  if (count <= 0) {
+    if (error_out) *error_out = "No CUDA devices found.";
+    return false;
+  }
+
+  CUdevice dev = 0;
+  st = f_.cuDeviceGet(&dev, 0);
+  if (st != CUDA_SUCCESS) {
+    if (error_out) *error_out = "cuDeviceGet failed: " + StatusToString(st);
+    return false;
+  }
+
+  CUcontext ctx = nullptr;
+  st = f_.cuDevicePrimaryCtxRetain(&ctx, dev);
+  if (st != CUDA_SUCCESS || !ctx) {
+    if (error_out) *error_out = "cuDevicePrimaryCtxRetain failed: " + StatusToString(st);
+    return false;
+  }
+  st = f_.cuCtxSetCurrent(ctx);
+  if (st != CUDA_SUCCESS) {
+    if (f_.cuDevicePrimaryCtxRelease) (void)f_.cuDevicePrimaryCtxRelease(dev);
+    if (error_out) *error_out = "cuCtxSetCurrent failed: " + StatusToString(st);
+    return false;
+  }
+
+  cur = nullptr;
+  st = f_.cuCtxGetCurrent(&cur);
+  if (st != CUDA_SUCCESS || !cur) {
+    if (f_.cuDevicePrimaryCtxRelease) (void)f_.cuDevicePrimaryCtxRelease(dev);
+    if (error_out) *error_out = "Failed to validate current CUDA context after set: " + StatusToString(st);
+    return false;
+  }
+
+  retained_primary_ctx_ = true;
+  primary_dev_ = dev;
+  primary_ctx_ = ctx;
+  return true;
+}
+
 bool CudaDriverApi::AllocatePitch(std::size_t width_bytes,
                                  std::size_t height,
                                  PitchAllocation* out,
@@ -84,6 +222,7 @@ bool CudaDriverApi::AllocatePitch(std::size_t width_bytes,
     if (error_out) *error_out = "CudaDriverApi not initialized.";
     return false;
   }
+  if (!EnsureContext(error_out)) return false;
   if (!out) {
     if (error_out) *error_out = "AllocatePitch called with null out pointer.";
     return false;
@@ -109,6 +248,7 @@ bool CudaDriverApi::Free(CUdeviceptr ptr, std::string* error_out) {
     if (error_out) *error_out = "CudaDriverApi not initialized.";
     return false;
   }
+  if (!EnsureContext(error_out)) return false;
   if (!f_.cuMemFree) {
     if (error_out) *error_out = "cuMemFree symbol not loaded.";
     return false;
@@ -135,6 +275,7 @@ bool CudaDriverApi::MemcpyHtoD2DAsync(CUdeviceptr dst,
     if (error_out) *error_out = "CudaDriverApi not initialized.";
     return false;
   }
+  if (!EnsureContext(error_out)) return false;
   if (!f_.cuMemcpy2DAsync) {
     if (error_out) *error_out = "cuMemcpy2DAsync symbol not loaded.";
     return false;
@@ -181,6 +322,7 @@ bool CudaDriverApi::MemcpyDtoH2DAsync(void* dst,
     if (error_out) *error_out = "CudaDriverApi not initialized.";
     return false;
   }
+  if (!EnsureContext(error_out)) return false;
   if (!f_.cuMemcpy2DAsync) {
     if (error_out) *error_out = "cuMemcpy2DAsync symbol not loaded.";
     return false;
@@ -220,6 +362,7 @@ bool CudaDriverApi::CreateStream(CUstream* out, std::string* error_out, unsigned
     if (error_out) *error_out = "CudaDriverApi not initialized.";
     return false;
   }
+  if (!EnsureContext(error_out)) return false;
   if (!out) {
     if (error_out) *error_out = "CreateStream called with null out pointer.";
     return false;
@@ -244,6 +387,7 @@ bool CudaDriverApi::DestroyStream(CUstream stream, std::string* error_out) {
     if (error_out) *error_out = "CudaDriverApi not initialized.";
     return false;
   }
+  if (!EnsureContext(error_out)) return false;
   if (!f_.cuStreamDestroy) {
     if (error_out) *error_out = "cuStreamDestroy symbol not loaded.";
     return false;
@@ -263,6 +407,7 @@ bool CudaDriverApi::StreamSynchronize(CUstream stream, std::string* error_out) {
     if (error_out) *error_out = "CudaDriverApi not initialized.";
     return false;
   }
+  if (!EnsureContext(error_out)) return false;
   if (!f_.cuStreamSynchronize) {
     if (error_out) *error_out = "cuStreamSynchronize symbol not loaded.";
     return false;
