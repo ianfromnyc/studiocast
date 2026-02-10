@@ -272,8 +272,9 @@ void VirtualCameraService::ThreadMain() {
         const auto now = std::chrono::steady_clock::now();
         if (consumerPresent) lastConsumerSeen = now;
 
-        // Apply effects live regardless of consumer state.
-        pipeline_.SetEffects(cfg.pipeline.effects);
+        auto effects_for_pipeline = cfg.pipeline.effects;
+        bool effectsSuppressed = false;
+        std::string suppressMsg;
 
         const bool wantRunRequested = cfg.enabled && (cfg.always_on || consumerPresent);
         bool wantRun = wantRunRequested;
@@ -373,20 +374,26 @@ void VirtualCameraService::ThreadMain() {
                     if (openCudaDiag.has_value()) {
                         const auto gate = effects::EvaluateOpenCudaGate(cfg.pipeline.effects, *openCudaDiag);
                         if (!gate.ok) {
-                            blocked = true;
-                            blockedMsg = gate.message;
-                            wantRun = false;
+                            effectsSuppressed = true;
+                            suppressMsg = gate.message;
+                            effects_for_pipeline.virtual_background.mode = effects::VirtualBackgroundMode::none;
                         }
                     }
                 }
             }
         }
 
+        // Apply effects live regardless of consumer state.
+        pipeline_.SetEffects(effects_for_pipeline);
+
+        auto pipelineCfgForPipeline = cfg.pipeline;
+        pipelineCfgForPipeline.effects = effects_for_pipeline;
+
         auto pst = pipeline_.Status();
         if (blocked) {
             {
                 std::lock_guard<std::mutex> lock(mu_);
-                last_error_ = blockedMsg;
+                if (last_error_ != blockedMsg) last_error_ = blockedMsg;
             }
 
             if (pst.running || pst.starting) {
@@ -395,10 +402,13 @@ void VirtualCameraService::ThreadMain() {
                 nextStartRetry = std::chrono::steady_clock::time_point{};
                 pst = pipeline_.Status();
             }
+        } else if (effectsSuppressed) {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (last_error_ != suppressMsg) last_error_ = suppressMsg;
         }
 
         // Restart if config changed and we are running.
-        if (pst.running && haveAppliedCfg && NeedsPipelineRestart(appliedPipelineCfg, cfg.pipeline)) {
+        if (pst.running && haveAppliedCfg && NeedsPipelineRestart(appliedPipelineCfg, pipelineCfgForPipeline)) {
             pipeline_.Stop();
             haveAppliedCfg = false;
             nextStartRetry = std::chrono::steady_clock::time_point{};
@@ -410,7 +420,7 @@ void VirtualCameraService::ThreadMain() {
                     // still in backoff window
                 } else {
                     std::string perr;
-                    if (!pipeline_.Start(cfg.pipeline, &perr)) {
+                    if (!pipeline_.Start(pipelineCfgForPipeline, &perr)) {
                         {
                             std::lock_guard<std::mutex> lock(mu_);
                             last_error_ = "Pipeline start failed: " + perr;
@@ -419,7 +429,7 @@ void VirtualCameraService::ThreadMain() {
                         nextStartRetry = now + std::chrono::seconds(2);
                     } else {
                         haveAppliedCfg = true;
-                        appliedPipelineCfg = cfg.pipeline;
+                        appliedPipelineCfg = pipelineCfgForPipeline;
                         nextStartRetry = std::chrono::steady_clock::time_point{};
                     }
                 }

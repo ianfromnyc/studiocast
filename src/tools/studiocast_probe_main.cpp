@@ -2184,7 +2184,8 @@ namespace {
             }
 
             // Open CUDA diagnostics + gating decision helper: if an Open CUDA-backed effect is
-            // enabled but not available, the pipeline must be blocked before starting.
+            // enabled but not available, the service should suppress those effects and keep the
+            // pipeline running in pass-through mode.
             {
                 using studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur;
 
@@ -2214,11 +2215,28 @@ namespace {
                 expectContains("open_cuda_gate blur blocked message", gate.message,
                                "virtual_background.blur unavailable (missing_model_packs)");
 
+                auto fx_for_pipeline = fx;
+                if (!gate.ok) {
+                    fx_for_pipeline.virtual_background.mode =
+                        studiocast::video::effects::VirtualBackgroundMode::none;
+                }
+                expectTrue("open_cuda_gate suppressed vb mode", fx_for_pipeline.virtual_background.mode ==
+                                                                 studiocast::video::effects::VirtualBackgroundMode::none);
+
                 studiocast::open_cuda::OpenCudaDiagnostics available;
                 available.ok = true;
                 available.available_effects = {"virtual_background.blur"};
                 const auto gate2 = studiocast::video::effects::EvaluateOpenCudaGate(fx, available);
                 expectTrue("open_cuda_gate blur allowed when available", gate2.ok);
+
+                auto fx_for_pipeline2 = fx;
+                if (!gate2.ok) {
+                    fx_for_pipeline2.virtual_background.mode =
+                        studiocast::video::effects::VirtualBackgroundMode::none;
+                }
+                expectTrue("open_cuda_gate does not suppress when allowed",
+                           fx_for_pipeline2.virtual_background.mode ==
+                               studiocast::video::effects::VirtualBackgroundMode::blur);
             }
 
             // AFX: Broadcast-equivalent microphone planning rules.
