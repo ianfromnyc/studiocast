@@ -649,11 +649,25 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   studiocast::video::effects::BroadcastEffectsPlan appliedPlan{};
 
   // Optional deferred GPU output (used to avoid CPU resize when scaling is needed and no CPU tail effects are active).
-  struct GpuBgrOutputRef {
-    const studiocast::maxine::NvCVImage* img = nullptr;  // non-owning
+  enum class DeferredGpuKind {
+    none,
+    nvcv_bgr,
+    cuda_rgb,
+  };
+
+  struct DeferredGpuOut {
+    DeferredGpuKind kind = DeferredGpuKind::none;
+
+    // Maxine / NvCV (BGR)
+    const studiocast::maxine::NvCVImage* nvcv_img = nullptr;  // non-owning
+    studiocast::maxine::NvcvApi* nvcv = nullptr;              // non-owning
+
+    // Open CUDA (RGB)
+    const studiocast::cuda::CudaImage* cuda_img = nullptr;  // non-owning
+
+    // Common
     studiocast::maxine::CUstream stream = nullptr;
-    studiocast::maxine::CudaDriverApi* cuda = nullptr;   // non-owning
-    studiocast::maxine::NvcvApi* nvcv = nullptr;         // non-owning
+    studiocast::maxine::CudaDriverApi* cuda = nullptr;  // non-owning
   };
 
   // GPU resize cache (allocated on demand when we can defer readback).
@@ -1070,7 +1084,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          float vignette_center_y_px,
                          std::string* error,
                          bool defer_readback,
-                         GpuBgrOutputRef* deferred_out) {
+                         DeferredGpuOut* deferred_out) {
       if (!initialized || !greenscreen || !blur) {
         if (error) *error = "Maxine virtual background not initialized.";
         return false;
@@ -1166,10 +1180,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             if (error) *error = "defer_readback requires deferred_out.";
             return false;
           }
-          deferred_out->img = out_gpu;
-          deferred_out->stream = blur->cuda_stream();
-          deferred_out->cuda = &cuda;
+          deferred_out->kind = DeferredGpuKind::nvcv_bgr;
+          deferred_out->nvcv_img = out_gpu;
           deferred_out->nvcv = &nvcv;
+          deferred_out->cuda_img = nullptr;
+          deferred_out->cuda = &cuda;
+          deferred_out->stream = blur->cuda_stream();
           return true;
         }
 
@@ -1218,10 +1234,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             if (error) *error = "defer_readback requires deferred_out.";
             return false;
           }
-          deferred_out->img = &gpu_bgr_out_img;
-          deferred_out->stream = stream;
-          deferred_out->cuda = &cuda;
+          deferred_out->kind = DeferredGpuKind::nvcv_bgr;
+          deferred_out->nvcv_img = &gpu_bgr_out_img;
           deferred_out->nvcv = &nvcv;
+          deferred_out->cuda_img = nullptr;
+          deferred_out->cuda = &cuda;
+          deferred_out->stream = stream;
           return true;
         }
 
@@ -1245,12 +1263,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return true;
     }
   } maxine_bg_blur;
-
-  struct GpuRgbOutputRef {
-    const studiocast::cuda::CudaImage* img = nullptr;  // non-owning
-    studiocast::maxine::CUstream stream = nullptr;
-    studiocast::maxine::CudaDriverApi* cuda = nullptr;  // non-owning
-  };
 
   struct OpenCudaVirtualBackgroundContext {
     bool initialized = false;
@@ -1508,7 +1520,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          const studiocast::video::effects::BroadcastCameraEffects& fx,
                          std::string* error,
                          bool defer_readback,
-                         GpuRgbOutputRef* out_gpu) {
+                         DeferredGpuOut* deferred_out) {
       if (error) error->clear();
 
       using studiocast::video::effects::VirtualBackgroundMode;
@@ -1624,13 +1636,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       if (defer_readback) {
-        if (!out_gpu) {
-          if (error) *error = "Open CUDA: defer_readback requires out_gpu.";
+        if (!deferred_out) {
+          if (error) *error = "Open CUDA: defer_readback requires deferred_out.";
           return false;
         }
-        out_gpu->img = &out_rgb;
-        out_gpu->stream = vb_stream;
-        out_gpu->cuda = &cuda;
+        deferred_out->kind = DeferredGpuKind::cuda_rgb;
+        deferred_out->nvcv_img = nullptr;
+        deferred_out->nvcv = nullptr;
+        deferred_out->cuda_img = &out_rgb;
+        deferred_out->cuda = &cuda;
+        deferred_out->stream = vb_stream;
         return true;
       }
 
@@ -2034,7 +2049,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          float vignette_center_y_px,
                          std::string* error,
                          bool defer_readback,
-                         GpuBgrOutputRef* deferred_out) {
+                         DeferredGpuOut* deferred_out) {
       if (!initialized || !greenscreen || !relight) {
         if (error) *error = "Maxine relighting not initialized.";
         return false;
@@ -2163,10 +2178,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (error) *error = "defer_readback requires deferred_out.";
           return false;
         }
-        deferred_out->img = &gpu_bgr_out_img;
-        deferred_out->stream = stream;
-        deferred_out->cuda = &cuda;
+        deferred_out->kind = DeferredGpuKind::nvcv_bgr;
+        deferred_out->nvcv_img = &gpu_bgr_out_img;
         deferred_out->nvcv = &nvcv;
+        deferred_out->cuda_img = nullptr;
+        deferred_out->cuda = &cuda;
+        deferred_out->stream = stream;
         return true;
       }
 
@@ -2408,7 +2425,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          float vignette_center_y_px,
                          std::string* error,
                          bool defer_readback,
-                         GpuBgrOutputRef* deferred_out) {
+                         DeferredGpuOut* deferred_out) {
       if (!rgb || width <= 0 || height <= 0) return true;
       std::string init_err;
       if (!EnsureInitialized(width, height, fx, &init_err)) {
@@ -2467,10 +2484,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (error) *error = "defer_readback requires deferred_out.";
           return false;
         }
-        deferred_out->img = &gpu_bgr_out;
-        deferred_out->stream = stream;
-        deferred_out->cuda = &cuda;
+        deferred_out->kind = DeferredGpuKind::nvcv_bgr;
+        deferred_out->nvcv_img = &gpu_bgr_out;
         deferred_out->nvcv = &nvcv;
+        deferred_out->cuda_img = nullptr;
+        deferred_out->cuda = &cuda;
+        deferred_out->stream = stream;
         return true;
       }
 
@@ -2718,7 +2737,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          float vignette_center_y_px,
                          std::string* error,
                          bool defer_readback,
-                         GpuBgrOutputRef* deferred_out) {
+                         DeferredGpuOut* deferred_out) {
       if (!rgb || width <= 0 || height <= 0) return true;
 
       std::string init_err;
@@ -2795,10 +2814,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (error) *error = "defer_readback requires deferred_out.";
           return false;
         }
-        deferred_out->img = &gpu_bgr_out;
-        deferred_out->stream = stream;
-        deferred_out->cuda = &cuda;
+        deferred_out->kind = DeferredGpuKind::nvcv_bgr;
+        deferred_out->nvcv_img = &gpu_bgr_out;
         deferred_out->nvcv = &nvcv;
+        deferred_out->cuda_img = nullptr;
+        deferred_out->cuda = &cuda;
+        deferred_out->stream = stream;
         return true;
       }
 
@@ -2961,7 +2982,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          float vignette_center_y_px,
                          std::string* error,
                          bool defer_readback,
-                         GpuBgrOutputRef* deferred_out) {
+                         DeferredGpuOut* deferred_out) {
       if (!rgb || width <= 0 || height <= 0) return true;
       if (!fx.vignette.enabled) return true;
 
@@ -3005,10 +3026,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (error) *error = "defer_readback requires deferred_out.";
           return false;
         }
-        deferred_out->img = &gpu_bgr;
-        deferred_out->stream = nullptr;
-        deferred_out->cuda = &cuda;
+        deferred_out->kind = DeferredGpuKind::nvcv_bgr;
+        deferred_out->nvcv_img = &gpu_bgr;
         deferred_out->nvcv = &nvcv;
+        deferred_out->cuda_img = nullptr;
+        deferred_out->cuda = &cuda;
+        deferred_out->stream = nullptr;
         return true;
       }
 
@@ -3467,11 +3490,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     const auto t_capture_end = Clock::now();
     const double capture_ms = ToMs(t_capture_end - t_capture_start);
 
-    GpuBgrOutputRef deferred_gpu_out{};
+    DeferredGpuOut deferred_gpu_out{};
     bool have_deferred_gpu_out = false;
-
-    GpuRgbOutputRef deferred_open_cuda_out{};
-    bool have_deferred_open_cuda_out = false;
 
     // Apply effects (in-place on RGB buffer).
     const auto t_effects_start = Clock::now();
@@ -3564,7 +3584,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             }
             fx_failed = true;
           }
-          if (defer_readback && deferred_gpu_out.img) have_deferred_gpu_out = true;
+          if (defer_readback && deferred_gpu_out.kind != DeferredGpuKind::none) have_deferred_gpu_out = true;
           return;
         }
 
@@ -3588,7 +3608,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             }
             fx_failed = true;
           }
-          if (defer_readback && deferred_gpu_out.img) have_deferred_gpu_out = true;
+          if (defer_readback && deferred_gpu_out.kind != DeferredGpuKind::none) have_deferred_gpu_out = true;
           return;
         }
 
@@ -3614,7 +3634,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
               }
               fx_failed = true;
             }
-            if (defer_readback && deferred_gpu_out.img) have_deferred_gpu_out = true;
+            if (defer_readback && deferred_gpu_out.kind != DeferredGpuKind::none) have_deferred_gpu_out = true;
             return;
           }
 
@@ -3637,15 +3657,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                               fx,
                                               &oc_err,
                                               defer_readback,
-                                              &deferred_open_cuda_out)) {
+                                              &deferred_gpu_out)) {
               {
                 std::lock_guard<std::mutex> lock(mu_);
                 last_error_ = "Open CUDA virtual background failed: " + oc_err;
               }
               fx_failed = true;
             }
-            if (defer_readback && deferred_open_cuda_out.img) {
-              have_deferred_open_cuda_out = true;
+            if (defer_readback && deferred_gpu_out.kind == DeferredGpuKind::cuda_rgb) {
+              have_deferred_gpu_out = true;
               if (!logged_open_cuda_defer) {
                 logged_open_cuda_defer = true;
                 std::fprintf(stderr, "Open CUDA VB: defer_readback path taken\n");
@@ -3677,7 +3697,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             }
             fx_failed = true;
           }
-          if (defer_readback && deferred_gpu_out.img) have_deferred_gpu_out = true;
+          if (defer_readback && deferred_gpu_out.kind != DeferredGpuKind::none) have_deferred_gpu_out = true;
           return;
         }
 
@@ -3700,7 +3720,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             }
             fx_failed = true;
           }
-          if (defer_readback && deferred_gpu_out.img) have_deferred_gpu_out = true;
+          if (defer_readback && deferred_gpu_out.kind != DeferredGpuKind::none) have_deferred_gpu_out = true;
           return;
         }
       };
@@ -3749,37 +3769,37 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     // If we deferred GPU readback, perform GPU resize (bilinear) to output dimensions and
     // do a single GPU->CPU transfer for the final output buffer.
-    if (have_deferred_open_cuda_out) {
+    if (have_deferred_gpu_out && deferred_gpu_out.kind == DeferredGpuKind::cuda_rgb) {
       std::string gerr;
       bool ok = true;
 
-      if (!deferred_open_cuda_out.img || !deferred_open_cuda_out.cuda) {
+      if (!deferred_gpu_out.cuda_img || !deferred_gpu_out.cuda) {
         ok = false;
         gerr = "Deferred Open CUDA output reference is incomplete.";
       }
 
       if (ok) {
-        if (!deferred_open_cuda_out.img->Valid()) {
+        if (!deferred_gpu_out.cuda_img->Valid()) {
           ok = false;
           gerr = "Deferred Open CUDA output image is invalid.";
         }
       }
 
-      const studiocast::cuda::CudaImage* src_img = deferred_open_cuda_out.img;
+      const studiocast::cuda::CudaImage* src_img = deferred_gpu_out.cuda_img;
       const std::size_t tightStride = static_cast<std::size_t>(outW) * 3u;
       const std::size_t tightBytes = tightStride * static_cast<std::size_t>(outH);
 
       const studiocast::cuda::CudaImage* download_img = src_img;
       if (ok && (capA.width != outW || capA.height != outH)) {
-        if (!gpu_rgb_scaled.ReallocIfNeeded(deferred_open_cuda_out.cuda,
+        if (!gpu_rgb_scaled.ReallocIfNeeded(deferred_gpu_out.cuda,
                                             outW,
                                             outH,
-                                            deferred_open_cuda_out.img->format,
+                                            deferred_gpu_out.cuda_img->format,
                                             &gerr)) {
           ok = false;
         }
         if (ok) {
-          if (!studiocast::cuda::kernels::ResizeBilinear(*src_img, gpu_rgb_scaled, deferred_open_cuda_out.stream, &gerr)) {
+          if (!studiocast::cuda::kernels::ResizeBilinear(*src_img, gpu_rgb_scaled, deferred_gpu_out.stream, &gerr)) {
             ok = false;
           }
         }
@@ -3788,17 +3808,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       if (ok) {
         rgbScaled.resize(tightBytes);
-        if (!download_img->DownloadToCpuRgb24(deferred_open_cuda_out.cuda,
+        if (!download_img->DownloadToCpuRgb24(deferred_gpu_out.cuda,
                                               rgbScaled.data(),
                                               tightStride,
-                                              deferred_open_cuda_out.stream,
+                                              deferred_gpu_out.stream,
                                               &gerr)) {
           ok = false;
         }
       }
 
       if (ok) {
-        if (!deferred_open_cuda_out.cuda->StreamSynchronize(deferred_open_cuda_out.stream, &gerr)) {
+        if (!deferred_gpu_out.cuda->StreamSynchronize(deferred_gpu_out.stream, &gerr)) {
           ok = false;
         }
       }
@@ -3813,15 +3833,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         // Attempt a best-effort readback into the pipeline RGB buffer so CPU scaling/output remains correct.
         std::string derr;
         bool readback_ok = false;
-        if (deferred_open_cuda_out.img && deferred_open_cuda_out.cuda) {
-          if (deferred_open_cuda_out.img->DownloadToCpuRgb24(deferred_open_cuda_out.cuda,
+        if (deferred_gpu_out.cuda_img && deferred_gpu_out.cuda) {
+          if (deferred_gpu_out.cuda_img->DownloadToCpuRgb24(deferred_gpu_out.cuda,
                                                             rgb.data(),
                                                             rgbStride,
-                                                            deferred_open_cuda_out.stream,
+                                                            deferred_gpu_out.stream,
                                                             &derr) &&
-              deferred_open_cuda_out.cuda->StreamSynchronize(deferred_open_cuda_out.stream, &derr)) {
+              deferred_gpu_out.cuda->StreamSynchronize(deferred_gpu_out.stream, &derr)) {
             readback_ok = true;
-            have_deferred_open_cuda_out = false;
+            have_deferred_gpu_out = false;
           }
         }
 
@@ -3831,11 +3851,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (!readback_ok && !derr.empty()) last_error_ += " (and readback failed: " + derr + ")";
         last_error_ += ".";
       }
-    } else if (have_deferred_gpu_out) {
+    } else if (have_deferred_gpu_out && deferred_gpu_out.kind == DeferredGpuKind::nvcv_bgr) {
       std::string gerr;
       bool ok = true;
 
-      if (!deferred_gpu_out.img || !deferred_gpu_out.cuda || !deferred_gpu_out.nvcv) {
+      if (!deferred_gpu_out.nvcv_img || !deferred_gpu_out.cuda || !deferred_gpu_out.nvcv) {
         ok = false;
         gerr = "Deferred GPU output reference is incomplete.";
       }
@@ -3906,7 +3926,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       ensure_scaled_gpu(static_cast<unsigned>(outW), static_cast<unsigned>(outH));
 
       if (ok) {
-        if (!gpu_resize_bilinear.Resize(*deferred_gpu_out.img, &gpu_bgr_scaled, deferred_gpu_out.stream, &gerr)) {
+        if (!gpu_resize_bilinear.Resize(*deferred_gpu_out.nvcv_img, &gpu_bgr_scaled, deferred_gpu_out.stream, &gerr)) {
           ok = false;
         }
       }
