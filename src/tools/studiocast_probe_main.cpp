@@ -225,6 +225,12 @@ namespace {
                      "");
         }
 
+        // Safety-net policy: Open CUDA VB apply failures should not abort the camera pipeline.
+        {
+            expectTrue("OpenCudaVbApplyFailureIsNonFatal",
+                       !studiocast::video::effects::ShouldAbortPipelineOnOpenCudaVbApplyFailure());
+        }
+
         // Open CUDA model pack registry (pure filesystem + JSON; no GPU/ORT required).
         {
             const auto reg = studiocast::open_cuda::ModelPackRegistry::Scan(

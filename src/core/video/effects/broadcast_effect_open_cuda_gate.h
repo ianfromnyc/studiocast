@@ -10,6 +10,14 @@
 
 namespace studiocast::video::effects {
 
+// Safety-net policy: Open CUDA virtual background failures during application (e.g. missing/corrupt
+// model pack, transient runtime/ORT errors) should NOT abort the camera pipeline.
+//
+// The pipeline should keep producing pass-through frames while surfacing the error to the user.
+inline bool ShouldAbortPipelineOnOpenCudaVbApplyFailure() {
+  return false;
+}
+
 struct OpenCudaGateDecision {
   bool ok = true;
   std::string message;

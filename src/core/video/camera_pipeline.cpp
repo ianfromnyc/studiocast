@@ -36,6 +36,7 @@
 #include "core/video/mjpeg_decode.h"
 #include "core/video/effects/effect_chain.h"
 #include "core/video/effects/broadcast_effect_contract.h"
+#include "core/video/effects/broadcast_effect_open_cuda_gate.h"
 #include "core/video/effects/broadcast_effect_rules.h"
 #include "core/video/effects/mirror_effect.h"
 #include "core/video/v4l2loopback.h"
@@ -3749,24 +3750,31 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                 std::lock_guard<std::mutex> lock(mu_);
                 last_error_ = "Open CUDA virtual background does not support vignette yet.";
               }
-              fx_failed = true;
               return;
             }
 
             std::string oc_err;
-            if (!open_cuda_vb.ApplyRgbInPlace(rgb.data(),
-                                              capA.width,
-                                              capA.height,
-                                              rgbStride,
-                                              fx,
-                                              &oc_err,
-                                              defer_readback,
-                                              &deferred_gpu_out)) {
+            const bool ok = open_cuda_vb.ApplyRgbInPlace(rgb.data(),
+                                                         capA.width,
+                                                         capA.height,
+                                                         rgbStride,
+                                                         fx,
+                                                         &oc_err,
+                                                         defer_readback,
+                                                         &deferred_gpu_out);
+            if (!ok) {
               {
                 std::lock_guard<std::mutex> lock(mu_);
                 last_error_ = "Open CUDA virtual background failed: " + oc_err;
               }
-              fx_failed = true;
+
+              // Safety net: Open CUDA VB failures are treated as non-fatal so we keep producing
+              // pass-through frames rather than blacking out the stream.
+              if (studiocast::video::effects::ShouldAbortPipelineOnOpenCudaVbApplyFailure()) {
+                fx_failed = true;
+              }
+
+              return;
             }
             if (defer_readback && deferred_gpu_out.kind == DeferredGpuKind::cuda_rgb) {
               have_deferred_gpu_out = true;
