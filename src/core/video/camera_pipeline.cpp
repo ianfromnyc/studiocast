@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstdio>
 #include <filesystem>
 #include <memory>
 #include <set>
@@ -13,6 +14,7 @@
 #include "core/cuda/cuda_image.h"
 #include "core/cuda/cuda_tensor.h"
 #include "core/cuda/kernels/open_cuda_vb_kernels.h"
+#include "core/cuda/kernels/resize_bilinear.h"
 #include "core/maxine/availability.h"
 #include "core/maxine/maxine_manager.h"
 #include "core/maxine/effects/ar_eye_contact_effect.h"
@@ -638,6 +640,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   }
 
   int frameIndex = 0;
+  bool logged_open_cuda_defer = false;
 
   // Build a modular effect chain (Maxine-ready). This can be rebuilt live when
   // the GUI/daemon updates effect settings.
@@ -661,6 +664,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   bool gpu_bgr_scaled_allocated = false;
   std::vector<std::uint8_t> bgr_scaled_out;
   studiocast::maxine::NvCVImage cpu_bgr_scaled{};
+
+  // Open CUDA deferred GPU output (RGB) + resize cache.
+  studiocast::cuda::CudaImage gpu_rgb_scaled;
 
   struct MaxineBackgroundBlurContext {
     bool initialized = false;
@@ -1240,6 +1246,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   } maxine_bg_blur;
 
+  struct GpuRgbOutputRef {
+    const studiocast::cuda::CudaImage* img = nullptr;  // non-owning
+    studiocast::maxine::CUstream stream = nullptr;
+    studiocast::maxine::CudaDriverApi* cuda = nullptr;  // non-owning
+  };
+
   struct OpenCudaVirtualBackgroundContext {
     bool initialized = false;
     bool enabled = false;
@@ -1494,7 +1506,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          int height,
                          std::size_t rgb_stride,
                          const studiocast::video::effects::BroadcastCameraEffects& fx,
-                         std::string* error) {
+                         std::string* error,
+                         bool defer_readback,
+                         GpuRgbOutputRef* out_gpu) {
       if (error) error->clear();
 
       using studiocast::video::effects::VirtualBackgroundMode;
@@ -1606,6 +1620,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           return false;
         }
       } else {
+        return true;
+      }
+
+      if (defer_readback) {
+        if (!out_gpu) {
+          if (error) *error = "Open CUDA: defer_readback requires out_gpu.";
+          return false;
+        }
+        out_gpu->img = &out_rgb;
+        out_gpu->stream = vb_stream;
+        out_gpu->cuda = &cuda;
         return true;
       }
 
@@ -3445,6 +3470,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     GpuBgrOutputRef deferred_gpu_out{};
     bool have_deferred_gpu_out = false;
 
+    GpuRgbOutputRef deferred_open_cuda_out{};
+    bool have_deferred_open_cuda_out = false;
+
     // Apply effects (in-place on RGB buffer).
     const auto t_effects_start = Clock::now();
     bool fx_failed = false;
@@ -3602,12 +3630,26 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             }
 
             std::string oc_err;
-            if (!open_cuda_vb.ApplyRgbInPlace(rgb.data(), capA.width, capA.height, rgbStride, fx, &oc_err)) {
+            if (!open_cuda_vb.ApplyRgbInPlace(rgb.data(),
+                                              capA.width,
+                                              capA.height,
+                                              rgbStride,
+                                              fx,
+                                              &oc_err,
+                                              defer_readback,
+                                              &deferred_open_cuda_out)) {
               {
                 std::lock_guard<std::mutex> lock(mu_);
                 last_error_ = "Open CUDA virtual background failed: " + oc_err;
               }
               fx_failed = true;
+            }
+            if (defer_readback && deferred_open_cuda_out.img) {
+              have_deferred_open_cuda_out = true;
+              if (!logged_open_cuda_defer) {
+                logged_open_cuda_defer = true;
+                std::fprintf(stderr, "Open CUDA VB: defer_readback path taken\n");
+              }
             }
             return;
           }
@@ -3707,7 +3749,89 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     // If we deferred GPU readback, perform GPU resize (bilinear) to output dimensions and
     // do a single GPU->CPU transfer for the final output buffer.
-    if (have_deferred_gpu_out) {
+    if (have_deferred_open_cuda_out) {
+      std::string gerr;
+      bool ok = true;
+
+      if (!deferred_open_cuda_out.img || !deferred_open_cuda_out.cuda) {
+        ok = false;
+        gerr = "Deferred Open CUDA output reference is incomplete.";
+      }
+
+      if (ok) {
+        if (!deferred_open_cuda_out.img->Valid()) {
+          ok = false;
+          gerr = "Deferred Open CUDA output image is invalid.";
+        }
+      }
+
+      const studiocast::cuda::CudaImage* src_img = deferred_open_cuda_out.img;
+      const std::size_t tightStride = static_cast<std::size_t>(outW) * 3u;
+      const std::size_t tightBytes = tightStride * static_cast<std::size_t>(outH);
+
+      const studiocast::cuda::CudaImage* download_img = src_img;
+      if (ok && (capA.width != outW || capA.height != outH)) {
+        if (!gpu_rgb_scaled.ReallocIfNeeded(deferred_open_cuda_out.cuda,
+                                            outW,
+                                            outH,
+                                            deferred_open_cuda_out.img->format,
+                                            &gerr)) {
+          ok = false;
+        }
+        if (ok) {
+          if (!studiocast::cuda::kernels::ResizeBilinear(*src_img, gpu_rgb_scaled, deferred_open_cuda_out.stream, &gerr)) {
+            ok = false;
+          }
+        }
+        download_img = &gpu_rgb_scaled;
+      }
+
+      if (ok) {
+        rgbScaled.resize(tightBytes);
+        if (!download_img->DownloadToCpuRgb24(deferred_open_cuda_out.cuda,
+                                              rgbScaled.data(),
+                                              tightStride,
+                                              deferred_open_cuda_out.stream,
+                                              &gerr)) {
+          ok = false;
+        }
+      }
+
+      if (ok) {
+        if (!deferred_open_cuda_out.cuda->StreamSynchronize(deferred_open_cuda_out.stream, &gerr)) {
+          ok = false;
+        }
+      }
+
+      if (ok) {
+        frameW = outW;
+        frameH = outH;
+        rgbOut = rgbScaled.data();
+        rgbOutStride = tightStride;
+        rgbOutBytes = rgbScaled.size();
+      } else {
+        // Attempt a best-effort readback into the pipeline RGB buffer so CPU scaling/output remains correct.
+        std::string derr;
+        bool readback_ok = false;
+        if (deferred_open_cuda_out.img && deferred_open_cuda_out.cuda) {
+          if (deferred_open_cuda_out.img->DownloadToCpuRgb24(deferred_open_cuda_out.cuda,
+                                                            rgb.data(),
+                                                            rgbStride,
+                                                            deferred_open_cuda_out.stream,
+                                                            &derr) &&
+              deferred_open_cuda_out.cuda->StreamSynchronize(deferred_open_cuda_out.stream, &derr)) {
+            readback_ok = true;
+            have_deferred_open_cuda_out = false;
+          }
+        }
+
+        std::lock_guard<std::mutex> lock(mu_);
+        last_error_ = "Open CUDA deferred GPU resize path failed";
+        if (!gerr.empty()) last_error_ += ": " + gerr;
+        if (!readback_ok && !derr.empty()) last_error_ += " (and readback failed: " + derr + ")";
+        last_error_ += ".";
+      }
+    } else if (have_deferred_gpu_out) {
       std::string gerr;
       bool ok = true;
 
@@ -4135,6 +4259,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   }
   gpu_bgr_scaled = studiocast::maxine::NvCVImage{};
   gpu_bgr_scaled_allocated = false;
+
+  // Cleanup Open CUDA GPU resize cache.
+  if (gpu_rgb_scaled.Valid() && open_cuda_vb.cuda.IsInitialized()) {
+    std::string derr;
+    (void)gpu_rgb_scaled.Free(&open_cuda_vb.cuda, &derr);
+  }
+  gpu_rgb_scaled = studiocast::cuda::CudaImage{};
 
   {
     std::lock_guard<std::mutex> lock(mu_);
