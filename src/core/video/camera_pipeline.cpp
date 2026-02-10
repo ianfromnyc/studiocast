@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstdlib>
 #include <cstdio>
 #include <filesystem>
 #include <memory>
@@ -681,6 +682,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
   // Open CUDA deferred GPU output (RGB) + resize cache.
   studiocast::cuda::CudaImage gpu_rgb_scaled;
+  bool gpu_rgb_scaled_allocated = false;
 
   struct MaxineBackgroundBlurContext {
     bool initialized = false;
@@ -1293,6 +1295,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     studiocast::cuda::CudaImage blurred;   // rgb_u8, WxH
 
     studiocast::cuda::CudaImage bg_rgb;  // rgb_u8, WxH (replace mode)
+
+    // Optional debug logging for manual performance verification.
+    bool debug_log_uploads = false;
+    std::uint64_t debug_frame_upload_calls = 0;
     std::filesystem::path cached_bg_path;
     std::filesystem::file_time_type cached_bg_mtime{};
     int cached_bg_w = 0;
@@ -1445,6 +1451,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       // Strength is the canonical knob; clamp once for deterministic behavior.
       (void)fx;
 
+      debug_log_uploads = (std::getenv("STUDIOCAST_DEBUG_CUDA_UPLOADS") != nullptr);
+
       initialized = true;
       enabled = true;
       return true;
@@ -1545,6 +1553,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (!frame_rgb.UploadFromCpuRgb24(&cuda, rgb, rgb_stride, vb_stream, &up_err)) {
         if (error) *error = "Open CUDA: frame upload failed: " + up_err;
         return false;
+      }
+      if (debug_log_uploads) {
+        ++debug_frame_upload_calls;
+        if ((debug_frame_upload_calls % 120u) == 1u) {
+          std::fprintf(stderr,
+                       "Open CUDA VB: UploadFromCpuRgb24 calls=%llu\n",
+                       static_cast<unsigned long long>(debug_frame_upload_calls));
+        }
       }
 
       // Run matting inference at model resolution.
@@ -3785,6 +3801,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
       }
 
+      if (ok) {
+        if (deferred_gpu_out.cuda_img->format != studiocast::cuda::PixelFormatGpu::rgb_u8) {
+          ok = false;
+          gerr = "Deferred Open CUDA output image format must be rgb_u8.";
+        }
+      }
+
       const studiocast::cuda::CudaImage* src_img = deferred_gpu_out.cuda_img;
       const std::size_t tightStride = static_cast<std::size_t>(outW) * 3u;
       const std::size_t tightBytes = tightStride * static_cast<std::size_t>(outH);
@@ -3794,10 +3817,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (!gpu_rgb_scaled.ReallocIfNeeded(deferred_gpu_out.cuda,
                                             outW,
                                             outH,
-                                            deferred_gpu_out.cuda_img->format,
+                                            studiocast::cuda::PixelFormatGpu::rgb_u8,
                                             &gerr)) {
           ok = false;
         }
+        gpu_rgb_scaled_allocated = gpu_rgb_scaled.Valid();
         if (ok) {
           if (!studiocast::cuda::kernels::ResizeBilinear(*src_img, gpu_rgb_scaled, deferred_gpu_out.stream, &gerr)) {
             ok = false;
@@ -4281,11 +4305,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   gpu_bgr_scaled_allocated = false;
 
   // Cleanup Open CUDA GPU resize cache.
-  if (gpu_rgb_scaled.Valid() && open_cuda_vb.cuda.IsInitialized()) {
+  if (gpu_rgb_scaled_allocated && gpu_rgb_scaled.Valid() && open_cuda_vb.cuda.IsInitialized()) {
     std::string derr;
     (void)gpu_rgb_scaled.Free(&open_cuda_vb.cuda, &derr);
   }
   gpu_rgb_scaled = studiocast::cuda::CudaImage{};
+  gpu_rgb_scaled_allocated = false;
 
   {
     std::lock_guard<std::mutex> lock(mu_);
