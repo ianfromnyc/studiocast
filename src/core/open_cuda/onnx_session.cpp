@@ -59,7 +59,7 @@ struct OpenCudaMattingSession::Impl {
   std::optional<Ort::MemoryInfo> cuda_mem_info;
   std::optional<Ort::Value> input_value;
 
-  bool CreateOrtSession(std::string* error_out) {
+  bool CreateOrtSession(studiocast::maxine::CUstream stream, std::string* error_out) {
     if (error_out) error_out->clear();
 
     try {
@@ -77,19 +77,55 @@ struct OpenCudaMattingSession::Impl {
         // TensorRT EP availability is packaging-dependent.
       }
 
-      // Configure CUDA EP (legacy provider options). We intentionally avoid the
-      // V2 options API here to keep compatibility with a wider range of ORT
-      // builds/headers.
-      OrtCUDAProviderOptions cuda_opts{};
-      cuda_opts.device_id = opts.device_id;
+      // Configure CUDA EP.
+      // Prefer CUDA EP V2 provider options with user_compute_stream so ORT enqueues its work
+      // on our explicit stream (when headers expose the API). Fall back to legacy options
+      // otherwise.
+#if STUDIOCAST_ORT_HAS_CUDA_EP_V2
+      if (stream != nullptr) {
+        const auto& api = Ort::GetApi();
 
-      // If this throws/returns error, it typically means a CPU-only ORT build.
-      so.AppendExecutionProvider_CUDA(cuda_opts);
+        OrtCUDAProviderOptionsV2* cuda_opts_v2 = nullptr;
+        Ort::ThrowOnError(api.CreateCUDAProviderOptions(&cuda_opts_v2));
+        struct CudaOptsV2Guard {
+          const OrtApi* api = nullptr;
+          OrtCUDAProviderOptionsV2* opts = nullptr;
+          ~CudaOptsV2Guard() {
+            if (api && opts) {
+              api->ReleaseCUDAProviderOptions(opts);
+            }
+          }
+        } guard{&api, cuda_opts_v2};
 
-      // Without user_compute_stream, ensure correctness by synchronizing the
-      // caller stream before running inference.
-      ort_needs_stream_sync = true;
-      ort_stream = nullptr;
+        const char* keys[] = {"device_id"};
+        const std::string dev = std::to_string(opts.device_id);
+        const char* values[] = {dev.c_str()};
+        Ort::ThrowOnError(api.UpdateCUDAProviderOptions(cuda_opts_v2, keys, values, 1));
+
+        // Treat CUstream as an opaque handle and pass it as void* to ORT.
+        Ort::ThrowOnError(api.UpdateCUDAProviderOptionsWithValue(cuda_opts_v2,
+                                                                 "user_compute_stream",
+                                                                 reinterpret_cast<void*>(stream)));
+
+        Ort::ThrowOnError(api.SessionOptionsAppendExecutionProvider_CUDA_V2(so, cuda_opts_v2));
+
+        ort_stream = stream;
+        ort_needs_stream_sync = false;
+      } else
+#endif
+      {
+        // Legacy path (no user_compute_stream).
+        OrtCUDAProviderOptions cuda_opts{};
+        cuda_opts.device_id = opts.device_id;
+
+        // If this throws/returns error, it typically means a CPU-only ORT build.
+        so.AppendExecutionProvider_CUDA(cuda_opts);
+
+        // Without user_compute_stream, ensure correctness by synchronizing the caller stream
+        // before running inference, and synchronizing outputs after Run.
+        ort_needs_stream_sync = true;
+        ort_stream = nullptr;
+      }
 
       session = std::make_unique<Ort::Session>(*env, pack.onnx_path.c_str(), so);
       binding = std::make_unique<Ort::IoBinding>(*session);
@@ -354,7 +390,7 @@ bool OpenCudaMattingSession::Run(studiocast::maxine::CUstream stream,
   // Lazily create the ORT session so we can attempt stream interop.
   if (!impl_->session) {
     std::string ort_err;
-    if (!impl_->CreateOrtSession(&ort_err)) {
+    if (!impl_->CreateOrtSession(stream, &ort_err)) {
       if (error_out) *error_out = std::move(ort_err);
       return false;
     }
@@ -404,6 +440,12 @@ bool OpenCudaMattingSession::Run(studiocast::maxine::CUstream stream,
 
     Ort::RunOptions ro;
     impl_->session->Run(ro, *impl_->binding);
+
+    // Legacy fallback path: ensure outputs are fully produced before downstream kernels on the
+    // caller stream consume them.
+    if (impl_->ort_needs_stream_sync) {
+      impl_->binding->SynchronizeOutputs();
+    }
     return true;
   } catch (const Ort::Exception& e) {
     if (error_out) *error_out = std::string("ONNX Runtime error: ") + e.what();
