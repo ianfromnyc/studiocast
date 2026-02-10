@@ -7,7 +7,7 @@ Planned components:
 - GUI (Qt)
 - Audio Service (PipeWire graph node)
 - Video Service (V4L2 input + v4l2loopback output)
-- Effects Engine abstraction layer (Maxine backends loaded at runtime)
+- Effects Engine abstraction layer (multiple GPU engines: Maxine + Open CUDA)
 - SDK Manager (downloads/installs user-obtained Maxine assets)
 
 ## Canonical effect model: `BroadcastCameraEffects`
@@ -41,13 +41,32 @@ CLI helpers:
 - `studiocastctl effects get` → `GET_CONFIG`
 - `studiocastctl effects set --file <effects.json|->` → `SET_VIDEO_EFFECTS_JSON` (file-based to avoid shell quoting)
 
-## Availability: daemon `MaxineManager` is authoritative
+## Effects engines: `auto_select`, `maxine`, `open_cuda`
+
+The canonical effect schema includes an engine selector:
+
+- `BroadcastCameraEffects.engine`
+
+Accepted JSON values:
+
+- `"auto"` / `"auto_select"`: prefer Maxine when available; otherwise fall back to Open CUDA for supported effects
+- `"maxine"`: force Maxine (unsupported effects remain blocked/unavailable)
+- `"open_cuda"`: force Open CUDA (GPU-only; requires ONNX Runtime + CUDA EP + model packs)
+
+Installation docs:
+
+- Maxine: `docs/maxine_install.md`
+- Open CUDA: `docs/open_cuda_install.md`
+
+## Availability: daemon diagnostics are authoritative
 
 Effect availability must be computed **only** by the daemon and exposed via `GET_STATUS`.
 
-- The daemon calls `MaxineManager::Diagnose(...)` and includes the diagnostics JSON in status.
+- The daemon includes per-engine diagnostics in `GET_STATUS` under:
+  - `engines.maxine` (and a legacy top-level `maxine` alias)
+  - `engines.open_cuda` (and a convenience top-level `open_cuda` alias)
 - The GUI should treat daemon status as the single source of truth for:
-  - whether Maxine is usable on this machine
+  - whether each engine is usable on this machine
   - which effects are available vs blocked (with reason codes)
   - what remediation/install hints to show
 
@@ -64,6 +83,10 @@ Each pack contains:
 - `model.json` (schema v1; see below)
 - `model.onnx` (filename configurable via `onnx_filename`)
 - `LICENSE.txt`
+
+Helper tool:
+
+- `studiocast-open paths` / `studiocast-open install-hints` / `studiocast-open list-models`
 
 ### `model.json` schema v1 (draft)
 

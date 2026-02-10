@@ -37,7 +37,22 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-## 3) Install NVIDIA Maxine SDK + features (required for effects)
+## 3) Optional: Open CUDA backend (no Maxine required)
+
+The Open CUDA backend (`open_cuda`) runs GPU-only virtual background effects via ONNX Runtime (CUDA EP), using
+user-supplied model packs.
+
+Install/usage docs:
+
+- `docs/open_cuda_install.md`
+
+On Ubuntu 22.04+, the helper script that installs an ONNX Runtime GPU build is:
+
+```bash
+./scripts/bootstrap_ubuntu22.sh
+```
+
+## 4) Optional: Install NVIDIA Maxine SDK + features
 
 StudioCast does **not** ship or redistribute NVIDIA Maxine SDK assets. You must obtain them yourself
 from NVIDIA and comply with NVIDIA's license terms.
@@ -74,7 +89,7 @@ This runs the SDK-provided `install_feature.sh` scripts under the hood.
 
 For AFX features, the helper uses the SDK-provided `download_features.sh` script and requires `NGC_API_KEY`.
 
-## 4) Run daemon + use in OBS
+## 5) Run daemon + use in OBS
 
 ```bash
 ./build/studiocastd

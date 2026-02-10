@@ -38,13 +38,15 @@ Notes:
 
 - CLion’s (the IDE I use) default build directory in this repo is `cmake-build-debug/`.
 - If you hit a compiler/libstdc++ mismatch, explicitly pick a distro-matching compiler and re-configure (e.g. `g++-12` on 22.04, `g++-13` on 24.04).
-- See `docs/SETUP.md` for the full quickstart, including v4l2loopback and optional Maxine setup.
+- See `docs/SETUP.md` for the full quickstart (v4l2loopback + optional engine setup).
+- For the non-Maxine GPU path (Open CUDA / ONNX Runtime + model packs): see `docs/open_cuda_install.md`.
 
 
 ## Dev tooling
 - Formatting: `./scripts/format.sh`
 - Version: `build/studiocast --version`
 - Maxine install (SDK + features): see `docs/maxine_install.md` (or run `build/studiocast-maxine install-hints` for authoritative commands)
+- Open CUDA model packs (paths + validation): `build/studiocast-open install-hints` / `build/studiocast-open list-models`
 - Support bundle: `build/studiocastctl debug-report --out studiocast-debug-report.txt`
 
 ## Effects model & availability (canonical)
