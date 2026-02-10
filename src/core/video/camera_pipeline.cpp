@@ -132,6 +132,21 @@ bool CheckedPositiveDims(int width, int height, unsigned* out_w, unsigned* out_h
   return true;
 }
 
+[[maybe_unused]] static bool SyncAfterGpuToCpuTransfer(studiocast::maxine::CudaDriverApi& cuda,
+                                     studiocast::maxine::CUstream stream,
+                                     const char* context,
+                                     std::string* error) {
+  std::string sync_err;
+  if (!cuda.StreamSynchronize(stream, &sync_err)) {
+    if (error) {
+      const char* ctx = context ? context : "(unknown context)";
+      *error = std::string(ctx) + ": cuda StreamSynchronize failed: " + sync_err;
+    }
+    return false;
+  }
+  return true;
+}
+
 int ScoreCamera(const VideoDevice& d) {
   // Heuristic score for "auto" camera selection.
   // Prefer typical UVC webcams, avoid IR/depth/metadata nodes when possible.
