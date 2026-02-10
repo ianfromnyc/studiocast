@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <csetjmp>
 #include <cmath>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -36,6 +37,7 @@
 #include "core/probe/probe.h"
 #include "core/util/json.h"
 #include "core/util/strings.h"
+#include "core/util/ttl_cache.h"
 #include "core/audio/effects/broadcast_audio_effects_json.h"
 #include "core/audio/effects/broadcast_audio_effects_plan.h"
 #include "core/video/broadcast_camera_effects_legacy_adapter.h"
@@ -2255,6 +2257,38 @@ namespace {
                         }
                     }
                 }
+            }
+
+            // TTL cache: deterministic behavior (no sleep).
+            {
+                studiocast::util::TtlCache<std::string> c;
+                int computes = 0;
+                constexpr auto ttl = std::chrono::seconds(2);
+
+                const auto t0 = std::chrono::steady_clock::time_point{};
+
+                const auto v1 = c.GetOrCompute(t0 + std::chrono::seconds(1), ttl, [&]() {
+                    ++computes;
+                    return std::string("one");
+                });
+                expectEq("ttl_cache v1", v1, "one");
+                expectIntEq("ttl_cache computes after v1", computes, 1);
+
+                // Within TTL: should reuse cached value.
+                const auto v2 = c.GetOrCompute(t0 + std::chrono::seconds(2), ttl, [&]() {
+                    ++computes;
+                    return std::string("two");
+                });
+                expectEq("ttl_cache v2 uses cached", v2, "one");
+                expectIntEq("ttl_cache computes within ttl", computes, 1);
+
+                // At TTL boundary (>= ttl): should recompute.
+                const auto v3 = c.GetOrCompute(t0 + std::chrono::seconds(3), ttl, [&]() {
+                    ++computes;
+                    return std::string("three");
+                });
+                expectEq("ttl_cache v3 recompute", v3, "three");
+                expectIntEq("ttl_cache computes after expiry", computes, 2);
             }
 
             // Restore env.

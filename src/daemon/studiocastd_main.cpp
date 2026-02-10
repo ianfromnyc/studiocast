@@ -23,6 +23,7 @@
 #include "core/open_cuda/open_cuda_diagnose.h"
 #include "core/open_cuda/model_pack_registry.h"
 #include "core/util/json.h"
+#include "core/util/ttl_cache.h"
 #include "core/util/xdg.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/camera_effects_json.h"
@@ -761,8 +762,14 @@ int main(int argc, char** argv) {
                                   diagJson = lastDiagJson;
                               }
 
-                              const auto od = studiocast::open_cuda::DiagnoseOpenCudaDefault();
-                              const std::string openCudaJson = od.ToJson();
+                              // Cache Open CUDA diagnostics to avoid heavy probing on every GUI poll.
+                              static studiocast::util::TtlCache<std::string> openCudaDiagCache;
+                              constexpr auto kOpenCudaDiagTtl = std::chrono::seconds(2);
+
+                              const std::string openCudaJson = openCudaDiagCache.GetOrCompute(
+                                      std::chrono::steady_clock::now(), kOpenCudaDiagTtl, []() {
+                                          return studiocast::open_cuda::DiagnoseOpenCudaDefault().ToJson();
+                                      });
 
                               return std::string("OK ") +
                                      StatusToJson(st, current, ast, acurrent, socketPath, diagJson, openCudaJson);
