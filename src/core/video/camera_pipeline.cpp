@@ -1015,8 +1015,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
         int iw = 0, ih = 0;
         std::string img_err;
-        if (!LoadPpmP6Rgb24(img_path, &iw, &ih, &tmp_replace_rgb_src, &img_err)) {
-          if (error) *error = "Failed to load replace image (PPM/P6 required): " + img_err;
+        if (!LoadImageRgb24(img_path, &iw, &ih, &tmp_replace_rgb_src, &img_err)) {
+          if (error) *error = "Failed to load replace image: " + img_err;
           return false;
         }
 
@@ -1295,6 +1295,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     studiocast::cuda::CudaImage blurred;   // rgb_u8, WxH
 
     studiocast::cuda::CudaImage bg_rgb;  // rgb_u8, WxH (replace mode)
+    studiocast::cuda::CudaImage bg_src_rgb;  // rgb_u8, WxH_src (decoded image, cached allocation)
 
     // Optional debug logging for manual performance verification.
     bool debug_log_uploads = false;
@@ -1306,7 +1307,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     bool cached_bg_valid = false;
 
     std::vector<std::uint8_t> tmp_replace_rgb_src;
-    std::vector<std::uint8_t> tmp_replace_rgb_resized;
 
     ~OpenCudaVirtualBackgroundContext() { Destroy(); }
 
@@ -1325,6 +1325,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         (void)blur_tmp.Free(&cuda, nullptr);
         (void)blurred.Free(&cuda, nullptr);
         (void)bg_rgb.Free(&cuda, nullptr);
+        (void)bg_src_rgb.Free(&cuda, nullptr);
         (void)alpha_tensor.Free(&cuda, nullptr);
 
         if (vb_stream != nullptr) {
@@ -1344,7 +1345,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       cached_bg_h = 0;
       cached_bg_valid = false;
       tmp_replace_rgb_src.clear();
-      tmp_replace_rgb_resized.clear();
 
       initialized = false;
       enabled = false;
@@ -1485,33 +1485,32 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       int iw = 0, ih = 0;
       std::string img_err;
-      if (!studiocast::video::LoadPpmP6Rgb24(path, &iw, &ih, &tmp_replace_rgb_src, &img_err)) {
-        if (error) *error = "Open CUDA: failed to load replace image (PPM/P6 required): " + img_err;
-        return false;
-      }
-
-      const std::size_t stride = static_cast<std::size_t>(width) * 3u;
-      if (!studiocast::video::ResizeRgb24Bilinear(tmp_replace_rgb_src.data(),
-                                                  iw,
-                                                  ih,
-                                                  static_cast<std::size_t>(iw) * 3u,
-                                                  width,
-                                                  height,
-                                                  &tmp_replace_rgb_resized,
-                                                  stride,
-                                                  &img_err)) {
-        if (error) *error = "Open CUDA: failed to resize replace image: " + img_err;
+      if (!studiocast::video::LoadImageRgb24(path, &iw, &ih, &tmp_replace_rgb_src, &img_err)) {
+        if (error) *error = "Open CUDA: failed to load replace image: " + img_err;
         return false;
       }
 
       std::string berr;
+      if (!bg_src_rgb.ReallocIfNeeded(&cuda, iw, ih, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr)) {
+        if (error) *error = "Open CUDA: failed to allocate bg_src_rgb: " + berr;
+        return false;
+      }
+      if (!bg_src_rgb.UploadFromCpuRgb24(&cuda,
+                                         tmp_replace_rgb_src.data(),
+                                         static_cast<std::size_t>(iw) * 3u,
+                                         vb_stream,
+                                         &berr)) {
+        if (error) *error = "Open CUDA: failed to upload bg_src_rgb: " + berr;
+        return false;
+      }
+
       if (!bg_rgb.ReallocIfNeeded(&cuda, width, height, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr)) {
         if (error) *error = "Open CUDA: failed to allocate bg_rgb: " + berr;
         return false;
       }
 
-      if (!bg_rgb.UploadFromCpuRgb24(&cuda, tmp_replace_rgb_resized.data(), stride, vb_stream, &berr)) {
-        if (error) *error = "Open CUDA: failed to upload bg_rgb: " + berr;
+      if (!studiocast::cuda::kernels::ResizeBilinear(bg_src_rgb, bg_rgb, vb_stream, &berr)) {
+        if (error) *error = "Open CUDA: failed to resize replace image on GPU: " + berr;
         return false;
       }
 

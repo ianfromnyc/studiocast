@@ -7,6 +7,17 @@
 
 namespace studiocast::video {
 
+// Load an image file into tightly packed RGB24.
+//
+// Supported formats:
+//  - .ppm (binary P6, maxval <= 255)
+//  - .png (8-bit; alpha is composited onto black)
+bool LoadImageRgb24(const std::filesystem::path& path,
+                    int* out_w,
+                    int* out_h,
+                    std::vector<std::uint8_t>* out_rgb,
+                    std::string* error);
+
 // Minimal image loader for Virtual Background Replace.
 //
 // Initial format support is intentionally small and dependency-free:

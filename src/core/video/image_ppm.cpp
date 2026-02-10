@@ -2,13 +2,161 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cmath>
 #include <fstream>
 #include <limits>
 #include <sstream>
 
+#include <png.h>
+
 namespace studiocast::video {
 namespace {
+
+std::string ToLowerAscii(std::string s) {
+  for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return s;
+}
+
+struct PngErrorContext {
+  std::string* error = nullptr;
+};
+
+void PngErrorFn(png_structp png_ptr, png_const_charp msg) {
+  auto* ctx = static_cast<PngErrorContext*>(png_get_error_ptr(png_ptr));
+  if (ctx && ctx->error) {
+    *ctx->error = (msg && msg[0] != '\0') ? msg : "libpng error";
+  }
+  longjmp(png_jmpbuf(png_ptr), 1);
+}
+
+void PngWarnFn(png_structp /*png_ptr*/, png_const_charp /*msg*/) {}
+
+bool LoadPngRgb24(const std::filesystem::path& path,
+                  int* out_w,
+                  int* out_h,
+                  std::vector<std::uint8_t>* out_rgb,
+                  std::string* error) {
+  if (out_w) *out_w = 0;
+  if (out_h) *out_h = 0;
+  if (out_rgb) out_rgb->clear();
+
+  std::FILE* fp = std::fopen(path.c_str(), "rb");
+  if (!fp) {
+    if (error) *error = "Failed to open image: " + path.string();
+    return false;
+  }
+
+  png_byte sig[8];
+  if (std::fread(sig, 1, sizeof(sig), fp) != sizeof(sig) || png_sig_cmp(sig, 0, sizeof(sig)) != 0) {
+    std::fclose(fp);
+    if (error) *error = "Invalid PNG signature: " + path.string();
+    return false;
+  }
+
+  std::string png_err;
+  PngErrorContext err_ctx{&png_err};
+
+  png_structp png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, &err_ctx, PngErrorFn, PngWarnFn);
+  if (!png_ptr) {
+    std::fclose(fp);
+    if (error) *error = "libpng: png_create_read_struct failed";
+    return false;
+  }
+  png_infop info_ptr = png_create_info_struct(png_ptr);
+  if (!info_ptr) {
+    png_destroy_read_struct(&png_ptr, nullptr, nullptr);
+    std::fclose(fp);
+    if (error) *error = "libpng: png_create_info_struct failed";
+    return false;
+  }
+
+  if (setjmp(png_jmpbuf(png_ptr))) {
+    png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
+    std::fclose(fp);
+    if (error) {
+      *error = png_err.empty() ? "libpng: decode failed" : png_err;
+    }
+    return false;
+  }
+
+  png_init_io(png_ptr, fp);
+  png_set_sig_bytes(png_ptr, static_cast<int>(sizeof(sig)));
+  png_read_info(png_ptr, info_ptr);
+
+  png_uint_32 w = 0, h = 0;
+  int bit_depth = 0;
+  int color_type = 0;
+  int interlace_type = 0;
+  int compression_type = 0;
+  int filter_method = 0;
+  png_get_IHDR(png_ptr,
+               info_ptr,
+               &w,
+               &h,
+               &bit_depth,
+               &color_type,
+               &interlace_type,
+               &compression_type,
+               &filter_method);
+
+  if (w == 0 || h == 0 || w > 16384u || h > 16384u) {
+    png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
+    std::fclose(fp);
+    if (error) *error = "Invalid PNG dimensions";
+    return false;
+  }
+
+  if (bit_depth == 16) png_set_strip_16(png_ptr);
+
+  if (color_type == PNG_COLOR_TYPE_PALETTE) png_set_palette_to_rgb(png_ptr);
+  if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) png_set_expand_gray_1_2_4_to_8(png_ptr);
+  if (png_get_valid(png_ptr, info_ptr, PNG_INFO_tRNS)) png_set_tRNS_to_alpha(png_ptr);
+  if (color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA) png_set_gray_to_rgb(png_ptr);
+
+  // Ensure we have an alpha channel so we can composite deterministically.
+  png_set_filler(png_ptr, 0xFF, PNG_FILLER_AFTER);
+
+  png_read_update_info(png_ptr, info_ptr);
+  const int channels = png_get_channels(png_ptr, info_ptr);
+  if (channels != 4) {
+    png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
+    std::fclose(fp);
+    if (error) *error = "Unsupported PNG channels (expected RGBA)";
+    return false;
+  }
+
+  const png_size_t rowbytes = png_get_rowbytes(png_ptr, info_ptr);
+  std::vector<png_byte> rgba(rowbytes * h);
+  std::vector<png_bytep> rows(h);
+  for (png_uint_32 y = 0; y < h; ++y) {
+    rows[y] = rgba.data() + static_cast<std::size_t>(y) * rowbytes;
+  }
+
+  png_read_image(png_ptr, rows.data());
+  png_read_end(png_ptr, nullptr);
+  png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
+  std::fclose(fp);
+
+  std::vector<std::uint8_t> rgb(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 3u);
+  for (png_uint_32 y = 0; y < h; ++y) {
+    const auto* row = rows[y];
+    for (png_uint_32 x = 0; x < w; ++x) {
+      const std::size_t si = static_cast<std::size_t>(x) * 4u;
+      const std::size_t di = (static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x)) * 3u;
+      const std::uint32_t a = static_cast<std::uint32_t>(row[si + 3]);
+      // Composite on black.
+      rgb[di + 0] = static_cast<std::uint8_t>((static_cast<std::uint32_t>(row[si + 0]) * a + 127u) / 255u);
+      rgb[di + 1] = static_cast<std::uint8_t>((static_cast<std::uint32_t>(row[si + 1]) * a + 127u) / 255u);
+      rgb[di + 2] = static_cast<std::uint8_t>((static_cast<std::uint32_t>(row[si + 2]) * a + 127u) / 255u);
+    }
+  }
+
+  if (out_w) *out_w = static_cast<int>(w);
+  if (out_h) *out_h = static_cast<int>(h);
+  if (out_rgb) *out_rgb = std::move(rgb);
+  return true;
+}
 
 // Read the next token in a PPM header, skipping whitespace and comments.
 bool ReadPpmToken(std::istream& in, std::string* out) {
@@ -50,6 +198,35 @@ bool ReadPpmToken(std::istream& in, std::string* out) {
 int ClampInt(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
 
 }  // namespace
+
+bool LoadImageRgb24(const std::filesystem::path& path,
+                    int* out_w,
+                    int* out_h,
+                    std::vector<std::uint8_t>* out_rgb,
+                    std::string* error) {
+  if (out_w) *out_w = 0;
+  if (out_h) *out_h = 0;
+  if (out_rgb) out_rgb->clear();
+  if (error) error->clear();
+
+  if (path.empty()) {
+    if (error) *error = "Image path is empty";
+    return false;
+  }
+
+  const std::string ext = ToLowerAscii(path.extension().string());
+  if (ext == ".ppm") {
+    return LoadPpmP6Rgb24(path, out_w, out_h, out_rgb, error);
+  }
+  if (ext == ".png") {
+    return LoadPngRgb24(path, out_w, out_h, out_rgb, error);
+  }
+
+  if (error) {
+    *error = "Unsupported image format '" + ext + "' (supported: .png, .ppm (P6)): " + path.string();
+  }
+  return false;
+}
 
 bool LoadPpmP6Rgb24(const std::filesystem::path& path,
                     int* out_w,

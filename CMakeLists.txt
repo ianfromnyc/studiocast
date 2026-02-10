@@ -43,6 +43,14 @@ if (NOT JPEG_FOUND)
             "On Ubuntu 22.04: sudo apt install libjpeg-turbo8 libjpeg-turbo8-dev")
 endif ()
 
+# PNG decode (libpng) for virtual background replace images.
+find_package(PNG QUIET)
+if (NOT PNG_FOUND)
+    message(FATAL_ERROR
+            "PNG (libpng) development files not found. Virtual background replace images require PNG support. "
+            "On Ubuntu 22.04: sudo apt install libpng-dev")
+endif ()
+
 set(_studiocast_onnxruntime_found FALSE)
 set(_studiocast_onnxruntime_target "")
 studiocast_configure_onnxruntime(_studiocast_onnxruntime_found _studiocast_onnxruntime_target)
@@ -247,6 +255,13 @@ if (TARGET JPEG::JPEG)
 else()
     target_include_directories(studiocast_core PUBLIC ${JPEG_INCLUDE_DIRS})
     target_link_libraries(studiocast_core PUBLIC ${JPEG_LIBRARIES})
+endif()
+
+if (TARGET PNG::PNG)
+    target_link_libraries(studiocast_core PUBLIC PNG::PNG)
+else()
+    target_include_directories(studiocast_core PUBLIC ${PNG_INCLUDE_DIRS})
+    target_link_libraries(studiocast_core PUBLIC ${PNG_LIBRARIES})
 endif()
 
 if (PULSE_SIMPLE_FOUND)

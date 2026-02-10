@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <jpeglib.h>
+#include <png.h>
 
 #include "core/audio/pulse/pactl.h"
 #include "core/config/daemon_config.h"
@@ -62,6 +63,69 @@ namespace {
             if (argv[i] && std::string_view(argv[i]) == flag) return true;
         }
         return false;
+    }
+
+    bool WritePngRgb24File(const std::filesystem::path& path,
+                           int w,
+                           int h,
+                           const std::uint8_t* rgb,
+                           std::string* error) {
+        if (error) error->clear();
+        if (!rgb || w <= 0 || h <= 0) {
+            if (error) *error = "invalid dimensions";
+            return false;
+        }
+
+        std::FILE* fp = std::fopen(path.c_str(), "wb");
+        if (!fp) {
+            if (error) *error = "failed to open for write";
+            return false;
+        }
+
+        png_structp png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+        if (!png_ptr) {
+            std::fclose(fp);
+            if (error) *error = "png_create_write_struct failed";
+            return false;
+        }
+        png_infop info_ptr = png_create_info_struct(png_ptr);
+        if (!info_ptr) {
+            png_destroy_write_struct(&png_ptr, nullptr);
+            std::fclose(fp);
+            if (error) *error = "png_create_info_struct failed";
+            return false;
+        }
+
+        if (setjmp(png_jmpbuf(png_ptr))) {
+            png_destroy_write_struct(&png_ptr, &info_ptr);
+            std::fclose(fp);
+            if (error && error->empty()) *error = "libpng write failed";
+            return false;
+        }
+
+        png_init_io(png_ptr, fp);
+        png_set_IHDR(png_ptr,
+                     info_ptr,
+                     static_cast<png_uint_32>(w),
+                     static_cast<png_uint_32>(h),
+                     8,
+                     PNG_COLOR_TYPE_RGB,
+                     PNG_INTERLACE_NONE,
+                     PNG_COMPRESSION_TYPE_DEFAULT,
+                     PNG_FILTER_TYPE_DEFAULT);
+        png_write_info(png_ptr, info_ptr);
+
+        std::vector<png_bytep> rows(static_cast<std::size_t>(h));
+        for (int y = 0; y < h; ++y) {
+            rows[static_cast<std::size_t>(y)] = const_cast<png_bytep>(
+                reinterpret_cast<const png_byte*>(rgb + static_cast<std::size_t>(y) * static_cast<std::size_t>(w) * 3u));
+        }
+        png_write_image(png_ptr, rows.data());
+        png_write_end(png_ptr, nullptr);
+
+        png_destroy_write_struct(&png_ptr, &info_ptr);
+        std::fclose(fp);
+        return true;
     }
 
     int RunSelfTest() {
@@ -201,6 +265,56 @@ namespace {
                     expectContains("OpenCudaModelRegistry.Problems(invalid_json).reason", it->second, "model.json");
                 }
             }
+        }
+
+        // Image loader: PNG support for virtual background replace images.
+        {
+            const std::filesystem::path tmp = std::filesystem::temp_directory_path() / "studiocast_selftest_vb_replace.png";
+
+            const std::vector<std::uint8_t> src_rgb = {
+                // Row 0: red, green
+                255, 0, 0, 0, 255, 0,
+                // Row 1: blue, white
+                0, 0, 255, 255, 255, 255,
+            };
+
+            std::string werr;
+            expectTrue("WritePngRgb24File",
+                       WritePngRgb24File(tmp, /*w=*/2, /*h=*/2, src_rgb.data(), &werr));
+            if (!werr.empty()) {
+                // Keep visibility for flaky FS issues.
+                std::printf("[INFO] WritePngRgb24File err: %s\n", werr.c_str());
+            }
+
+            int w = 0, h = 0;
+            std::vector<std::uint8_t> out;
+            std::string err;
+            expectTrue("LoadImageRgb24(png)", studiocast::video::LoadImageRgb24(tmp, &w, &h, &out, &err));
+            if (!err.empty()) {
+                std::printf("[INFO] LoadImageRgb24(png) err: %s\n", err.c_str());
+            }
+            expectIntEq("LoadImageRgb24(png) width", w, 2);
+            expectIntEq("LoadImageRgb24(png) height", h, 2);
+            expectIntEq("LoadImageRgb24(png) size", static_cast<int>(out.size()), 2 * 2 * 3);
+
+            auto at = [&](int x, int y, int c) -> int {
+                return static_cast<int>(out[static_cast<std::size_t>((y * w + x) * 3 + c)]);
+            };
+            expectIntEq("LoadImageRgb24(png) (0,0) R", at(0, 0, 0), 255);
+            expectIntEq("LoadImageRgb24(png) (0,0) G", at(0, 0, 1), 0);
+            expectIntEq("LoadImageRgb24(png) (0,0) B", at(0, 0, 2), 0);
+            expectIntEq("LoadImageRgb24(png) (1,0) R", at(1, 0, 0), 0);
+            expectIntEq("LoadImageRgb24(png) (1,0) G", at(1, 0, 1), 255);
+            expectIntEq("LoadImageRgb24(png) (1,0) B", at(1, 0, 2), 0);
+            expectIntEq("LoadImageRgb24(png) (0,1) R", at(0, 1, 0), 0);
+            expectIntEq("LoadImageRgb24(png) (0,1) G", at(0, 1, 1), 0);
+            expectIntEq("LoadImageRgb24(png) (0,1) B", at(0, 1, 2), 255);
+            expectIntEq("LoadImageRgb24(png) (1,1) R", at(1, 1, 0), 255);
+            expectIntEq("LoadImageRgb24(png) (1,1) G", at(1, 1, 1), 255);
+            expectIntEq("LoadImageRgb24(png) (1,1) B", at(1, 1, 2), 255);
+
+            std::error_code ec;
+            (void)std::filesystem::remove(tmp, ec);
         }
 
         // GPU buffer roundtrip (CUDA driver only; no Maxine/NvCV dependencies).
