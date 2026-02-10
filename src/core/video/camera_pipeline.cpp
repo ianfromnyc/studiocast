@@ -1211,6 +1211,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (error) *error = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(down);
           return false;
         }
+
+        if (!SyncAfterGpuToCpuTransfer(cuda,
+                                       blur->cuda_stream(),
+                                       "Maxine VB blur: after gpu->cpu transfer",
+                                       error)) {
+          return false;
+        }
       } else if (fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::remove ||
                  fx.virtual_background.mode == studiocast::video::effects::VirtualBackgroundMode::replace) {
         if (!nvcv.f().NvCVImage_Composite) {
@@ -1263,6 +1270,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         const auto down = nvcv.f().NvCVImage_Transfer(&gpu_bgr_out_img, &cpu_bgr_out, 1.0f, stream, nullptr);
         if (down != studiocast::maxine::NVCV_SUCCESS) {
           if (error) *error = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(down);
+          return false;
+        }
+
+        if (!SyncAfterGpuToCpuTransfer(cuda,
+                                       stream,
+                                       "Maxine VB composite: after gpu->cpu transfer",
+                                       error)) {
           return false;
         }
       } else {
@@ -2264,6 +2278,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
+      if (!SyncAfterGpuToCpuTransfer(cuda, stream, "Maxine relight: after gpu->cpu transfer", error)) {
+        return false;
+      }
+
       // BGR -> RGB back into the pipeline buffer.
       studiocast::video::Bgr24ToRgb24(bgr_out.data(),
                                      rgb,
@@ -2568,6 +2586,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       const auto down = nvcv.f().NvCVImage_Transfer(&gpu_bgr_out, &cpu_bgr_out, 1.0f, stream, nullptr);
       if (down != studiocast::maxine::NVCV_SUCCESS) {
         if (error) *error = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(down);
+        return false;
+      }
+
+      if (!SyncAfterGpuToCpuTransfer(cuda, stream, "Maxine eye contact: after gpu->cpu transfer", error)) {
         return false;
       }
 
@@ -2901,6 +2923,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
+      if (!SyncAfterGpuToCpuTransfer(cuda, stream, "Maxine auto frame: after gpu->cpu transfer", error)) {
+        return false;
+      }
+
       // BGR -> RGB
       studiocast::video::Bgr24ToRgb24(bgr_out.data(),
                                      rgb,
@@ -3110,6 +3136,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       const auto down = nvcv.f().NvCVImage_Transfer(&gpu_bgr, &cpu_bgr_out, 1.0f, /*stream=*/nullptr, nullptr);
       if (down != studiocast::maxine::NVCV_SUCCESS) {
         if (error) *error = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(down);
+        return false;
+      }
+
+      if (!SyncAfterGpuToCpuTransfer(cuda,
+                                     /*stream=*/nullptr,
+                                     "Vignette-only: after gpu->cpu transfer",
+                                     error)) {
         return false;
       }
 
@@ -4057,6 +4090,18 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
 
         if (ok) {
+          if (!deferred_gpu_out.cuda) {
+            ok = false;
+            gerr = "Deferred GPU resize readback: missing CUDA driver API.";
+          } else if (!SyncAfterGpuToCpuTransfer(*deferred_gpu_out.cuda,
+                                                deferred_gpu_out.stream,
+                                                "Deferred GPU resize readback: after gpu->cpu transfer",
+                                                &gerr)) {
+            ok = false;
+          }
+        }
+
+        if (ok) {
           rgbScaled.resize(tightStride * static_cast<std::size_t>(outH));
           studiocast::video::Bgr24ToRgb24(bgr_scaled_out.data(),
                                          rgbScaled.data(),
@@ -4224,6 +4269,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (down != studiocast::maxine::NVCV_SUCCESS) {
             ok = false;
             gerr = "NvCVImage_Transfer(gpu->cpu out) failed: " + std::to_string(down);
+          }
+        }
+
+        if (ok) {
+          if (!SyncAfterGpuToCpuTransfer(gpu_scaler.cuda,
+                                         /*stream=*/nullptr,
+                                         "Standalone GPU scaler readback: after gpu->cpu transfer",
+                                         &gerr)) {
+            ok = false;
           }
         }
 
