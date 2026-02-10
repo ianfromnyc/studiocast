@@ -1300,11 +1300,21 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     // Optional debug logging for manual performance verification.
     bool debug_log_uploads = false;
     std::uint64_t debug_frame_upload_calls = 0;
-    std::filesystem::path cached_bg_path;
-    std::filesystem::file_time_type cached_bg_mtime{};
-    int cached_bg_w = 0;
-    int cached_bg_h = 0;
-    bool cached_bg_valid = false;
+
+    // Replace-mode background cache.
+    // Cache the decoded+uploaded source image at its native resolution, then GPU-resize
+    // into bg_rgb for the current frame size.
+    std::filesystem::path cached_bg_src_path;
+    std::filesystem::file_time_type cached_bg_src_mtime{};
+    int cached_bg_src_w = 0;
+    int cached_bg_src_h = 0;
+    bool cached_bg_src_valid = false;
+    std::uint64_t cached_bg_src_gen = 0;
+
+    int cached_bg_dst_w = 0;
+    int cached_bg_dst_h = 0;
+    bool cached_bg_dst_valid = false;
+    std::uint64_t cached_bg_dst_src_gen = 0;
 
     std::vector<std::uint8_t> tmp_replace_rgb_src;
 
@@ -1339,11 +1349,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       session.reset();
       pack.reset();
 
-      cached_bg_path.clear();
-      cached_bg_mtime = {};
-      cached_bg_w = 0;
-      cached_bg_h = 0;
-      cached_bg_valid = false;
+      cached_bg_src_path.clear();
+      cached_bg_src_mtime = {};
+      cached_bg_src_w = 0;
+      cached_bg_src_h = 0;
+      cached_bg_src_valid = false;
+      cached_bg_src_gen = 0;
+
+      cached_bg_dst_w = 0;
+      cached_bg_dst_h = 0;
+      cached_bg_dst_valid = false;
+      cached_bg_dst_src_gen = 0;
       tmp_replace_rgb_src.clear();
 
       initialized = false;
@@ -1441,11 +1457,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
       }
 
-      // Invalidate replace cache if size changed.
-      if (cached_bg_w != frame_w || cached_bg_h != frame_h) {
-        cached_bg_valid = false;
-        cached_bg_w = frame_w;
-        cached_bg_h = frame_h;
+      // If the frame size changed, keep the uploaded source background but invalidate the
+      // resized destination so we'll re-run the GPU resize.
+      if (cached_bg_dst_w != frame_w || cached_bg_dst_h != frame_h) {
+        cached_bg_dst_valid = false;
+        cached_bg_dst_w = frame_w;
+        cached_bg_dst_h = frame_h;
       }
 
       // Strength is the canonical knob; clamp once for deterministic behavior.
@@ -1479,31 +1496,54 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      if (cached_bg_valid && cached_bg_path == path && cached_bg_mtime == mtime && bg_rgb.Valid()) {
+      const bool src_cache_hit = (cached_bg_src_valid &&
+                                 cached_bg_src_path == path &&
+                                 cached_bg_src_mtime == mtime &&
+                                 bg_src_rgb.Valid());
+
+      if (!src_cache_hit) {
+        int iw = 0, ih = 0;
+        std::string img_err;
+        if (!studiocast::video::LoadImageRgb24(path, &iw, &ih, &tmp_replace_rgb_src, &img_err)) {
+          if (error) *error = "Open CUDA: failed to load replace image: " + img_err;
+          return false;
+        }
+
+        std::string berr;
+        if (!bg_src_rgb.ReallocIfNeeded(&cuda, iw, ih, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr)) {
+          if (error) *error = "Open CUDA: failed to allocate bg_src_rgb: " + berr;
+          return false;
+        }
+        if (!bg_src_rgb.UploadFromCpuRgb24(&cuda,
+                                           tmp_replace_rgb_src.data(),
+                                           static_cast<std::size_t>(iw) * 3u,
+                                           vb_stream,
+                                           &berr)) {
+          if (error) *error = "Open CUDA: failed to upload bg_src_rgb: " + berr;
+          return false;
+        }
+
+        cached_bg_src_path = path;
+        cached_bg_src_mtime = mtime;
+        cached_bg_src_w = iw;
+        cached_bg_src_h = ih;
+        cached_bg_src_valid = true;
+        ++cached_bg_src_gen;
+
+        // Source changed -> destination must be re-generated.
+        cached_bg_dst_valid = false;
+      }
+
+      const bool dst_cache_hit = (cached_bg_dst_valid &&
+                                 cached_bg_dst_w == width &&
+                                 cached_bg_dst_h == height &&
+                                 cached_bg_dst_src_gen == cached_bg_src_gen &&
+                                 bg_rgb.Valid());
+      if (dst_cache_hit) {
         return true;
       }
 
-      int iw = 0, ih = 0;
-      std::string img_err;
-      if (!studiocast::video::LoadImageRgb24(path, &iw, &ih, &tmp_replace_rgb_src, &img_err)) {
-        if (error) *error = "Open CUDA: failed to load replace image: " + img_err;
-        return false;
-      }
-
       std::string berr;
-      if (!bg_src_rgb.ReallocIfNeeded(&cuda, iw, ih, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr)) {
-        if (error) *error = "Open CUDA: failed to allocate bg_src_rgb: " + berr;
-        return false;
-      }
-      if (!bg_src_rgb.UploadFromCpuRgb24(&cuda,
-                                         tmp_replace_rgb_src.data(),
-                                         static_cast<std::size_t>(iw) * 3u,
-                                         vb_stream,
-                                         &berr)) {
-        if (error) *error = "Open CUDA: failed to upload bg_src_rgb: " + berr;
-        return false;
-      }
-
       if (!bg_rgb.ReallocIfNeeded(&cuda, width, height, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr)) {
         if (error) *error = "Open CUDA: failed to allocate bg_rgb: " + berr;
         return false;
@@ -1514,9 +1554,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      cached_bg_path = path;
-      cached_bg_mtime = mtime;
-      cached_bg_valid = true;
+      cached_bg_dst_w = width;
+      cached_bg_dst_h = height;
+      cached_bg_dst_src_gen = cached_bg_src_gen;
+      cached_bg_dst_valid = true;
       return true;
     }
 
