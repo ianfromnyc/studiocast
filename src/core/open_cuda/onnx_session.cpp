@@ -12,10 +12,6 @@
 
 #if STUDIOCAST_HAVE_ONNXRUNTIME
 #include <onnxruntime_cxx_api.h>
-
-// Provider factory header for CUDA/TensorRT EP append helpers.
-// This is shipped with the official ONNX Runtime C/C++ distribution.
-#include <onnxruntime_provider_factory.h>
 #endif
 
 namespace studiocast::open_cuda {
@@ -88,7 +84,7 @@ struct OpenCudaMattingSession::Impl {
       cuda_opts.device_id = opts.device_id;
 
       // If this throws/returns error, it typically means a CPU-only ORT build.
-      Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(so, &cuda_opts));
+      so.AppendExecutionProvider_CUDA(cuda_opts);
 
       // Without user_compute_stream, ensure correctness by synchronizing the
       // caller stream before running inference.
