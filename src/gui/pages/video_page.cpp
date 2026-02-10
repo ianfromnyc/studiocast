@@ -199,6 +199,15 @@ struct DaemonVideoStatus {
   QMap<QString, QStringList> maxine_missing_effects;
   bool virtual_key_light_available = false;
 
+  // Open CUDA runtime diagnostics (from daemon GET_STATUS)
+  bool open_cuda_present = false;
+  bool open_cuda_ok = false;
+  QStringList open_cuda_installed_models;
+  QMap<QString, QString> open_cuda_missing_models;
+  QStringList open_cuda_available_effects;
+  QMap<QString, QString> open_cuda_blocked_effects;
+  QStringList open_cuda_install_hints;
+
   QString effects_backends;
   QString effects_note;
 
@@ -352,6 +361,61 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
     }
   }
 
+  // Open CUDA diagnostics payload.
+  out->open_cuda_present = false;
+  out->open_cuda_ok = false;
+  out->open_cuda_installed_models.clear();
+  out->open_cuda_missing_models.clear();
+  out->open_cuda_available_effects.clear();
+  out->open_cuda_blocked_effects.clear();
+  out->open_cuda_install_hints.clear();
+
+  QJsonObject openCuda = root.value("open_cuda").toObject();
+  if (openCuda.isEmpty()) {
+    const QJsonObject engines = root.value("engines").toObject();
+    openCuda = engines.value("open_cuda").toObject();
+  }
+  if (!openCuda.isEmpty()) {
+    out->open_cuda_present = true;
+    out->open_cuda_ok = openCuda.value("ok").toBool(false);
+
+    const auto installed = openCuda.value("installed_models").toArray();
+    for (const auto& v : installed) {
+      const QString s = v.toString();
+      if (!s.isEmpty()) out->open_cuda_installed_models.push_back(s);
+    }
+
+    const QJsonObject missing = openCuda.value("missing_models").toObject();
+    for (auto it = missing.begin(); it != missing.end(); ++it) {
+      const QString id = it.key();
+      const QString reason = it.value().toString();
+      if (!id.isEmpty() && !reason.isEmpty()) {
+        out->open_cuda_missing_models.insert(id, reason);
+      }
+    }
+
+    const auto available = openCuda.value("available_effects").toArray();
+    for (const auto& v : available) {
+      const QString id = v.toString();
+      if (!id.isEmpty()) out->open_cuda_available_effects.push_back(id);
+    }
+
+    const QJsonObject blocked = openCuda.value("blocked_effects").toObject();
+    for (auto it = blocked.begin(); it != blocked.end(); ++it) {
+      const QString id = it.key();
+      const QString reason = it.value().toString();
+      if (!id.isEmpty() && !reason.isEmpty()) {
+        out->open_cuda_blocked_effects.insert(id, reason);
+      }
+    }
+
+    const auto hints = openCuda.value("install_hints").toArray();
+    for (const auto& v : hints) {
+      const QString s = v.toString();
+      if (!s.isEmpty()) out->open_cuda_install_hints.push_back(s);
+    }
+  }
+
   out->last_error = video.value("last_error").toString();
   return true;
 }
@@ -448,10 +512,17 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   sizeRow->addStretch(1);
   boxLayout->addLayout(sizeRow);
 
-  // Effect engine (Maxine-only UX)
+  // Effect engine preference (Auto / Maxine / Open CUDA)
   auto* engineRow = new QHBoxLayout();
   engineRow->addWidget(new QLabel("Effect engine:", box));
-  effectEngineValue_ = new QLabel("Maxine", box);
+  engineCombo_ = new QComboBox(box);
+  engineCombo_->addItem("Auto", "auto");
+  engineCombo_->addItem("Maxine", "maxine");
+  engineCombo_->addItem("Open CUDA", "open_cuda");
+  engineRow->addWidget(engineCombo_);
+  engineRow->addSpacing(12);
+  engineRow->addWidget(new QLabel("Active:", box));
+  effectEngineValue_ = new QLabel("—", box);
   effectEngineValue_->setStyleSheet("font-weight: 600;");
   engineRow->addWidget(effectEngineValue_);
   engineRow->addStretch(1);
@@ -674,6 +745,10 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   connect(copyCmdBtn_, &QPushButton::clicked, this, &VideoPage::CopySuggestedCommand);
   connect(startBtn_, &QPushButton::clicked, this, &VideoPage::OnStart);
   connect(stopBtn_, &QPushButton::clicked, this, &VideoPage::OnStop);
+
+  connect(engineCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, &VideoPage::OnEnginePreferenceChanged);
+
   connect(mirrorCheck_, &QCheckBox::toggled, this, &VideoPage::OnMirrorToggled);
   connect(backgroundCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
           this, &VideoPage::OnBackgroundChanged);
@@ -838,6 +913,14 @@ bool VideoPage::SyncFromDaemonConfig() {
     const QByteArray txt = QJsonDocument(fx).toJson(QJsonDocument::Compact);
     std::string jerr;
     (void)studiocast::video::ApplyBroadcastCameraEffectsPatchJsonText(txt.toStdString(), &effects_, &jerr);
+  }
+
+  if (engineCombo_) {
+    engineCombo_->blockSignals(true);
+    const QString v = QString::fromStdString(studiocast::video::effects::ToString(effects_.engine));
+    const int idx = engineCombo_->findData(v);
+    engineCombo_->setCurrentIndex(idx >= 0 ? idx : 0);
+    engineCombo_->blockSignals(false);
   }
 
   const bool autoFrame = effects_.auto_frame.enabled;
@@ -1058,7 +1141,14 @@ bool VideoPage::SendDaemonVideoConfig() {
 bool VideoPage::SendDaemonVideoEffects() {
   // Canonical local model is `effects_` (Broadcast schema). Sync UI -> model here,
   // then serialize using the stable contract JSON.
-  effects_.engine = studiocast::video::effects::EffectsEnginePreference::maxine;
+  effects_.engine = studiocast::video::effects::EffectsEnginePreference::auto_select;
+  if (engineCombo_) {
+    const QString s = engineCombo_->currentData().toString();
+    studiocast::video::effects::EffectsEnginePreference ep = effects_.engine;
+    if (studiocast::video::effects::ParseEffectsEnginePreference(s.toStdString(), &ep)) {
+      effects_.engine = ep;
+    }
+  }
   effects_.mirror = mirrorCheck_ && mirrorCheck_->isChecked();
 
   const QString bg = backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
@@ -1127,6 +1217,11 @@ bool VideoPage::SendDaemonEnabled(bool enabled) {
     return false;
   }
   return true;
+}
+
+void VideoPage::OnEnginePreferenceChanged(int /*index*/) {
+  UpdateUiEnabled();
+  (void)SendDaemonVideoEffects();
 }
 
 void VideoPage::OnMirrorToggled(bool checked) {
@@ -1201,28 +1296,53 @@ void VideoPage::OnDenoiseStrengthChanged(int value) {
 }
 
 void VideoPage::OnOpenInstallHints() {
-  QString program = QCoreApplication::applicationDirPath() + "/studiocast-maxine";
-  if (!QFileInfo::exists(program)) {
-    program = "studiocast-maxine";
+  studiocast::video::effects::EffectsEnginePreference pref =
+      studiocast::video::effects::EffectsEnginePreference::auto_select;
+  if (engineCombo_) {
+    const QString s = engineCombo_->currentData().toString();
+    (void)studiocast::video::effects::ParseEffectsEnginePreference(s.toStdString(), &pref);
   }
 
-  QProcess p;
-  p.setProgram(program);
-  p.setArguments({"install-hints"});
-  p.start();
-  if (!p.waitForFinished(15000)) {
-    p.kill();
-    p.waitForFinished(2000);
-  }
+  const auto runHints = [&](const QString& program, const QString& title) -> QString {
+    QProcess p;
+    p.setProgram(program);
+    p.setArguments({"install-hints"});
+    p.start();
+    if (!p.waitForFinished(15000)) {
+      p.kill();
+      p.waitForFinished(2000);
+    }
+    const QString out = QString::fromUtf8(p.readAllStandardOutput());
+    const QString err = QString::fromUtf8(p.readAllStandardError());
+    const QString text = (out + (err.isEmpty() ? "" : ("\n" + err))).trimmed();
+    if (text.isEmpty()) return title + ": (no output)";
+    return title + ":\n" + text;
+  };
 
-  const QString out = QString::fromUtf8(p.readAllStandardOutput());
-  const QString err = QString::fromUtf8(p.readAllStandardError());
-  const QString text = (out + (err.isEmpty() ? "" : ("\n" + err))).trimmed();
+  const auto resolveProgram = [&](const char* exeName) -> QString {
+    QString program = QCoreApplication::applicationDirPath() + "/" + exeName;
+    if (QFileInfo::exists(program)) return program;
+    return QString::fromUtf8(exeName);
+  };
+
+  QString text;
+  QString title;
+  if (pref == studiocast::video::effects::EffectsEnginePreference::open_cuda) {
+    title = "Open CUDA install hints";
+    text = runHints(resolveProgram("studiocast-open"), "studiocast-open");
+  } else if (pref == studiocast::video::effects::EffectsEnginePreference::maxine) {
+    title = "Maxine install hints";
+    text = runHints(resolveProgram("studiocast-maxine"), "studiocast-maxine");
+  } else {
+    title = "Engine install hints";
+    text = runHints(resolveProgram("studiocast-maxine"), "studiocast-maxine") + "\n\n" +
+           runHints(resolveProgram("studiocast-open"), "studiocast-open");
+  }
 
   QMessageBox mb(this);
-  mb.setWindowTitle("Maxine install hints");
-  mb.setText(text.isEmpty() ? "No output." : "See details.");
-  mb.setDetailedText(text.isEmpty() ? QString() : text);
+  mb.setWindowTitle(title);
+  mb.setText("See details.");
+  mb.setDetailedText(text.trimmed());
   mb.exec();
 }
 
@@ -1412,8 +1532,18 @@ void VideoPage::UpdateUiEnabled() {
     (void)ParseDaemonStatusJson(daemonLastStatusJson_, &st, &perr);
   }
 
+  const auto currentEnginePref = [&]() -> studiocast::video::effects::EffectsEnginePreference {
+    studiocast::video::effects::EffectsEnginePreference ep = studiocast::video::effects::EffectsEnginePreference::auto_select;
+    if (!engineCombo_) return ep;
+    const QString s = engineCombo_->currentData().toString();
+    (void)studiocast::video::effects::ParseEffectsEnginePreference(s.toStdString(), &ep);
+    return ep;
+  };
+
   const bool enabled = daemonReachable_ ? st.enabled : false;
   const bool maxineSupported = daemonReachable_ && st.maxine_supported;
+  const bool openCudaSupported = daemonReachable_ && st.open_cuda_present && st.open_cuda_ok;
+  const auto enginePref = currentEnginePref();
 
   refreshBtn_->setEnabled(!enabled);
   copyCmdBtn_->setEnabled(!suggestedCmd_.isEmpty());
@@ -1427,24 +1557,103 @@ void VideoPage::UpdateUiEnabled() {
   heightSpin_->setEnabled(!enabled);
   fpsSpin_->setEnabled(!enabled);
 
-  // Maxine blocking banner + diagnostics (best-effort)
+  if (engineCombo_) {
+    engineCombo_->setEnabled(daemonReachable_);
+  }
+
+  if (effectEngineValue_) {
+    if (!daemonReachable_) {
+      effectEngineValue_->setText("—");
+    } else if (!st.effects_backends.isEmpty()) {
+      effectEngineValue_->setText(st.effects_backends);
+    } else {
+      effectEngineValue_->setText(QString::fromStdString(studiocast::video::effects::ToString(enginePref)));
+    }
+  }
+
+  // Engine blocking banner + diagnostics (best-effort)
   if (maxineBanner_) {
-    if (daemonReachable_ && !st.maxine_supported) {
-      QString msg = "Maxine unavailable.";
-      if (!st.maxine_blocked_reason.isEmpty()) {
-        msg += "\n" + FormatMaxineReasonCode(st.maxine_blocked_reason);
-      }
-      if (!st.maxine_blocked_details.isEmpty()) {
-        msg += "\n\n";
-        for (const auto& d : st.maxine_blocked_details) {
-          msg += "• " + d + "\n";
+    if (!daemonReachable_) {
+      maxineBanner_->setVisible(false);
+    } else {
+      QString msg;
+      bool show = false;
+
+      const auto fmtMaxineBlocked = [&]() -> QString {
+        QString s = "Maxine unavailable.";
+        if (!st.maxine_blocked_reason.isEmpty()) {
+          s += "\n" + FormatMaxineReasonCode(st.maxine_blocked_reason);
+        }
+        if (!st.maxine_blocked_details.isEmpty()) {
+          s += "\n\n";
+          for (const auto& d : st.maxine_blocked_details) {
+            s += "• " + d + "\n";
+          }
+        }
+        return s.trimmed();
+      };
+
+      const auto fmtOpenCudaBlocked = [&]() -> QString {
+        QString s = "Open CUDA unavailable.";
+        if (!st.open_cuda_present) {
+          s += "\nDaemon did not report Open CUDA status (older studiocastd).";
+        } else if (!st.open_cuda_ok) {
+          if (st.open_cuda_installed_models.isEmpty()) {
+            s += "\nNo usable Open CUDA model packs were found.";
+          }
+        }
+
+        if (!st.open_cuda_missing_models.isEmpty()) {
+          s += "\n\nMissing/invalid model packs:";
+          for (auto it = st.open_cuda_missing_models.begin(); it != st.open_cuda_missing_models.end(); ++it) {
+            s += "\n• " + it.key() + ": " + it.value();
+          }
+        }
+
+        if (!st.open_cuda_install_hints.isEmpty()) {
+          s += "\n\n" + st.open_cuda_install_hints.join("\n");
+        } else {
+          s += "\n\nModel packs: ~/.local/share/studiocast/models/open_cuda/<model_id>/";
+        }
+
+        s += "\n\nRun: studiocast-open install-hints";
+        return s.trimmed();
+      };
+
+      if (enginePref == studiocast::video::effects::EffectsEnginePreference::maxine) {
+        if (!st.maxine_supported) {
+          msg = fmtMaxineBlocked();
+          msg += "\n\nEffects are disabled. Open Diagnostics for install/path hints.";
+          show = true;
+        }
+      } else if (enginePref == studiocast::video::effects::EffectsEnginePreference::open_cuda) {
+        if (!st.open_cuda_present || !st.open_cuda_ok) {
+          msg = fmtOpenCudaBlocked();
+          msg += "\n\nEffects are disabled. Open Diagnostics for details.";
+          show = true;
+        }
+      } else {
+        // auto_select
+        if (!st.maxine_supported && !(st.open_cuda_present && st.open_cuda_ok)) {
+          msg = "No effects engine is available.";
+          msg += "\n\n" + fmtMaxineBlocked();
+          msg += "\n\n" + fmtOpenCudaBlocked();
+          show = true;
         }
       }
-      msg += "\nEffects are disabled. Open Diagnostics for install/path hints.";
-      maxineBanner_->setText(msg.trimmed());
-      maxineBanner_->setVisible(true);
+
+      maxineBanner_->setText(msg);
+      maxineBanner_->setVisible(show);
+    }
+  }
+
+  if (openInstallHintsBtn_) {
+    if (enginePref == studiocast::video::effects::EffectsEnginePreference::open_cuda) {
+      openInstallHintsBtn_->setText("Open CUDA install hints");
+    } else if (enginePref == studiocast::video::effects::EffectsEnginePreference::maxine) {
+      openInstallHintsBtn_->setText("Maxine install hints");
     } else {
-      maxineBanner_->setVisible(false);
+      openInstallHintsBtn_->setText("Engine install hints");
     }
   }
 
@@ -1452,8 +1661,17 @@ void VideoPage::UpdateUiEnabled() {
     QJsonObject root;
     QString perr;
     if (ParseJsonObject(daemonLastStatusJson_, &root, &perr)) {
-      const QJsonObject maxine = root.value("maxine").toObject();
-      diagnosticsText_->setPlainText(QString::fromUtf8(QJsonDocument(maxine).toJson(QJsonDocument::Indented)));
+      QJsonObject diag;
+      if (enginePref == studiocast::video::effects::EffectsEnginePreference::open_cuda) {
+        diag = root.value("open_cuda").toObject();
+        if (diag.isEmpty()) diag = root.value("engines").toObject().value("open_cuda").toObject();
+      } else if (enginePref == studiocast::video::effects::EffectsEnginePreference::maxine) {
+        diag = root.value("maxine").toObject();
+        if (diag.isEmpty()) diag = root.value("engines").toObject().value("maxine").toObject();
+      } else {
+        diag = root.value("engines").toObject();
+      }
+      diagnosticsText_->setPlainText(QString::fromUtf8(QJsonDocument(diag).toJson(QJsonDocument::Indented)));
     } else {
       diagnosticsText_->setPlainText("(failed to parse status JSON)\n" + perr);
     }
@@ -1470,19 +1688,29 @@ void VideoPage::UpdateUiEnabled() {
     const auto kind = AvailabilityKindForEffectId(id);
     if (kind == EffectAvailabilityKind::always) return true;
     if (kind == EffectAvailabilityKind::gpu_utility) {
-      // We currently treat "GPU utility" effects as gated by the same runtime
-      // prerequisites as Maxine (CUDA/GPU/driver). If we later expose explicit
-      // CUDA diagnostics, this can be relaxed.
-      return maxineSupported;
+      // GPU utility effects require a CUDA-capable engine (Maxine or Open CUDA).
+      return maxineSupported || openCudaSupported;
     }
 
-    // Maxine-listed effect.
-    if (!maxineSupported) return false;
-    if (st.maxine_available_effects.isEmpty() && st.maxine_missing_effects.isEmpty()) {
-      // Disable-by-default when daemon did not report availability.
-      return false;
+    // Engine-specific availability for effects that are not always-on.
+    if (enginePref == studiocast::video::effects::EffectsEnginePreference::maxine) {
+      if (!maxineSupported) return false;
+      if (st.maxine_available_effects.isEmpty() && st.maxine_missing_effects.isEmpty()) {
+        // Disable-by-default when daemon did not report availability.
+        return false;
+      }
+      return st.maxine_available_effects.contains(id);
     }
-    return st.maxine_available_effects.contains(id);
+
+    if (enginePref == studiocast::video::effects::EffectsEnginePreference::open_cuda) {
+      if (!(st.open_cuda_present && st.open_cuda_ok)) return false;
+      return st.open_cuda_available_effects.contains(id);
+    }
+
+    // auto_select: prefer Maxine if available, else Open CUDA.
+    if (maxineSupported && st.maxine_available_effects.contains(id)) return true;
+    if (st.open_cuda_present && st.open_cuda_ok && st.open_cuda_available_effects.contains(id)) return true;
+    return false;
   };
 
   auto effectUnavailableTooltip = [&](const QString& id) -> QString {
@@ -1497,15 +1725,48 @@ void VideoPage::UpdateUiEnabled() {
       return "Effect is unavailable.";
     }
 
+    if (kind == EffectAvailabilityKind::gpu_utility) {
+      if (!(maxineSupported || openCudaSupported)) return "GPU processing unavailable (no CUDA engine available).";
+      return "GPU processing unavailable.";
+    }
+
+    if (enginePref == studiocast::video::effects::EffectsEnginePreference::open_cuda) {
+      if (!st.open_cuda_present) {
+        return "Open CUDA status not reported by daemon.";
+      }
+      if (!st.open_cuda_ok) {
+        QStringList lines;
+        lines << "Open CUDA unavailable.";
+        if (st.open_cuda_installed_models.isEmpty()) {
+          lines << "No usable Open CUDA model packs were found.";
+        }
+        if (!st.open_cuda_missing_models.isEmpty()) {
+          lines << "";
+          lines << "Missing/invalid model packs:";
+          for (auto it = st.open_cuda_missing_models.begin(); it != st.open_cuda_missing_models.end(); ++it) {
+            lines << ("• " + it.key() + ": " + it.value());
+          }
+        }
+        if (!st.open_cuda_install_hints.isEmpty()) {
+          lines << "";
+          lines << st.open_cuda_install_hints;
+        }
+        lines << "";
+        lines << "Run: studiocast-open install-hints";
+        return lines.join("\n");
+      }
+      if (st.open_cuda_blocked_effects.contains(id)) {
+        return st.open_cuda_blocked_effects.value(id);
+      }
+      return "Effect is unavailable.";
+    }
+
+    // Maxine (or auto_select with Maxine-specific reason).
     if (!maxineSupported) {
       if (!st.maxine_blocked_details.isEmpty()) return st.maxine_blocked_details.join("\n");
       if (!st.maxine_summary.isEmpty()) return st.maxine_summary;
       if (!st.maxine_blocked_reason.isEmpty()) return FormatMaxineReasonCode(st.maxine_blocked_reason);
       return "Maxine unavailable.";
-    }
-
-    if (kind == EffectAvailabilityKind::gpu_utility) {
-      return "GPU processing unavailable.";
     }
 
     if (st.maxine_missing_effects.contains(id)) {

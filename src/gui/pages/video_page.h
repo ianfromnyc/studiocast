@@ -35,6 +35,7 @@ namespace studiocast::gui {
         void CopySuggestedCommand();
         void OnStart();
         void OnStop();
+        void OnEnginePreferenceChanged(int index);
         void OnMirrorToggled(bool checked);
         void OnBackgroundChanged(int index);
         void OnBackgroundStrengthChanged(int value);
@@ -87,6 +88,8 @@ namespace studiocast::gui {
         QSpinBox* widthSpin_ = nullptr;
         QSpinBox* heightSpin_ = nullptr;
         QSpinBox* fpsSpin_ = nullptr;
+
+        QComboBox* engineCombo_ = nullptr;
 
         QCheckBox* mirrorCheck_ = nullptr;
 
