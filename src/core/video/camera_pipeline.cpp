@@ -1247,6 +1247,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     studiocast::maxine::CudaDriverApi cuda;
 
+    // Persistent stream used for the entire Open CUDA virtual background pipeline.
+    // This avoids accidental default-stream work and allows ORT (when supported) to
+    // run on the same explicit stream via user_compute_stream.
+    studiocast::maxine::CUstream vb_stream = nullptr;
+
     std::optional<studiocast::open_cuda::ModelPack> pack;
     std::unique_ptr<studiocast::open_cuda::OpenCudaMattingSession> session;
 
@@ -1276,6 +1281,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     ~OpenCudaVirtualBackgroundContext() { Destroy(); }
 
     void Destroy() {
+      if (cuda.IsInitialized() && vb_stream != nullptr) {
+        std::string serr;
+        (void)cuda.StreamSynchronize(vb_stream, &serr);
+      }
+
       if (cuda.IsInitialized()) {
         (void)frame_rgb.Free(&cuda, nullptr);
         (void)out_rgb.Free(&cuda, nullptr);
@@ -1286,6 +1296,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         (void)blurred.Free(&cuda, nullptr);
         (void)bg_rgb.Free(&cuda, nullptr);
         (void)alpha_tensor.Free(&cuda, nullptr);
+
+        if (vb_stream != nullptr) {
+          std::string derr;
+          (void)cuda.DestroyStream(vb_stream, &derr);
+          vb_stream = nullptr;
+        }
       }
 
       alpha_model_view = studiocast::cuda::CudaImage{};
@@ -1328,6 +1344,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         last_error = "Open CUDA: failed to ensure CUDA context: " + err;
         if (error) *error = last_error;
         return false;
+      }
+
+      if (vb_stream == nullptr) {
+        std::string serr;
+        if (!cuda.CreateStream(&vb_stream, &serr)) {
+          last_error = "Open CUDA: failed to create CUDA stream: " + serr;
+          if (error) *error = last_error;
+          return false;
+        }
       }
 
       // Resolve model pack once (deterministic default).
@@ -1453,7 +1478,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      if (!bg_rgb.UploadFromCpuRgb24(&cuda, tmp_replace_rgb_resized.data(), stride, /*stream=*/nullptr, &berr)) {
+      if (!bg_rgb.UploadFromCpuRgb24(&cuda, tmp_replace_rgb_resized.data(), stride, vb_stream, &berr)) {
         if (error) *error = "Open CUDA: failed to upload bg_rgb: " + berr;
         return false;
       }
@@ -1489,23 +1514,23 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                     std::min(studiocast::video::effects::contract::kVbStrengthMax,
                                              fx.virtual_background.strength));
 
-      // Upload CPU->GPU (default stream for correctness with ORT CUDA EP).
+      // Upload CPU->GPU.
       std::string up_err;
-      if (!frame_rgb.UploadFromCpuRgb24(&cuda, rgb, rgb_stride, /*stream=*/nullptr, &up_err)) {
+      if (!frame_rgb.UploadFromCpuRgb24(&cuda, rgb, rgb_stride, vb_stream, &up_err)) {
         if (error) *error = "Open CUDA: frame upload failed: " + up_err;
         return false;
       }
 
       // Run matting inference at model resolution.
       std::string matte_err;
-      if (!session->Run(/*stream=*/nullptr, frame_rgb, &alpha_tensor, &matte_err)) {
+      if (!session->Run(vb_stream, frame_rgb, &alpha_tensor, &matte_err)) {
         if (error) *error = matte_err;
         return false;
       }
 
       // Resize alpha to frame size.
       std::string kerr;
-      if (!studiocast::cuda::kernels::ResizeBilinearF32_1(alpha_model_view, alpha_resized, /*stream=*/nullptr, &kerr)) {
+      if (!studiocast::cuda::kernels::ResizeBilinearF32_1(alpha_model_view, alpha_resized, vb_stream, &kerr)) {
         if (error) *error = "Open CUDA: alpha resize failed: " + kerr;
         return false;
       }
@@ -1518,7 +1543,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                                              alpha_tmp,
                                                              alpha_feather,
                                                              feather_radius,
-                                                             /*stream=*/nullptr,
+                                                             vb_stream,
                                                              &kerr)) {
           if (error) *error = "Open CUDA: alpha feather blur failed: " + kerr;
           return false;
@@ -1532,7 +1557,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                                             blur_tmp,
                                                             blurred,
                                                             /*radius=*/strength,
-                                                            /*stream=*/nullptr,
+                                                            vb_stream,
                                                             &kerr)) {
           if (error) *error = "Open CUDA: background blur failed: " + kerr;
           return false;
@@ -1541,7 +1566,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                                           blurred,
                                                           *alpha_use,
                                                           out_rgb,
-                                                          /*stream=*/nullptr,
+                                                          vb_stream,
                                                           &kerr)) {
           if (error) *error = "Open CUDA: composite failed: " + kerr;
           return false;
@@ -1560,7 +1585,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                                                g,
                                                                b,
                                                                out_rgb,
-                                                               /*stream=*/nullptr,
+                                                               vb_stream,
                                                                &kerr)) {
           if (error) *error = "Open CUDA: composite(solid) failed: " + kerr;
           return false;
@@ -1575,7 +1600,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                                           bg_rgb,
                                                           *alpha_use,
                                                           out_rgb,
-                                                          /*stream=*/nullptr,
+                                                          vb_stream,
                                                           &kerr)) {
           if (error) *error = "Open CUDA: composite(replace) failed: " + kerr;
           return false;
@@ -1586,11 +1611,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       // Download GPU->CPU.
       std::string down_err;
-      if (!out_rgb.DownloadToCpuRgb24(&cuda, rgb, rgb_stride, /*stream=*/nullptr, &down_err)) {
+      if (!out_rgb.DownloadToCpuRgb24(&cuda, rgb, rgb_stride, vb_stream, &down_err)) {
         if (error) *error = "Open CUDA: frame download failed: " + down_err;
         return false;
       }
-      if (!cuda.StreamSynchronize(/*stream=*/nullptr, &down_err)) {
+      if (!cuda.StreamSynchronize(vb_stream, &down_err)) {
         if (error) *error = "Open CUDA: StreamSynchronize failed: " + down_err;
         return false;
       }
