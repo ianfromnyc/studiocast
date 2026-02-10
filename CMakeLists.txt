@@ -73,6 +73,8 @@ add_library(studiocast_core
         src/core/probe/probe.cpp
         src/core/open_cuda/open_cuda_diagnostics.h
         src/core/open_cuda/open_cuda_diagnostics.cpp
+        src/core/open_cuda/open_cuda_diagnose.h
+        src/core/open_cuda/open_cuda_diagnose.cpp
         src/core/open_cuda/model_pack_registry.h
         src/core/open_cuda/model_pack_registry.cpp
         src/core/open_cuda/onnx_session.h

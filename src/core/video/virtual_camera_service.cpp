@@ -12,8 +12,10 @@
 #include <cstring>
 
 #include "core/maxine/maxine_manager.h"
+#include "core/open_cuda/open_cuda_diagnose.h"
 #include "core/util/proc.h"
 #include "core/video/effects/broadcast_effect_maxine_gate.h"
+#include "core/video/effects/broadcast_effect_open_cuda_gate.h"
 #include "core/video/v4l2loopback.h"
 
 namespace studiocast::video {
@@ -173,6 +175,9 @@ void VirtualCameraService::ThreadMain() {
     std::optional<studiocast::maxine::MaxineDiagnostics> maxineDiag;
     auto lastMaxineDiagAt = std::chrono::steady_clock::time_point{};
 
+    std::optional<studiocast::open_cuda::OpenCudaDiagnostics> openCudaDiag;
+    auto lastOpenCudaDiagAt = std::chrono::steady_clock::time_point{};
+
     bool haveAppliedCfg = false;
     CameraPipelineConfig appliedPipelineCfg{};
 
@@ -273,32 +278,112 @@ void VirtualCameraService::ThreadMain() {
         const bool wantRunRequested = cfg.enabled && (cfg.always_on || consumerPresent);
         bool wantRun = wantRunRequested;
 
-        // If Maxine-backed effects are enabled but not runnable on this system,
-        // do not start capture/processing threads. Keep loopback output alive
-        // (see EnsureOutputOpen above) so consumers still see a stable device.
-        bool blockedByMaxine = false;
+        // Gate expensive capture/processing threads based on engine availability.
+        // Keep loopback output alive (see EnsureOutputOpen above) so consumers
+        // still see a stable device.
+        bool blocked = false;
         std::string blockedMsg;
-        if (wantRunRequested && effects::WantsMaxineForPlannedEffects(cfg.pipeline.effects)) {
+
+        if (wantRunRequested) {
+            const auto plan = effects::BuildBroadcastEffectsPlan(cfg.pipeline.effects);
+            const std::set<std::string> planned(plan.ordered_effect_ids.begin(), plan.ordered_effect_ids.end());
+            const auto has = [&](std::string_view id) {
+                return planned.count(std::string(id)) != 0;
+            };
+
+            const bool wants_vb = has(effects::contract::kEffectIdVirtualBackgroundBlur) ||
+                                  has(effects::contract::kEffectIdVirtualBackgroundRemove) ||
+                                  has(effects::contract::kEffectIdVirtualBackgroundReplace);
+
+            // Effects that currently require Maxine (no Open CUDA implementation).
+            const bool wants_maxine_only = has(effects::contract::kEffectIdVideoNoiseRemoval) ||
+                                           has(effects::contract::kEffectIdVirtualKeyLight) ||
+                                           has(effects::contract::kEffectIdEyeContact) ||
+                                           has(effects::contract::kEffectIdAutoFrame);
+
             const auto ttl = std::chrono::seconds(2);
-            if (!maxineDiag.has_value() || lastMaxineDiagAt == std::chrono::steady_clock::time_point{} ||
-                (now - lastMaxineDiagAt) >= ttl) {
-                studiocast::maxine::MaxineManager mgr;
-                maxineDiag = mgr.Diagnose(false);
-                lastMaxineDiagAt = now;
+
+            // --- Maxine gate ---
+            bool needMaxineGate = false;
+            bool needMaxineDiag = false;
+            if (cfg.pipeline.effects.engine == effects::EffectsEnginePreference::maxine) {
+                // Forced Maxine: any Maxine-backed effect blocks the pipeline when unavailable.
+                needMaxineGate = effects::WantsMaxineForPlannedEffects(cfg.pipeline.effects);
+                needMaxineDiag = needMaxineGate;
+            } else if (cfg.pipeline.effects.engine == effects::EffectsEnginePreference::auto_select) {
+                // Auto-select: only gate Maxine for effects that have no Open CUDA fallback.
+                needMaxineGate = wants_maxine_only;
+                // Still cache Maxine diagnostics if we need to decide whether VB can run on Maxine.
+                needMaxineDiag = needMaxineGate || wants_vb;
             }
 
-            if (maxineDiag.has_value()) {
+            if (needMaxineDiag) {
+                if (!maxineDiag.has_value() || lastMaxineDiagAt == std::chrono::steady_clock::time_point{} ||
+                    (now - lastMaxineDiagAt) >= ttl) {
+                    studiocast::maxine::MaxineManager mgr;
+                    maxineDiag = mgr.Diagnose(false);
+                    lastMaxineDiagAt = now;
+                }
+            }
+
+            if (needMaxineGate && maxineDiag.has_value()) {
                 const auto gate = effects::EvaluateMaxineGate(cfg.pipeline.effects, *maxineDiag);
                 if (!gate.ok) {
-                    blockedByMaxine = true;
+                    blocked = true;
                     blockedMsg = gate.message;
                     wantRun = false;
+                }
+            }
+
+            // --- Open CUDA gate ---
+            if (!blocked && wants_vb) {
+                bool needOpenCudaGate = false;
+                if (cfg.pipeline.effects.engine == effects::EffectsEnginePreference::open_cuda) {
+                    needOpenCudaGate = true;
+                } else if (cfg.pipeline.effects.engine == effects::EffectsEnginePreference::auto_select) {
+                    // For VB: prefer Maxine when available; otherwise require Open CUDA.
+                    bool vb_available_in_maxine = false;
+                    if (maxineDiag.has_value()) {
+                        const std::set<std::string> mx_avail(maxineDiag->available_effects.begin(),
+                                                             maxineDiag->available_effects.end());
+                        vb_available_in_maxine = true;
+                        if (has(effects::contract::kEffectIdVirtualBackgroundBlur) &&
+                            !mx_avail.count(std::string(effects::contract::kEffectIdVirtualBackgroundBlur))) {
+                            vb_available_in_maxine = false;
+                        }
+                        if (has(effects::contract::kEffectIdVirtualBackgroundRemove) &&
+                            !mx_avail.count(std::string(effects::contract::kEffectIdVirtualBackgroundRemove))) {
+                            vb_available_in_maxine = false;
+                        }
+                        if (has(effects::contract::kEffectIdVirtualBackgroundReplace) &&
+                            !mx_avail.count(std::string(effects::contract::kEffectIdVirtualBackgroundReplace))) {
+                            vb_available_in_maxine = false;
+                        }
+                    }
+                    needOpenCudaGate = !vb_available_in_maxine;
+                }
+
+                if (needOpenCudaGate && effects::WantsOpenCudaForPlannedEffects(cfg.pipeline.effects)) {
+                    if (!openCudaDiag.has_value() || lastOpenCudaDiagAt == std::chrono::steady_clock::time_point{} ||
+                        (now - lastOpenCudaDiagAt) >= ttl) {
+                        openCudaDiag = studiocast::open_cuda::DiagnoseOpenCudaDefault();
+                        lastOpenCudaDiagAt = now;
+                    }
+
+                    if (openCudaDiag.has_value()) {
+                        const auto gate = effects::EvaluateOpenCudaGate(cfg.pipeline.effects, *openCudaDiag);
+                        if (!gate.ok) {
+                            blocked = true;
+                            blockedMsg = gate.message;
+                            wantRun = false;
+                        }
+                    }
                 }
             }
         }
 
         auto pst = pipeline_.Status();
-        if (blockedByMaxine) {
+        if (blocked) {
             {
                 std::lock_guard<std::mutex> lock(mu_);
                 last_error_ = blockedMsg;

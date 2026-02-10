@@ -31,6 +31,7 @@
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
 #include "core/open_cuda/model_pack_registry.h"
+#include "core/open_cuda/open_cuda_diagnose.h"
 #include "core/open_cuda/onnx_session.h"
 #include "core/probe/probe.h"
 #include "core/util/json.h"
@@ -43,6 +44,7 @@
 #include "core/video/capture_error_policy.h"
 #include "core/video/legacy_camera_effects.h"
 #include "core/video/effects/broadcast_effect_maxine_gate.h"
+#include "core/video/effects/broadcast_effect_open_cuda_gate.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/broadcast_effect_rules.h"
 #include "core/video/effects/broadcast_effects_json.h"
@@ -2063,6 +2065,44 @@ namespace {
                 d.available_effects = {"virtual_background.blur"};
                 const auto gate2 = studiocast::video::effects::EvaluateMaxineGate(fx, d);
                 expectTrue("maxine_gate blur allowed when available", gate2.ok);
+            }
+
+            // Open CUDA diagnostics + gating decision helper: if an Open CUDA-backed effect is
+            // enabled but not available, the pipeline must be blocked before starting.
+            {
+                using studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur;
+
+                const auto diag = studiocast::open_cuda::DiagnoseOpenCudaDefault();
+#if STUDIOCAST_HAVE_ONNXRUNTIME
+                expectTrue("open_cuda_diag has install_hints", !diag.install_hints.empty());
+#else
+                expectTrue("open_cuda_diag blocked when built without ORT", !diag.ok);
+                const auto it = diag.blocked_effects.find(std::string(kEffectIdVirtualBackgroundBlur));
+                expectTrue("open_cuda_diag reason onnxruntime_not_found",
+                           it != diag.blocked_effects.end() && it->second == "onnxruntime_not_found");
+#endif
+
+                studiocast::video::effects::BroadcastCameraEffects fx;
+                fx.engine = studiocast::video::effects::EffectsEnginePreference::open_cuda;
+                fx.virtual_background.mode = studiocast::video::effects::VirtualBackgroundMode::blur;
+
+                expectTrue("open_cuda_gate wants_vb", studiocast::video::effects::WantsOpenCudaForPlannedEffects(fx));
+
+                studiocast::open_cuda::OpenCudaDiagnostics blocked;
+                blocked.ok = false;
+                blocked.blocked_effects[std::string(kEffectIdVirtualBackgroundBlur)] = "missing_model_packs";
+                blocked.install_hints = {"No usable Open CUDA model packs were found."};
+
+                const auto gate = studiocast::video::effects::EvaluateOpenCudaGate(fx, blocked);
+                expectTrue("open_cuda_gate blur blocked", !gate.ok);
+                expectContains("open_cuda_gate blur blocked message", gate.message,
+                               "virtual_background.blur unavailable (missing_model_packs)");
+
+                studiocast::open_cuda::OpenCudaDiagnostics available;
+                available.ok = true;
+                available.available_effects = {"virtual_background.blur"};
+                const auto gate2 = studiocast::video::effects::EvaluateOpenCudaGate(fx, available);
+                expectTrue("open_cuda_gate blur allowed when available", gate2.ok);
             }
 
             // AFX: Broadcast-equivalent microphone planning rules.
