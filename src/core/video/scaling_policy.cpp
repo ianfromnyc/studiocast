@@ -29,4 +29,19 @@ bool CheckOutputResizeAllowed(int src_w,
   return false;
 }
 
+bool ShouldRunStandaloneOpenCudaScaler(bool scaling_needed,
+                                      bool gpu_backend_is_open_cuda_or_maxine,
+                                      bool have_deferred_gpu_out,
+                                      bool allow_cpu_resize,
+                                      bool open_cuda_effects_ran) {
+  if (!scaling_needed) return false;
+  if (!gpu_backend_is_open_cuda_or_maxine) return false;
+
+  const bool should_skip_to_avoid_unnecessary_transfers =
+      !have_deferred_gpu_out && allow_cpu_resize && !open_cuda_effects_ran;
+  if (should_skip_to_avoid_unnecessary_transfers) return false;
+
+  return true;
+}
+
 }  // namespace studiocast::video

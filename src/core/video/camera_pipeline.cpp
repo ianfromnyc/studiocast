@@ -4777,8 +4777,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     // Standalone GPU scaling backend (OpenCUDA/pure CUDA): upload CPU RGB -> GPU RGB, resize on GPU, download.
     //
     // This runs when OpenCUDA scaling is selected, and also serves as a fallback when Maxine/NVCV scaling fails.
-    if ((frameW != outW || frameH != outH) &&
-        (gpu_backend == GpuResizeBackend::open_cuda || gpu_backend == GpuResizeBackend::maxine_nvcv)) {
+    //
+    // IMPORTANT: If Open CUDA effects were not active this frame and CPU resize is allowed, skip this
+    // standalone scaler so we don't do unnecessary GPU uploads/downloads.
+    const bool gpu_backend_supports_open_cuda_scaler =
+        (gpu_backend == GpuResizeBackend::open_cuda || gpu_backend == GpuResizeBackend::maxine_nvcv);
+    if (ShouldRunStandaloneOpenCudaScaler(/*scaling_needed=*/(frameW != outW || frameH != outH),
+                                         /*gpu_backend_is_open_cuda_or_maxine=*/gpu_backend_supports_open_cuda_scaler,
+                                         /*have_deferred_gpu_out=*/have_deferred_gpu_out,
+                                         /*allow_cpu_resize=*/cfg.allow_cpu_resize,
+                                         /*open_cuda_effects_ran=*/open_cuda_active_this_frame)) {
       std::string gerr;
       bool ok = open_cuda_scaler.EnsureInitialized(&gerr);
       if (ok) {

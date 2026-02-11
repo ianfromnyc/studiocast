@@ -224,6 +224,50 @@ namespace {
             expectContains("CheckOutputResizeAllowed(cpu disabled message)", err, "CPU resize is disabled");
         }
 
+        // Standalone Open CUDA scaler gating (pure logic; used by the camera pipeline).
+        {
+            using studiocast::video::ShouldRunStandaloneOpenCudaScaler;
+
+            expectTrue("ShouldRunStandaloneOpenCudaScaler(no scaling) == false",
+                       !ShouldRunStandaloneOpenCudaScaler(/*scaling_needed=*/false,
+                                                         /*gpu_backend_is_open_cuda_or_maxine=*/true,
+                                                         /*have_deferred_gpu_out=*/false,
+                                                         /*allow_cpu_resize=*/true,
+                                                         /*open_cuda_effects_ran=*/false));
+
+            expectTrue("ShouldRunStandaloneOpenCudaScaler(no gpu backend) == false",
+                       !ShouldRunStandaloneOpenCudaScaler(/*scaling_needed=*/true,
+                                                         /*gpu_backend_is_open_cuda_or_maxine=*/false,
+                                                         /*have_deferred_gpu_out=*/false,
+                                                         /*allow_cpu_resize=*/true,
+                                                         /*open_cuda_effects_ran=*/false));
+
+            // Key requirement: if no deferred GPU output exists, CPU resize is allowed, and no Open CUDA effects ran,
+            // do not run the standalone GPU scaler (avoid unnecessary GPU transfers).
+            expectTrue("ShouldRunStandaloneOpenCudaScaler(skip when cpu allowed + no effects)",
+                       !ShouldRunStandaloneOpenCudaScaler(/*scaling_needed=*/true,
+                                                         /*gpu_backend_is_open_cuda_or_maxine=*/true,
+                                                         /*have_deferred_gpu_out=*/false,
+                                                         /*allow_cpu_resize=*/true,
+                                                         /*open_cuda_effects_ran=*/false));
+
+            // If an Open CUDA effect ran, we allow the GPU scaler so resize can stay in the GPU section.
+            expectTrue("ShouldRunStandaloneOpenCudaScaler(run when effects ran)",
+                       ShouldRunStandaloneOpenCudaScaler(/*scaling_needed=*/true,
+                                                        /*gpu_backend_is_open_cuda_or_maxine=*/true,
+                                                        /*have_deferred_gpu_out=*/false,
+                                                        /*allow_cpu_resize=*/true,
+                                                        /*open_cuda_effects_ran=*/true));
+
+            // Strict policy fallback: if CPU resize is disallowed and scaling is needed, allow GPU scaling as last resort.
+            expectTrue("ShouldRunStandaloneOpenCudaScaler(run when cpu resize disallowed)",
+                       ShouldRunStandaloneOpenCudaScaler(/*scaling_needed=*/true,
+                                                        /*gpu_backend_is_open_cuda_or_maxine=*/true,
+                                                        /*have_deferred_gpu_out=*/false,
+                                                        /*allow_cpu_resize=*/false,
+                                                        /*open_cuda_effects_ran=*/false));
+        }
+
         // Backend resolver policy (pure logic).
         // Mirrors CameraPipeline behavior for maxine vs open_cuda selection.
         {
