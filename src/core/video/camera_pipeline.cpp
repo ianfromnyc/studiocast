@@ -1878,6 +1878,51 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return true;
     }
 
+    // GPU-in / GPU-out entrypoint for Open CUDA VB.
+    //
+    // - Expects input/output as GPU RGB images.
+    // - Does not perform CPU<->GPU transfers.
+    // - Always populates DeferredGpuOut to describe the produced GPU frame.
+    bool ApplyCudaRgb(const studiocast::cuda::CudaImage& in_rgb,
+                      studiocast::cuda::CudaImage* out_rgb_img,
+                      const studiocast::video::effects::BroadcastCameraEffects& fx,
+                      std::string* error,
+                      DeferredGpuOut* deferred_out) {
+      if (error) error->clear();
+
+      using studiocast::video::effects::VirtualBackgroundMode;
+      if (fx.virtual_background.mode == VirtualBackgroundMode::none) {
+        if (deferred_out) {
+          deferred_out->kind = DeferredGpuKind::none;
+          deferred_out->nvcv_img = nullptr;
+          deferred_out->nvcv = nullptr;
+          deferred_out->cuda_img = nullptr;
+          deferred_out->cuda = nullptr;
+          deferred_out->stream = nullptr;
+        }
+        return true;
+      }
+
+      if (!deferred_out) {
+        if (error) *error = "Open CUDA: ApplyCudaRgb requires deferred_out.";
+        return false;
+      }
+
+      std::string stage_err;
+      if (!ApplyGpuStage(in_rgb, out_rgb_img, in_rgb.w, in_rgb.h, fx, &stage_err)) {
+        if (error) *error = stage_err;
+        return false;
+      }
+
+      deferred_out->kind = DeferredGpuKind::cuda_rgb;
+      deferred_out->nvcv_img = nullptr;
+      deferred_out->nvcv = nullptr;
+      deferred_out->cuda_img = out_rgb_img;
+      deferred_out->cuda = &cuda;
+      deferred_out->stream = vb_stream;
+      return true;
+    }
+
     bool ApplyRgbInPlace(std::uint8_t* rgb,
                          int width,
                          int height,
@@ -1916,23 +1961,20 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
       }
 
+      DeferredGpuOut tmp_deferred_out{};
+      DeferredGpuOut* use_deferred_out = defer_readback ? deferred_out : &tmp_deferred_out;
+      if (!use_deferred_out) {
+        if (error) *error = "Open CUDA: defer_readback requires deferred_out.";
+        return false;
+      }
+
       std::string stage_err;
-      if (!ApplyGpuStage(frame_rgb, &out_rgb, width, height, fx, &stage_err)) {
+      if (!ApplyCudaRgb(frame_rgb, &out_rgb, fx, &stage_err, use_deferred_out)) {
         if (error) *error = stage_err;
         return false;
       }
 
       if (defer_readback) {
-        if (!deferred_out) {
-          if (error) *error = "Open CUDA: defer_readback requires deferred_out.";
-          return false;
-        }
-        deferred_out->kind = DeferredGpuKind::cuda_rgb;
-        deferred_out->nvcv_img = nullptr;
-        deferred_out->nvcv = nullptr;
-        deferred_out->cuda_img = &out_rgb;
-        deferred_out->cuda = &cuda;
-        deferred_out->stream = vb_stream;
         return true;
       }
 
@@ -4103,7 +4145,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
               }
             }
 
-            if (!open_cuda_vb.ApplyGpuStage(*open_cuda_curr, open_cuda_next, capA.width, capA.height, fx, &oc_err)) {
+            if (!open_cuda_vb.ApplyCudaRgb(*open_cuda_curr, open_cuda_next, fx, &oc_err, &deferred_gpu_out)) {
               {
                 std::lock_guard<std::mutex> lock(mu_);
                 last_error_ = "Open CUDA virtual background failed: " + oc_err;
@@ -4124,13 +4166,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             open_cuda_next = curr_was_a ? &open_cuda_frame_a : &open_cuda_frame_b;
 
             if (defer_readback) {
-              deferred_gpu_out.kind = DeferredGpuKind::cuda_rgb;
-              deferred_gpu_out.nvcv_img = nullptr;
-              deferred_gpu_out.nvcv = nullptr;
-              deferred_gpu_out.cuda_img = open_cuda_curr;
-              deferred_gpu_out.cuda = &open_cuda_vb.cuda;
-              deferred_gpu_out.stream = open_cuda_vb.vb_stream;
-
               have_deferred_gpu_out = true;
               if (!logged_open_cuda_defer) {
                 logged_open_cuda_defer = true;
