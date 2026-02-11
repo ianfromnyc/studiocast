@@ -3918,6 +3918,21 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       const bool allow_defer_readback =
           scaling_needed && (gpu_backend != GpuResizeBackend::none) && !last_stage_for_defer.empty();
 
+      // Define whether any Open CUDA stage is enabled for this frame.
+      // When true, Open CUDA stages must always follow the deferred strategy (no internal readback).
+      const bool open_cuda_any_stage_enabled =
+          have_open_cuda_vb &&
+          (has_stage(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) ||
+           has_stage(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove) ||
+           has_stage(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace));
+
+      const auto is_open_cuda_stage_id = [&](const std::string& stage_id) {
+        if (!open_cuda_any_stage_enabled) return false;
+        return stage_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur ||
+               stage_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove ||
+               stage_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace;
+      };
+
       // Apply vignette exactly once, either attached to the planned last GPU stage,
       // or as a standalone GPU stage when no other GPU stage is active.
       const bool apply_vignette_on_eye_contact =
@@ -3932,7 +3947,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           vignette_requested && (vig_attach == studiocast::video::effects::contract::kEffectIdAutoFrame);
 
       auto apply_stage = [&](const std::string& stage_id) {
-        const bool defer_readback = allow_defer_readback && (stage_id == last_stage_for_defer);
+        const bool defer_readback = is_open_cuda_stage_id(stage_id) ? true
+                                                                    : (allow_defer_readback && (stage_id == last_stage_for_defer));
 
         // Note: video noise removal exists in the effect schema but is not
         // currently applied in the pipeline.
