@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -649,14 +650,43 @@ bool V4l2Capture::Open(const std::string& device,
 
   // Request buffers
   v4l2_requestbuffers req{};
-  req.count = 4;
+  // Buffering directly impacts end-to-end latency.
+  //
+  // Many camera drivers will allocate 4+ buffers, which can add multiple frame
+  // intervals of latency even when the processing path is fast. Prefer fewer
+  // buffers by default and allow overrides via env var.
+  unsigned int desired_buffers = 2;
+  if (const char* env = std::getenv("STUDIOCAST_V4L2_CAPTURE_BUFFERS"); env && *env) {
+    char* end = nullptr;
+    const long v = std::strtol(env, &end, 10);
+    if (end && *end == '\0') {
+      // Clamp to a sane range.
+      if (v < 2) desired_buffers = 2;
+      else if (v > 16) desired_buffers = 16;
+      else desired_buffers = static_cast<unsigned int>(v);
+    }
+  }
+  req.count = desired_buffers;
   req.type = buf_type_;
   req.memory = V4L2_MEMORY_MMAP;
 
   if (IoctlRetry(fd_, VIDIOC_REQBUFS, &req) != 0) {
-    if (error) *error = "VIDIOC_REQBUFS failed: " + std::string(std::strerror(errno));
-    Close();
-    return false;
+    // Some drivers are picky; fall back to a more typical count.
+    if (desired_buffers != 4) {
+      req = v4l2_requestbuffers{};
+      req.count = 4;
+      req.type = buf_type_;
+      req.memory = V4L2_MEMORY_MMAP;
+      if (IoctlRetry(fd_, VIDIOC_REQBUFS, &req) != 0) {
+        if (error) *error = "VIDIOC_REQBUFS failed: " + std::string(std::strerror(errno));
+        Close();
+        return false;
+      }
+    } else {
+      if (error) *error = "VIDIOC_REQBUFS failed: " + std::string(std::strerror(errno));
+      Close();
+      return false;
+    }
   }
   if (req.count < 2) {
     if (error) *error = "Insufficient V4L2 buffers allocated (need >=2).";
@@ -944,6 +974,9 @@ bool V4l2Capture::AcquireFrame(CapturedFrameView* out, int timeout_ms, std::stri
 
     out->index = static_cast<int>(b.index);
     out->sequence = b.sequence;
+    out->timestamp_ns = (static_cast<std::uint64_t>(b.timestamp.tv_sec) * 1000000000ULL) +
+                        (static_cast<std::uint64_t>(b.timestamp.tv_usec) * 1000ULL);
+    out->timestamp_monotonic = (b.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0;
     out->bytes = static_cast<std::size_t>(b.bytesused);
     out->data = static_cast<const std::uint8_t*>(buffers_[idx].start);
     return true;
@@ -970,6 +1003,9 @@ bool V4l2Capture::AcquireFrame(CapturedFrameView* out, int timeout_ms, std::stri
 
   out->index = static_cast<int>(b.index);
   out->sequence = b.sequence;
+  out->timestamp_ns = (static_cast<std::uint64_t>(b.timestamp.tv_sec) * 1000000000ULL) +
+                      (static_cast<std::uint64_t>(b.timestamp.tv_usec) * 1000ULL);
+  out->timestamp_monotonic = (b.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0;
   out->bytes = static_cast<std::size_t>(planes[0].bytesused);
   out->data = static_cast<const std::uint8_t*>(buffers_[idx].start);
   return true;

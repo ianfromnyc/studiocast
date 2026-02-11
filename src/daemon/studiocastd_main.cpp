@@ -357,7 +357,17 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"effects\":" << std::setprecision(6) << st.pipeline.ms_per_frame.effects << ",";
     oss << "\"write\":" << std::setprecision(6) << st.pipeline.ms_per_frame.write;
     oss << "},";
-    oss << "\"perf_sample_frames\":" << st.pipeline.perf_sample_frames << ",";
+    oss << "\"perf_sample_frames\":" << st.pipeline.perf_sample_frames;
+
+    // Optional debug stats. Kept out of the default schema unless explicitly enabled.
+    if (std::getenv("STUDIOCAST_DEBUG_VIDEO_STATS")) {
+        oss << ",\"debug\":{";
+        oss << "\"latency_ms\":" << std::setprecision(6) << st.pipeline.debug.latency_ms << ",";
+        oss << "\"capture_sequence\":" << st.pipeline.debug.capture_sequence << ",";
+        oss << "\"dropped_capture_frames\":" << st.pipeline.debug.dropped_capture_frames;
+        oss << "}";
+    }
+    oss << ",";
 
     // Deterministic effect ordering + rule-based disable reasons.
     const auto plan = studiocast::video::effects::BuildBroadcastEffectsPlan(cfg.pipeline.effects);

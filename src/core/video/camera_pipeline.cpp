@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <memory>
 #include <set>
@@ -224,6 +225,7 @@ CameraPipelineStatus CameraPipeline::Status() const {
     s.ms_per_frame = ms_per_frame_;
     s.fps_actual = fps_actual_;
     s.perf_sample_frames = perf_sample_frames_;
+    s.debug = debug_;
   } else {
     // Avoid exposing stale negotiated formats when the pipeline is idle.
     s.capture = CaptureFormat{};
@@ -234,6 +236,7 @@ CameraPipelineStatus CameraPipeline::Status() const {
     s.ms_per_frame = CameraPipelineStatus::MsPerFrame{};
     s.fps_actual = 0.0;
     s.perf_sample_frames = 0;
+    s.debug = CameraPipelineStatus::Debug{};
   }
   s.frame_index = frame_index_;
   s.effects_backends = effects_backends_;
@@ -293,6 +296,7 @@ bool CameraPipeline::Start(const CameraPipelineConfig& cfg, std::string* error) 
   ms_per_frame_ = CameraPipelineStatus::MsPerFrame{};
   fps_actual_ = 0.0;
   perf_sample_frames_ = 0;
+  debug_ = CameraPipelineStatus::Debug{};
 
   effects_backends_.clear();
   effects_note_.clear();
@@ -3713,6 +3717,20 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   Ema ema_write;
   Ema ema_period;
 
+  // Optional end-to-end latency estimate and capture backlog stats.
+  Ema ema_latency;
+  std::uint64_t last_capture_sequence = 0;
+  int dropped_capture_frames_total = 0;
+
+  auto NowNs = [](clockid_t clock_id) -> std::uint64_t {
+    timespec ts{};
+    if (::clock_gettime(clock_id, &ts) != 0) return 0;
+    return (static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ULL) +
+           static_cast<std::uint64_t>(ts.tv_nsec);
+  };
+  auto NowNsMonotonic = [&]() -> std::uint64_t { return NowNs(CLOCK_MONOTONIC); };
+  auto NowNsRealtime = [&]() -> std::uint64_t { return NowNs(CLOCK_REALTIME); };
+
   Clock::time_point last_frame_end{};
   bool have_last_frame_end = false;
   int perf_frames = 0;
@@ -3737,6 +3755,33 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       last_error_ = "Capture acquire failed: " + ferr;
       break;
     }
+
+    // Reduce end-to-end latency by always processing the newest frame available.
+    //
+    // If our loop ever runs behind (or the driver buffers aggressively), multiple frames
+    // can be queued by the time we wake up. Drain any queued frames and keep only the most
+    // recent, dropping older frames to avoid "living in the past".
+    int dropped_this_frame = 0;
+    for (;;) {
+      if (stop_.load()) break;
+
+      CapturedFrameView newer{};
+      std::string nerr;
+      if (!cap.AcquireFrame(&newer, 0, &nerr)) {
+        // No additional frame ready.
+        break;
+      }
+
+      // Release the older frame and keep the newer one.
+      std::string rerr;
+      (void)cap.ReleaseFrame(f, &rerr);
+      f = newer;
+      ++dropped_this_frame;
+    }
+    if (dropped_this_frame > 0) {
+      dropped_capture_frames_total += dropped_this_frame;
+    }
+    last_capture_sequence = f.sequence;
 
     const auto t_capture_start = Clock::now();
 
@@ -4845,10 +4890,20 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     const auto t_write_end = Clock::now();
     const double write_ms = ToMs(t_write_end - t_write_start);
 
+    // Approximate end-to-end latency (driver timestamp -> end of write).
+    double latency_ms = 0.0;
+    if (f.timestamp_ns != 0) {
+      const std::uint64_t now_ns = f.timestamp_monotonic ? NowNsMonotonic() : NowNsRealtime();
+      if (now_ns >= f.timestamp_ns) {
+        latency_ms = static_cast<double>(now_ns - f.timestamp_ns) / 1000000.0;
+      }
+    }
+
     ema_capture.Add(capture_ms);
     ema_effects.Add(effects_ms);
     ema_scale.Add(scale_ms);
     ema_write.Add(write_ms);
+    ema_latency.Add(latency_ms);
 
     ++perf_frames;
 
@@ -4883,6 +4938,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       ms_per_frame_.write = ema_write.ValueOrZero();
       fps_actual_ = fps_actual;
       perf_sample_frames_ = perf_frames;
+
+      debug_.latency_ms = ema_latency.ValueOrZero();
+      debug_.capture_sequence = last_capture_sequence;
+      debug_.dropped_capture_frames = dropped_capture_frames_total;
     }
   }
 

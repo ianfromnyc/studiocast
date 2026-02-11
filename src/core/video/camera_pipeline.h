@@ -91,6 +91,13 @@ namespace studiocast::video {
         double fps_actual = 0.0;
         int perf_sample_frames = 0;
 
+        // Optional debug stats (not emitted in status JSON unless explicitly enabled).
+        struct Debug {
+            double latency_ms = 0.0;
+            std::uint64_t capture_sequence = 0;
+            int dropped_capture_frames = 0;
+        } debug{};
+
         // Debug/status for effects.
         std::string effects_backends;  // e.g. "mirror:builtin,virtual_background.blur:maxine"
         std::string effects_note;      // e.g. "Maxine requested but unavailable; effects disabled"
@@ -162,6 +169,8 @@ namespace studiocast::video {
         CameraPipelineStatus::MsPerFrame ms_per_frame_{};
         double fps_actual_ = 0.0;
         int perf_sample_frames_ = 0;
+
+        CameraPipelineStatus::Debug debug_{};
 
         // Effects: updated live by SetEffects.
         mutable std::mutex effects_mu_;

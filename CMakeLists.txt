@@ -245,6 +245,12 @@ set_target_properties(studiocast_core PROPERTIES
         AUTORCC OFF
 )
 
+# Video color conversion is extremely hot (runs every frame). In Debug builds the lack of
+# optimization can make the virtual camera feel laggy. Force optimization for this TU.
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set_source_files_properties(src/core/video/convert.cpp PROPERTIES COMPILE_OPTIONS "-O3")
+endif()
+
 target_include_directories(studiocast_core PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${STUDIOCAST_GENERATED_DIR}"

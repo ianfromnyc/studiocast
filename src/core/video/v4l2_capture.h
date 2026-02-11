@@ -40,6 +40,12 @@ namespace studiocast::video {
     std::size_t bytes = 0;
     int index = -1;
     std::uint64_t sequence = 0;
+
+    // Timestamp from the V4L2 driver (v4l2_buffer.timestamp).
+    // Units: nanoseconds.
+    // Epoch: depends on the driver; check `timestamp_monotonic`.
+    std::uint64_t timestamp_ns = 0;
+    bool timestamp_monotonic = false;
   };
 
   class V4l2Capture final {
