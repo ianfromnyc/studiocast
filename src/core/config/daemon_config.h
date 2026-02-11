@@ -17,6 +17,12 @@ struct DaemonConfig {
   bool video_enabled = true;
   std::string video_input_device;   // empty = auto
   std::string video_output_device;  // empty = auto
+
+  // Capture mode:
+  // - requested: use `video_width`/`video_height`
+  // - auto_best: choose a good capture mode automatically; width/height may be <= 0 (sentinel)
+  studiocast::video::CaptureMode video_capture_mode = studiocast::video::CaptureMode::requested;
+
   int video_width = 1280;
   int video_height = 720;
   int video_fps = 30;

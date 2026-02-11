@@ -15,6 +15,14 @@
 
 namespace studiocast::video {
 
+    enum class CaptureMode {
+        // Use the requested `width`/`height` (must be > 0).
+        requested,
+
+        // Auto-select a good capture mode. `width`/`height` may be <= 0 (sentinel).
+        auto_best,
+    };
+
     enum class ScalingBackendPreference {
         auto_select,
         cpu,
@@ -24,6 +32,8 @@ namespace studiocast::video {
     struct CameraPipelineConfig {
         std::string input_device;   // e.g. /dev/video0
         std::string output_device;  // e.g. /dev/video10 (v4l2loopback)
+
+        CaptureMode capture_mode = CaptureMode::requested;
 
         int width = 1280;
         int height = 720;

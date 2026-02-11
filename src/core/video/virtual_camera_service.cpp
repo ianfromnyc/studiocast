@@ -46,6 +46,7 @@ bool VirtualCameraService::NeedsPipelineRestart(const CameraPipelineConfig& a, c
     // Mirror (and other future live-toggles) can be applied without restart.
     return a.input_device != b.input_device ||
            a.output_device != b.output_device ||
+           a.capture_mode != b.capture_mode ||
            a.width != b.width ||
            a.height != b.height ||
            a.fps != b.fps ||

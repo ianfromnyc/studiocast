@@ -71,6 +71,7 @@ void Usage(const char* argv0) {
         << "Options:\n"
         << "  --input /dev/videoX      Input camera (default: auto)\n"
         << "  --output /dev/videoY     Output v4l2loopback (default: auto)\n"
+        << "  --capture-mode M         Capture mode: requested|auto (default: requested)\n"
         << "  --width N                Requested width (default: 1280)\n"
         << "  --height N               Requested height (default: 720)\n"
         << "  --fps N                  Requested fps (default: 30)\n"
@@ -313,6 +314,10 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"from\":" << CaptureFormatToJson(st.pipeline.scaling_from) << ",";
     oss << "\"to\":" << ActualFormatToJson(st.pipeline.scaling_to);
     oss << "},";
+
+    const char* capture_mode_label =
+        (cfg.pipeline.capture_mode == studiocast::video::CaptureMode::auto_best) ? "auto_best" : "requested";
+    oss << "\"capture_mode\":\"" << capture_mode_label << "\",";
 
     oss << "\"width\":" << cfg.pipeline.width << ",";
     oss << "\"height\":" << cfg.pipeline.height << ",";
@@ -635,9 +640,30 @@ int main(int argc, char** argv) {
 
     if (const auto v = GetArgValue(argc, argv, "--input"); !v.empty()) cfg.pipeline.input_device = v;
     if (const auto v = GetArgValue(argc, argv, "--output"); !v.empty()) cfg.pipeline.output_device = v;
+
+    bool capture_mode_explicit = false;
+    if (const auto v = GetArgValue(argc, argv, "--capture-mode"); !v.empty()) {
+        const auto t = ToLowerAscii(v);
+        if (t == "auto" || t == "auto_best" || t == "autobest") {
+            cfg.pipeline.capture_mode = studiocast::video::CaptureMode::auto_best;
+            capture_mode_explicit = true;
+        } else if (t == "requested") {
+            cfg.pipeline.capture_mode = studiocast::video::CaptureMode::requested;
+            capture_mode_explicit = true;
+        } else {
+            std::cerr << "WARN: unknown --capture-mode value: " << v << " (expected requested|auto)\n";
+        }
+    }
+
     cfg.pipeline.width = GetArgInt(argc, argv, "--width", cfg.pipeline.width);
     cfg.pipeline.height = GetArgInt(argc, argv, "--height", cfg.pipeline.height);
     cfg.pipeline.fps = GetArgInt(argc, argv, "--fps", cfg.pipeline.fps);
+
+    // Convenience: if the user sets a sentinel width/height and didn't explicitly set a capture mode,
+    // treat it as capture auto.
+    if (!capture_mode_explicit && (cfg.pipeline.width <= 0 || cfg.pipeline.height <= 0)) {
+        cfg.pipeline.capture_mode = studiocast::video::CaptureMode::auto_best;
+    }
 
     if (HasArg(argc, argv, "--mirror")) cfg.pipeline.effects.mirror = true;
 

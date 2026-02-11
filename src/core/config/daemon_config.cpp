@@ -98,6 +98,23 @@ std::string ScalingBackendPreferenceToString(studiocast::video::ScalingBackendPr
   }
 }
 
+studiocast::video::CaptureMode ParseCaptureMode(const std::string& raw, studiocast::video::CaptureMode fallback) {
+  auto v = studiocast::util::TrimCopy(raw);
+  std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (v == "requested") return studiocast::video::CaptureMode::requested;
+  if (v == "auto" || v == "auto_best" || v == "autobest") return studiocast::video::CaptureMode::auto_best;
+  return fallback;
+}
+
+std::string CaptureModeToString(studiocast::video::CaptureMode v) {
+  switch (v) {
+    case studiocast::video::CaptureMode::auto_best:
+      return "auto_best";
+    default:
+      return "requested";
+  }
+}
+
 }  // namespace
 
 std::filesystem::path DaemonConfigPath() {
@@ -113,6 +130,16 @@ DaemonConfig LoadDaemonConfig() {
   if (!path.empty()) {
     if (auto content = studiocast::util::ReadTextFile(path.string())) {
       const auto kv = ParseKeyValueFile(*content);
+
+      const bool capture_mode_key_present = (kv.find("video.capture_mode") != kv.end()) ||
+                                            (kv.find("video.capture.mode") != kv.end());
+
+      if (auto it = kv.find("video.capture_mode"); it != kv.end()) {
+        s.video_capture_mode = ParseCaptureMode(it->second, s.video_capture_mode);
+      }
+      if (auto it = kv.find("video.capture.mode"); it != kv.end()) {
+        s.video_capture_mode = ParseCaptureMode(it->second, s.video_capture_mode);
+      }
 
       if (auto it = kv.find("video.enabled"); it != kv.end()) {
         s.video_enabled = ParseBool(it->second, s.video_enabled);
@@ -141,6 +168,12 @@ DaemonConfig LoadDaemonConfig() {
                                                         ParseScalingBackendPreference(s.video_scaling_backend,
                                                                                      studiocast::video::ScalingBackendPreference::auto_select));
         s.video_scaling_backend = ScalingBackendPreferenceToString(pref);
+      }
+
+      // Backward-compatible inference: if width/height are set to a non-positive sentinel and no
+      // capture mode was specified, treat that as capture auto.
+      if (!capture_mode_key_present && (s.video_width <= 0 || s.video_height <= 0)) {
+        s.video_capture_mode = studiocast::video::CaptureMode::auto_best;
       }
 
       // Audio
@@ -467,6 +500,7 @@ bool SaveDaemonConfig(const DaemonConfig& s, std::string* error) {
   out << "video.enabled = " << (s.video_enabled ? "true" : "false") << "\n";
   if (!s.video_input_device.empty()) out << "video.input = " << s.video_input_device << "\n";
   if (!s.video_output_device.empty()) out << "video.output = " << s.video_output_device << "\n";
+  out << "video.capture_mode = " << CaptureModeToString(s.video_capture_mode) << "\n";
   out << "video.width = " << s.video_width << "\n";
   out << "video.height = " << s.video_height << "\n";
   out << "video.fps = " << s.video_fps << "\n";
@@ -502,6 +536,7 @@ studiocast::video::VirtualCameraServiceConfig ToVideoServiceConfig(const DaemonC
   cfg.enabled = s.video_enabled;
   cfg.pipeline.input_device = s.video_input_device;
   cfg.pipeline.output_device = s.video_output_device;
+  cfg.pipeline.capture_mode = s.video_capture_mode;
   cfg.pipeline.width = s.video_width;
   cfg.pipeline.height = s.video_height;
   cfg.pipeline.fps = s.video_fps;
@@ -522,6 +557,7 @@ void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCamer
   out->video_enabled = cfg.enabled;
   out->video_input_device = cfg.pipeline.input_device;
   out->video_output_device = cfg.pipeline.output_device;
+  out->video_capture_mode = cfg.pipeline.capture_mode;
   out->video_width = cfg.pipeline.width;
   out->video_height = cfg.pipeline.height;
   out->video_fps = cfg.pipeline.fps;

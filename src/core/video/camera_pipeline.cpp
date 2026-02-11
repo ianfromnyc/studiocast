@@ -242,9 +242,19 @@ CameraPipelineStatus CameraPipeline::Status() const {
 }
 
 bool CameraPipeline::Start(const CameraPipelineConfig& cfg, std::string* error) {
-  if (cfg.width <= 0 || cfg.height <= 0) {
-    if (error) *error = "Invalid width/height.";
-    return false;
+  const bool w_set = cfg.width > 0;
+  const bool h_set = cfg.height > 0;
+  if (cfg.capture_mode == CaptureMode::requested) {
+    if (!w_set || !h_set) {
+      if (error) *error = "Invalid width/height.";
+      return false;
+    }
+  } else {
+    // In auto capture mode, width/height are optional (sentinel <= 0). If one is set, both must be set.
+    if (w_set != h_set) {
+      if (error) *error = "Invalid width/height (must both be >0 or both be <=0 in auto capture mode).";
+      return false;
+    }
   }
   if (cfg.fps <= 0 || cfg.fps > 240) {
     if (error) *error = "Invalid fps (1..240).";
@@ -354,9 +364,19 @@ bool CameraPipeline::OpenOutputLocked(const std::string& outDev,
 }
 
 bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig& cfg, std::string* error) {
-  if (cfg.width <= 0 || cfg.height <= 0) {
-    if (error) *error = "Invalid width/height.";
-    return false;
+  const bool w_set = cfg.width > 0;
+  const bool h_set = cfg.height > 0;
+  if (cfg.capture_mode == CaptureMode::requested) {
+    if (!w_set || !h_set) {
+      if (error) *error = "Invalid width/height.";
+      return false;
+    }
+  } else {
+    // In auto capture mode, width/height are optional (sentinel <= 0). If one is set, both must be set.
+    if (w_set != h_set) {
+      if (error) *error = "Invalid width/height (must both be >0 or both be <=0 in auto capture mode).";
+      return false;
+    }
   }
   if (cfg.fps <= 0 || cfg.fps > 240) {
     if (error) *error = "Invalid fps (1..240).";
@@ -377,6 +397,18 @@ bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig& cfg, std::stri
       if (error) *error = e.empty() ? "No output loopback found." : e;
       return false;
     }
+  }
+
+  // If capture is auto and there is no explicit output override, we can't know what output
+  // dimensions to choose until capture is negotiated in ThreadMain(). Treat this as best-effort:
+  // keep any already-open writer, otherwise defer without error.
+  if (cfg.capture_mode == CaptureMode::auto_best && (!w_set || !h_set)) {
+    if (writer_.IsOpen() && writer_device_ == outDev) {
+      output_ = writer_.Actual();
+      output_device_ = outDev;
+    }
+    last_error_.clear();
+    return true;
   }
 
   bool opened_or_renegotiated = false;
@@ -476,11 +508,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   std::string inDev = cfg.input_device;
   std::ostringstream inAttempts;
 
+  // `V4l2Capture::Open()` requires positive dimensions. In `auto_best` mode we currently
+  // use a conservative request and rely on negotiation (future work will probe/select
+  // the true best mode).
+  const int req_w = (cfg.capture_mode == CaptureMode::requested) ? cfg.width : 1280;
+  const int req_h = (cfg.capture_mode == CaptureMode::requested) ? cfg.height : 720;
+
   if (!inDev.empty()) {
     std::string cerr;
     if (!cap.Open(inDev,
-                  cfg.width,
-                  cfg.height,
+                  req_w,
+                  req_h,
                   cfg.fps,
                   CapturePixelFormat::yuyv,
                   cfg.prefer_mjpeg,
@@ -507,8 +545,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     for (const auto& d : candidates) {
       std::string cerr;
       if (cap.Open(d.dev_node,
-                   cfg.width,
-                   cfg.height,
+                   req_w,
+                   req_h,
                    cfg.fps,
                    CapturePixelFormat::yuyv,
                    cfg.prefer_mjpeg,
@@ -562,12 +600,21 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     std::lock_guard<std::mutex> lock(mu_);
     bool opened_or_renegotiated = false;
     std::string oerr;
-    // Keep output size aligned with the configured (requested) width/height.
+    int out_w = cfg.width;
+    int out_h = cfg.height;
+    if (cfg.capture_mode == CaptureMode::auto_best && (out_w <= 0 || out_h <= 0)) {
+      // In auto capture mode (without an explicit output override), align output
+      // to the negotiated capture size.
+      out_w = capA.width;
+      out_h = capA.height;
+    }
+
+    // Keep output size aligned with an explicitly configured width/height.
     // Many webcams silently negotiate down when requesting YUYV at HD sizes; if
-    // we switch the loopback format to that smaller negotiated size, consumers
-    // (OBS/preview) that still request the configured size can display the frame
-    // in the top-left quadrant.
-    if (!OpenOutputLocked(outDev, cfg.width, cfg.height, cfg.fps, &opened_or_renegotiated, &oerr)) {
+    // we switch the loopback format to that smaller negotiated size while a
+    // consumer still requests the configured size, the frame can display in the
+    // top-left quadrant.
+    if (!OpenOutputLocked(outDev, out_w, out_h, cfg.fps, &opened_or_renegotiated, &oerr)) {
       last_error_ = oerr;
       running_ = false;
       start_notified_ = true;
