@@ -7,6 +7,12 @@
 
 namespace studiocast::cuda::kernels {
 
+// Returns true when the resize kernel can be JIT-loaded and launched on this system.
+//
+// This is a lightweight probe used to decide whether GPU resize is available without
+// committing to any particular pipeline path.
+bool IsResizeBilinearAvailable(std::string* error_out);
+
 // Bilinear resize for interleaved RGB/BGR U8 pitched device images.
 //
 // - Source and destination formats must match and be rgb_u8 or bgr_u8.

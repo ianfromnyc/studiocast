@@ -54,6 +54,7 @@
 #include "core/video/v4l2_capture.h"
 #include "core/video/image_ppm.h"
 #include "core/video/mjpeg_decode.h"
+#include "core/video/camera_pipeline.h"
 #include "core/video/scaling_policy.h"
 #include "core/video/effects/effect_types.h"
 #include "studiocast/version.h"
@@ -259,6 +260,46 @@ namespace {
             expectEq("ResolveVB(open_cuda strict; no fallback)",
                      resolveVb(EffectsEnginePreference::open_cuda, /*maxine=*/true, /*open_cuda=*/false),
                      "");
+        }
+
+        // GPU resize backend selection policy (pure logic).
+        // Mirrors the CameraPipeline scaling fallback order:
+        //   Maxine/NVCV -> OpenCUDA (pure CUDA) -> CPU/none
+        {
+            using studiocast::video::ScalingBackendPreference;
+
+            auto resolveScaling = [&](ScalingBackendPreference pref,
+                                      bool maxine_runnable,
+                                      bool open_cuda_runnable) -> std::string {
+                if (pref == ScalingBackendPreference::cpu) return "cpu";
+                if (maxine_runnable) return "gpu:maxine";
+                if (open_cuda_runnable) return "gpu:open_cuda";
+                return "cpu";
+            };
+
+            expectEq("ResolveScaling(auto prefers maxine)",
+                     resolveScaling(ScalingBackendPreference::auto_select, /*maxine=*/true, /*open_cuda=*/true),
+                     "gpu:maxine");
+            expectEq("ResolveScaling(auto falls back to open_cuda)",
+                     resolveScaling(ScalingBackendPreference::auto_select, /*maxine=*/false, /*open_cuda=*/true),
+                     "gpu:open_cuda");
+            expectEq("ResolveScaling(auto none)",
+                     resolveScaling(ScalingBackendPreference::auto_select, /*maxine=*/false, /*open_cuda=*/false),
+                     "cpu");
+
+            expectEq("ResolveScaling(gpu prefers maxine)",
+                     resolveScaling(ScalingBackendPreference::gpu, /*maxine=*/true, /*open_cuda=*/true),
+                     "gpu:maxine");
+            expectEq("ResolveScaling(gpu falls back to open_cuda)",
+                     resolveScaling(ScalingBackendPreference::gpu, /*maxine=*/false, /*open_cuda=*/true),
+                     "gpu:open_cuda");
+            expectEq("ResolveScaling(gpu none)",
+                     resolveScaling(ScalingBackendPreference::gpu, /*maxine=*/false, /*open_cuda=*/false),
+                     "cpu");
+
+            expectEq("ResolveScaling(cpu strict)",
+                     resolveScaling(ScalingBackendPreference::cpu, /*maxine=*/true, /*open_cuda=*/true),
+                     "cpu");
         }
 
         // Safety-net policy: Open CUDA VB apply failures should not abort the camera pipeline.

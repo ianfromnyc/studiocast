@@ -70,6 +70,21 @@ __global__ void ResizeBilinearU8InterleavedKernel(const std::uint8_t* src,
 
 }  // namespace
 
+bool IsResizeBilinearAvailable(std::string* error_out) {
+  if (error_out) error_out->clear();
+  int count = 0;
+  const cudaError_t st = cudaGetDeviceCount(&count);
+  if (st != cudaSuccess) {
+    if (error_out) *error_out = std::string("cudaGetDeviceCount failed: ") + cudaGetErrorString(st);
+    return false;
+  }
+  if (count <= 0) {
+    if (error_out) *error_out = "No CUDA devices detected.";
+    return false;
+  }
+  return true;
+}
+
 bool ResizeBilinear(const CudaImage& src,
                     const CudaImage& dst,
                     studiocast::maxine::CUstream stream,

@@ -298,6 +298,12 @@ bool EnsureKernelLoaded(studiocast::maxine::CudaDriverApi* cuda, std::string* er
 
 }  // namespace
 
+bool IsResizeBilinearAvailable(std::string* error_out) {
+  studiocast::maxine::CudaDriverApi* cuda = nullptr;
+  if (!EnsureCudaReady(&cuda, error_out)) return false;
+  return EnsureKernelLoaded(cuda, error_out);
+}
+
 bool ResizeBilinear(const CudaImage& src,
                     const CudaImage& dst,
                     studiocast::maxine::CUstream stream,

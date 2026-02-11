@@ -71,7 +71,9 @@ namespace studiocast::video {
         CaptureFormat capture{};
         ActualFormat output{};
 
-        std::string scaling_backend_active;  // "cpu" | "gpu" (empty when idle)
+        // Active output-scaling backend.
+        // Common values: "cpu", "gpu:maxine", "gpu:open_cuda" (empty when idle)
+        std::string scaling_backend_active;
         CaptureFormat scaling_from{};
         ActualFormat scaling_to{};
 

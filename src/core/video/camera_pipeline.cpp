@@ -628,10 +628,27 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
   // Scaling backend selection (cpu|gpu|auto).
   //
-  // GPU scaling is optional and depends on runtime-loaded CUDA + NvCVImage.
-  std::string scaling_backend_active = "cpu";
+  // GPU scaling is optional and depends on runtime-loaded CUDA.
+  //
+  // Backends (fallback order):
+  //   1) Maxine-compatible NvCV resize (NVCV)
+  //   2) Pure CUDA resize kernel (OpenCUDA)
+  //   3) None
+  enum class GpuResizeBackend {
+    none,
+    maxine_nvcv,
+    open_cuda,
+  };
 
-  struct StandaloneGpuScaler {
+  auto GpuResizeBackendToActiveString = [](GpuResizeBackend b) -> std::string {
+    switch (b) {
+      case GpuResizeBackend::maxine_nvcv: return "gpu:maxine";
+      case GpuResizeBackend::open_cuda: return "gpu:open_cuda";
+      default: return "cpu";
+    }
+  };
+
+  struct MaxineGpuScaler {
     bool initialized = false;
     std::string init_error;
 
@@ -651,7 +668,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     studiocast::maxine::NvCVImage cpu_bgr_in{};
     studiocast::maxine::NvCVImage cpu_bgr_out{};
 
-    ~StandaloneGpuScaler() {
+    ~MaxineGpuScaler() {
       if (gpu_scaled_allocated && nvcv.IsInitialized() && nvcv.f().NvCVImage_Dealloc) {
         (void)nvcv.f().NvCVImage_Dealloc(&gpu_scaled);
       }
@@ -661,27 +678,103 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   };
 
-  StandaloneGpuScaler gpu_scaler;
-  const bool want_gpu_scaling = (cfg.scaling_backend != ScalingBackendPreference::cpu);
-  if (want_gpu_scaling) {
-    std::string gerr;
-    bool ok = true;
+  struct OpenCudaGpuScaler {
+    bool initialized = false;
+    std::string init_error;
 
-    if (!gpu_scaler.cuda.Initialize(&gerr)) ok = false;
-    if (ok && !gpu_scaler.nvcv.Initialize(studiocast::maxine::NvcvApi::Requirement::VfxCompat, &gerr)) ok = false;
-    if (ok && !gpu_scaler.resize.Initialize(&gpu_scaler.cuda, &gerr)) ok = false;
+    studiocast::maxine::CudaDriverApi cuda;
+    studiocast::maxine::CUstream stream = nullptr;
+    bool stream_created = false;
 
-    gpu_scaler.initialized = ok;
-    gpu_scaler.init_error = gerr;
+    studiocast::cuda::CudaImage gpu_in{};
+    studiocast::cuda::CudaImage gpu_scaled{};
 
-    if (ok) {
-      scaling_backend_active = "gpu";
+    ~OpenCudaGpuScaler() {
+      if (initialized) {
+        std::string e;
+        if (gpu_scaled.Valid()) (void)gpu_scaled.Free(&cuda, &e);
+        if (gpu_in.Valid()) (void)gpu_in.Free(&cuda, &e);
+        if (stream_created) (void)cuda.DestroyStream(stream, &e);
+      }
     }
+
+    bool EnsureInitialized(std::string* error_out) {
+      if (error_out) error_out->clear();
+      if (initialized) return true;
+      std::string e;
+
+      if (!cuda.Initialize(&e)) {
+        init_error = e;
+        if (error_out) *error_out = e;
+        return false;
+      }
+      if (!cuda.EnsureContext(&e)) {
+        init_error = e;
+        if (error_out) *error_out = e;
+        return false;
+      }
+      if (!studiocast::cuda::kernels::IsResizeBilinearAvailable(&e)) {
+        init_error = e;
+        if (error_out) *error_out = e;
+        return false;
+      }
+      if (!cuda.CreateStream(&stream, &e)) {
+        init_error = e;
+        if (error_out) *error_out = e;
+        return false;
+      }
+      stream_created = true;
+
+      initialized = true;
+      init_error.clear();
+      return true;
+    }
+  };
+
+  MaxineGpuScaler maxine_scaler;
+  OpenCudaGpuScaler open_cuda_scaler;
+
+  const bool want_gpu_scaling = (cfg.scaling_backend != ScalingBackendPreference::cpu);
+  GpuResizeBackend gpu_backend = GpuResizeBackend::none;
+  std::string scaling_backend_active = "cpu";
+  std::string gpu_backend_init_note;
+
+  if (want_gpu_scaling) {
+    std::string maxine_err;
+    bool maxine_ok = true;
+    if (!maxine_scaler.cuda.Initialize(&maxine_err)) maxine_ok = false;
+    if (maxine_ok && !maxine_scaler.nvcv.Initialize(studiocast::maxine::NvcvApi::Requirement::VfxCompat, &maxine_err)) {
+      maxine_ok = false;
+    }
+    if (maxine_ok && !maxine_scaler.resize.Initialize(&maxine_scaler.cuda, &maxine_err)) maxine_ok = false;
+
+    maxine_scaler.initialized = maxine_ok;
+    maxine_scaler.init_error = maxine_err;
+
+    if (maxine_ok) {
+      gpu_backend = GpuResizeBackend::maxine_nvcv;
+    } else {
+      std::string open_err;
+      if (open_cuda_scaler.EnsureInitialized(&open_err)) {
+        gpu_backend = GpuResizeBackend::open_cuda;
+      } else {
+        // Keep some diagnostics for status/error reporting.
+        std::ostringstream oss;
+        if (!maxine_err.empty()) oss << "Maxine/NVCV init failed: " << maxine_err;
+        if (!open_err.empty()) {
+          if (oss.tellp() > 0) oss << " | ";
+          oss << "OpenCUDA resize init failed: " << open_err;
+        }
+        gpu_backend_init_note = oss.str();
+      }
+    }
+
+    scaling_backend_active = GpuResizeBackendToActiveString(gpu_backend);
   }
 
   {
     std::string policy_err;
-    const bool gpu_resize_available = (scaling_backend_active == "gpu");
+    const bool gpu_resize_available = (gpu_backend != GpuResizeBackend::none);
     if (!CheckOutputResizeAllowed(capA.width,
                                   capA.height,
                                   outA.width,
@@ -691,6 +784,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                   &policy_err)) {
       std::lock_guard<std::mutex> lock(mu_);
       last_error_ = policy_err;
+      if (!gpu_backend_init_note.empty()) {
+        last_error_ += "\nGPU resize diagnostics: " + gpu_backend_init_note;
+      }
       running_ = false;
       start_notified_ = true;
       cv_.notify_all();
@@ -3712,7 +3808,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       const bool mirror_enabled = has_stage(studiocast::video::effects::contract::kEffectIdMirror);
       const bool scaling_needed = (capA.width != outA.width || capA.height != outA.height);
       const bool allow_defer_readback =
-          scaling_needed && (scaling_backend_active == "gpu") && !mirror_enabled && !last_stage_for_defer.empty();
+          scaling_needed && (gpu_backend != GpuResizeBackend::none) && !mirror_enabled && !last_stage_for_defer.empty();
 
       // Apply vignette exactly once, either attached to the planned last GPU stage,
       // or as a standalone GPU stage when no other GPU stage is active.
@@ -4193,22 +4289,77 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       if (!ok) {
-        // Fall back to the existing CPU resize path.
+        // Best-effort: transfer the unscaled GPU frame back to the pipeline RGB buffer so we can
+        // continue with other scaling backends (or fail fast if CPU resize is disallowed).
+        bool readback_ok = false;
+        std::string derr;
+        if (deferred_gpu_out.nvcv_img && deferred_gpu_out.nvcv && deferred_gpu_out.cuda) {
+          const auto& nvcv_f = deferred_gpu_out.nvcv->f();
+          if (deferred_gpu_out.nvcv->IsInitialized() && nvcv_f.NvCVImage_Init && nvcv_f.NvCVImage_Transfer) {
+            const std::size_t srcTightStride = static_cast<std::size_t>(frameW) * 3u;
+            std::vector<std::uint8_t> bgr_readback;
+            bgr_readback.resize(srcTightStride * static_cast<std::size_t>(frameH));
+            studiocast::maxine::NvCVImage cpu_bgr_readback{};
+
+            const auto init = nvcv_f.NvCVImage_Init(&cpu_bgr_readback,
+                                                    static_cast<unsigned>(frameW),
+                                                    static_cast<unsigned>(frameH),
+                                                    static_cast<int>(srcTightStride),
+                                                    bgr_readback.data(),
+                                                    studiocast::maxine::NVCV_BGR,
+                                                    studiocast::maxine::NVCV_U8,
+                                                    studiocast::maxine::NVCV_CHUNKY,
+                                                    studiocast::maxine::NVCV_CPU);
+            if (init == studiocast::maxine::NVCV_SUCCESS) {
+              const auto down = nvcv_f.NvCVImage_Transfer(deferred_gpu_out.nvcv_img,
+                                                          &cpu_bgr_readback,
+                                                          1.0f,
+                                                          deferred_gpu_out.stream,
+                                                          nullptr);
+              if (down == studiocast::maxine::NVCV_SUCCESS) {
+                std::string sync_err;
+                if (SyncAfterGpuToCpuTransfer(*deferred_gpu_out.cuda,
+                                              deferred_gpu_out.stream,
+                                              "Deferred NvCV readback after resize failure",
+                                              &sync_err)) {
+                  studiocast::video::Bgr24ToRgb24(bgr_readback.data(),
+                                                 rgb.data(),
+                                                 frameW,
+                                                 frameH,
+                                                 srcTightStride,
+                                                 rgbStride);
+                  readback_ok = true;
+                  have_deferred_gpu_out = false;
+                } else {
+                  derr = sync_err;
+                }
+              } else {
+                derr = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(down);
+              }
+            } else {
+              derr = "NvCVImage_Init(cpu readback) failed: " + std::to_string(init);
+            }
+          }
+        }
+
         std::lock_guard<std::mutex> lock(mu_);
-        last_error_ = "GPU resize path failed (falling back to CPU resize): " + gerr;
+        last_error_ = "Maxine/NVCV deferred GPU resize failed";
+        if (!gerr.empty()) last_error_ += ": " + gerr;
+        if (!readback_ok && !derr.empty()) last_error_ += " (and readback failed: " + derr + ")";
+        last_error_ += ".";
       }
     }
 
     // Standalone GPU scaling backend: upload CPU RGB->GPU BGR, resize on GPU, download and convert back.
     // This is used when GPU scaling is selected but there is no deferred GPU stage to reuse.
-    if ((scaling_backend_active == "gpu") && (frameW != outW || frameH != outH)) {
+    if ((gpu_backend == GpuResizeBackend::maxine_nvcv) && (frameW != outW || frameH != outH)) {
       std::string gerr;
-      bool ok = gpu_scaler.initialized;
+      bool ok = maxine_scaler.initialized;
       if (!ok) {
-        gerr = gpu_scaler.init_error.empty() ? "GPU scaler not initialized." : gpu_scaler.init_error;
+        gerr = maxine_scaler.init_error.empty() ? "Maxine GPU scaler not initialized." : maxine_scaler.init_error;
       }
 
-      const auto& nvcv = gpu_scaler.nvcv;
+      const auto& nvcv = maxine_scaler.nvcv;
       const auto& nvcv_f = nvcv.f();
       if (ok) {
         if (!nvcv_f.NvCVImage_Init || !nvcv_f.NvCVImage_Transfer || !nvcv_f.NvCVImage_Alloc || !nvcv_f.NvCVImage_Dealloc) {
@@ -4267,16 +4418,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       };
 
       if (ok) {
-        ensure_gpu_bgr(&gpu_scaler.gpu_in,
-                       &gpu_scaler.gpu_in_allocated,
+        ensure_gpu_bgr(&maxine_scaler.gpu_in,
+                       &maxine_scaler.gpu_in_allocated,
                        static_cast<unsigned>(frameW),
                        static_cast<unsigned>(frameH),
                        "gpu in");
       }
 
       if (ok) {
-        ensure_gpu_bgr(&gpu_scaler.gpu_scaled,
-                       &gpu_scaler.gpu_scaled_allocated,
+        ensure_gpu_bgr(&maxine_scaler.gpu_scaled,
+                       &maxine_scaler.gpu_scaled_allocated,
                        static_cast<unsigned>(outW),
                        static_cast<unsigned>(outH),
                        "gpu scaled");
@@ -4284,19 +4435,19 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       if (ok) {
         const std::size_t srcTightStride = static_cast<std::size_t>(frameW) * 3u;
-        gpu_scaler.bgr_in.resize(srcTightStride * static_cast<std::size_t>(frameH));
+        maxine_scaler.bgr_in.resize(srcTightStride * static_cast<std::size_t>(frameH));
         studiocast::video::Rgb24ToBgr24(rgbOut,
-                                        gpu_scaler.bgr_in.data(),
+                                        maxine_scaler.bgr_in.data(),
                                         frameW,
                                         frameH,
                                         rgbOutStride,
                                         srcTightStride);
 
-        const auto init = nvcv_f.NvCVImage_Init(&gpu_scaler.cpu_bgr_in,
+        const auto init = nvcv_f.NvCVImage_Init(&maxine_scaler.cpu_bgr_in,
                                                 static_cast<unsigned>(frameW),
                                                 static_cast<unsigned>(frameH),
                                                 static_cast<int>(srcTightStride),
-                                                gpu_scaler.bgr_in.data(),
+                                                maxine_scaler.bgr_in.data(),
                                                 studiocast::maxine::NVCV_BGR,
                                                 studiocast::maxine::NVCV_U8,
                                                 studiocast::maxine::NVCV_CHUNKY,
@@ -4307,7 +4458,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
 
         if (ok) {
-          const auto up = nvcv_f.NvCVImage_Transfer(&gpu_scaler.cpu_bgr_in, &gpu_scaler.gpu_in, 1.0f, nullptr, nullptr);
+          const auto up = nvcv_f.NvCVImage_Transfer(&maxine_scaler.cpu_bgr_in,
+                                                    &maxine_scaler.gpu_in,
+                                                    1.0f,
+                                                    nullptr,
+                                                    nullptr);
           if (up != studiocast::maxine::NVCV_SUCCESS) {
             ok = false;
             gerr = "NvCVImage_Transfer(cpu->gpu in) failed: " + std::to_string(up);
@@ -4316,20 +4471,20 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       if (ok) {
-        if (!gpu_scaler.resize.Resize(gpu_scaler.gpu_in, &gpu_scaler.gpu_scaled, nullptr, &gerr)) {
+        if (!maxine_scaler.resize.Resize(maxine_scaler.gpu_in, &maxine_scaler.gpu_scaled, nullptr, &gerr)) {
           ok = false;
         }
       }
 
       if (ok) {
         const std::size_t dstTightStride = static_cast<std::size_t>(outW) * 3u;
-        gpu_scaler.bgr_out.resize(dstTightStride * static_cast<std::size_t>(outH));
+        maxine_scaler.bgr_out.resize(dstTightStride * static_cast<std::size_t>(outH));
 
-        const auto init = nvcv_f.NvCVImage_Init(&gpu_scaler.cpu_bgr_out,
+        const auto init = nvcv_f.NvCVImage_Init(&maxine_scaler.cpu_bgr_out,
                                                 static_cast<unsigned>(outW),
                                                 static_cast<unsigned>(outH),
                                                 static_cast<int>(dstTightStride),
-                                                gpu_scaler.bgr_out.data(),
+                                                maxine_scaler.bgr_out.data(),
                                                 studiocast::maxine::NVCV_BGR,
                                                 studiocast::maxine::NVCV_U8,
                                                 studiocast::maxine::NVCV_CHUNKY,
@@ -4340,7 +4495,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
 
         if (ok) {
-          const auto down = nvcv_f.NvCVImage_Transfer(&gpu_scaler.gpu_scaled, &gpu_scaler.cpu_bgr_out, 1.0f, nullptr, nullptr);
+          const auto down = nvcv_f.NvCVImage_Transfer(&maxine_scaler.gpu_scaled,
+                                                      &maxine_scaler.cpu_bgr_out,
+                                                      1.0f,
+                                                      nullptr,
+                                                      nullptr);
           if (down != studiocast::maxine::NVCV_SUCCESS) {
             ok = false;
             gerr = "NvCVImage_Transfer(gpu->cpu out) failed: " + std::to_string(down);
@@ -4348,7 +4507,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
 
         if (ok) {
-          if (!SyncAfterGpuToCpuTransfer(gpu_scaler.cuda,
+          if (!SyncAfterGpuToCpuTransfer(maxine_scaler.cuda,
                                          /*stream=*/nullptr,
                                          "Standalone GPU scaler readback: after gpu->cpu transfer",
                                          &gerr)) {
@@ -4358,7 +4517,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
         if (ok) {
           rgbScaled.resize(dstTightStride * static_cast<std::size_t>(outH));
-          studiocast::video::Bgr24ToRgb24(gpu_scaler.bgr_out.data(),
+          studiocast::video::Bgr24ToRgb24(maxine_scaler.bgr_out.data(),
                                           rgbScaled.data(),
                                           outW,
                                           outH,
@@ -4374,7 +4533,82 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       if (!ok) {
         std::lock_guard<std::mutex> lock(mu_);
-        last_error_ = "GPU scaling failed (falling back to CPU scaling): " + gerr;
+        last_error_ = "Maxine/NVCV GPU scaling failed";
+        if (!gerr.empty()) last_error_ += ": " + gerr;
+        last_error_ += ".";
+      }
+    }
+
+    // Standalone GPU scaling backend (OpenCUDA/pure CUDA): upload CPU RGB -> GPU RGB, resize on GPU, download.
+    //
+    // This runs when OpenCUDA scaling is selected, and also serves as a fallback when Maxine/NVCV scaling fails.
+    if ((frameW != outW || frameH != outH) &&
+        (gpu_backend == GpuResizeBackend::open_cuda || gpu_backend == GpuResizeBackend::maxine_nvcv)) {
+      std::string gerr;
+      bool ok = open_cuda_scaler.EnsureInitialized(&gerr);
+      if (ok) {
+        if (!open_cuda_scaler.gpu_in.ReallocIfNeeded(&open_cuda_scaler.cuda,
+                                                     frameW,
+                                                     frameH,
+                                                     studiocast::cuda::PixelFormatGpu::rgb_u8,
+                                                     &gerr)) {
+          ok = false;
+        }
+      }
+      if (ok) {
+        if (!open_cuda_scaler.gpu_scaled.ReallocIfNeeded(&open_cuda_scaler.cuda,
+                                                         outW,
+                                                         outH,
+                                                         studiocast::cuda::PixelFormatGpu::rgb_u8,
+                                                         &gerr)) {
+          ok = false;
+        }
+      }
+      if (ok) {
+        if (!open_cuda_scaler.gpu_in.UploadFromCpuRgb24(&open_cuda_scaler.cuda,
+                                                        rgbOut,
+                                                        rgbOutStride,
+                                                        open_cuda_scaler.stream,
+                                                        &gerr)) {
+          ok = false;
+        }
+      }
+      if (ok) {
+        if (!studiocast::cuda::kernels::ResizeBilinear(open_cuda_scaler.gpu_in,
+                                                       open_cuda_scaler.gpu_scaled,
+                                                       open_cuda_scaler.stream,
+                                                       &gerr)) {
+          ok = false;
+        }
+      }
+      if (ok) {
+        const std::size_t tightStride = static_cast<std::size_t>(outW) * 3u;
+        rgbScaled.resize(tightStride * static_cast<std::size_t>(outH));
+        if (!open_cuda_scaler.gpu_scaled.DownloadToCpuRgb24(&open_cuda_scaler.cuda,
+                                                            rgbScaled.data(),
+                                                            tightStride,
+                                                            open_cuda_scaler.stream,
+                                                            &gerr)) {
+          ok = false;
+        }
+      }
+      if (ok) {
+        if (!open_cuda_scaler.cuda.StreamSynchronize(open_cuda_scaler.stream, &gerr)) {
+          ok = false;
+        }
+      }
+      if (ok) {
+        const std::size_t tightStride = static_cast<std::size_t>(outW) * 3u;
+        frameW = outW;
+        frameH = outH;
+        rgbOut = rgbScaled.data();
+        rgbOutStride = tightStride;
+        rgbOutBytes = rgbScaled.size();
+      } else {
+        std::lock_guard<std::mutex> lock(mu_);
+        last_error_ = "OpenCUDA GPU scaling failed";
+        if (!gerr.empty()) last_error_ += ": " + gerr;
+        last_error_ += ".";
       }
     }
 
