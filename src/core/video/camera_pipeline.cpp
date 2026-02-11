@@ -867,6 +867,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   studiocast::cuda::CudaImage gpu_rgb_scaled;
   bool gpu_rgb_scaled_allocated = false;
 
+  // Open CUDA per-frame GPU buffers (ping-pong) for GPU-only Open CUDA stages.
+  // These persist across frames and are reallocated only when the capture size changes.
+  studiocast::cuda::CudaImage open_cuda_frame_a;
+  studiocast::cuda::CudaImage open_cuda_frame_b;
+  const studiocast::cuda::CudaImage* open_cuda_curr = nullptr;
+  studiocast::cuda::CudaImage* open_cuda_next = nullptr;
+  bool open_cuda_uploaded_this_frame = false;
+
   struct MaxineBackgroundBlurContext {
     bool initialized = false;
     bool enabled = false;
@@ -1758,20 +1766,28 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return true;
     }
 
-    bool ApplyRgbInPlace(std::uint8_t* rgb,
-                         int width,
-                         int height,
-                         std::size_t rgb_stride,
-                         const studiocast::video::effects::BroadcastCameraEffects& fx,
-                         std::string* error,
-                         bool defer_readback,
-                         DeferredGpuOut* deferred_out) {
+    // GPU-only Open CUDA stage.
+    //
+    // - Expects input/output as GPU RGB images.
+    // - Does not perform CPU<->GPU transfers.
+    bool ApplyGpuStage(const studiocast::cuda::CudaImage& in_rgb,
+                       studiocast::cuda::CudaImage* out_rgb_img,
+                       int width,
+                       int height,
+                       const studiocast::video::effects::BroadcastCameraEffects& fx,
+                       std::string* error) {
       if (error) error->clear();
 
       using studiocast::video::effects::VirtualBackgroundMode;
       if (fx.virtual_background.mode == VirtualBackgroundMode::none) return true;
-      if (!rgb || width <= 0 || height <= 0 || rgb_stride == 0) {
-        if (error) *error = "Open CUDA: invalid RGB buffer.";
+
+      if (!out_rgb_img) {
+        if (error) *error = "Open CUDA: out_rgb is null.";
+        return false;
+      }
+      if (!in_rgb.Valid() || in_rgb.w != width || in_rgb.h != height ||
+          in_rgb.format != studiocast::cuda::PixelFormatGpu::rgb_u8) {
+        if (error) *error = "Open CUDA: invalid input GPU RGB image.";
         return false;
       }
 
@@ -1781,28 +1797,19 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
+      std::string berr;
+      if (!out_rgb_img->ReallocIfNeeded(&cuda, width, height, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr)) {
+        if (error) *error = "Open CUDA: failed to allocate output RGB image: " + berr;
+        return false;
+      }
+
       const int strength = std::max(studiocast::video::effects::contract::kVbStrengthMin,
                                     std::min(studiocast::video::effects::contract::kVbStrengthMax,
                                              fx.virtual_background.strength));
 
-      // Upload CPU->GPU.
-      std::string up_err;
-      if (!frame_rgb.UploadFromCpuRgb24(&cuda, rgb, rgb_stride, vb_stream, &up_err)) {
-        if (error) *error = "Open CUDA: frame upload failed: " + up_err;
-        return false;
-      }
-      if (debug_log_uploads) {
-        ++debug_frame_upload_calls;
-        if ((debug_frame_upload_calls % 120u) == 1u) {
-          std::fprintf(stderr,
-                       "Open CUDA VB: UploadFromCpuRgb24 calls=%llu\n",
-                       static_cast<unsigned long long>(debug_frame_upload_calls));
-        }
-      }
-
       // Run matting inference at model resolution.
       std::string matte_err;
-      if (!session->Run(vb_stream, frame_rgb, &alpha_tensor, &matte_err)) {
+      if (!session->Run(vb_stream, in_rgb, &alpha_tensor, &matte_err)) {
         if (error) *error = matte_err;
         return false;
       }
@@ -1832,21 +1839,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       // Build background and composite.
       if (fx.virtual_background.mode == VirtualBackgroundMode::blur) {
-        if (!studiocast::cuda::kernels::BoxBlurSeparableU8x3(frame_rgb,
-                                                            blur_tmp,
-                                                            blurred,
-                                                            /*radius=*/strength,
-                                                            vb_stream,
-                                                            &kerr)) {
+        if (!studiocast::cuda::kernels::BoxBlurSeparableU8x3(in_rgb, blur_tmp, blurred, /*radius=*/strength, vb_stream, &kerr)) {
           if (error) *error = "Open CUDA: background blur failed: " + kerr;
           return false;
         }
-        if (!studiocast::cuda::kernels::CompositeAlphaU8x3(frame_rgb,
-                                                          blurred,
-                                                          *alpha_use,
-                                                          out_rgb,
-                                                          vb_stream,
-                                                          &kerr)) {
+        if (!studiocast::cuda::kernels::CompositeAlphaU8x3(in_rgb, blurred, *alpha_use, *out_rgb_img, vb_stream, &kerr)) {
           if (error) *error = "Open CUDA: composite failed: " + kerr;
           return false;
         }
@@ -1858,14 +1855,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         const std::uint8_t r = static_cast<std::uint8_t>((rgb_hex >> 16) & 0xFFu);
         const std::uint8_t g = static_cast<std::uint8_t>((rgb_hex >> 8) & 0xFFu);
         const std::uint8_t b = static_cast<std::uint8_t>((rgb_hex) & 0xFFu);
-        if (!studiocast::cuda::kernels::CompositeAlphaSolidU8x3(frame_rgb,
-                                                               *alpha_use,
-                                                               r,
-                                                               g,
-                                                               b,
-                                                               out_rgb,
-                                                               vb_stream,
-                                                               &kerr)) {
+        if (!studiocast::cuda::kernels::CompositeAlphaSolidU8x3(in_rgb, *alpha_use, r, g, b, *out_rgb_img, vb_stream, &kerr)) {
           if (error) *error = "Open CUDA: composite(solid) failed: " + kerr;
           return false;
         }
@@ -1875,17 +1865,57 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (error) *error = bg_err;
           return false;
         }
-        if (!studiocast::cuda::kernels::CompositeAlphaU8x3(frame_rgb,
-                                                          bg_rgb,
-                                                          *alpha_use,
-                                                          out_rgb,
-                                                          vb_stream,
-                                                          &kerr)) {
+        if (!studiocast::cuda::kernels::CompositeAlphaU8x3(in_rgb, bg_rgb, *alpha_use, *out_rgb_img, vb_stream, &kerr)) {
           if (error) *error = "Open CUDA: composite(replace) failed: " + kerr;
           return false;
         }
-      } else {
-        return true;
+      }
+
+      return true;
+    }
+
+    bool ApplyRgbInPlace(std::uint8_t* rgb,
+                         int width,
+                         int height,
+                         std::size_t rgb_stride,
+                         const studiocast::video::effects::BroadcastCameraEffects& fx,
+                         std::string* error,
+                         bool defer_readback,
+                         DeferredGpuOut* deferred_out) {
+      if (error) error->clear();
+
+      using studiocast::video::effects::VirtualBackgroundMode;
+      if (fx.virtual_background.mode == VirtualBackgroundMode::none) return true;
+      if (!rgb || width <= 0 || height <= 0 || rgb_stride == 0) {
+        if (error) *error = "Open CUDA: invalid RGB buffer.";
+        return false;
+      }
+
+      std::string init_err;
+      if (!EnsureInitialized(width, height, fx, &init_err)) {
+        if (error) *error = init_err;
+        return false;
+      }
+
+      // Upload CPU->GPU.
+      std::string up_err;
+      if (!frame_rgb.UploadFromCpuRgb24(&cuda, rgb, rgb_stride, vb_stream, &up_err)) {
+        if (error) *error = "Open CUDA: frame upload failed: " + up_err;
+        return false;
+      }
+      if (debug_log_uploads) {
+        ++debug_frame_upload_calls;
+        if ((debug_frame_upload_calls % 120u) == 1u) {
+          std::fprintf(stderr,
+                       "Open CUDA VB: UploadFromCpuRgb24 calls=%llu\n",
+                       static_cast<unsigned long long>(debug_frame_upload_calls));
+        }
+      }
+
+      std::string stage_err;
+      if (!ApplyGpuStage(frame_rgb, &out_rgb, width, height, fx, &stage_err)) {
+        if (error) *error = stage_err;
+        return false;
       }
 
       if (defer_readback) {
@@ -3765,6 +3795,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     bool have_deferred_gpu_out = false;
     bool open_cuda_active_this_frame = false;
 
+    // Reset per-frame Open CUDA ping-pong state.
+    open_cuda_curr = &open_cuda_frame_a;
+    open_cuda_next = &open_cuda_frame_b;
+    open_cuda_uploaded_this_frame = false;
+
     // Open CUDA transfer invariant (pipeline contract)
     //
     // Define “Open CUDA active for this frame” as:
@@ -3955,19 +3990,59 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                 ++open_cuda_active_frames;
               }
             }
-            if (debug_open_cuda_transfers) {
-              ++pipeline_open_cuda_upload_calls;
+
+            // Upload once at the start of the Open CUDA section (per-frame), then keep the frame
+            // in GPU memory across Open CUDA stages.
+            if (!open_cuda_uploaded_this_frame) {
+              std::string init_err;
+              if (!open_cuda_vb.EnsureInitialized(capA.width, capA.height, fx, &init_err)) {
+                oc_err = init_err;
+              } else {
+                std::string berr;
+                if (!open_cuda_frame_a.ReallocIfNeeded(&open_cuda_vb.cuda,
+                                                       capA.width,
+                                                       capA.height,
+                                                       studiocast::cuda::PixelFormatGpu::rgb_u8,
+                                                       &berr) ||
+                    !open_cuda_frame_b.ReallocIfNeeded(&open_cuda_vb.cuda,
+                                                       capA.width,
+                                                       capA.height,
+                                                       studiocast::cuda::PixelFormatGpu::rgb_u8,
+                                                       &berr)) {
+                  oc_err = "Open CUDA: failed to allocate ping-pong frame buffers: " + berr;
+                } else if (!open_cuda_frame_a.UploadFromCpuRgb24(&open_cuda_vb.cuda,
+                                                                 rgb.data(),
+                                                                 rgbStride,
+                                                                 open_cuda_vb.vb_stream,
+                                                                 &berr)) {
+                  oc_err = "Open CUDA: frame upload failed: " + berr;
+                } else {
+                  open_cuda_curr = &open_cuda_frame_a;
+                  open_cuda_next = &open_cuda_frame_b;
+                  open_cuda_uploaded_this_frame = true;
+                  if (debug_open_cuda_transfers) {
+                    ++pipeline_open_cuda_upload_calls;
+                  }
+                }
+              }
+
+              if (!open_cuda_uploaded_this_frame) {
+                {
+                  std::lock_guard<std::mutex> lock(mu_);
+                  last_error_ = "Open CUDA virtual background failed: " + oc_err;
+                }
+
+                // Safety net: Open CUDA VB failures are treated as non-fatal so we keep producing
+                // pass-through frames rather than blacking out the stream.
+                if (studiocast::video::effects::ShouldAbortPipelineOnOpenCudaVbApplyFailure()) {
+                  fx_failed = true;
+                }
+
+                return;
+              }
             }
 
-            const bool ok = open_cuda_vb.ApplyRgbInPlace(rgb.data(),
-                                                         capA.width,
-                                                         capA.height,
-                                                         rgbStride,
-                                                         fx,
-                                                         &oc_err,
-                                                         defer_readback,
-                                                         &deferred_gpu_out);
-            if (!ok) {
+            if (!open_cuda_vb.ApplyGpuStage(*open_cuda_curr, open_cuda_next, capA.width, capA.height, fx, &oc_err)) {
               {
                 std::lock_guard<std::mutex> lock(mu_);
                 last_error_ = "Open CUDA virtual background failed: " + oc_err;
@@ -3982,15 +4057,48 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
               return;
             }
 
-            if (!defer_readback && debug_open_cuda_transfers) {
-              ++pipeline_open_cuda_download_calls;
-            }
-            if (defer_readback && deferred_gpu_out.kind == DeferredGpuKind::cuda_rgb) {
+            // Ping-pong swap.
+            const bool curr_was_a = (open_cuda_curr == &open_cuda_frame_a);
+            open_cuda_curr = open_cuda_next;
+            open_cuda_next = curr_was_a ? &open_cuda_frame_a : &open_cuda_frame_b;
+
+            if (defer_readback) {
+              deferred_gpu_out.kind = DeferredGpuKind::cuda_rgb;
+              deferred_gpu_out.nvcv_img = nullptr;
+              deferred_gpu_out.nvcv = nullptr;
+              deferred_gpu_out.cuda_img = open_cuda_curr;
+              deferred_gpu_out.cuda = &open_cuda_vb.cuda;
+              deferred_gpu_out.stream = open_cuda_vb.vb_stream;
+
               have_deferred_gpu_out = true;
               if (!logged_open_cuda_defer) {
                 logged_open_cuda_defer = true;
                 std::fprintf(stderr, "Open CUDA VB: defer_readback path taken\n");
               }
+
+              return;
+            }
+
+            // Download GPU->CPU for any CPU-side continuation.
+            std::string down_err;
+            if (!open_cuda_curr->DownloadToCpuRgb24(&open_cuda_vb.cuda, rgb.data(), rgbStride, open_cuda_vb.vb_stream,
+                                                    &down_err) ||
+                !open_cuda_vb.cuda.StreamSynchronize(open_cuda_vb.vb_stream, &down_err)) {
+              {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = "Open CUDA virtual background failed: Open CUDA: frame download failed: " + down_err;
+              }
+
+              // Treat download failures consistently with stage failures.
+              if (studiocast::video::effects::ShouldAbortPipelineOnOpenCudaVbApplyFailure()) {
+                fx_failed = true;
+              }
+
+              return;
+            }
+
+            if (debug_open_cuda_transfers) {
+              ++pipeline_open_cuda_download_calls;
             }
             return;
           }
@@ -4793,6 +4901,23 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   }
   gpu_rgb_scaled = studiocast::cuda::CudaImage{};
   gpu_rgb_scaled_allocated = false;
+
+  // Cleanup Open CUDA ping-pong frame buffers.
+  if (open_cuda_vb.cuda.IsInitialized()) {
+    if (open_cuda_frame_a.Valid()) {
+      std::string derr;
+      (void)open_cuda_frame_a.Free(&open_cuda_vb.cuda, &derr);
+    }
+    if (open_cuda_frame_b.Valid()) {
+      std::string derr;
+      (void)open_cuda_frame_b.Free(&open_cuda_vb.cuda, &derr);
+    }
+  }
+  open_cuda_frame_a = studiocast::cuda::CudaImage{};
+  open_cuda_frame_b = studiocast::cuda::CudaImage{};
+  open_cuda_curr = nullptr;
+  open_cuda_next = nullptr;
+  open_cuda_uploaded_this_frame = false;
 
   {
     std::lock_guard<std::mutex> lock(mu_);
