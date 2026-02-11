@@ -828,7 +828,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   }
 
   int frameIndex = 0;
-  bool logged_open_cuda_defer = false;
 
   // Build a modular effect chain (Maxine-ready). This can be rebuilt live when
   // the GUI/daemon updates effect settings.
@@ -1506,10 +1505,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     studiocast::cuda::CudaImage bg_rgb;  // rgb_u8, WxH (replace mode)
     studiocast::cuda::CudaImage bg_src_rgb;  // rgb_u8, WxH_src (decoded image, cached allocation)
 
-    // Optional debug logging for manual performance verification.
-    bool debug_log_uploads = false;
-    std::uint64_t debug_frame_upload_calls = 0;
-
     // Replace-mode background cache.
     // Cache the decoded+uploaded source image at its native resolution, then GPU-resize
     // into bg_rgb for the current frame size.
@@ -1676,8 +1671,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       // Strength is the canonical knob; clamp once for deterministic behavior.
       (void)fx;
-
-      debug_log_uploads = (std::getenv("STUDIOCAST_DEBUG_CUDA_UPLOADS") != nullptr);
 
       initialized = true;
       enabled = true;
@@ -1951,14 +1944,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (!frame_rgb.UploadFromCpuRgb24(&cuda, rgb, rgb_stride, vb_stream, &up_err)) {
         if (error) *error = "Open CUDA: frame upload failed: " + up_err;
         return false;
-      }
-      if (debug_log_uploads) {
-        ++debug_frame_upload_calls;
-        if ((debug_frame_upload_calls % 120u) == 1u) {
-          std::fprintf(stderr,
-                       "Open CUDA VB: UploadFromCpuRgb24 calls=%llu\n",
-                       static_cast<unsigned long long>(debug_frame_upload_calls));
-        }
       }
 
       DeferredGpuOut tmp_deferred_out{};
@@ -3883,8 +3868,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     bool open_cuda_active_this_frame = false;
 
     // Reset per-frame Open CUDA ping-pong state.
-    open_cuda_curr = &open_cuda_frame_a;
-    open_cuda_next = &open_cuda_frame_b;
+    open_cuda_curr = nullptr;
+    open_cuda_next = nullptr;
     open_cuda_uploaded_this_frame = false;
 
     // Open CUDA transfer invariant (pipeline contract)
@@ -4167,11 +4152,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
             if (defer_readback) {
               have_deferred_gpu_out = true;
-              if (!logged_open_cuda_defer) {
-                logged_open_cuda_defer = true;
-                std::fprintf(stderr, "Open CUDA VB: defer_readback path taken\n");
-              }
-
               return;
             }
 
