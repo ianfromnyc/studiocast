@@ -34,6 +34,7 @@
 #include "core/video/capture_error_policy.h"
 #include "core/video/image_ppm.h"
 #include "core/video/mjpeg_decode.h"
+#include "core/video/scaling_policy.h"
 #include "core/video/effects/effect_chain.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/broadcast_effect_open_cuda_gate.h"
@@ -675,6 +676,25 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     if (ok) {
       scaling_backend_active = "gpu";
+    }
+  }
+
+  {
+    std::string policy_err;
+    const bool gpu_resize_available = (scaling_backend_active == "gpu");
+    if (!CheckOutputResizeAllowed(capA.width,
+                                  capA.height,
+                                  outA.width,
+                                  outA.height,
+                                  gpu_resize_available,
+                                  cfg.allow_cpu_resize,
+                                  &policy_err)) {
+      std::lock_guard<std::mutex> lock(mu_);
+      last_error_ = policy_err;
+      running_ = false;
+      start_notified_ = true;
+      cv_.notify_all();
+      return;
     }
   }
 
@@ -4359,6 +4379,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
 
     if (frameW != outW || frameH != outH) {
+      if (!cfg.allow_cpu_resize) {
+        std::lock_guard<std::mutex> lock(mu_);
+        last_error_ = OutputResizeDisallowedErrorMessage(frameW, frameH, outW, outH);
+        break;
+      }
       std::string resizeErr;
       const std::size_t tightDstStride = static_cast<std::size_t>(outW) * 3u;
       if (!ResizeRgb24Bilinear(rgbOut,

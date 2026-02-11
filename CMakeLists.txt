@@ -192,6 +192,8 @@ add_library(studiocast_core
         src/core/video/feed.cpp
         src/core/video/convert.h
         src/core/video/convert.cpp
+        src/core/video/scaling_policy.h
+        src/core/video/scaling_policy.cpp
         src/core/video/mjpeg_decode.h
         src/core/video/mjpeg_decode.cpp
         src/core/video/effects/effect_types.h

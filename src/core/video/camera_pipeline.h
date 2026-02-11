@@ -44,8 +44,19 @@ namespace studiocast::video {
         // Output scaling backend selection.
         // - auto_select: use GPU scaling when available, otherwise CPU.
         // - cpu: force CPU scaling.
-        // - gpu: prefer GPU scaling, falling back to CPU when unavailable.
+        // - gpu: prefer GPU scaling.
+        //
+        // Note: CPU resize can be hard-disabled via `allow_cpu_resize` to prevent
+        // silent high-latency scaling paths.
         ScalingBackendPreference scaling_backend = ScalingBackendPreference::auto_select;
+
+        // When false (default), the pipeline will NOT perform CPU resizing when
+        // output dimensions differ from the source frame.
+        //
+        // If an output resize is required and GPU resize is unavailable, the
+        // pipeline reports an explicit error and stops instead of silently
+        // spending tens of milliseconds per frame.
+        bool allow_cpu_resize = false;
 
         studiocast::video::effects::BroadcastCameraEffects effects{};
     };

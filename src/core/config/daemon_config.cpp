@@ -170,6 +170,10 @@ DaemonConfig LoadDaemonConfig() {
         s.video_scaling_backend = ScalingBackendPreferenceToString(pref);
       }
 
+      if (auto it = kv.find("video.scaling.allow_cpu_resize"); it != kv.end()) {
+        s.video_allow_cpu_resize = ParseBool(it->second, s.video_allow_cpu_resize);
+      }
+
       // Backward-compatible inference: if width/height are set to a non-positive sentinel and no
       // capture mode was specified, treat that as capture auto.
       if (!capture_mode_key_present && (s.video_width <= 0 || s.video_height <= 0)) {
@@ -506,6 +510,7 @@ bool SaveDaemonConfig(const DaemonConfig& s, std::string* error) {
   out << "video.fps = " << s.video_fps << "\n";
   out << "video.prefer_mjpeg = " << (s.video_prefer_mjpeg ? "true" : "false") << "\n";
   out << "video.scaling.backend = " << s.video_scaling_backend << "\n";
+  out << "video.scaling.allow_cpu_resize = " << (s.video_allow_cpu_resize ? "true" : "false") << "\n";
   out << "\n";
 
   out << "# Audio\n";
@@ -543,6 +548,7 @@ studiocast::video::VirtualCameraServiceConfig ToVideoServiceConfig(const DaemonC
   cfg.pipeline.prefer_mjpeg = s.video_prefer_mjpeg;
   cfg.pipeline.scaling_backend =
       ParseScalingBackendPreference(s.video_scaling_backend, studiocast::video::ScalingBackendPreference::auto_select);
+  cfg.pipeline.allow_cpu_resize = s.video_allow_cpu_resize;
   cfg.pipeline.effects = s.video_effects;
 
   cfg.consumer_poll_ms = s.consumer_poll_ms;
@@ -563,6 +569,7 @@ void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCamer
   out->video_fps = cfg.pipeline.fps;
   out->video_prefer_mjpeg = cfg.pipeline.prefer_mjpeg;
   out->video_scaling_backend = ScalingBackendPreferenceToString(cfg.pipeline.scaling_backend);
+  out->video_allow_cpu_resize = cfg.pipeline.allow_cpu_resize;
   out->video_effects = cfg.pipeline.effects;
 
   out->consumer_poll_ms = cfg.consumer_poll_ms;

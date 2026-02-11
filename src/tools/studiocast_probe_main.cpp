@@ -54,6 +54,7 @@
 #include "core/video/v4l2_capture.h"
 #include "core/video/image_ppm.h"
 #include "core/video/mjpeg_decode.h"
+#include "core/video/scaling_policy.h"
 #include "core/video/effects/effect_types.h"
 #include "studiocast/version.h"
 
@@ -185,6 +186,41 @@ namespace {
             expectTrue("IsRecoverableCaptureAcquireFailure(empty)", IsRecoverableCaptureAcquireFailure(""));
             expectTrue("IsRecoverableCaptureAcquireFailure(fatal) == false",
                        !IsRecoverableCaptureAcquireFailure("poll failed: EIO"));
+        }
+
+        // Scaling policy guard (pure logic; used by the camera pipeline).
+        {
+            using studiocast::video::CheckOutputResizeAllowed;
+            std::string err;
+
+            err.clear();
+            expectTrue("CheckOutputResizeAllowed(no resize)",
+                       CheckOutputResizeAllowed(640, 480, 640, 480,
+                                                /*gpu_resize_available=*/false,
+                                                /*allow_cpu_resize=*/false,
+                                                &err));
+
+            err.clear();
+            expectTrue("CheckOutputResizeAllowed(gpu resize available)",
+                       CheckOutputResizeAllowed(640, 480, 1280, 720,
+                                                /*gpu_resize_available=*/true,
+                                                /*allow_cpu_resize=*/false,
+                                                &err));
+
+            err.clear();
+            expectTrue("CheckOutputResizeAllowed(cpu resize allowed)",
+                       CheckOutputResizeAllowed(640, 480, 1280, 720,
+                                                /*gpu_resize_available=*/false,
+                                                /*allow_cpu_resize=*/true,
+                                                &err));
+
+            err.clear();
+            expectTrue("CheckOutputResizeAllowed(cpu disabled) == false",
+                       !CheckOutputResizeAllowed(640, 480, 1280, 720,
+                                                 /*gpu_resize_available=*/false,
+                                                 /*allow_cpu_resize=*/false,
+                                                 &err));
+            expectContains("CheckOutputResizeAllowed(cpu disabled message)", err, "CPU resize is disabled");
         }
 
         // Backend resolver policy (pure logic).

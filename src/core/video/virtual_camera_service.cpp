@@ -51,7 +51,8 @@ bool VirtualCameraService::NeedsPipelineRestart(const CameraPipelineConfig& a, c
            a.height != b.height ||
            a.fps != b.fps ||
            a.prefer_mjpeg != b.prefer_mjpeg ||
-           a.scaling_backend != b.scaling_backend;
+           a.scaling_backend != b.scaling_backend ||
+           a.allow_cpu_resize != b.allow_cpu_resize;
 }
 
 bool VirtualCameraService::Start(const VirtualCameraServiceConfig& cfg, std::string* error) {
