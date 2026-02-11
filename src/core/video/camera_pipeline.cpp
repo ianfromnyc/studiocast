@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
@@ -3686,6 +3687,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   bool have_last_frame_end = false;
   int perf_frames = 0;
 
+  const bool debug_open_cuda_transfers = (std::getenv("STUDIOCAST_DEBUG_OPEN_CUDA_TRANSFERS") != nullptr);
+  std::uint64_t open_cuda_active_frames = 0;
+  std::uint64_t pipeline_open_cuda_upload_calls = 0;
+  std::uint64_t pipeline_open_cuda_download_calls = 0;
+
   while (!stop_.load()) {
     CapturedFrameView f{};
     std::string ferr;
@@ -3757,6 +3763,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     DeferredGpuOut deferred_gpu_out{};
     bool have_deferred_gpu_out = false;
+    bool open_cuda_active_this_frame = false;
 
     // Open CUDA transfer invariant (pipeline contract)
     //
@@ -3938,6 +3945,20 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             }
 
             std::string oc_err;
+
+            // Pipeline-level Open CUDA transfer counters (env-var gated).
+            // This matches the transfer invariant we're moving toward: one upload at the start of
+            // the Open CUDA section and one download at the end (possibly deferred).
+            if (!open_cuda_active_this_frame) {
+              open_cuda_active_this_frame = true;
+              if (debug_open_cuda_transfers) {
+                ++open_cuda_active_frames;
+              }
+            }
+            if (debug_open_cuda_transfers) {
+              ++pipeline_open_cuda_upload_calls;
+            }
+
             const bool ok = open_cuda_vb.ApplyRgbInPlace(rgb.data(),
                                                          capA.width,
                                                          capA.height,
@@ -3959,6 +3980,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
               }
 
               return;
+            }
+
+            if (!defer_readback && debug_open_cuda_transfers) {
+              ++pipeline_open_cuda_download_calls;
             }
             if (defer_readback && deferred_gpu_out.kind == DeferredGpuKind::cuda_rgb) {
               have_deferred_gpu_out = true;
@@ -4111,6 +4136,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       if (ok) {
         rgbScaled.resize(tightBytes);
+        if (debug_open_cuda_transfers && open_cuda_active_this_frame) {
+          ++pipeline_open_cuda_download_calls;
+        }
         if (!download_img->DownloadToCpuRgb24(deferred_gpu_out.cuda,
                                               rgbScaled.data(),
                                               tightStride,
@@ -4137,6 +4165,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         std::string derr;
         bool readback_ok = false;
         if (deferred_gpu_out.cuda_img && deferred_gpu_out.cuda) {
+          if (debug_open_cuda_transfers && open_cuda_active_this_frame) {
+            ++pipeline_open_cuda_download_calls;
+          }
           if (deferred_gpu_out.cuda_img->DownloadToCpuRgb24(deferred_gpu_out.cuda,
                                                             rgb.data(),
                                                             rgbStride,
@@ -4712,6 +4743,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     ema_write.Add(write_ms);
 
     ++perf_frames;
+
+    if (debug_open_cuda_transfers && ((perf_frames % 120) == 0)) {
+      std::fprintf(stderr,
+                   "Open CUDA transfers (pipeline): active_frames=%llu upload_calls=%llu download_calls=%llu\n",
+                   static_cast<unsigned long long>(open_cuda_active_frames),
+                   static_cast<unsigned long long>(pipeline_open_cuda_upload_calls),
+                   static_cast<unsigned long long>(pipeline_open_cuda_download_calls));
+    }
 
     double fps_actual = 0.0;
     if (have_last_frame_end) {
