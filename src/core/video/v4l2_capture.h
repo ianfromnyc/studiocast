@@ -58,6 +58,13 @@ namespace studiocast::video {
               bool prefer_mjpeg,
               std::string* error);
 
+    // Enumerate supported capture modes and open the best-scoring one.
+    // Intended for `CaptureMode::auto_best`.
+    bool OpenBest(const std::string& device,
+                  int target_fps,
+                  bool prefer_mjpeg,
+                  std::string* error);
+
     void Close();
 
     bool IsOpen() const { return fd_ >= 0; }

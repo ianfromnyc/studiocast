@@ -1364,12 +1364,13 @@ namespace {
                 fx.mirror = true;
 
                 const auto plan = BuildBroadcastEffectsPlan(fx);
-                expectVecEq("EffectPlan: ordering eye_contact -> vb.blur -> vignette -> mirror",
+                expectVecEq("EffectPlan: ordering eye_contact -> vb.blur -> vignette (mirror ignored)",
                             plan.ordered_effect_ids,
                             {std::string(studiocast::video::effects::contract::kEffectIdEyeContact),
                              std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur),
-                             std::string(studiocast::video::effects::contract::kEffectIdVignette),
-                             std::string(studiocast::video::effects::contract::kEffectIdMirror)});
+                             std::string(studiocast::video::effects::contract::kEffectIdVignette)});
+                expectTrue("EffectPlan: mirror is reported as disabled",
+                           disabledHas(plan, studiocast::video::effects::contract::kEffectIdMirror));
                 expectEq("EffectPlan: vignette attaches to last GPU stage (vb.blur)",
                          plan.vignette_attach_to_effect_id,
                          std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur));

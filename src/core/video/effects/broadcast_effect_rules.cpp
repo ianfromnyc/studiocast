@@ -30,8 +30,7 @@ inline std::string VirtualBackgroundEffectId(const BroadcastCameraEffects& fx) {
 }
 
 inline bool IsGpuStageEffectId(std::string_view id) {
-  // "GPU stage" here means a stage that runs before the CPU tail (`mirror`) and
-  // may host vignette attachment.
+  // "GPU stage" here means a stage that may host vignette attachment.
   using namespace contract;
 
   if (id == kEffectIdVideoNoiseRemoval) return true;
@@ -55,7 +54,7 @@ BroadcastEffectsPlan BuildBroadcastEffectsPlan(const BroadcastCameraEffects& fx)
   bool enable_key_light = fx.virtual_key_light.enabled;
   bool enable_auto_frame = fx.auto_frame.enabled;
   bool enable_vignette = VignetteEffective(fx);
-  bool enable_mirror = fx.mirror;
+  const bool enable_mirror = fx.mirror;
 
   std::string vb_id = VirtualBackgroundEffectId(fx);
   bool enable_virtual_background = !vb_id.empty();
@@ -82,6 +81,14 @@ BroadcastEffectsPlan BuildBroadcastEffectsPlan(const BroadcastCameraEffects& fx)
     vb_id.clear();
   }
 
+  // 3) Mirror is intentionally not implemented in the pipeline.
+  // Keep it in the schema/UI for backward compatibility, but never schedule it.
+  if (enable_mirror) {
+    plan.disabled.push_back(DisabledEffectByRule{
+        .id = std::string(contract::kEffectIdMirror),
+        .reason = "Disabled: mirror is not supported (ignored)."});
+  }
+
   // ---- Ordering rules ----
   // Rationale (high-level):
   //  - Noise removal early improves subsequent stages.
@@ -89,7 +96,6 @@ BroadcastEffectsPlan BuildBroadcastEffectsPlan(const BroadcastCameraEffects& fx)
   //  - Key Light and Virtual Background both depend on segmentation; run before framing.
   //  - Auto Frame last so it frames the final image.
   //  - Vignette after framing.
-  //  - Mirror is CPU tail and always last.
 
   if (enable_noise_removal) {
     plan.ordered_effect_ids.push_back(std::string(contract::kEffectIdVideoNoiseRemoval));
@@ -115,17 +121,12 @@ BroadcastEffectsPlan BuildBroadcastEffectsPlan(const BroadcastCameraEffects& fx)
     plan.ordered_effect_ids.push_back(std::string(contract::kEffectIdVignette));
   }
 
-  if (enable_mirror) {
-    plan.ordered_effect_ids.push_back(std::string(contract::kEffectIdMirror));
-  }
-
   // Decide vignette attachment.
   if (enable_vignette) {
     // Attach to the last enabled GPU stage (excluding vignette itself).
     for (auto it = plan.ordered_effect_ids.rbegin(); it != plan.ordered_effect_ids.rend(); ++it) {
       const std::string& id = *it;
       if (id == contract::kEffectIdVignette) continue;
-      if (id == contract::kEffectIdMirror) continue;
       if (IsGpuStageEffectId(id)) {
         plan.vignette_attach_to_effect_id = id;
         break;

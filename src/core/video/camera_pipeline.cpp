@@ -39,7 +39,6 @@
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/broadcast_effect_open_cuda_gate.h"
 #include "core/video/effects/broadcast_effect_rules.h"
-#include "core/video/effects/mirror_effect.h"
 #include "core/video/v4l2loopback.h"
 
 namespace studiocast::video {
@@ -509,21 +508,21 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   std::string inDev = cfg.input_device;
   std::ostringstream inAttempts;
 
-  // `V4l2Capture::Open()` requires positive dimensions. In `auto_best` mode we currently
-  // use a conservative request and rely on negotiation (future work will probe/select
-  // the true best mode).
-  const int req_w = (cfg.capture_mode == CaptureMode::requested) ? cfg.width : 1280;
-  const int req_h = (cfg.capture_mode == CaptureMode::requested) ? cfg.height : 720;
+  const bool auto_best = (cfg.capture_mode == CaptureMode::auto_best);
 
   if (!inDev.empty()) {
     std::string cerr;
-    if (!cap.Open(inDev,
-                  req_w,
-                  req_h,
-                  cfg.fps,
-                  CapturePixelFormat::yuyv,
-                  cfg.prefer_mjpeg,
-                  &cerr)) {
+    const bool opened = auto_best
+                            ? cap.OpenBest(inDev, cfg.fps, cfg.prefer_mjpeg, &cerr)
+                            : cap.Open(inDev,
+                                       cfg.width,
+                                       cfg.height,
+                                       cfg.fps,
+                                       CapturePixelFormat::yuyv,
+                                       cfg.prefer_mjpeg,
+                                       &cerr);
+
+    if (!opened) {
       std::lock_guard<std::mutex> lock(mu_);
       last_error_ = "Failed to open capture device " + inDev + ":\n" + cerr;
       running_ = false;
@@ -545,13 +544,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     bool opened = false;
     for (const auto& d : candidates) {
       std::string cerr;
-      if (cap.Open(d.dev_node,
-                   req_w,
-                   req_h,
-                   cfg.fps,
-                   CapturePixelFormat::yuyv,
-                   cfg.prefer_mjpeg,
-                   &cerr)) {
+      const bool thisOpened = auto_best
+                                  ? cap.OpenBest(d.dev_node, cfg.fps, cfg.prefer_mjpeg, &cerr)
+                                  : cap.Open(d.dev_node,
+                                             cfg.width,
+                                             cfg.height,
+                                             cfg.fps,
+                                             CapturePixelFormat::yuyv,
+                                             cfg.prefer_mjpeg,
+                                             &cerr);
+
+      if (thisOpened) {
         inDev = d.dev_node;
         opened = true;
         break;
@@ -3618,12 +3621,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
     }
 
-    // Mirror (CPU) last.
-    if (has(studiocast::video::effects::contract::kEffectIdMirror)) {
-      chain.Add(std::make_unique<studiocast::video::effects::MirrorEffect>());
-      set_backend(studiocast::video::effects::contract::kEffectIdMirror, "builtin");
-    }
-
     {
       append_rule_notes();
 
@@ -3796,19 +3793,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       // Defer GPU->CPU readback for the last GPU stage only when:
       // - output scaling is needed
-      // - no CPU tail effects (mirror) are active
+      // - no CPU tail effects are active
       // This allows us to resize on GPU and perform a single GPU->CPU transfer for output.
       std::string last_stage_for_defer;
       for (auto it = plan.ordered_effect_ids.rbegin(); it != plan.ordered_effect_ids.rend(); ++it) {
-        if (*it == studiocast::video::effects::contract::kEffectIdMirror) continue;
         if (*it == studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) continue;
         last_stage_for_defer = *it;
         break;
       }
-      const bool mirror_enabled = has_stage(studiocast::video::effects::contract::kEffectIdMirror);
       const bool scaling_needed = (capA.width != outA.width || capA.height != outA.height);
       const bool allow_defer_readback =
-          scaling_needed && (gpu_backend != GpuResizeBackend::none) && !mirror_enabled && !last_stage_for_defer.empty();
+          scaling_needed && (gpu_backend != GpuResizeBackend::none) && !last_stage_for_defer.empty();
 
       // Apply vignette exactly once, either attached to the planned last GPU stage,
       // or as a standalone GPU stage when no other GPU stage is active.
@@ -4001,12 +3996,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       };
 
       for (const auto& stage_id : plan.ordered_effect_ids) {
-        if (stage_id == studiocast::video::effects::contract::kEffectIdMirror) continue;
         apply_stage(stage_id);
         if (fx_failed) break;
       }
 
-      // CPU-only tail effects (e.g. mirror) run last.
+      // CPU-only tail effects run last.
       if (!fx_failed) {
         chain.Apply(view);
       }
