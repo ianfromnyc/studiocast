@@ -3758,6 +3758,32 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     DeferredGpuOut deferred_gpu_out{};
     bool have_deferred_gpu_out = false;
 
+    // Open CUDA transfer invariant (pipeline contract)
+    //
+    // Define “Open CUDA active for this frame” as:
+    //   fx.engine == EffectsEnginePreference::open_cuda
+    //   AND at least one Open CUDA stage is planned+enabled and will actually run.
+    //   (Today that effectively means: the Virtual Background stage is present in
+    //    appliedPlan.ordered_effect_ids and have_open_cuda_vb == true.)
+    //
+    // Invariant we are moving toward:
+    //   - If Open CUDA is active this frame: exactly one CPU->GPU upload at the
+    //     start of the Open CUDA section, then GPU-only model/effect stages,
+    //     then exactly one GPU->CPU download at the end (including any resize).
+    //   - If Open CUDA is NOT active this frame: zero GPU uploads/downloads.
+    //
+    // Current transfer points (pre-refactor):
+    //   - OpenCudaVirtualBackgroundContext::ApplyRgbInPlace does UploadFromCpuRgb24(...)
+    //     and, unless defer_readback is true, does DownloadToCpuRgb24(...) inside the stage.
+    //   - allow_defer_readback below is currently gated by scaling_needed + “last stage”
+    //     logic so that GPU resize can be combined with a single final readback.
+    //   - OpenCudaGpuScaler can upload+download for resize even when no Open CUDA
+    //     effect stages ran.
+    //
+    // Avoid mixed modes where an Open CUDA stage performs an internal readback
+    // while the pipeline also expects DeferredGpuOut; when Open CUDA stages are
+    // active the pipeline must have exactly one coherent upload/readback strategy.
+
     // Apply effects (in-place on RGB buffer).
     const auto t_effects_start = Clock::now();
     bool fx_failed = false;
