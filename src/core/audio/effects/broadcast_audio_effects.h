@@ -37,6 +37,12 @@ inline bool TryParseSuperresMode(std::string_view s, SuperresMode* out) {
 // This type is intended to be used across config persistence, IPC, and GUI state.
 
 struct BroadcastMicrophoneEffects {
+    // Open CUDA-only: optional model pack identifier to use when/if an Open CUDA
+    // microphone effect backend is introduced.
+    //
+    // Empty means "use backend default".
+    std::string model_id;
+
     // Broadcast-style mic processing knobs.
     bool noise_removal_enabled = false;
     bool room_echo_removal_enabled = false;
@@ -63,7 +69,7 @@ struct BroadcastMicrophoneEffects {
 };
 
 inline bool operator==(const BroadcastMicrophoneEffects& a, const BroadcastMicrophoneEffects& b) {
-    return a.noise_removal_enabled == b.noise_removal_enabled &&
+    return a.model_id == b.model_id && a.noise_removal_enabled == b.noise_removal_enabled &&
            a.room_echo_removal_enabled == b.room_echo_removal_enabled &&
            a.strength == b.strength &&
            a.studio_voice_enabled == b.studio_voice_enabled &&
@@ -76,6 +82,12 @@ inline bool operator==(const BroadcastMicrophoneEffects& a, const BroadcastMicro
 inline bool operator!=(const BroadcastMicrophoneEffects& a, const BroadcastMicrophoneEffects& b) { return !(a == b); }
 
 struct BroadcastSpeakerEffects {
+    // Open CUDA-only: optional model pack identifier to use when/if an Open CUDA
+    // speaker effect backend is introduced.
+    //
+    // Empty means "use backend default".
+    std::string model_id;
+
     bool noise_removal_enabled = false;
 
     // 0..100-ish user knob (implementation-defined).
@@ -90,7 +102,7 @@ struct BroadcastSpeakerEffects {
 };
 
 inline bool operator==(const BroadcastSpeakerEffects& a, const BroadcastSpeakerEffects& b) {
-    return a.noise_removal_enabled == b.noise_removal_enabled && a.strength == b.strength &&
+    return a.model_id == b.model_id && a.noise_removal_enabled == b.noise_removal_enabled && a.strength == b.strength &&
            a.superres.enabled == b.superres.enabled && a.superres.mode == b.superres.mode;
 }
 

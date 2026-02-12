@@ -149,6 +149,7 @@ std::string BroadcastAudioEffectsToJson(const BroadcastAudioEffects& effects) {
     oss << "\"schema_version\":" << effects.schema_version << ",";
 
     oss << "\"microphone\":{";
+    oss << "\"model_id\":\"" << studiocast::util::json::EscapeString(effects.microphone.model_id) << "\",";
     oss << "\"noise_removal_enabled\":" << (effects.microphone.noise_removal_enabled ? "true" : "false") << ",";
     oss << "\"room_echo_removal_enabled\":" << (effects.microphone.room_echo_removal_enabled ? "true" : "false") << ",";
     oss << "\"strength\":" << effects.microphone.strength << ",";
@@ -167,6 +168,7 @@ std::string BroadcastAudioEffectsToJson(const BroadcastAudioEffects& effects) {
     oss << "},";
 
     oss << "\"speaker\":{";
+    oss << "\"model_id\":\"" << studiocast::util::json::EscapeString(effects.speaker.model_id) << "\",";
     oss << "\"noise_removal_enabled\":" << (effects.speaker.noise_removal_enabled ? "true" : "false") << ",";
     oss << "\"strength\":" << effects.speaker.strength << ",";
 
@@ -217,7 +219,8 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
 
     if (const auto* mic = GetObj(*obj, "", "microphone", error)) {
         if (!CheckUnknownKeys(*mic,
-                              {"noise_removal_enabled",
+                              {"model_id",
+                               "noise_removal_enabled",
                                "room_echo_removal_enabled",
                                "strength",
                                "studio_voice_enabled",
@@ -229,6 +232,10 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
                               error)) {
             return false;
         }
+
+        std::string modelId = out->microphone.model_id;
+        if (!TryGetString(*mic, "microphone", "model_id", &found, &modelId, error)) return false;
+        if (found) out->microphone.model_id = modelId;
 
         bool en = out->microphone.noise_removal_enabled;
         if (!TryGetBool(*mic, "microphone", "noise_removal_enabled", &found, &en, error)) return false;
@@ -284,9 +291,13 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
     }
 
     if (const auto* spk = GetObj(*obj, "", "speaker", error)) {
-        if (!CheckUnknownKeys(*spk, {"noise_removal_enabled", "strength", "superres"}, "speaker", options, warnings, error)) {
+        if (!CheckUnknownKeys(*spk, {"model_id", "noise_removal_enabled", "strength", "superres"}, "speaker", options, warnings, error)) {
             return false;
         }
+
+        std::string modelId = out->speaker.model_id;
+        if (!TryGetString(*spk, "speaker", "model_id", &found, &modelId, error)) return false;
+        if (found) out->speaker.model_id = modelId;
 
         bool en = out->speaker.noise_removal_enabled;
         if (!TryGetBool(*spk, "speaker", "noise_removal_enabled", &found, &en, error)) return false;

@@ -1277,6 +1277,7 @@ namespace {
             using studiocast::audio::effects::SuperresMode;
 
             BroadcastAudioEffects fx;
+            fx.microphone.model_id = "mic_model_0";
             fx.microphone.noise_removal_enabled = true;
             fx.microphone.room_echo_removal_enabled = true;
             fx.microphone.strength = 42;
@@ -1285,6 +1286,7 @@ namespace {
             fx.microphone.aec.reference_source = "monitor_source0";
             fx.microphone.superres.enabled = true;
             fx.microphone.superres.mode = SuperresMode::k8kTo16k;
+            fx.speaker.model_id = "spk_model_0";
             fx.speaker.noise_removal_enabled = true;
             fx.speaker.strength = 33;
             fx.speaker.superres.enabled = true;
@@ -1294,10 +1296,12 @@ namespace {
             expectContains("BroadcastAudioEffectsToJson includes mic.aec", json, "\"aec\":{");
             expectContains("BroadcastAudioEffectsToJson includes aec reference_source", json,
                            "\"reference_source\":\"monitor_source0\"");
-            expectContains("BroadcastAudioEffectsToJson includes mic.superres mode", json,
+            expectContains("BroadcastAudioEffectsToJson includes microphone object", json,
                            "\"microphone\":{");
             expectContains("BroadcastAudioEffectsToJson includes mic.superres mode", json,
                            "\"mode\":\"8k_to_16k\"");
+            expectContains("BroadcastAudioEffectsToJson includes mic model_id", json, "\"model_id\":\"mic_model_0\"");
+            expectContains("BroadcastAudioEffectsToJson includes speaker model_id", json, "\"model_id\":\"spk_model_0\"");
             BroadcastAudioEffects parsed;
             std::vector<std::string> warnings;
             std::string error;
@@ -1306,6 +1310,37 @@ namespace {
             expectEq("ParseBroadcastAudioEffectsJsonText: error empty", error, "");
             expectVecEq("ParseBroadcastAudioEffectsJsonText: warnings empty", warnings, {});
             expectTrue("BroadcastAudioEffects JSON round-trip equality", parsed == fx);
+
+            // model_id should be optional for forward/backward compatibility.
+            {
+                const std::string noModel =
+                    "{"\
+                    "\"schema_version\":2,"\
+                    "\"microphone\":{"\
+                    "\"noise_removal_enabled\":true"\
+                    "},"\
+                    "\"speaker\":{"\
+                    "\"strength\":50"\
+                    "}"\
+                    "}";
+
+                BroadcastAudioEffects parsedNoModel;
+                warnings.clear();
+                error.clear();
+                expectTrue("ParseBroadcastAudioEffectsJsonText: missing model_id ok",
+                           ParseBroadcastAudioEffectsJsonText(noModel,
+                                                              &parsedNoModel,
+                                                              BroadcastAudioEffectsJsonParseOptions{},
+                                                              &warnings,
+                                                              &error));
+                expectEq("ParseBroadcastAudioEffectsJsonText: missing model_id error empty", error, "");
+                expectEq("ParseBroadcastAudioEffectsJsonText: missing mic model_id default empty",
+                         parsedNoModel.microphone.model_id,
+                         "");
+                expectEq("ParseBroadcastAudioEffectsJsonText: missing spk model_id default empty",
+                         parsedNoModel.speaker.model_id,
+                         "");
+            }
 
             // Superres mode validation.
             {
