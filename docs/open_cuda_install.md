@@ -180,6 +180,69 @@ This uses the canonical effect IDs (see `src/core/video/effects/broadcast_effect
 
 If everything is installed correctly, the pipeline will select the Open CUDA engine for virtual background blur.
 
+## 5) Selecting an Open CUDA model for Virtual Background
+
+Model packs are an **Open CUDA-only** concern.
+
+- If Virtual Background is **actually running on Open CUDA**, the GUI shows a **Model** dropdown.
+- If Virtual Background is **actually running on Maxine**, the Model dropdown is **hidden**.
+
+### How to show the Model dropdown
+
+1. Ensure model packs are installed and discoverable:
+
+   ```bash
+   ./<build-dir>/studiocast-open list-models
+   ```
+
+2. Start the daemon:
+
+   ```bash
+   ./<build-dir>/studiocastd
+   ```
+
+3. In the GUI (Video page):
+
+    - Set **Effect engine** to **Open CUDA** (or leave **Auto** if Maxine is not available).
+    - Enable Virtual Background (Blur / Remove / Replace).
+
+When the daemon reports the active backend for the selected Virtual Background mode as `open_cuda`, the **Model** row
+appears.
+
+### Default vs explicit model selection
+
+- **Default (auto)** corresponds to an empty `model_id` in config. The daemon then uses a deterministic default model
+  (`open_cuda.default_model_id` in `studiocastctl status`).
+- Selecting a specific entry (e.g. `birefnet_lite`, `birefnet_portrait`, `modnet-webnn-256-fp32`) sets
+  `virtual_background.model_id` to that pack ID.
+
+### Where the selection is persisted
+
+The selection is stored in the canonical video effects config, persisted by the daemon at:
+
+- `~/.config/studiocast/daemon.conf` (respecting `XDG_CONFIG_HOME`)
+
+The key is:
+
+- `video.effects.json` (a single-line JSON blob)
+
+Inside that JSON, the field is:
+
+- `virtual_background.model_id`
+
+Example (formatted for readability; the on-disk value is on one line):
+
+```json
+{
+  "schema_version": 1,
+  "engine": "open_cuda",
+  "virtual_background": {
+    "mode": "blur",
+    "model_id": "birefnet_lite"
+  }
+}
+```
+
 ## Troubleshooting
 
 ### `open_cuda.ok` is false and `blocked_effects` contains `onnxruntime_not_found`
@@ -210,3 +273,37 @@ Common causes:
 - `model.json` is invalid JSON
 - `model.onnx` is missing
 - `onnx_filename` points outside the pack directory (rejected for safety)
+
+### The Model dropdown is hidden in the GUI
+
+The Model dropdown is shown only when **Virtual Background is enabled** and the daemon reports that the active backend
+for the selected Virtual Background mode is **`open_cuda`**.
+
+Common reasons it’s hidden:
+
+- Virtual Background is set to **Off**.
+- The pipeline is not running (daemon not started, or video disabled).
+- The engine preference is **Auto** and Maxine is available, so the active backend is **Maxine**.
+    - To force Open CUDA: set **Effect engine → Open CUDA** in the GUI, or use the CLI example above with
+      `--engine open_cuda`.
+
+You can confirm the active backend with:
+
+```bash
+./<build-dir>/studiocastctl status
+```
+
+Look for `effects_backends` (per-effect backend mapping) and `engines.open_cuda.ok`.
+
+### Selected `model_id` is missing / invalid
+
+If `virtual_background.model_id` references a model pack that is not currently installed:
+
+- The GUI may show a “Missing: <model_id>” entry to make the mismatch visible.
+- The daemon will fail to resolve the selected model pack and Virtual Background will not run on Open CUDA until a
+  valid pack is selected.
+
+Fix:
+
+- Install the missing pack under `~/.local/share/studiocast/models/open_cuda/<model_id>/`, or
+- Switch the Model dropdown back to **Default (auto)** (clears `model_id`), or pick another installed model.

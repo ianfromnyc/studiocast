@@ -459,6 +459,7 @@ std::optional<int> ParsePercent01Or100(std::string_view s, const char* what, std
 std::string BuildEnablePatchJson(const std::string& effectId,
                                  bool enabled,
                                  const std::optional<std::string>& engine,
+                                 const std::optional<std::string>& modelId,
                                  const std::optional<int>& strength,
                                  const std::optional<int>& intensity,
                                  const std::optional<int>& smoothing,
@@ -487,6 +488,8 @@ std::string BuildEnablePatchJson(const std::string& effectId,
   oss << "\"" << EscapeString(effectId) << "\":{";
   oss << "\"" << param::kEnabled << "\":" << (enabled ? "true" : "false");
 
+  if (modelId && !modelId->empty()) oss << ",\"" << param::kModelId << "\":\"" << EscapeString(*modelId) << "\"";
+
   if (strength) oss << ",\"" << param::kStrength << "\":" << *strength;
   if (intensity) oss << ",\"" << param::kIntensity << "\":" << *intensity;
   if (smoothing) oss << ",\"" << param::kSmoothing << "\":" << *smoothing;
@@ -508,6 +511,121 @@ std::string BuildEnablePatchJson(const std::string& effectId,
   return oss.str();
 }
 
+bool ExtractOpenCudaModelsFromStatusJson(const std::string& statusJson,
+                                        std::vector<std::pair<std::string, std::string>>* outModels,
+                                        std::string* error) {
+  if (!outModels) return false;
+  outModels->clear();
+
+  Value root;
+  std::string jerr;
+  if (!studiocast::util::json::Parse(statusJson, &root, &jerr)) {
+    if (error) *error = "invalid JSON from daemon GET_STATUS: " + jerr;
+    return false;
+  }
+  const auto* rootObj = root.AsObject();
+  if (!rootObj) {
+    if (error) *error = "invalid GET_STATUS payload (expected JSON object)";
+    return false;
+  }
+
+  const Value::Object* openCuda = nullptr;
+  if (auto it = rootObj->find("open_cuda"); it != rootObj->end()) {
+    openCuda = it->second.AsObject();
+  }
+  if (!openCuda) {
+    if (auto it = rootObj->find("engines"); it != rootObj->end()) {
+      if (const auto* engines = it->second.AsObject()) {
+        if (auto it2 = engines->find("open_cuda"); it2 != engines->end()) {
+          openCuda = it2->second.AsObject();
+        }
+      }
+    }
+  }
+  if (!openCuda) {
+    if (error) *error = "GET_STATUS does not include open_cuda engine information";
+    return false;
+  }
+
+  // Preferred: full model objects.
+  if (auto it = openCuda->find("models"); it != openCuda->end()) {
+    if (const auto* a = it->second.AsArray()) {
+      for (const auto& v : *a) {
+        const auto* o = v.AsObject();
+        if (!o) continue;
+        std::string id;
+        std::string display;
+        if (auto itId = o->find("id"); itId != o->end()) {
+          if (const auto* s = itId->second.AsString()) id = *s;
+        }
+        if (id.empty()) continue;
+        if (auto itDn = o->find("display_name"); itDn != o->end()) {
+          if (const auto* s = itDn->second.AsString()) display = *s;
+        }
+        if (display.empty()) display = id;
+        outModels->push_back({id, display});
+      }
+    }
+  }
+
+  // Back-compat: older daemons may only provide installed model IDs.
+  if (outModels->empty()) {
+    if (auto it = openCuda->find("installed_models"); it != openCuda->end()) {
+      if (const auto* a = it->second.AsArray()) {
+        for (const auto& v : *a) {
+          if (const auto* s = v.AsString()) {
+            if (!s->empty()) outModels->push_back({*s, *s});
+          }
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
+bool PrintOpenCudaModelsFromDaemon() {
+  studiocast::ipc::DaemonCallResult res;
+  std::string err;
+  if (!studiocast::ipc::DaemonCall("GET_STATUS", &res, &err)) {
+    std::cerr << "ERROR: " << err << "\n";
+    return false;
+  }
+  if (!res.ok) {
+    std::cerr << (res.error_json.empty() ? std::string("{\"error\":\"daemon_error\"}") : res.error_json) << "\n";
+    return false;
+  }
+
+  std::vector<std::pair<std::string, std::string>> models;
+  std::string perr;
+  if (!ExtractOpenCudaModelsFromStatusJson(res.json, &models, &perr)) {
+    std::cerr << "ERROR: " << perr << "\n";
+    return false;
+  }
+  if (models.empty()) {
+    std::cerr << "ERROR: no Open CUDA models reported by daemon (open_cuda.models/installed_models is empty)\n";
+    return false;
+  }
+
+  using studiocast::util::json::EscapeString;
+  std::ostringstream oss;
+  oss << '[';
+  bool first = true;
+  for (const auto& [id, display] : models) {
+    if (id.empty()) continue;
+    if (!first) oss << ',';
+    first = false;
+    oss << "{\"id\":\"" << EscapeString(id) << "\"";
+    if (!display.empty() && display != id) {
+      oss << ",\"display_name\":\"" << EscapeString(display) << "\"";
+    }
+    oss << '}';
+  }
+  oss << ']';
+  std::cout << oss.str() << "\n";
+  return true;
+}
+
 void Usage(const char* argv0) {
   std::cout
       << "studiocastctl - control StudioCast daemon (studiocastd)\n\n"
@@ -521,10 +639,12 @@ void Usage(const char* argv0) {
       << "  " << argv0 << " audio set --file <audio.json|->\n"
       << "  " << argv0 << " audio start\n"
       << "  " << argv0 << " audio stop\n"
-      << "  " << argv0 << " effects enable <effect_id> [--engine auto|maxine|open_cuda] [--strength N|0..1] [--intensity N|0..1] ...\n"
+      << "  " << argv0 << " effects enable <effect_id> [--engine auto|maxine|open_cuda] [--model <id>] [--strength N|0..1] [--intensity N|0..1] ...\n"
       << "  " << argv0 << " effects disable <effect_id>\n"
       << "  " << argv0 << " enable <0|1>\n"
       << "  " << argv0 << " video set [input=/dev/videoX|auto] [output=/dev/videoY|auto] [width=N] [height=N] [fps=N]\n"
+      << "  " << argv0 << " video vb --model <id> [--mode blur|remove|replace] [--engine auto|maxine|open_cuda]\n"
+      << "  " << argv0 << " video vb --list-models\n"
       << "  " << argv0 << " video effects [mirror=0|1] [background=none|blur|remove|replace|auto_frame] "
       << "[background_backend=auto|maxine|open_cuda] [background_strength=N] [background_remove_color=#RRGGBB] [background_replace_image=/path]\n"
       << "  " << argv0 << " video effects --from <effects.json>\n\n"
@@ -534,6 +654,8 @@ void Usage(const char* argv0) {
       << "  " << argv0 << " debug-report --out studiocast-debug-report.txt\n"
       << "  " << argv0 << " enable 1\n"
       << "  " << argv0 << " video set input=/dev/video0 output=/dev/video10 width=1280 height=720 fps=30\n"
+      << "  " << argv0 << " video vb --list-models\n"
+      << "  " << argv0 << " video vb --model modnet-webnn-256-fp32 --mode remove\n"
       << "  " << argv0 << " video effects mirror=1 background=blur background_strength=10\n"
       << "  " << argv0 << " video effects --from effects.json\n\n"
       << "Notes:\n"
@@ -806,6 +928,7 @@ int main(int argc, char** argv) {
       }
 
       std::optional<std::string> engine;
+      std::optional<std::string> modelId;
       std::optional<int> strength;
       std::optional<int> intensity;
       std::optional<int> smoothing;
@@ -845,6 +968,10 @@ int main(int argc, char** argv) {
             return 2;
           }
           engine = studiocast::video::effects::ToString(ep);
+          continue;
+        }
+        if (auto v = needValue("--model")) {
+          modelId = std::string(*v);
           continue;
         }
         if (auto v = needValue("--strength")) {
@@ -953,7 +1080,7 @@ int main(int argc, char** argv) {
         std::cerr << "WARNING: virtual_background.replace requires --replace-path; daemon will reject if empty\n";
       }
 
-      const std::string patch = BuildEnablePatchJson(effectId, enabled, engine, strength, intensity, smoothing, headroom,
+      const std::string patch = BuildEnablePatchJson(effectId, enabled, engine, modelId, strength, intensity, smoothing, headroom,
                                                      lookAway, removeColor, replacePath, greenscreenMode, greenscreenTemporal,
                                                      temperaturePreset, directionPanDegrees, hdriPath, centerOnTrackedFace);
       const std::string req = std::string("SET_VIDEO_EFFECTS_JSON ") + patch;
@@ -1031,6 +1158,97 @@ int main(int argc, char** argv) {
         req.push_back(' ');
         req.append(argv[i]);
       }
+      return CallOrDie(req) ? 0 : 1;
+    }
+
+    if (sub == "vb") {
+      bool listModels = false;
+      std::optional<std::string> modelId;
+      std::optional<std::string> engine;
+      std::string effectId = std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove);
+
+      for (int i = 3; i < argc; ++i) {
+        const std::string_view a = argv[i] ? std::string_view(argv[i]) : std::string_view();
+        auto needValue = [&](const char* flag) -> std::optional<std::string_view> {
+          if (a != flag) return std::nullopt;
+          if (i + 1 >= argc || !argv[i + 1]) {
+            std::cerr << "ERROR: " << flag << " requires a value\n";
+            return std::nullopt;
+          }
+          ++i;
+          return std::string_view(argv[i]);
+        };
+
+        if (a == "--list-models" || a == "--models") {
+          listModels = true;
+          continue;
+        }
+        if (auto v = needValue("--model")) {
+          modelId = std::string(*v);
+          continue;
+        }
+        if (auto v = needValue("--mode")) {
+          const std::string m = ToLower(std::string(*v));
+          if (m == "blur") effectId = std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur);
+          else if (m == "remove") effectId = std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove);
+          else if (m == "replace") effectId = std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace);
+          else {
+            std::cerr << "ERROR: --mode must be blur|remove|replace\n";
+            return 2;
+          }
+          continue;
+        }
+        if (auto v = needValue("--engine")) {
+          const std::string vv = ToLower(std::string(*v));
+          if (vv == "cpu") {
+            std::cerr << "WARNING: backend 'cpu' is not supported; use engine=auto|maxine|open_cuda\n";
+            std::cerr << "ERROR: engine must be auto|maxine|open_cuda\n";
+            return 2;
+          }
+          studiocast::video::effects::EffectsEnginePreference ep{};
+          if (!studiocast::video::effects::ParseEffectsEnginePreference(vv, &ep)) {
+            std::cerr << "ERROR: engine must be auto|maxine|open_cuda\n";
+            return 2;
+          }
+          engine = studiocast::video::effects::ToString(ep);
+          continue;
+        }
+        if (a == "--help" || a == "-h") {
+          Usage(argv[0]);
+          return 0;
+        }
+
+        std::cerr << "ERROR: unknown flag for 'video vb': " << a << "\n";
+        return 2;
+      }
+
+      if (listModels) {
+        return PrintOpenCudaModelsFromDaemon() ? 0 : 1;
+      }
+
+      if (!modelId || modelId->empty()) {
+        std::cerr << "ERROR: video vb requires --model <id> (or --list-models)\n";
+        return 2;
+      }
+
+      const std::string patch = BuildEnablePatchJson(effectId,
+                                                     /*enabled=*/true,
+                                                     engine,
+                                                     modelId,
+                                                     /*strength=*/std::nullopt,
+                                                     /*intensity=*/std::nullopt,
+                                                     /*smoothing=*/std::nullopt,
+                                                     /*headroom=*/std::nullopt,
+                                                     /*lookAway=*/std::nullopt,
+                                                     /*removeColor=*/std::nullopt,
+                                                     /*replacePath=*/std::nullopt,
+                                                     /*greenscreenMode=*/std::nullopt,
+                                                     /*greenscreenTemporal=*/std::nullopt,
+                                                     /*temperaturePreset=*/std::nullopt,
+                                                     /*directionPanDegrees=*/std::nullopt,
+                                                     /*hdriPath=*/std::nullopt,
+                                                     /*centerOnTrackedFace=*/std::nullopt);
+      const std::string req = std::string("SET_VIDEO_EFFECTS_JSON ") + patch;
       return CallOrDie(req) ? 0 : 1;
     }
     if (sub == "effects") {
