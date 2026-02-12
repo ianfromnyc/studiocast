@@ -41,7 +41,126 @@ function(studiocast_configure_onnxruntime out_found out_target)
     endif()
   endif()
 
-  # 3) Last resort: user-provided root path.
+  
+
+  # 3) Dev convenience: try to locate ONNX Runtime from an installed Python package
+  # (onnxruntime / onnxruntime-gpu). This is useful when a developer installed ORT via pip
+  # but hasn't installed the standalone C/C++ SDK.
+  #
+  # Note: This is best-effort and only used as a fallback. For system installs / packaging,
+  # prefer a proper CMake package, pkg-config, or ONNXRUNTIME_ROOT.
+  if (NOT _found)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if (Python3_Interpreter_FOUND)
+      set(_studiocast_ort_py_probe [==[
+import json
+import pathlib
+import sys
+
+try:
+    import onnxruntime  # noqa: F401
+except Exception:
+    sys.exit(2)
+
+root = pathlib.Path(onnxruntime.__file__).resolve().parent
+
+# Find headers (need onnxruntime_cxx_api.h).
+inc = None
+for p in [
+    root / "capi" / "include",
+    root / "capi" / "include" / "onnxruntime",
+    root / "include",
+    root / "include" / "onnxruntime",
+    root / "capi",
+]:
+    if (p / "onnxruntime_cxx_api.h").exists():
+        inc = p
+        break
+
+if inc is None:
+    for hdr in root.rglob("onnxruntime_cxx_api.h"):
+        inc = hdr.parent
+        break
+
+# Find libonnxruntime.
+lib = None
+for d in [
+    root / "capi",
+    root / "capi" / "lib",
+    root / "lib",
+    root,
+]:
+    if not d.exists():
+        continue
+
+    p = d / "libonnxruntime.so"
+    if p.exists():
+        lib = p
+        break
+
+    # Fall back to a versioned .so if the unversioned symlink isn't present.
+    candidates = sorted(d.glob("libonnxruntime.so.*"))
+    if candidates:
+        lib = candidates[-1]
+        break
+
+if not inc or not lib:
+    sys.exit(3)
+
+payload = {
+    "root": str(root),
+    "include": str(inc),
+    "lib": str(lib),
+    "libdir": str(lib.parent),
+}
+print(json.dumps(payload))
+]==])
+
+      execute_process(
+        COMMAND "${Python3_EXECUTABLE}" "-c" "${_studiocast_ort_py_probe}"
+        RESULT_VARIABLE _studiocast_ort_py_rc
+        OUTPUT_VARIABLE _studiocast_ort_py_out
+        ERROR_VARIABLE _studiocast_ort_py_err
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+
+      if (_studiocast_ort_py_rc EQUAL 0)
+        # Parse JSON payload.
+        set(_studiocast_ort_py_json "${_studiocast_ort_py_out}")
+        string(JSON _studiocast_ort_py_inc GET "${_studiocast_ort_py_json}" include)
+        string(JSON _studiocast_ort_py_lib GET "${_studiocast_ort_py_json}" lib)
+        string(JSON _studiocast_ort_py_libdir GET "${_studiocast_ort_py_json}" libdir)
+
+        if (EXISTS "${_studiocast_ort_py_inc}/onnxruntime_cxx_api.h" AND EXISTS "${_studiocast_ort_py_lib}")
+          if (NOT TARGET studiocast_onnxruntime)
+            add_library(studiocast_onnxruntime UNKNOWN IMPORTED)
+            set_target_properties(studiocast_onnxruntime PROPERTIES
+              IMPORTED_LOCATION "${_studiocast_ort_py_lib}"
+              INTERFACE_INCLUDE_DIRECTORIES "${_studiocast_ort_py_inc}"
+            )
+
+            # Ensure consumers can run without needing LD_LIBRARY_PATH when ORT lives in
+            # a non-system directory (e.g., ~/.local from pip). Many ORT builds ship
+            # provider .so's next to libonnxruntime.
+            if (UNIX AND NOT APPLE)
+              set_property(TARGET studiocast_onnxruntime PROPERTY
+                INTERFACE_LINK_OPTIONS "-Wl,-rpath,${_studiocast_ort_py_libdir}"
+              )
+            endif()
+          endif()
+          if (NOT TARGET studiocast::onnxruntime)
+            add_library(studiocast::onnxruntime ALIAS studiocast_onnxruntime)
+          endif()
+
+          set(_found TRUE)
+          set(_target studiocast::onnxruntime)
+          message(STATUS "ONNX Runtime found via Python package (${Python3_EXECUTABLE}): ${_studiocast_ort_py_lib}")
+        endif()
+      endif()
+    endif()
+  endif()
+
+  # 4) Last resort: user-provided root path.
   if (NOT _found AND DEFINED ONNXRUNTIME_ROOT)
     find_path(ONNXRUNTIME_INCLUDE_DIR
       NAMES onnxruntime_cxx_api.h
