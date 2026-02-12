@@ -226,6 +226,7 @@ CameraPipelineStatus CameraPipeline::Status() const {
     s.fps_actual = fps_actual_;
     s.perf_sample_frames = perf_sample_frames_;
     s.debug = debug_;
+    s.open_cuda_transfers = open_cuda_transfers_;
   } else {
     // Avoid exposing stale negotiated formats when the pipeline is idle.
     s.capture = CaptureFormat{};
@@ -237,6 +238,7 @@ CameraPipelineStatus CameraPipeline::Status() const {
     s.fps_actual = 0.0;
     s.perf_sample_frames = 0;
     s.debug = CameraPipelineStatus::Debug{};
+    s.open_cuda_transfers = CameraPipelineStatus::OpenCudaTransfers{};
   }
   s.frame_index = frame_index_;
   s.effects_backends = effects_backends_;
@@ -297,6 +299,7 @@ bool CameraPipeline::Start(const CameraPipelineConfig& cfg, std::string* error) 
   fps_actual_ = 0.0;
   perf_sample_frames_ = 0;
   debug_ = CameraPipelineStatus::Debug{};
+  open_cuda_transfers_ = CameraPipelineStatus::OpenCudaTransfers{};
 
   effects_backends_.clear();
   effects_note_.clear();
@@ -3762,7 +3765,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   bool have_last_frame_end = false;
   int perf_frames = 0;
 
-  const bool debug_open_cuda_transfers = (std::getenv("STUDIOCAST_DEBUG_OPEN_CUDA_TRANSFERS") != nullptr);
+  const bool debug_open_cuda_transfers = (std::getenv("STUDIOCAST_DEBUG_OPEN_CUDA_TRANSFERS") != nullptr) ||
+                                         (std::getenv("STUDIOCAST_DEBUG_CUDA_UPLOADS") != nullptr);
   std::uint64_t open_cuda_active_frames = 0;
   std::uint64_t pipeline_open_cuda_upload_calls = 0;
   std::uint64_t pipeline_open_cuda_download_calls = 0;
@@ -4981,6 +4985,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       debug_.latency_ms = ema_latency.ValueOrZero();
       debug_.capture_sequence = last_capture_sequence;
       debug_.dropped_capture_frames = dropped_capture_frames_total;
+
+      open_cuda_transfers_.active_frames = open_cuda_active_frames;
+      open_cuda_transfers_.upload_calls = pipeline_open_cuda_upload_calls;
+      open_cuda_transfers_.download_calls = pipeline_open_cuda_download_calls;
     }
   }
 

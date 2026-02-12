@@ -359,6 +359,19 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "},";
     oss << "\"perf_sample_frames\":" << st.pipeline.perf_sample_frames;
 
+    const bool debug_open_cuda_transfers = (std::getenv("STUDIOCAST_DEBUG_OPEN_CUDA_TRANSFERS") != nullptr) ||
+                                          (std::getenv("STUDIOCAST_DEBUG_CUDA_UPLOADS") != nullptr);
+
+    // Open CUDA transfer counters are a focused debug surface that can be enabled
+    // without turning on the broader STUDIOCAST_DEBUG_VIDEO_STATS payload.
+    if (debug_open_cuda_transfers) {
+        oss << ",\"open_cuda_transfers\":{";
+        oss << "\"active_frames\":" << st.pipeline.open_cuda_transfers.active_frames << ",";
+        oss << "\"upload_calls\":" << st.pipeline.open_cuda_transfers.upload_calls << ",";
+        oss << "\"download_calls\":" << st.pipeline.open_cuda_transfers.download_calls;
+        oss << "}";
+    }
+
     // Optional debug stats. Kept out of the default schema unless explicitly enabled.
     if (std::getenv("STUDIOCAST_DEBUG_VIDEO_STATS")) {
         oss << ",\"debug\":{";
