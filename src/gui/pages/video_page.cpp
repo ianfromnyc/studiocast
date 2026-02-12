@@ -1741,7 +1741,18 @@ void VideoPage::UpdateUiEnabled() {
       } else {
         diag = root.value("engines").toObject();
       }
-      diagnosticsText_->setPlainText(QString::fromUtf8(QJsonDocument(diag).toJson(QJsonDocument::Indented)));
+
+      QString note;
+      if (enginePref == studiocast::video::effects::EffectsEnginePreference::open_cuda && !st.open_cuda_missing_models.isEmpty()) {
+        note = QStringLiteral("NOTE: Some Open CUDA model packs are missing/invalid.\n");
+        for (auto it = st.open_cuda_missing_models.begin(); it != st.open_cuda_missing_models.end(); ++it) {
+          note += QStringLiteral("• ") + it.key() + QStringLiteral(": ") + it.value() + QChar('\n');
+        }
+        note = note.trimmed();
+        note += QStringLiteral("\n\n");
+      }
+
+      diagnosticsText_->setPlainText(note + QString::fromUtf8(QJsonDocument(diag).toJson(QJsonDocument::Indented)));
     } else {
       diagnosticsText_->setPlainText("(failed to parse status JSON)\n" + perr);
     }
@@ -1956,8 +1967,21 @@ void VideoPage::UpdateUiEnabled() {
 
       // Keep selection in sync with the canonical local model.
       const QString selectedId = QString::fromStdString(effects_.virtual_background.model_id);
-      const int idx = vbModelCombo_->findData(selectedId);
       vbModelCombo_->blockSignals(true);
+
+      // If config references a model that isn't installed, show it explicitly instead of silently
+      // falling back to Default.
+      if (vbModelCombo_->count() > 0 && vbModelCombo_->itemText(0).startsWith(QStringLiteral("Missing: "))) {
+        vbModelCombo_->removeItem(0);
+      }
+
+      int idx = vbModelCombo_->findData(selectedId);
+      if (!selectedId.isEmpty() && idx < 0) {
+        const QString missingLabel = QStringLiteral("Missing: %1 (select a valid model)").arg(selectedId);
+        vbModelCombo_->insertItem(0, missingLabel, selectedId);
+        idx = 0;
+      }
+
       vbModelCombo_->setCurrentIndex(idx >= 0 ? idx : 0);
       vbModelCombo_->blockSignals(false);
     }
