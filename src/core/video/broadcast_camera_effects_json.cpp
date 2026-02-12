@@ -206,6 +206,10 @@ bool ApplyVirtualBackgroundEffectPatch(VirtualBackgroundMode mode,
         }
     }
 
+    std::string mid;
+    if (!TryGetString(patch, std::string(effects::contract::param::kModelId), &found, &mid, error)) return false;
+    if (found) fx->virtual_background.model_id = mid;
+
     int strength = 0;
     if (!TryGetInt(patch, std::string(effects::contract::param::kStrength), &found, &strength, error)) return false;
     if (found) {
@@ -280,6 +284,7 @@ std::string BroadcastCameraEffectsContractToJson(const studiocast::video::effect
     using studiocast::video::effects::contract::param::kHeadroom;
     using studiocast::video::effects::contract::param::kIntensity;
     using studiocast::video::effects::contract::param::kLookAwayEnabled;
+    using studiocast::video::effects::contract::param::kModelId;
     using studiocast::video::effects::contract::param::kSmoothing;
     using studiocast::video::effects::contract::param::kStrength;
     using studiocast::video::effects::contract::param::kTemperaturePreset;
@@ -303,12 +308,14 @@ std::string BroadcastCameraEffectsContractToJson(const studiocast::video::effect
     // Virtual background modes
     oss << "\"" << kEffectIdVirtualBackgroundBlur << "\":{";
     oss << "\"" << kEnabled << "\":" << (vbBlur ? "true" : "false") << ',';
+    oss << "\"" << kModelId << "\":\"" << studiocast::util::json::EscapeString(effects.virtual_background.model_id) << "\",";
     oss << "\"" << kStrength << "\":" << effects.virtual_background.strength;
     oss << "},";
 
     oss << "\"" << kEffectIdVirtualBackgroundRemove << "\":{";
     oss << "\"" << kEnabled << "\":" << (vbRemove ? "true" : "false") << ',';
     oss << "\"" << kStrength << "\":" << effects.virtual_background.strength << ',';
+    oss << "\"" << kModelId << "\":\"" << studiocast::util::json::EscapeString(effects.virtual_background.model_id) << "\",";
     oss << "\"" << kVbRemoveColor << "\":\"" << studiocast::util::json::EscapeString(effects.virtual_background.remove_color) << "\",";
     oss << "\"" << kGreenscreenMode << "\":" << effects.virtual_background.greenscreen_mode << ',';
     oss << "\"" << kGreenscreenTemporal << "\":" << (effects.virtual_background.greenscreen_temporal ? "true" : "false");
@@ -317,6 +324,7 @@ std::string BroadcastCameraEffectsContractToJson(const studiocast::video::effect
     oss << "\"" << kEffectIdVirtualBackgroundReplace << "\":{";
     oss << "\"" << kEnabled << "\":" << (vbReplace ? "true" : "false") << ',';
     oss << "\"" << kStrength << "\":" << effects.virtual_background.strength << ',';
+    oss << "\"" << kModelId << "\":\"" << studiocast::util::json::EscapeString(effects.virtual_background.model_id) << "\",";
     oss << "\"" << kVbRemoveColor << "\":\"" << studiocast::util::json::EscapeString(effects.virtual_background.remove_color) << "\",";
     oss << "\"" << kVbReplacePath << "\":\"" << studiocast::util::json::EscapeString(effects.virtual_background.replace_path) << "\",";
     oss << "\"" << kGreenscreenMode << "\":" << effects.virtual_background.greenscreen_mode << ',';

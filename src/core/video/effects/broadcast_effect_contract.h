@@ -52,6 +52,9 @@ inline constexpr std::string_view kStrength = "strength";
 inline constexpr std::string_view kSmoothing = "smoothing";
 inline constexpr std::string_view kHeadroom = "headroom";  // float 0..1
 
+// Open CUDA model pack selection (where applicable).
+inline constexpr std::string_view kModelId = "model_id";
+
 // Virtual background.
 inline constexpr std::string_view kVbRemoveColor = "remove_color";  // "#RRGGBB"
 inline constexpr std::string_view kVbReplacePath = "replace_path";

@@ -2019,6 +2019,15 @@ namespace {
                 expectIntEq("effects patch blur_strength", fx.virtual_background.strength, 9);
             }
 
+            const std::string mid = "{\"virtual_background.blur\":{\"enabled\":true,\"model_id\":\"birefnet_lite\"}}";
+            jerr.clear();
+            if (!studiocast::video::ApplyBroadcastCameraEffectsPatchJsonText(mid, &fx, &jerr)) {
+                ++failures;
+                std::printf("[FAIL] ApplyBroadcastCameraEffectsPatchJsonText model_id: %s\n", jerr.c_str());
+            } else {
+                expectEq("effects patch model_id", fx.virtual_background.model_id, "birefnet_lite");
+            }
+
             const std::string eng = "{\"engine\":\"open_cuda\"}";
             jerr.clear();
             if (!studiocast::video::ApplyBroadcastCameraEffectsPatchJsonText(eng, &fx, &jerr)) {
@@ -2056,6 +2065,9 @@ namespace {
             expectEq("BroadcastCameraEffectsContractToJson roundtrip path",
                      fx2.virtual_background.replace_path,
                      fx.virtual_background.replace_path);
+            expectEq("BroadcastCameraEffectsContractToJson roundtrip model_id",
+                     fx2.virtual_background.model_id,
+                     fx.virtual_background.model_id);
         }
 
         // BroadcastCameraEffects canonical JSON round-trip + strict validation.
