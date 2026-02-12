@@ -1482,6 +1482,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     bool enabled = false;
     std::string last_error;
 
+    // The model pack currently active in the pipeline. This is used to hot-swap the
+    // Open CUDA session when the user changes fx.virtual_background.model_id.
+    std::string active_model_id;
+
     studiocast::maxine::CudaDriverApi cuda;
 
     // Persistent stream used for the entire Open CUDA virtual background pipeline.
@@ -1555,6 +1559,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       alpha_model_view = studiocast::cuda::CudaImage{};
       session.reset();
       pack.reset();
+      active_model_id.clear();
 
       cached_bg_src_path.clear();
       cached_bg_src_mtime = {};
@@ -1608,22 +1613,57 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
       }
 
-      // Resolve model pack once (deterministic default).
-      if (!pack.has_value()) {
-        const auto reg = studiocast::open_cuda::ModelPackRegistry::ScanDefault();
-        const std::string model_id = reg.DefaultModelId();
-        if (model_id.empty()) {
-          last_error = "Open CUDA: no usable model packs found (install under ~/.local/share/studiocast/models/open_cuda/<model_id>/).";
-          if (error) *error = last_error;
-          return false;
+      // Resolve model pack.
+      // Open CUDA models are selected per-effect, but remain an Open CUDA-only concern.
+      // If fx.virtual_background.model_id is empty, preserve the existing deterministic default.
+      const auto reg = studiocast::open_cuda::ModelPackRegistry::ScanDefault();
+      std::string requested_model_id = fx.virtual_background.model_id;
+      if (requested_model_id.empty()) {
+        requested_model_id = reg.DefaultModelId();
+      }
+
+      if (requested_model_id.empty()) {
+        last_error =
+            "Open CUDA: no usable model packs found (install under ~/.local/share/studiocast/models/open_cuda/<model_id>/).";
+        if (error) *error = last_error;
+        return false;
+      }
+
+      auto DescribeInstalledModelIds = [&reg]() -> std::string {
+        std::ostringstream oss;
+        const auto& models = reg.ListModels();
+        if (models.empty()) {
+          oss << "<none>";
+          return oss.str();
         }
-        const auto p = reg.ResolveModel(model_id);
+        bool first = true;
+        for (const auto& m : models) {
+          if (!first) oss << ", ";
+          first = false;
+          oss << m.id;
+        }
+        return oss.str();
+      };
+
+      if (requested_model_id != active_model_id) {
+        // Model changed: reset model-dependent state so ORT session and model-sized buffers
+        // are rebuilt cleanly.
+        session.reset();
+        pack.reset();
+        (void)alpha_tensor.Free(&cuda, nullptr);
+        alpha_model_view = studiocast::cuda::CudaImage{};
+      }
+
+      if (!pack.has_value()) {
+        const auto p = reg.ResolveModel(requested_model_id);
         if (!p.has_value()) {
-          last_error = "Open CUDA: failed to resolve model pack '" + model_id + "'.";
+          last_error = "Open CUDA: selected model_id '" + requested_model_id + "' not found. Installed: " +
+                       DescribeInstalledModelIds();
           if (error) *error = last_error;
           return false;
         }
         pack = *p;
+        active_model_id = requested_model_id;
       }
 
       if (!session) {
