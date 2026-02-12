@@ -33,6 +33,22 @@ void AppendJsonStringMap(std::ostringstream* oss, const std::map<std::string, st
   *oss << "}";
 }
 
+void AppendJsonModels(std::ostringstream* oss, const std::vector<OpenCudaDiagnostics::ModelInfo>& models) {
+  *oss << "[";
+  for (std::size_t i = 0; i < models.size(); ++i) {
+    if (i) *oss << ",";
+    const auto& m = models[i];
+    *oss << "{";
+    *oss << "\"id\":\"" << JsonEscape(m.id) << "\",";
+    *oss << "\"display_name\":\"" << JsonEscape(m.display_name) << "\",";
+    *oss << "\"task\":\"" << JsonEscape(m.task) << "\",";
+    *oss << "\"width\":" << m.width << ",";
+    *oss << "\"height\":" << m.height;
+    *oss << "}";
+  }
+  *oss << "]";
+}
+
 }  // namespace
 
 std::string OpenCudaDiagnostics::ToJson() const {
@@ -43,6 +59,12 @@ std::string OpenCudaDiagnostics::ToJson() const {
 
   oss << "\"installed_models\":";
   AppendJsonStringArray(&oss, installed_models);
+  oss << ",";
+
+  oss << "\"default_model_id\":\"" << JsonEscape(default_model_id) << "\",";
+
+  oss << "\"models\":";
+  AppendJsonModels(&oss, models);
   oss << ",";
 
   oss << "\"missing_models\":";

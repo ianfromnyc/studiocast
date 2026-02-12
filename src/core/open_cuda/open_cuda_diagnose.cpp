@@ -11,7 +11,17 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
   OpenCudaDiagnostics od;
 
   const auto reg = ModelPackRegistry::ScanDefault();
-  for (const auto& m : reg.ListModels()) od.installed_models.push_back(m.id);
+  od.default_model_id = reg.DefaultModelId();
+  for (const auto& m : reg.ListModels()) {
+    od.installed_models.push_back(m.id);
+    OpenCudaDiagnostics::ModelInfo mi;
+    mi.id = m.id;
+    mi.display_name = m.display_name;
+    mi.task = m.task;
+    mi.width = m.input.width;
+    mi.height = m.input.height;
+    od.models.push_back(std::move(mi));
+  }
   od.missing_models = reg.Problems();
 
   const auto modelsRoot = studiocast::util::StudioCastModelsDir();

@@ -392,6 +392,36 @@ namespace {
                     expectContains("OpenCudaModelRegistry.Problems(invalid_json).reason", it->second, "model.json");
                 }
             }
+
+            // Open CUDA diagnostics JSON includes model metadata for GUI dropdowns.
+            {
+                studiocast::open_cuda::OpenCudaDiagnostics od;
+                od.ok = true;
+                od.default_model_id = reg.DefaultModelId();
+                for (const auto& m : reg.ListModels()) {
+                    od.installed_models.push_back(m.id);
+                    studiocast::open_cuda::OpenCudaDiagnostics::ModelInfo mi;
+                    mi.id = m.id;
+                    mi.display_name = m.display_name;
+                    mi.task = m.task;
+                    mi.width = m.input.width;
+                    mi.height = m.input.height;
+                    od.models.push_back(std::move(mi));
+                }
+                od.missing_models = reg.Problems();
+
+                const std::string j = od.ToJson();
+                expectContains("OpenCudaDiagnosticsJson.default_model_id", j, "\"default_model_id\":\"mock_model\"");
+                expectContains("OpenCudaDiagnosticsJson.models", j, "\"models\":[");
+                expectContains("OpenCudaDiagnosticsJson.models.id", j, "\"id\":\"mock_model\"");
+                expectContains("OpenCudaDiagnosticsJson.models.display_name", j,
+                               "\"display_name\":\"Mock Matting Model\"");
+                expectContains("OpenCudaDiagnosticsJson.models.task", j, "\"task\":\"matting\"");
+                expectContains("OpenCudaDiagnosticsJson.models.width", j, "\"width\":256");
+                expectContains("OpenCudaDiagnosticsJson.models.height", j, "\"height\":256");
+                // Backward compatibility field.
+                expectContains("OpenCudaDiagnosticsJson.installed_models", j, "\"installed_models\":[");
+            }
         }
 
         // Image loader: PNG support for virtual background replace images.

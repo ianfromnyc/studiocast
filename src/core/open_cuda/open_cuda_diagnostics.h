@@ -12,6 +12,19 @@ struct OpenCudaDiagnostics {
   // Model pack IDs discovered/usable by this engine.
   std::vector<std::string> installed_models;
 
+  // Rich model pack metadata for UI (Open CUDA only).
+  struct ModelInfo {
+    std::string id;
+    std::string display_name;
+    std::string task;
+    int width = 0;
+    int height = 0;
+  };
+  std::vector<ModelInfo> models;
+
+  // Deterministic default model id computed by the daemon.
+  std::string default_model_id;
+
   // model_id -> reason string (stable-ish; human-readable for now).
   std::map<std::string, std::string> missing_models;
 

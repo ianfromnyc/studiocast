@@ -37,6 +37,7 @@
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
+#include <vector>
 
 #include "core/maxine/reason_codes.h"
 #include "core/video/broadcast_camera_effects_json.h"
@@ -202,6 +203,17 @@ struct DaemonVideoStatus {
   // Open CUDA runtime diagnostics (from daemon GET_STATUS)
   bool open_cuda_present = false;
   bool open_cuda_ok = false;
+  QString open_cuda_default_model_id;
+
+  struct OpenCudaModelInfo {
+    QString id;
+    QString display_name;
+    QString task;
+    int width = 0;
+    int height = 0;
+  };
+  std::vector<OpenCudaModelInfo> open_cuda_models;
+
   QStringList open_cuda_installed_models;
   QMap<QString, QString> open_cuda_missing_models;
   QStringList open_cuda_available_effects;
@@ -364,6 +376,8 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
   // Open CUDA diagnostics payload.
   out->open_cuda_present = false;
   out->open_cuda_ok = false;
+  out->open_cuda_default_model_id.clear();
+  out->open_cuda_models.clear();
   out->open_cuda_installed_models.clear();
   out->open_cuda_missing_models.clear();
   out->open_cuda_available_effects.clear();
@@ -379,10 +393,43 @@ bool ParseDaemonStatusJson(const std::string& json, DaemonVideoStatus* out, QStr
     out->open_cuda_present = true;
     out->open_cuda_ok = openCuda.value("ok").toBool(false);
 
+    out->open_cuda_default_model_id = openCuda.value("default_model_id").toString();
+
+    const auto models = openCuda.value("models").toArray();
+    for (const auto& v : models) {
+      const QJsonObject o = v.toObject();
+      const QString id = o.value("id").toString();
+      if (id.isEmpty()) continue;
+      DaemonVideoStatus::OpenCudaModelInfo mi;
+      mi.id = id;
+      mi.display_name = o.value("display_name").toString(id);
+      mi.task = o.value("task").toString();
+      mi.width = o.value("width").toInt(0);
+      mi.height = o.value("height").toInt(0);
+      out->open_cuda_models.push_back(mi);
+    }
+
     const auto installed = openCuda.value("installed_models").toArray();
     for (const auto& v : installed) {
       const QString s = v.toString();
       if (!s.isEmpty()) out->open_cuda_installed_models.push_back(s);
+    }
+
+    if (out->open_cuda_installed_models.isEmpty() && !out->open_cuda_models.empty()) {
+      for (const auto& m : out->open_cuda_models) {
+        if (!m.id.isEmpty()) out->open_cuda_installed_models.push_back(m.id);
+      }
+    }
+
+    // Backward compatibility: older daemons only provide installed model IDs.
+    if (out->open_cuda_models.empty() && !out->open_cuda_installed_models.isEmpty()) {
+      out->open_cuda_models.reserve(static_cast<std::size_t>(out->open_cuda_installed_models.size()));
+      for (const auto& id : out->open_cuda_installed_models) {
+        DaemonVideoStatus::OpenCudaModelInfo mi;
+        mi.id = id;
+        mi.display_name = id;
+        out->open_cuda_models.push_back(mi);
+      }
     }
 
     const QJsonObject missing = openCuda.value("missing_models").toObject();
