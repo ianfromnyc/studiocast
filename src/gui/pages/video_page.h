@@ -38,6 +38,7 @@ namespace studiocast::gui {
         void OnEnginePreferenceChanged(int index);
         void OnMirrorToggled(bool checked);
         void OnBackgroundChanged(int index);
+        void OnVbModelChanged(int index);
         void OnBackgroundStrengthChanged(int value);
         void OnBackgroundRemoveColorChanged();
         void OnBackgroundReplaceImageChanged();
@@ -96,6 +97,9 @@ namespace studiocast::gui {
         QComboBox* backgroundCombo_ = nullptr;
         QSpinBox* backgroundStrengthSpin_ = nullptr;
 
+        QLabel* vbModelLabel_ = nullptr;
+        QComboBox* vbModelCombo_ = nullptr;
+
         QLineEdit* backgroundRemoveColorEdit_ = nullptr;   // #RRGGBB
         QLineEdit* backgroundReplaceImageEdit_ = nullptr;  // path (PPM/P6 for now)
         QPushButton* browseReplaceImageBtn_ = nullptr;
@@ -149,6 +153,9 @@ namespace studiocast::gui {
 
         QString suggestedCmd_;
         std::string baseStatusText_;
+
+        // Cached signature to avoid repopulating the VB model combo on every poll.
+        QString vbModelItemsSig_;
 
         bool daemonReachable_ = false;
         std::string daemonLastStatusJson_;

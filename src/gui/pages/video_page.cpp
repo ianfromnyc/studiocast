@@ -611,6 +611,17 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   vbRow->addWidget(backgroundStrengthSpin_);
   vbLayout->addLayout(vbRow);
 
+  auto* vbModelRow = new QHBoxLayout();
+  vbModelLabel_ = new QLabel("Model:", vbBox);
+  vbModelCombo_ = new QComboBox(vbBox);
+  vbModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  vbModelRow->addWidget(vbModelLabel_);
+  vbModelRow->addWidget(vbModelCombo_, 1);
+  vbLayout->addLayout(vbModelRow);
+
+  vbModelLabel_->setVisible(false);
+  vbModelCombo_->setVisible(false);
+
   auto* vbParamRow = new QHBoxLayout();
   vbParamRow->addWidget(new QLabel("Remove color (#RRGGBB):", vbBox));
   backgroundRemoveColorEdit_ = new QLineEdit(vbBox);
@@ -799,6 +810,8 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   connect(mirrorCheck_, &QCheckBox::toggled, this, &VideoPage::OnMirrorToggled);
   connect(backgroundCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
           this, &VideoPage::OnBackgroundChanged);
+  connect(vbModelCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, &VideoPage::OnVbModelChanged);
   connect(backgroundStrengthSpin_, QOverload<int>::of(&QSpinBox::valueChanged),
           this, &VideoPage::OnBackgroundStrengthChanged);
 
@@ -1215,6 +1228,9 @@ bool VideoPage::SendDaemonVideoEffects() {
     (void)studiocast::video::effects::ParseVirtualBackgroundMode(bg.toStdString(), &m);
     effects_.virtual_background.mode = m;
   }
+  if (vbModelCombo_ && vbModelCombo_->count() > 0) {
+    effects_.virtual_background.model_id = vbModelCombo_->currentData().toString().toStdString();
+  }
   if (backgroundStrengthSpin_) effects_.virtual_background.strength = backgroundStrengthSpin_->value();
   if (backgroundRemoveColorEdit_) effects_.virtual_background.remove_color = backgroundRemoveColorEdit_->text().trimmed().toStdString();
   if (backgroundReplaceImageEdit_) effects_.virtual_background.replace_path = backgroundReplaceImageEdit_->text().trimmed().toStdString();
@@ -1283,6 +1299,13 @@ void VideoPage::OnBackgroundChanged(int /*index*/) {
   if (backgroundRemoveColorEdit_) backgroundRemoveColorEdit_->setEnabled(bg == "remove");
   if (backgroundReplaceImageEdit_) backgroundReplaceImageEdit_->setEnabled(bg == "replace");
   if (browseReplaceImageBtn_) browseReplaceImageBtn_->setEnabled(bg == "replace");
+  UpdateUiEnabled();
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnVbModelChanged(int /*index*/) {
+  if (!vbModelCombo_ || vbModelCombo_->count() <= 0) return;
+  effects_.virtual_background.model_id = vbModelCombo_->currentData().toString().toStdString();
   (void)SendDaemonVideoEffects();
 }
 
@@ -1889,6 +1912,80 @@ void VideoPage::UpdateUiEnabled() {
     const bool on = vbMode == "replace" && vbReplaceAvail;
     backgroundReplaceImageEdit_->setEnabled(on);
     if (browseReplaceImageBtn_) browseReplaceImageBtn_->setEnabled(on);
+  }
+
+  // Virtual Background model selection (Open CUDA-only).
+  if (vbModelLabel_ && vbModelCombo_) {
+    // Populate model list from daemon status (best-effort).
+    if (daemonReachable_ && st.open_cuda_present) {
+      bool hasTaskMeta = false;
+      for (const auto& m : st.open_cuda_models) {
+        if (!m.task.isEmpty()) {
+          hasTaskMeta = true;
+          break;
+        }
+      }
+
+      QString sig;
+      sig += QStringLiteral("matting|");
+      sig += st.open_cuda_default_model_id;
+      sig += QChar('|');
+
+      for (const auto& m : st.open_cuda_models) {
+        if (hasTaskMeta && m.task != QStringLiteral("matting")) continue;
+        sig += m.id + QChar('\n');
+        sig += m.display_name + QChar('\n');
+        sig += m.task + QChar('\n');
+      }
+
+      if (sig != vbModelItemsSig_) {
+        vbModelCombo_->blockSignals(true);
+        vbModelCombo_->clear();
+        vbModelCombo_->addItem(QStringLiteral("Default (auto)"), QString());
+
+        for (const auto& m : st.open_cuda_models) {
+          if (m.id.isEmpty()) continue;
+          if (hasTaskMeta && m.task != QStringLiteral("matting")) continue;
+          const QString label = m.display_name.isEmpty() ? m.id : (m.display_name + QStringLiteral("  [") + m.id + QChar(']'));
+          vbModelCombo_->addItem(label, m.id);
+        }
+
+        vbModelItemsSig_ = sig;
+        vbModelCombo_->blockSignals(false);
+      }
+
+      // Keep selection in sync with the canonical local model.
+      const QString selectedId = QString::fromStdString(effects_.virtual_background.model_id);
+      const int idx = vbModelCombo_->findData(selectedId);
+      vbModelCombo_->blockSignals(true);
+      vbModelCombo_->setCurrentIndex(idx >= 0 ? idx : 0);
+      vbModelCombo_->blockSignals(false);
+    }
+
+    // Show only when VB is active and the daemon reports Open CUDA as the actual backend.
+    QMap<QString, QString> backendById;
+    if (!st.effects_backends.isEmpty()) {
+      const auto parts = st.effects_backends.split(',', Qt::SkipEmptyParts);
+      for (const auto& raw : parts) {
+        const QString p = raw.trimmed();
+        const qsizetype colon = p.indexOf(QChar(':'));
+        if (colon <= 0) continue;
+        const QString id = p.left(colon).trimmed();
+        const QString backend = p.mid(colon + 1).trimmed();
+        if (!id.isEmpty() && !backend.isEmpty()) backendById.insert(id, backend);
+      }
+    }
+
+    QString vbEffectId;
+    if (vbMode == QStringLiteral("blur")) vbEffectId = QStringLiteral("virtual_background.blur");
+    else if (vbMode == QStringLiteral("remove")) vbEffectId = QStringLiteral("virtual_background.remove");
+    else if (vbMode == QStringLiteral("replace")) vbEffectId = QStringLiteral("virtual_background.replace");
+
+    const QString vbBackend = backendById.value(vbEffectId);
+    const bool showModelRow = daemonReachable_ && (st.pipeline_running || st.pipeline_starting) && vbOn &&
+                              vbBackend.compare(QStringLiteral("open_cuda"), Qt::CaseInsensitive) == 0;
+    vbModelLabel_->setVisible(showModelRow);
+    vbModelCombo_->setVisible(showModelRow);
   }
 
   // Auto Frame
