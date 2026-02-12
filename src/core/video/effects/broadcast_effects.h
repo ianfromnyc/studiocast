@@ -31,6 +31,10 @@ bool ParseVirtualBackgroundMode(const std::string& s, VirtualBackgroundMode* out
 struct VirtualBackgroundSettings {
     VirtualBackgroundMode mode = VirtualBackgroundMode::none;
 
+    // Open CUDA model pack selection for matting.
+    // Empty = deterministic default (ModelPackRegistry::DefaultModelId()).
+    std::string model_id;
+
     // Used by blur (and future AI effects) as an intensity knob.
     // Interpreted as a blur radius for the current CPU placeholder.
     int strength = 8;
@@ -50,7 +54,7 @@ struct VirtualBackgroundSettings {
 };
 
 inline bool operator==(const VirtualBackgroundSettings& a, const VirtualBackgroundSettings& b) {
-    return a.mode == b.mode && a.strength == b.strength && a.replace_path == b.replace_path &&
+    return a.mode == b.mode && a.model_id == b.model_id && a.strength == b.strength && a.replace_path == b.replace_path &&
            a.remove_color == b.remove_color &&
            a.greenscreen_mode == b.greenscreen_mode &&
            a.greenscreen_temporal == b.greenscreen_temporal;

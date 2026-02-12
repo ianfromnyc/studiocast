@@ -204,6 +204,7 @@ std::string BroadcastCameraEffectsToJson(const BroadcastCameraEffects& effects) 
     // Virtual background.
     oss << "\"virtual_background\":{";
     oss << "\"mode\":\"" << studiocast::util::json::EscapeString(ToString(effects.virtual_background.mode)) << "\",";
+    oss << "\"model_id\":\"" << studiocast::util::json::EscapeString(effects.virtual_background.model_id) << "\",";
     oss << "\"strength\":" << effects.virtual_background.strength << ",";
     oss << "\"replace_path\":\"" << studiocast::util::json::EscapeString(effects.virtual_background.replace_path) << "\",";
     oss << "\"remove_color\":\"" << studiocast::util::json::EscapeString(effects.virtual_background.remove_color) << "\",";
@@ -326,6 +327,7 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
     if (const auto* vb = GetObj(*obj, "", "virtual_background", error)) {
         if (!CheckUnknownKeys(*vb,
                               {"mode",
+                               "model_id",
                                "strength",
                                "replace_path",
                                "remove_color",
@@ -348,6 +350,10 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
             }
             out->virtual_background.mode = m;
         }
+
+        std::string modelId;
+        if (!TryGetString(*vb, "virtual_background", "model_id", &found, &modelId, error)) return false;
+        if (found) out->virtual_background.model_id = modelId;
 
         int strength = out->virtual_background.strength;
         if (!TryGetInt(*vb, "virtual_background", "strength", &found, &strength, error)) return false;

@@ -2037,6 +2037,7 @@ namespace {
             fx.mirror = true;
             fx.engine = EffectsEnginePreference::open_cuda;
             fx.virtual_background.mode = VirtualBackgroundMode::replace;
+            fx.virtual_background.model_id = "birefnet_lite";
             fx.virtual_background.strength = 9;
             fx.virtual_background.replace_path = "/tmp/bg.ppm";
             fx.auto_frame.enabled = false;
@@ -2065,6 +2066,34 @@ namespace {
             } else {
                 expectTrue("BroadcastCameraEffects roundtrip equals", out == fx);
                 expectTrue("BroadcastCameraEffects roundtrip no warnings", warnings.empty());
+            }
+
+            // model_id is optional (parser must accept JSON with or without it).
+            {
+                const std::string withModelId =
+                    "{\"schema_version\":1,\"virtual_background\":{\"mode\":\"none\",\"model_id\":\"modnet-webnn-256-fp32\"}}";
+                BroadcastCameraEffects tmp;
+                warnings.clear();
+                err.clear();
+                opt.allow_unknown_keys = false;
+                if (!ParseBroadcastCameraEffectsJsonText(withModelId, &tmp, opt, &warnings, &err)) {
+                    ++failures;
+                    std::printf("[FAIL] BroadcastCameraEffects model_id should parse: %s\n", err.c_str());
+                } else {
+                    expectEq("BroadcastCameraEffects model_id parse", tmp.virtual_background.model_id, "modnet-webnn-256-fp32");
+                }
+
+                const std::string withoutModelId =
+                    "{\"schema_version\":1,\"virtual_background\":{\"mode\":\"none\"}}";
+                BroadcastCameraEffects tmp2;
+                warnings.clear();
+                err.clear();
+                if (!ParseBroadcastCameraEffectsJsonText(withoutModelId, &tmp2, opt, &warnings, &err)) {
+                    ++failures;
+                    std::printf("[FAIL] BroadcastCameraEffects missing model_id should parse: %s\n", err.c_str());
+                } else {
+                    expectEq("BroadcastCameraEffects missing model_id default", tmp2.virtual_background.model_id, "");
+                }
             }
 
             // Unknown key strict vs compat.
