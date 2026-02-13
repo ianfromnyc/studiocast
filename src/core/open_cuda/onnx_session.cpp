@@ -28,6 +28,38 @@ bool IsFinite3(const std::array<double, 3>& v) {
   return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
 }
 
+#if STUDIOCAST_HAVE_ONNXRUNTIME
+bool OrtErrorLooksLikeVramOom(const std::string& ort_msg) {
+  // Common failure strings seen from ORT CUDA EP when VRAM is exhausted or cuDNN can't
+  // find a viable algorithm/workspace due to memory pressure.
+  return ort_msg.find("CUDA failure 2") != std::string::npos ||
+         ort_msg.find("out of memory") != std::string::npos ||
+         ort_msg.find("cudaErrorMemoryAllocation") != std::string::npos ||
+         ort_msg.find("CUDNN_STATUS_ALLOC_FAILED") != std::string::npos ||
+         // Often appears after OOM / workspace allocation failures when cuDNN can't run the chosen kernel.
+         ort_msg.find("CUDNN_STATUS_NOT_SUPPORTED") != std::string::npos;
+}
+
+std::string HumanizeOrtError(const std::string& ort_msg, const std::filesystem::path& model_path) {
+  if (OrtErrorLooksLikeVramOom(ort_msg)) {
+    std::string out = "GPU is likely out of VRAM for this model";
+    if (!model_path.empty()) {
+      out += " (" + model_path.filename().string() + ")";
+    }
+    out +=
+        ". The model is probably too large for the available GPU memory. "
+        "Try a smaller model (e.g., modnet-webnn-256), lower input resolution, or close other GPU-heavy apps. "
+        "Underlying ONNX Runtime error: ";
+    out += ort_msg;
+    return out;
+  }
+
+  std::string out = "ONNX Runtime error: ";
+  out += ort_msg;
+  return out;
+}
+#endif
+
 }  // namespace
 
 struct OpenCudaMattingSession::Impl {
@@ -60,12 +92,18 @@ struct OpenCudaMattingSession::Impl {
   std::optional<Ort::MemoryInfo> cuda_mem_info;
   std::optional<Ort::Value> input_value;
 
+  // When the GPU runs out of memory, ORT can spam errors every frame.
+  // Latch the first failure so we can return a clear, human-friendly message
+  // and avoid hammering the CUDA EP repeatedly.
+  bool ort_latched_failure = false;
+  std::string ort_latched_error;
+
   bool CreateOrtSession(studiocast::maxine::CUstream stream, std::string* error_out) {
     if (error_out) error_out->clear();
 
     try {
       if (!env.has_value()) {
-        env.emplace(ORT_LOGGING_LEVEL_WARNING, "studiocast_open_cuda");
+        env.emplace(ORT_LOGGING_LEVEL_ERROR, "studiocast_open_cuda");
       }
 
       Ort::SessionOptions so;
@@ -221,7 +259,22 @@ struct OpenCudaMattingSession::Impl {
 
       return true;
     } catch (const Ort::Exception& e) {
-      if (error_out) *error_out = std::string("ONNX Runtime error: ") + e.what();
+      const std::string msg = e.what();
+      const std::string human = HumanizeOrtError(msg, pack.onnx_path);
+
+      // If this looks like VRAM exhaustion, latch so we don't retry every frame and spam logs.
+      if (OrtErrorLooksLikeVramOom(msg)) {
+        ort_latched_failure = true;
+        ort_latched_error = human;
+
+        // Best-effort cleanup to release GPU allocations held by this session.
+        binding.reset();
+        session.reset();
+        input_value.reset();
+        cuda_mem_info.reset();
+      }
+
+      if (error_out) *error_out = human;
       return false;
     } catch (const std::exception& e) {
       if (error_out) *error_out = std::string("OpenCudaMattingSession error: ") + e.what();
@@ -392,6 +445,11 @@ bool OpenCudaMattingSession::Run(studiocast::maxine::CUstream stream,
   return false;
 #else
   // Lazily create the ORT session so we can attempt stream interop.
+  if (impl_->ort_latched_failure) {
+    if (error_out) *error_out = impl_->ort_latched_error;
+    return false;
+  }
+
   if (!impl_->session) {
     std::string ort_err;
     if (!impl_->CreateOrtSession(stream, &ort_err)) {
@@ -452,7 +510,21 @@ bool OpenCudaMattingSession::Run(studiocast::maxine::CUstream stream,
     }
     return true;
   } catch (const Ort::Exception& e) {
-    if (error_out) *error_out = std::string("ONNX Runtime error: ") + e.what();
+    const std::string msg = e.what();
+    const std::string human = HumanizeOrtError(msg, impl_->pack.onnx_path);
+
+    if (OrtErrorLooksLikeVramOom(msg)) {
+      impl_->ort_latched_failure = true;
+      impl_->ort_latched_error = human;
+
+      // Best-effort cleanup to release GPU allocations held by this session.
+      impl_->binding.reset();
+      impl_->session.reset();
+      impl_->input_value.reset();
+      impl_->cuda_mem_info.reset();
+    }
+
+    if (error_out) *error_out = human;
     return false;
   }
 #endif
