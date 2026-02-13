@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <iostream>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -158,8 +159,11 @@ struct OpenCudaMattingSession::Impl {
 
       // Validate model input/output shapes (best-effort; allow dynamic dims).
       {
-        const auto in_info = session->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo();
-        const auto out_info = session->GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo();
+        // NOTE: Do not bind references to temporaries here (lifetime bug).
+        auto in_ti = session->GetInputTypeInfo(0);
+        auto out_ti = session->GetOutputTypeInfo(0);
+        auto in_info = in_ti.GetTensorTypeAndShapeInfo();
+        auto out_info = out_ti.GetTensorTypeAndShapeInfo();
 
         if (in_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
           if (error_out) *error_out = "Model input dtype must be float32.";
