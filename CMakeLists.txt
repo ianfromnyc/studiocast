@@ -128,6 +128,7 @@ add_library(studiocast_core
         src/core/maxine/afx_api.cpp
         src/core/maxine/afx/afx_effect.h
         src/core/maxine/afx/afx_effect.cpp
+        src/core/maxine/afx/afx_audio_processor.h
         src/core/maxine/ar_api.h
         src/core/maxine/ar_api.cpp
         src/core/maxine/cuda_driver_api.h
@@ -164,6 +165,8 @@ add_library(studiocast_core
         src/core/maxine/effects/ar_auto_frame_tracker.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
+        src/core/audio/audio_processor.h
+        src/core/audio/audio_processor.cpp
         src/core/audio/effects/broadcast_audio_effects.h
         src/core/audio/effects/broadcast_audio_effects_plan.h
         src/core/audio/effects/broadcast_audio_effects_plan.cpp

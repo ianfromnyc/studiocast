@@ -6,7 +6,7 @@
 #include <pulse/error.h>
 #include <pulse/simple.h>
 
-#include "core/maxine/afx/afx_effect.h"
+#include "core/audio/audio_processor.h"
 
 namespace studiocast::audio {
 
@@ -22,7 +22,7 @@ std::string PulseErrorString(int pa_error) {
 
 }  // namespace
 
-AudioPipeline::AudioPipeline(maxine::afx::AfxEffect* effect) : effect_(effect) {}
+AudioPipeline::AudioPipeline(AudioProcessor* processor) : processor_(processor) {}
 
 AudioPipeline::~AudioPipeline() { Stop(); }
 
@@ -36,14 +36,8 @@ bool AudioPipeline::Start(const AudioPipelineConfig& cfg, std::string* error) {
         stats_ = AudioPipelineStats{};
     }
 
-    if (!effect_) {
-        SetLastError("Audio pipeline effect is null.");
-        if (error) *error = GetStats().last_error;
-        Stop();
-        return false;
-    }
-    if (!effect_->IsLoaded()) {
-        SetLastError("AFX effect is not loaded. Configure+Load must succeed before starting the audio pipeline.");
+    if (!processor_) {
+        SetLastError("Audio pipeline processor is null.");
         if (error) *error = GetStats().last_error;
         Stop();
         return false;
@@ -157,15 +151,18 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
     std::vector<float> in(samples_per_frame);
     std::vector<float> out(samples_per_frame);
 
+    processor_->Reset();
+
+    std::string proc_err;
     while (!stop_.load(std::memory_order_acquire)) {
         if (::pa_simple_read(rec, in.data(), bytes_per_frame, &pa_err) < 0) {
             SetLastError("Pulse capture read failed: " + PulseErrorString(pa_err));
             break;
         }
 
-        std::string run_err;
-        if (!effect_->Run(in.data(), out.data(), samples_per_frame, &run_err)) {
-            SetLastError("AFX Run failed: " + run_err);
+        proc_err.clear();
+        if (!processor_->Process(in.data(), out.data(), cfg.frame_samples, cfg.channels, &proc_err)) {
+            SetLastError("AudioProcessor::Process failed: " + proc_err);
             break;
         }
 

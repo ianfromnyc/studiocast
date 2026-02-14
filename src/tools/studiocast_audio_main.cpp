@@ -13,6 +13,7 @@
 #include "core/audio/virtual_mic.h"
 #include "core/audio/virtual_speaker.h"
 #include "core/config/settings.h"
+#include "core/maxine/afx/afx_audio_processor.h"
 #include "core/maxine/afx/afx_effect.h"
 #include "core/maxine/afx_api.h"
 #include "core/maxine/gpu_selection.h"
@@ -312,7 +313,8 @@ int main(int argc, char** argv) {
       }
     }
 
-    studiocast::audio::AudioPipeline pipeline(&fx);
+    studiocast::maxine::afx::AfxAudioProcessor processor(&fx);
+    studiocast::audio::AudioPipeline pipeline(&processor);
     {
       studiocast::audio::AudioPipelineConfig cfg;
       cfg.source_name = chosenSource;
@@ -464,7 +466,8 @@ int main(int argc, char** argv) {
       }
     }
 
-    studiocast::audio::AudioPipeline pipeline(&fx);
+    studiocast::maxine::afx::AfxAudioProcessor processor(&fx);
+    studiocast::audio::AudioPipeline pipeline(&processor);
     {
       studiocast::audio::AudioPipelineConfig cfg;
       cfg.source_name = studiocast::audio::VirtualSpeakerMonitorSourceName();

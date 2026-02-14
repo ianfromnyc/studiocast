@@ -148,8 +148,11 @@ std::string BroadcastAudioEffectsToJson(const BroadcastAudioEffects& effects) {
     oss << "{";
     oss << "\"schema_version\":" << effects.schema_version << ",";
 
+    oss << "\"engine\":\"" << ToString(effects.engine) << "\",";
+
     oss << "\"microphone\":{";
     oss << "\"model_id\":\"" << studiocast::util::json::EscapeString(effects.microphone.model_id) << "\",";
+    oss << "\"model_path\":\"" << studiocast::util::json::EscapeString(effects.microphone.model_path) << "\",";
     oss << "\"noise_removal_enabled\":" << (effects.microphone.noise_removal_enabled ? "true" : "false") << ",";
     oss << "\"room_echo_removal_enabled\":" << (effects.microphone.room_echo_removal_enabled ? "true" : "false") << ",";
     oss << "\"strength\":" << effects.microphone.strength << ",";
@@ -169,6 +172,7 @@ std::string BroadcastAudioEffectsToJson(const BroadcastAudioEffects& effects) {
 
     oss << "\"speaker\":{";
     oss << "\"model_id\":\"" << studiocast::util::json::EscapeString(effects.speaker.model_id) << "\",";
+    oss << "\"model_path\":\"" << studiocast::util::json::EscapeString(effects.speaker.model_path) << "\",";
     oss << "\"noise_removal_enabled\":" << (effects.speaker.noise_removal_enabled ? "true" : "false") << ",";
     oss << "\"strength\":" << effects.speaker.strength << ",";
 
@@ -193,21 +197,24 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
     const Value::Object* obj = nullptr;
     if (!ParseRootObject(root, &obj, warnings, error)) return false;
 
-    if (!CheckUnknownKeys(*obj, {"schema_version", "microphone", "speaker"}, "", options, warnings, error)) return false;
+    if (!CheckUnknownKeys(*obj, {"schema_version", "engine", "microphone", "speaker"}, "", options, warnings, error)) {
+        return false;
+    }
 
     bool found = false;
 
     int schema = out->schema_version;
     if (!TryGetInt(*obj, "", "schema_version", &found, &schema, error)) return false;
     if (found) {
-        if (schema != 1 && schema != kBroadcastAudioEffectsSchemaVersion) {
+        if (schema != 1 && schema != 2 && schema != kBroadcastAudioEffectsSchemaVersion) {
             return Fail(error,
                         "unsupported schema_version " + std::to_string(schema) +
-                            " (expected 1 or " + std::to_string(kBroadcastAudioEffectsSchemaVersion) + ")");
+                            " (expected 1, 2, or " + std::to_string(kBroadcastAudioEffectsSchemaVersion) + ")");
         }
-        if (schema == 1) {
+        if (schema != kBroadcastAudioEffectsSchemaVersion) {
             AddWarning(warnings,
-                       "schema_version 1 detected; upgrading to " + std::to_string(kBroadcastAudioEffectsSchemaVersion));
+                       "schema_version " + std::to_string(schema) + " detected; upgrading to " +
+                           std::to_string(kBroadcastAudioEffectsSchemaVersion));
             out->schema_version = kBroadcastAudioEffectsSchemaVersion;
         } else {
             out->schema_version = schema;
@@ -217,9 +224,22 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
         out->schema_version = kBroadcastAudioEffectsSchemaVersion;
     }
 
+    {
+        std::string engineStr;
+        if (!TryGetString(*obj, "", "engine", &found, &engineStr, error)) return false;
+        if (found) {
+            AudioEffectsEnginePreference e = out->engine;
+            if (!TryParseAudioEffectsEnginePreference(engineStr, &e)) {
+                return Fail(error, "engine must be one of \"auto\", \"maxine\", \"open_source\", or \"off\"");
+            }
+            out->engine = e;
+        }
+    }
+
     if (const auto* mic = GetObj(*obj, "", "microphone", error)) {
         if (!CheckUnknownKeys(*mic,
                               {"model_id",
+                               "model_path",
                                "noise_removal_enabled",
                                "room_echo_removal_enabled",
                                "strength",
@@ -236,6 +256,10 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
         std::string modelId = out->microphone.model_id;
         if (!TryGetString(*mic, "microphone", "model_id", &found, &modelId, error)) return false;
         if (found) out->microphone.model_id = modelId;
+
+        std::string modelPath = out->microphone.model_path;
+        if (!TryGetString(*mic, "microphone", "model_path", &found, &modelPath, error)) return false;
+        if (found) out->microphone.model_path = modelPath;
 
         bool en = out->microphone.noise_removal_enabled;
         if (!TryGetBool(*mic, "microphone", "noise_removal_enabled", &found, &en, error)) return false;
@@ -291,13 +315,22 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
     }
 
     if (const auto* spk = GetObj(*obj, "", "speaker", error)) {
-        if (!CheckUnknownKeys(*spk, {"model_id", "noise_removal_enabled", "strength", "superres"}, "speaker", options, warnings, error)) {
+        if (!CheckUnknownKeys(*spk,
+                              {"model_id", "model_path", "noise_removal_enabled", "strength", "superres"},
+                              "speaker",
+                              options,
+                              warnings,
+                              error)) {
             return false;
         }
 
         std::string modelId = out->speaker.model_id;
         if (!TryGetString(*spk, "speaker", "model_id", &found, &modelId, error)) return false;
         if (found) out->speaker.model_id = modelId;
+
+        std::string modelPath = out->speaker.model_path;
+        if (!TryGetString(*spk, "speaker", "model_path", &found, &modelPath, error)) return false;
+        if (found) out->speaker.model_path = modelPath;
 
         bool en = out->speaker.noise_removal_enabled;
         if (!TryGetBool(*spk, "speaker", "noise_removal_enabled", &found, &en, error)) return false;

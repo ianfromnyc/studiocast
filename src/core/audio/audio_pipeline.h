@@ -6,11 +6,9 @@
 #include <string>
 #include <thread>
 
-namespace studiocast::maxine::afx {
-class AfxEffect;
-}
-
 namespace studiocast::audio {
+
+class AudioProcessor;
 
 struct AudioPipelineConfig {
     // Empty = Pulse default source.
@@ -32,12 +30,12 @@ struct AudioPipelineStats {
 };
 
 // Real-time audio pipeline:
-//  Pulse (capture) -> Maxine AFX (Run) -> Pulse (playback into a sink).
+//  Pulse (capture) -> AudioProcessor (Process) -> Pulse (playback into a sink).
 //
 // MVP format: mono float32 @ 48kHz, 10ms frames.
 class AudioPipeline {
 public:
-    explicit AudioPipeline(maxine::afx::AfxEffect* effect);
+    explicit AudioPipeline(AudioProcessor* processor);
     ~AudioPipeline();
 
     AudioPipeline(const AudioPipeline&) = delete;
@@ -52,7 +50,7 @@ private:
     void ThreadMain(AudioPipelineConfig cfg);
     void SetLastError(std::string msg);
 
-    maxine::afx::AfxEffect* effect_ = nullptr;  // not owned
+    AudioProcessor* processor_ = nullptr;  // not owned
 
     mutable std::mutex mu_;
     AudioPipelineStats stats_;

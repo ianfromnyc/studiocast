@@ -15,6 +15,7 @@
 
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
 #include "core/audio/audio_pipeline.h"
+#include "core/maxine/afx/afx_audio_processor.h"
 #include "core/maxine/afx_api.h"
 #endif
 
@@ -91,6 +92,7 @@ void VirtualAudioService::ThreadMain() {
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
     std::unique_ptr<studiocast::maxine::afx::AfxApi> api;
     std::unique_ptr<studiocast::maxine::afx::AfxEffect> fx;
+    std::unique_ptr<studiocast::maxine::afx::AfxAudioProcessor> processor;
     std::unique_ptr<studiocast::audio::AudioPipeline> pipeline;
 
     std::optional<studiocast::audio::effects::BroadcastAudioEffects> lastFx;
@@ -130,6 +132,7 @@ void VirtualAudioService::ThreadMain() {
                 pipeline->Stop();
                 pipeline.reset();
             }
+            processor.reset();
             if (fx) {
                 fx->Destroy();
                 fx.reset();
@@ -170,6 +173,7 @@ void VirtualAudioService::ThreadMain() {
                 pipeline->Stop();
                 pipeline.reset();
             }
+            processor.reset();
             if (fx) {
                 fx->Destroy();
                 fx.reset();
@@ -213,6 +217,7 @@ void VirtualAudioService::ThreadMain() {
                 pipeline->Stop();
                 pipeline.reset();
             }
+            processor.reset();
             if (fx) {
                 fx->Destroy();
                 fx.reset();
@@ -308,7 +313,8 @@ void VirtualAudioService::ThreadMain() {
                 continue;
             }
 
-            pipeline = std::make_unique<studiocast::audio::AudioPipeline>(fx.get());
+            processor = std::make_unique<studiocast::maxine::afx::AfxAudioProcessor>(fx.get());
+            pipeline = std::make_unique<studiocast::audio::AudioPipeline>(processor.get());
             studiocast::audio::AudioPipelineConfig pcfg;
             pcfg.source_name = cfg.source_name;
             pcfg.sink_name = "studiocast_sink";
@@ -351,6 +357,7 @@ void VirtualAudioService::ThreadMain() {
 
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
     if (pipeline) pipeline->Stop();
+    processor.reset();
     if (fx) fx->Destroy();
 #endif
 }
