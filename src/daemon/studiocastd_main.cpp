@@ -21,6 +21,7 @@
 #include "core/ipc/daemon_socket.h"
 #include "core/maxine/maxine_manager.h"
 #include "core/open_cuda/open_cuda_diagnose.h"
+#include "core/open_audio/open_audio_diagnose.h"
 #include "core/open_cuda/model_pack_registry.h"
 #include "core/util/json.h"
 #include "core/util/ttl_cache.h"
@@ -269,7 +270,8 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
                          const studiocast::audio::VirtualAudioServiceConfig& acfg,
                          const std::filesystem::path& socketPath,
                          const std::string& maxineJson,
-                         const std::string& openCudaJson) {
+                         const std::string& openCudaJson,
+                         const std::string& openAudioJson) {
     std::ostringstream oss;
     oss << "{";
     oss << "\"version\":\"" << JsonEscape(STUDIOCAST_VERSION) << "\",";
@@ -288,11 +290,16 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
         oss << "\"maxine\":" << maxineJson << ",";
     }
     oss << "\"open_cuda\":" << (openCudaJson.empty() ? std::string("{}") : openCudaJson);
+    oss << ",\"open_audio\":" << (openAudioJson.empty() ? std::string("{}") : openAudioJson);
     oss << "},";
 
     // Convenience top-level alias.
     if (!openCudaJson.empty()) {
         oss << "\"open_cuda\":" << openCudaJson << ",";
+    }
+
+    if (!openAudioJson.empty()) {
+        oss << "\"open_audio\":" << openAudioJson << ",";
     }
 
     oss << "\"video\":{";
@@ -822,8 +829,24 @@ int main(int argc, char** argv) {
                                           return studiocast::open_cuda::DiagnoseOpenCudaDefault().ToJson();
                                       });
 
+                              // Cache Open Audio diagnostics to avoid heavy probing on every GUI poll.
+                              static studiocast::util::TtlCache<std::string> openAudioDiagCache;
+                              constexpr auto kOpenAudioDiagTtl = std::chrono::seconds(2);
+
+                              const std::string openAudioJson = openAudioDiagCache.GetOrCompute(
+                                      std::chrono::steady_clock::now(), kOpenAudioDiagTtl, []() {
+                                          return studiocast::open_audio::DiagnoseOpenAudioDefault().ToJson();
+                                      });
+
                               return std::string("OK ") +
-                                     StatusToJson(st, current, ast, acurrent, socketPath, diagJson, openCudaJson);
+                                     StatusToJson(st,
+                                                  current,
+                                                  ast,
+                                                  acurrent,
+                                                  socketPath,
+                                                  diagJson,
+                                                  openCudaJson,
+                                                  openAudioJson);
                           }
 
                           if (pc.cmd == "GET_CONFIG") {

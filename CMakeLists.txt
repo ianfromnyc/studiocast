@@ -87,6 +87,13 @@ add_library(studiocast_core
         src/core/open_cuda/model_pack_registry.cpp
         src/core/open_cuda/onnx_session.h
         src/core/open_cuda/onnx_session.cpp
+        src/core/open_audio/open_audio_diagnostics.h
+        src/core/open_audio/open_audio_diagnostics.cpp
+        src/core/open_audio/open_audio_diagnose.h
+        src/core/open_audio/open_audio_diagnose.cpp
+        src/core/open_audio/model_pack_registry.h
+        src/core/open_audio/model_pack_registry.cpp
+        src/core/audio/effects/broadcast_audio_effect_contract.h
         src/core/util/dynlib.h
         src/core/util/dynlib.cpp
         src/core/util/json.h
