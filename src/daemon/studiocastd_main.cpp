@@ -438,6 +438,8 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"running\":" << BoolJson(ast.pipeline_running) << ",";
     oss << "\"starting\":" << BoolJson(ast.pipeline_starting) << ",";
     oss << "\"sink\":\"" << JsonEscape(ast.pipeline_sink) << "\",";
+    oss << "\"backend_active\":\"" << JsonEscape(ast.effects_backend_active) << "\",";
+    oss << "\"effects_note\":\"" << JsonEscape(ast.effects_note) << "\",";
     oss << "\"effect_selector\":\"" << JsonEscape(ast.effect_selector) << "\",";
     oss << "\"feature_id\":\"" << JsonEscape(ast.feature_id) << "\",";
     oss << "\"intensity\":" << ast.intensity << ",";

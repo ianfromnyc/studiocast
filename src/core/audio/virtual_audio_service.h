@@ -42,6 +42,14 @@ struct VirtualAudioServiceStatus {
     std::string selected_source;
     std::string pipeline_sink = "studiocast_sink";
 
+    // Active effects backend (selected by the runtime resolver).
+    // Common values: "passthrough", "maxine", "open_source".
+    std::string effects_backend_active;
+
+    // Human-friendly backend selection / fallback note.
+    // Intended for GUI banners and daemon status.
+    std::string effects_note;
+
     // What effect is currently active (derived from the Broadcast effect model).
     std::string effect_selector;
     std::string feature_id;

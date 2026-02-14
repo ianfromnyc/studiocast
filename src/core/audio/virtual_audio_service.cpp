@@ -7,8 +7,10 @@
 #include <filesystem>
 #include <thread>
 
+#include "core/audio/audio_backend_resolver.h"
 #include "core/audio/virtual_mic.h"
 #include "core/config/settings.h"
+#include "core/maxine/availability.h"
 #include "core/maxine/gpu_selection.h"
 #include "core/maxine/paths.h"
 
@@ -23,6 +25,47 @@
 #endif
 
 namespace studiocast::audio {
+
+namespace {
+
+AudioBackendAvailability ProbeAudioBackendAvailability() {
+    AudioBackendAvailability out;
+
+    // Maxine availability probe (audio needs AFX).
+    if (!studiocast::maxine::BackendBuilt()) {
+        out.maxine_ok = false;
+        out.maxine_reason = "Maxine support not enabled in this build.";
+    } else {
+        const auto settings = studiocast::config::LoadSettings();
+        const auto sel = studiocast::maxine::SelectGpu(settings.gpu);
+        if (!sel.selected || !sel.selected->compute_capability) {
+            out.maxine_ok = false;
+            out.maxine_reason = "Failed to select a supported NVIDIA GPU.";
+            if (!sel.error.empty()) out.maxine_reason += " " + sel.error;
+        } else {
+            const auto paths = studiocast::maxine::ResolveMaxinePaths();
+            if (!paths.afx.ok) {
+                out.maxine_ok = false;
+                out.maxine_reason = "AFX SDK not available";
+                if (!paths.afx.problems.empty()) {
+                    out.maxine_reason += ": ";
+                    out.maxine_reason += paths.afx.problems.front();
+                }
+            } else {
+                out.maxine_ok = true;
+                out.maxine_reason.clear();
+            }
+        }
+    }
+
+    // Open-source backend is introduced in a later phase.
+    out.open_source_ok = false;
+    out.open_source_reason = "Open-source audio backend not available (Phase 1 stub).";
+
+    return out;
+}
+
+}  // namespace
 
 VirtualAudioService::~VirtualAudioService() { Stop(); }
 
@@ -154,6 +197,8 @@ void VirtualAudioService::ThreadMain() {
                 st_.effect_selector.clear();
                 st_.feature_id.clear();
                 st_.intensity = 0.0f;
+                st_.effects_backend_active.clear();
+                st_.effects_note.clear();
             }
             std::this_thread::sleep_for(milliseconds(pollMs));
             continue;
@@ -177,6 +222,18 @@ void VirtualAudioService::ThreadMain() {
             st_.intensity = plan.intensity;
         }
 
+        // Backend selection (Phase 1: open-source backend is stubbed out).
+        AudioBackendAvailability avail;
+        if (AnyMicrophoneEffectRequested(cfg.effects)) {
+            avail = ProbeAudioBackendAvailability();
+        }
+        const auto decision = ResolveAudioBackend(cfg.effects, avail);
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            st_.effects_backend_active = std::string(ToString(decision.backend));
+            st_.effects_note = decision.note;
+        }
+
 #if !STUDIOCAST_HAVE_PULSE_SIMPLE
         SetLastError("Audio pipeline disabled at build time (libpulse-simple not found)");
         {
@@ -194,7 +251,7 @@ void VirtualAudioService::ThreadMain() {
             continue;
         }
 
-        const bool wantMaxine = plan.enabled;
+        const bool wantMaxine = (decision.backend == AudioBackendKind::kMaxine) && plan.enabled;
         const char* desiredBackend = wantMaxine ? "maxine" : "passthrough";
 
         const bool needRestart = (!pipeline) || (lastBackend != desiredBackend) || (lastSource != cfg.source_name) ||
