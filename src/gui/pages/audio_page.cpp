@@ -5,10 +5,12 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QFileDialog>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -88,8 +90,32 @@ namespace studiocast::gui {
         // -----------------------
         // AI effects (daemon-driven)
         // -----------------------
-        auto* aiBox = new QGroupBox("AI microphone effects (Maxine AFX via daemon)", this);
+        auto* aiBox = new QGroupBox("AI microphone effects (daemon)", this);
         auto* aiLayout = new QVBoxLayout(aiBox);
+
+        // Backend selection (mirrors video_page.cpp)
+        auto* engineRow = new QHBoxLayout();
+        engineRow->addWidget(new QLabel("Effect engine:", aiBox));
+        engineCombo_ = new QComboBox(aiBox);
+        engineCombo_->addItem("Auto", "auto");
+        engineCombo_->addItem("Maxine", "maxine");
+        engineCombo_->addItem("Open Source", "open_source");
+        engineCombo_->addItem("Off", "off");
+        engineRow->addWidget(engineCombo_);
+        engineRow->addSpacing(12);
+        engineRow->addWidget(new QLabel("Active:", aiBox));
+        engineActiveValue_ = new QLabel("—", aiBox);
+        engineActiveValue_->setStyleSheet("font-weight: 600;");
+        engineRow->addWidget(engineActiveValue_);
+        engineRow->addStretch(1);
+        aiLayout->addLayout(engineRow);
+
+        aiInfoBanner_ = new QLabel(aiBox);
+        aiInfoBanner_->setWordWrap(true);
+        aiInfoBanner_->setStyleSheet(
+            "background: #14213a; border: 1px solid #334466; color: #d0e0f0; padding: 8px; border-radius: 4px;");
+        aiInfoBanner_->setVisible(false);
+        aiLayout->addWidget(aiInfoBanner_);
 
         aiBanner_ = new QLabel(aiBox);
         aiBanner_->setWordWrap(true);
@@ -97,6 +123,30 @@ namespace studiocast::gui {
             "background: #3a1414; border: 1px solid #663333; color: #f0d0d0; padding: 8px; border-radius: 4px;");
         aiBanner_->setVisible(false);
         aiLayout->addWidget(aiBanner_);
+
+        // Open-source model selection (Open Audio packs)
+        auto* modelRow = new QHBoxLayout();
+        openAudioModelLabel_ = new QLabel("Open-source model:", aiBox);
+        modelRow->addWidget(openAudioModelLabel_);
+        openAudioModelCombo_ = new QComboBox(aiBox);
+        openAudioModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+        openAudioModelCombo_->addItem("Default (auto)", "");
+        modelRow->addWidget(openAudioModelCombo_, 1);
+        aiLayout->addLayout(modelRow);
+
+        auto* modelPathRow = new QHBoxLayout();
+        openAudioModelPathLabel_ = new QLabel("Model path (optional):", aiBox);
+        modelPathRow->addWidget(openAudioModelPathLabel_);
+        openAudioModelPathEdit_ = new QLineEdit(aiBox);
+        openAudioModelPathEdit_->setPlaceholderText("/path/to/model.onnx or /path/to/pack/");
+        modelPathRow->addWidget(openAudioModelPathEdit_, 1);
+        browseOpenAudioModelBtn_ = new QPushButton("Browse…", aiBox);
+        modelPathRow->addWidget(browseOpenAudioModelBtn_);
+        aiLayout->addLayout(modelPathRow);
+
+        openAudioInstallHintsBtn_ = new QPushButton("Open Audio install hints", aiBox);
+        openAudioInstallHintsBtn_->setEnabled(false);
+        aiLayout->addWidget(openAudioInstallHintsBtn_, 0, Qt::AlignLeft);
 
         auto* aiRow = new QHBoxLayout();
         noiseRemovalCb_ = new QCheckBox("Noise removal", aiBox);
@@ -139,6 +189,8 @@ namespace studiocast::gui {
         root->addWidget(aiBox);
 
         UpdateMicInterlocks();
+
+        UpdateEngineUiVisibility();
 
         // -----------------------
         // Input selection
@@ -297,6 +349,12 @@ namespace studiocast::gui {
         connect(echoRemovalCb_, &QCheckBox::toggled, this, &AudioPage::OnAiEchoToggled);
         connect(studioVoiceCb_, &QCheckBox::toggled, this, &AudioPage::OnAiStudioVoiceToggled);
         connect(strengthSlider_, &QSlider::valueChanged, this, &AudioPage::OnAiStrengthChanged);
+
+        connect(engineCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &AudioPage::OnAiEngineChanged);
+        connect(openAudioModelCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &AudioPage::OnAiOpenAudioModelChanged);
+        connect(openAudioModelPathEdit_, &QLineEdit::editingFinished, this, &AudioPage::OnAiOpenAudioModelPathEdited);
+        connect(browseOpenAudioModelBtn_, &QPushButton::clicked, this, &AudioPage::OnAiBrowseOpenAudioModel);
+        connect(openAudioInstallHintsBtn_, &QPushButton::clicked, this, &AudioPage::OnOpenAudioInstallHints);
         connect(speakerNoiseRemovalCb_, &QCheckBox::toggled, this, &AudioPage::OnAiSpeakerNoiseToggled);
         connect(speakerStrengthSlider_, &QSlider::valueChanged, this, &AudioPage::OnAiSpeakerStrengthChanged);
         connect(aiStartBtn_, &QPushButton::clicked, this, &AudioPage::OnAiStart);
@@ -515,6 +573,12 @@ namespace studiocast::gui {
         daemonAiSupported_ = enabled;
         daemonAiDisableReason_ = reason;
 
+        if (engineCombo_) engineCombo_->setEnabled(enabled);
+
+        if (openAudioModelCombo_) openAudioModelCombo_->setEnabled(enabled);
+        if (openAudioModelPathEdit_) openAudioModelPathEdit_->setEnabled(enabled);
+        if (browseOpenAudioModelBtn_) browseOpenAudioModelBtn_->setEnabled(enabled);
+
         noiseRemovalCb_->setEnabled(enabled);
         echoRemovalCb_->setEnabled(enabled);
         studioVoiceCb_->setEnabled(enabled);
@@ -531,6 +595,18 @@ namespace studiocast::gui {
         aiBanner_->setText(reason);
 
         UpdateMicInterlocks();
+    }
+
+    void AudioPage::UpdateEngineUiVisibility() {
+        const QString eng = engineCombo_ ? engineCombo_->currentData().toString() : QStringLiteral("auto");
+        const bool showOpen = (eng == "open_source" || eng == "auto");
+
+        if (openAudioModelLabel_) openAudioModelLabel_->setVisible(showOpen);
+        if (openAudioModelCombo_) openAudioModelCombo_->setVisible(showOpen);
+        if (openAudioModelPathLabel_) openAudioModelPathLabel_->setVisible(showOpen);
+        if (openAudioModelPathEdit_) openAudioModelPathEdit_->setVisible(showOpen);
+        if (browseOpenAudioModelBtn_) browseOpenAudioModelBtn_->setVisible(showOpen);
+        if (openAudioInstallHintsBtn_) openAudioInstallHintsBtn_->setVisible(showOpen);
     }
 
     void AudioPage::UpdateMicInterlocks() {
@@ -563,39 +639,43 @@ namespace studiocast::gui {
             return;
         }
 
-        const auto maxine = root.value("maxine").toObject();
-        const bool supported = maxine.value("supported").toBool(false);
-        const QString summary = maxine.value("summary").toString();
-        const QString blockedReason = maxine.value("blocked_reason").toString();
-        const auto blockedDetails = maxine.value("blocked_details").toArray();
+        // Keep Maxine diagnostics for user guidance, but do not hard-disable the UI.
+        // The runtime resolver handles Maxine/OpenAudio selection and fallback.
+        QString maxineDiag;
+        {
+            const auto maxine = root.value("maxine").toObject();
+            const bool supported = maxine.value("supported").toBool(false);
+            const QString summary = maxine.value("summary").toString();
+            const QString blockedReason = maxine.value("blocked_reason").toString();
+            const auto blockedDetails = maxine.value("blocked_details").toArray();
 
-        bool gpuOk = true;
-        if (maxine.contains("gpu")) {
-            gpuOk = maxine.value("gpu").toObject().value("ok").toBool(true);
-        }
+            bool gpuOk = true;
+            if (maxine.contains("gpu")) {
+                gpuOk = maxine.value("gpu").toObject().value("ok").toBool(true);
+            }
 
-        bool afxOk = true;
-        if (maxine.contains("afx")) {
-            afxOk = maxine.value("afx").toObject().value("ok").toBool(true);
-        } else if (maxine.contains("components")) {
-            afxOk = maxine.value("components").toObject().value("afx").toObject().value("found").toBool(true);
-        }
+            bool afxOk = true;
+            if (maxine.contains("afx")) {
+                afxOk = maxine.value("afx").toObject().value("ok").toBool(true);
+            } else if (maxine.contains("components")) {
+                afxOk = maxine.value("components").toObject().value("afx").toObject().value("found").toBool(true);
+            }
 
-        QString disableReason;
-        if (!supported || !gpuOk || !afxOk) {
-            disableReason = "AI audio effects are not available on this system.";
-            if (!summary.isEmpty()) disableReason += "\n\n" + summary;
-            const auto english = FormatMaxineReasonCode(blockedReason);
-            if (!english.isEmpty()) disableReason += "\n\nReason: " + english;
-            if (!blockedDetails.isEmpty()) {
-                disableReason += "\n\n";
-                for (const auto& v : blockedDetails) {
-                    disableReason += "- " + v.toString() + "\n";
+            if (!supported || !gpuOk || !afxOk) {
+                maxineDiag = "maxine_unavailable: true\n";
+                if (!summary.isEmpty()) maxineDiag += "maxine_summary: " + summary + "\n";
+                const auto english = FormatMaxineReasonCode(blockedReason);
+                if (!english.isEmpty()) maxineDiag += "maxine_reason: " + english + "\n";
+                if (!blockedDetails.isEmpty()) {
+                    maxineDiag += "maxine_details:\n";
+                    for (const auto& v : blockedDetails) {
+                        maxineDiag += "- " + v.toString() + "\n";
+                    }
                 }
             }
         }
 
-        SetAiControlsEnabled(disableReason.isEmpty(), disableReason);
+        SetAiControlsEnabled(true, "");
 
         const auto audio = root.value("audio").toObject();
         const bool audioEnabled = audio.value("enabled").toBool(false);
@@ -604,6 +684,19 @@ namespace studiocast::gui {
         const bool running = pipeline.value("running").toBool(false);
         const bool starting = pipeline.value("starting").toBool(false);
         const QString lastErr = pipeline.value("last_error").toString();
+
+        const QString backendActive = pipeline.value("backend_active").toString();
+        const QString effectsNote = pipeline.value("effects_note").toString();
+
+        if (engineActiveValue_) {
+            engineActiveValue_->setText(backendActive.isEmpty() ? QStringLiteral("—") : backendActive);
+        }
+
+        if (aiInfoBanner_) {
+            const QString note = effectsNote.trimmed();
+            aiInfoBanner_->setVisible(!note.isEmpty());
+            aiInfoBanner_->setText(note);
+        }
 
         daemonStatusText_ = QString("enabled=%1\nmic_mode=%2\npipeline=%3\n")
                                 .arg(audioEnabled ? "true" : "false")
@@ -624,6 +717,9 @@ namespace studiocast::gui {
         }
         if (!lastErr.isEmpty()) daemonStatusText_ += "last_error: " + lastErr + "\n";
 
+        if (!backendActive.isEmpty()) daemonStatusText_ += "backend_active: " + backendActive + "\n";
+        if (!maxineDiag.isEmpty()) daemonStatusText_ += maxineDiag;
+
         if (!daemonAiSupported_) {
             // Keep widget states but prevent edits.
             return;
@@ -631,11 +727,82 @@ namespace studiocast::gui {
 
         // Sync UI from daemon config.
         const auto fx = audio.value("audio_effects").toObject();
+        lastAudioEffectsObj_ = fx;
+
+        // Engine preference (schema v3).
+        const QString engine = fx.value("engine").toString("auto");
+        if (engineCombo_) {
+            engineCombo_->blockSignals(true);
+            const int idx = engineCombo_->findData(engine);
+            engineCombo_->setCurrentIndex(idx >= 0 ? idx : 0);
+            engineCombo_->blockSignals(false);
+        }
+
+        // Open Audio diagnostics.
+        openAudioStatusPresent_ = false;
+        openAudioOk_ = false;
+        openAudioInstallHints_.clear();
+
+        QJsonObject openAudio;
+        if (root.contains("engines")) {
+            const auto engines = root.value("engines").toObject();
+            openAudio = engines.value("open_audio").toObject();
+        }
+        if (openAudio.isEmpty()) {
+            openAudio = root.value("open_audio").toObject();
+        }
+        if (!openAudio.isEmpty()) {
+            openAudioStatusPresent_ = true;
+            openAudioOk_ = openAudio.value("ok").toBool(false);
+            const auto hints = openAudio.value("install_hints").toArray();
+            for (const auto& v : hints) {
+                const auto s = v.toString();
+                if (!s.isEmpty()) openAudioInstallHints_.push_back(s);
+            }
+        }
+
+        if (openAudioStatusPresent_) {
+            daemonStatusText_ += QString("open_audio_ok: %1\n").arg(openAudioOk_ ? "true" : "false");
+        }
+
+        if (openAudioInstallHintsBtn_) {
+            openAudioInstallHintsBtn_->setEnabled(openAudioStatusPresent_ && !openAudioInstallHints_.isEmpty());
+        }
+
+        // Populate model list from Open Audio diagnostics.
+        if (openAudioModelCombo_) {
+            const QString prior = openAudioModelCombo_->currentData().toString();
+            openAudioModelCombo_->blockSignals(true);
+            openAudioModelCombo_->clear();
+            openAudioModelCombo_->addItem("Default (auto)", "");
+            if (!openAudioStatusPresent_) {
+                openAudioModelCombo_->addItem("<Open Audio status not reported>", "");
+            } else {
+                const auto models = openAudio.value("models").toArray();
+                for (const auto& mv : models) {
+                    const auto m = mv.toObject();
+                    const QString id = m.value("id").toString();
+                    const QString name = m.value("display_name").toString();
+                    if (id.isEmpty()) continue;
+                    const QString label = name.isEmpty() ? id : (name + " (" + id + ")");
+                    openAudioModelCombo_->addItem(label, id);
+                }
+            }
+
+            // Restore selection if possible.
+            int restore = openAudioModelCombo_->findData(prior);
+            if (restore < 0) restore = 0;
+            openAudioModelCombo_->setCurrentIndex(restore);
+            openAudioModelCombo_->blockSignals(false);
+        }
         const auto mic = fx.value("microphone").toObject();
         const bool noise = mic.value("noise_removal_enabled").toBool(false);
         const bool echo = mic.value("room_echo_removal_enabled").toBool(false);
         const bool studio = mic.value("studio_voice_enabled").toBool(false);
         const int strength = mic.value("strength").toInt(50);
+
+        const QString micModelId = mic.value("model_id").toString();
+        const QString micModelPath = mic.value("model_path").toString();
 
         const auto spk = fx.value("speaker").toObject();
         const bool spkNoise = spk.value("noise_removal_enabled").toBool(false);
@@ -648,6 +815,14 @@ namespace studiocast::gui {
         strengthSlider_->setValue(std::max(0, std::min(100, strength)));
         strengthValueLabel_->setText(QString::number(strengthSlider_->value()));
 
+        if (openAudioModelCombo_) {
+            const int idx = openAudioModelCombo_->findData(micModelId);
+            if (idx >= 0) openAudioModelCombo_->setCurrentIndex(idx);
+        }
+        if (openAudioModelPathEdit_) {
+            openAudioModelPathEdit_->setText(micModelPath);
+        }
+
         speakerNoiseRemovalCb_->setChecked(spkNoise);
         speakerStrengthSlider_->setValue(std::max(0, std::min(100, spkStrength)));
         speakerStrengthValueLabel_->setText(QString::number(speakerStrengthSlider_->value()));
@@ -657,6 +832,7 @@ namespace studiocast::gui {
         updatingAiUi_ = false;
 
         UpdateMicInterlocks();
+        UpdateEngineUiVisibility();
     }
 
     void AudioPage::PushDaemonSourceSelection() {
@@ -688,22 +864,27 @@ namespace studiocast::gui {
 
         const bool enabled = (studio || noise || echo);
 
-        QJsonObject mic;
+        const QString engine = engineCombo_ ? engineCombo_->currentData().toString() : QStringLiteral("auto");
+
+        QJsonObject effects = lastAudioEffectsObj_;
+        effects.insert("schema_version", 3);
+        effects.insert("engine", engine);
+
+        QJsonObject mic = effects.value("microphone").toObject();
         mic.insert("studio_voice_enabled", studio);
         mic.insert("noise_removal_enabled", noise);
         mic.insert("room_echo_removal_enabled", echo);
         mic.insert("strength", strength);
+        if (openAudioModelCombo_) mic.insert("model_id", openAudioModelCombo_->currentData().toString());
+        if (openAudioModelPathEdit_) mic.insert("model_path", openAudioModelPathEdit_->text().trimmed());
+        effects.insert("microphone", mic);
 
         const bool spkNoise = speakerNoiseRemovalCb_ && speakerNoiseRemovalCb_->isChecked();
         const int spkStrength = speakerStrengthSlider_ ? std::max(0, std::min(100, speakerStrengthSlider_->value())) : 50;
 
-        QJsonObject spk;
+        QJsonObject spk = effects.value("speaker").toObject();
         spk.insert("noise_removal_enabled", spkNoise);
         spk.insert("strength", spkStrength);
-
-        QJsonObject effects;
-        effects.insert("schema_version", 1);
-        effects.insert("microphone", mic);
         effects.insert("speaker", spk);
 
         QJsonObject patch;
@@ -719,6 +900,45 @@ namespace studiocast::gui {
             ShowError("Audio", "Failed to update daemon audio config:\n\n" + err);
         }
         RefreshDaemonAudioStatus();
+    }
+
+    void AudioPage::OnAiEngineChanged(int /*index*/) {
+        if (updatingAiUi_) return;
+        UpdateEngineUiVisibility();
+        PushDaemonAudioConfig();
+    }
+
+    void AudioPage::OnAiOpenAudioModelChanged(int /*index*/) {
+        if (updatingAiUi_) return;
+        PushDaemonAudioConfig();
+    }
+
+    void AudioPage::OnAiOpenAudioModelPathEdited() {
+        if (updatingAiUi_) return;
+        PushDaemonAudioConfig();
+    }
+
+    void AudioPage::OnAiBrowseOpenAudioModel() {
+        if (!openAudioModelPathEdit_) return;
+        const QString start = openAudioModelPathEdit_->text().trimmed();
+        const QString path = QFileDialog::getOpenFileName(this, "Select ONNX model", start,
+                                                         "ONNX model (*.onnx);;All files (*)");
+        if (path.isEmpty()) return;
+        openAudioModelPathEdit_->setText(path);
+        if (updatingAiUi_) return;
+        PushDaemonAudioConfig();
+    }
+
+    void AudioPage::OnOpenAudioInstallHints() {
+        if (openAudioInstallHints_.isEmpty()) {
+            ShowError("Open Audio", "No install hints were reported by the daemon.");
+            return;
+        }
+        QString msg;
+        for (const auto& s : openAudioInstallHints_) {
+            msg += "- " + s + "\n";
+        }
+        QMessageBox::information(this, "Open Audio install hints", msg);
     }
 
     void AudioPage::OnAiNoiseToggled(bool checked) {
