@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <optional>
+#include <filesystem>
 #include <thread>
 
 #include "core/audio/virtual_mic.h"
@@ -15,6 +17,7 @@
 
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
 #include "core/audio/audio_pipeline.h"
+#include "core/audio/audio_processor.h"
 #include "core/maxine/afx/afx_audio_processor.h"
 #include "core/maxine/afx_api.h"
 #endif
@@ -92,9 +95,10 @@ void VirtualAudioService::ThreadMain() {
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
     std::unique_ptr<studiocast::maxine::afx::AfxApi> api;
     std::unique_ptr<studiocast::maxine::afx::AfxEffect> fx;
-    std::unique_ptr<studiocast::maxine::afx::AfxAudioProcessor> processor;
+    std::unique_ptr<AudioProcessor> processor;
     std::unique_ptr<studiocast::audio::AudioPipeline> pipeline;
 
+    std::string lastBackend;
     std::optional<studiocast::audio::effects::BroadcastAudioEffects> lastFx;
     std::string lastSource;
     std::filesystem::path lastAfxLib;
@@ -140,6 +144,7 @@ void VirtualAudioService::ThreadMain() {
             api.reset();
             lastFx.reset();
             lastSource.clear();
+            lastBackend.clear();
             lastAfxLib.clear();
 #endif
             {
@@ -154,43 +159,22 @@ void VirtualAudioService::ThreadMain() {
             continue;
         }
 
-        const auto plan = studiocast::maxine::afx::PlanBroadcastMicrophoneEffect(
+        auto plan = studiocast::maxine::afx::PlanBroadcastMicrophoneEffect(
             cfg.effects.microphone.studio_voice_enabled,
             cfg.effects.microphone.noise_removal_enabled,
             cfg.effects.microphone.room_echo_removal_enabled,
             cfg.effects.microphone.strength);
+
+        if (!plan.enabled) {
+            // Planner maps strength -> intensity even when disabled; normalize for pass-through status.
+            plan.intensity = 0.0f;
+        }
 
         {
             std::lock_guard<std::mutex> lock(mu_);
             st_.effect_selector = plan.effect_selector;
             st_.feature_id = plan.feature_id;
             st_.intensity = plan.intensity;
-        }
-
-        if (!plan.enabled) {
-#if STUDIOCAST_HAVE_PULSE_SIMPLE
-            if (pipeline) {
-                pipeline->Stop();
-                pipeline.reset();
-            }
-            processor.reset();
-            if (fx) {
-                fx->Destroy();
-                fx.reset();
-            }
-            api.reset();
-            lastFx.reset();
-            lastSource.clear();
-            lastAfxLib.clear();
-#endif
-            {
-                std::lock_guard<std::mutex> lock(mu_);
-                st_.pipeline_running = false;
-                st_.pipeline_starting = false;
-            }
-            SetLastError("No Maxine AFX microphone effect enabled");
-            std::this_thread::sleep_for(milliseconds(pollMs));
-            continue;
         }
 
 #if !STUDIOCAST_HAVE_PULSE_SIMPLE
@@ -210,7 +194,11 @@ void VirtualAudioService::ThreadMain() {
             continue;
         }
 
-        const bool needRestart = (!lastFx.has_value() || *lastFx != cfg.effects) || (lastSource != cfg.source_name);
+        const bool wantMaxine = plan.enabled;
+        const char* desiredBackend = wantMaxine ? "maxine" : "passthrough";
+
+        const bool needRestart = (!pipeline) || (lastBackend != desiredBackend) || (lastSource != cfg.source_name) ||
+                                 (wantMaxine && (!lastFx.has_value() || *lastFx != cfg.effects));
 
         if (needRestart) {
             if (pipeline) {
@@ -222,6 +210,71 @@ void VirtualAudioService::ThreadMain() {
                 fx->Destroy();
                 fx.reset();
             }
+            if (!wantMaxine) {
+                // Pass-through mode does not need the AFX runtime.
+                api.reset();
+                lastAfxLib.clear();
+                lastFx.reset();
+            }
+        }
+
+        if (!wantMaxine) {
+            // Effects are disabled: keep the pipeline alive with pass-through audio.
+            if (needRestart) {
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    st_.pipeline_starting = true;
+                    st_.pipeline_running = false;
+
+                    // No GPU requirement in pass-through mode.
+                    st_.gpu_index = -1;
+                    st_.gpu_name.clear();
+                    st_.gpu_compute_cap.clear();
+                }
+
+                processor = std::make_unique<PassthroughAudioProcessor>();
+                pipeline = std::make_unique<studiocast::audio::AudioPipeline>(processor.get());
+
+                studiocast::audio::AudioPipelineConfig pcfg;
+                pcfg.source_name = cfg.source_name;
+                pcfg.sink_name = "studiocast_sink";
+
+                std::string perr;
+                if (!pipeline->Start(pcfg, &perr)) {
+                    SetLastError("Failed to start audio pipeline: " + perr);
+                    pipeline.reset();
+                    processor.reset();
+                    nextStartRetry = now + milliseconds(std::max(250, cfg.start_retry_ms));
+                    std::lock_guard<std::mutex> lock(mu_);
+                    st_.pipeline_starting = false;
+                    std::this_thread::sleep_for(milliseconds(pollMs));
+                    continue;
+                }
+
+                lastBackend = desiredBackend;
+                lastSource = cfg.source_name;
+
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    st_.pipeline_starting = false;
+                    st_.pipeline_running = true;
+                    st_.last_error.clear();
+                }
+            }
+
+            if (pipeline) {
+                const auto stats = pipeline->GetStats();
+                if (!stats.last_error.empty()) {
+                    SetLastError(stats.last_error);
+                }
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    st_.pipeline_running = stats.running;
+                }
+            }
+
+            std::this_thread::sleep_for(milliseconds(pollMs));
+            continue;
         }
 
         // Resolve GPU selection (settings.conf) and AFX SDK paths.
@@ -332,6 +385,7 @@ void VirtualAudioService::ThreadMain() {
 
             lastFx = cfg.effects;
             lastSource = cfg.source_name;
+            lastBackend = desiredBackend;
             {
                 std::lock_guard<std::mutex> lock(mu_);
                 st_.pipeline_starting = false;
