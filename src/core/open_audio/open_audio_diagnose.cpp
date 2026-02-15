@@ -31,7 +31,11 @@ OpenAudioDiagnostics DiagnoseOpenAudioDefault() {
                                  : (modelsRoot / "open_audio").string();
 
   od.install_hints.push_back(std::string("Model packs: ") + openAudioRoot + "/<model_id>/");
-  od.install_hints.push_back("Each pack must contain: model.json, model.onnx, LICENSE.txt");
+  od.install_hints.push_back(
+      "Source builds: run ./scripts/install_open_audio_models.sh to install the curated FastEnhancer pack.");
+  od.install_hints.push_back("Docs: docs/open_audio_install.md");
+  od.install_hints.push_back(
+      "Each pack must contain: model.json, the ONNX file referenced by onnx_filename, and LICENSE.txt.");
 
   const auto block_effects = [&](const char* reason_code) {
     od.blocked_effects[std::string(studiocast::audio::effects::contract::kEffectIdNoiseRemoval)] = reason_code;

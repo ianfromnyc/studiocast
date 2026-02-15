@@ -200,10 +200,15 @@ static int CmdAudioInstallHints(const char* argv0) {
   std::cout << "StudioCast Open Audio Install Hints\n\n";
   std::cout << "Model packs root:\n  " << OpenAudioRootForDisplay() << "\n\n";
 
+  std::cout << "Quick install (source builds):\n";
+  std::cout << "  ./scripts/install_open_audio_models.sh\n\n";
+  std::cout << "Curated pack ID: fastenhancer_m_vd_v1\n";
+  std::cout << "Docs: docs/open_audio_install.md\n\n";
+
   std::cout << "A model pack is a directory named by <model_id>.\n";
   std::cout << "Required files:\n";
   std::cout << "  - model.json   (metadata)\n";
-  std::cout << "  - model.onnx   (ONNX model)\n";
+  std::cout << "  - <model>.onnx (ONNX model)\n";
   std::cout << "  - LICENSE.txt  (model license text)\n\n";
 
   std::cout << "Create a new pack (example):\n";

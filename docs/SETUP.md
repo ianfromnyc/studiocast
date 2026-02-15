@@ -52,6 +52,28 @@ On Ubuntu 22.04+, the helper script that installs an ONNX Runtime GPU build is:
 ./scripts/bootstrap_ubuntu22.sh
 ```
 
+## 3b) Optional: Open Audio backend (no Maxine required)
+
+The Open Audio backend (`open_audio`) runs **microphone** effects (noise removal + “studio voice”-style enhancement)
+via ONNX Runtime, using user-supplied model packs.
+
+Install/usage docs:
+
+- `docs/open_audio_install.md`
+
+Install the curated model pack:
+
+```bash
+./scripts/install_open_audio_models.sh
+```
+
+Verify:
+
+```bash
+./build/studiocast-open audio-list-models
+./build/studiocast-open audio-self-test --model-id fastenhancer_m_vd_v1
+```
+
 ## 4) Optional: Install NVIDIA Maxine SDK + features
 
 StudioCast does **not** ship or redistribute NVIDIA Maxine SDK assets. You must obtain them yourself

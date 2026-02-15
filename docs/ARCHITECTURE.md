@@ -103,3 +103,15 @@ Required top-level fields:
 
 Effects are GPU-only (Maxine + small CUDA post-process where needed). If Maxine, drivers, supported GPU, or feature
 models are missing, the pipeline must not run effects and the UI must communicate the “unavailable” state.
+
+
+## Open Audio (microphone ML) model packs
+
+The Open Audio backend (`open_audio`) uses ONNX Runtime and user-supplied model packs to run streaming
+microphone enhancement (noise removal + “studio voice”). Model packs live under:
+
+```
+${XDG_DATA_HOME:-~/.local/share}/studiocast/models/open_audio/<model_id>/
+```
+
+See `docs/open_audio_install.md` for the installer script, pack schema, and validation tooling.

@@ -40,6 +40,7 @@ Notes:
 - If you hit a compiler/libstdc++ mismatch, explicitly pick a distro-matching compiler and re-configure (e.g. `g++-12` on 22.04, `g++-13` on 24.04).
 - See `docs/SETUP.md` for the full quickstart (v4l2loopback + optional engine setup).
 - For the non-Maxine GPU path (Open CUDA / ONNX Runtime + model packs): see `docs/open_cuda_install.md`.
+- For the non-Maxine audio ML path (Open Audio / ONNX Runtime + model packs): see `docs/open_audio_install.md`.
 
 
 ## Dev tooling
