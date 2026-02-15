@@ -1,6 +1,7 @@
 #include "core/open_audio/open_audio_onnx_session.h"
 
 #include <sstream>
+#include <type_traits>
 #include <utility>
 
 #if STUDIOCAST_HAVE_ONNXRUNTIME
@@ -42,7 +43,13 @@ OrtRuntimeInfo OpenAudioOrtSession::QueryRuntimeInfo() {
         out.providers.emplace_back(providers[i]);
       }
     }
-    api.ReleaseAvailableProviders(providers, num);
+
+    // ORT changed this API from `void` to returning `OrtStatus*` (warn_unused_result).
+    if constexpr (std::is_void_v<decltype(api.ReleaseAvailableProviders(providers, num))>) {
+      api.ReleaseAvailableProviders(providers, num);
+    } else {
+      Ort::ThrowOnError(api.ReleaseAvailableProviders(providers, num));
+    }
   } catch (const Ort::Exception&) {
     // Best-effort only.
   }
@@ -112,7 +119,8 @@ std::string ShapeToString(const std::vector<int64_t>& shape) {
   return oss.str();
 }
 
-std::string TensorDesc(const Ort::TensorTypeAndShapeInfo& ti) {
+template <typename TensorTypeAndShapeInfo>
+std::string TensorDesc(const TensorTypeAndShapeInfo& ti) {
   std::ostringstream oss;
   const auto type = ti.GetElementType();
   oss << "tensor(" << ElemTypeToString(type) << ")";
