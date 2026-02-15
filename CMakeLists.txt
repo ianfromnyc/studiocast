@@ -93,6 +93,8 @@ add_library(studiocast_core
         src/core/open_audio/open_audio_diagnose.cpp
         src/core/open_audio/model_pack_registry.h
         src/core/open_audio/model_pack_registry.cpp
+        src/core/open_audio/open_audio_audio_processor.h
+        src/core/open_audio/open_audio_audio_processor.cpp
         src/core/audio/effects/broadcast_audio_effect_contract.h
         src/core/util/dynlib.h
         src/core/util/dynlib.cpp

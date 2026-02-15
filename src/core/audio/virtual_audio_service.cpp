@@ -13,6 +13,7 @@
 #include "core/maxine/availability.h"
 #include "core/maxine/gpu_selection.h"
 #include "core/maxine/paths.h"
+#include "core/open_audio/open_audio_audio_processor.h"
 
 // Effect planning is build-time independent from the Pulse audio pipeline.
 #include "core/maxine/afx/afx_effect.h"
@@ -28,8 +29,12 @@ namespace studiocast::audio {
 
 namespace {
 
-AudioBackendAvailability ProbeAudioBackendAvailability() {
+AudioBackendAvailability ProbeAudioBackendAvailability(const VirtualAudioServiceConfig& cfg) {
     AudioBackendAvailability out;
+
+#if !STUDIOCAST_HAVE_ONNXRUNTIME
+    (void)cfg;
+#endif
 
     // Maxine availability probe (audio needs AFX).
     if (!studiocast::maxine::BackendBuilt()) {
@@ -58,9 +63,23 @@ AudioBackendAvailability ProbeAudioBackendAvailability() {
         }
     }
 
-    // Open-source backend is introduced in a later phase.
+#if STUDIOCAST_HAVE_ONNXRUNTIME
+    // Open Audio backend availability probe.
+    // Phase 4: validate that a model can be resolved (installed pack or user path).
+    {
+        std::string oerr;
+        if (studiocast::open_audio::ResolveOpenAudioModelForMicrophone(cfg.effects, nullptr, &oerr)) {
+            out.open_source_ok = true;
+            out.open_source_reason.clear();
+        } else {
+            out.open_source_ok = false;
+            out.open_source_reason = oerr.empty() ? "Open Audio backend unavailable." : oerr;
+        }
+    }
+#else
     out.open_source_ok = false;
-    out.open_source_reason = "Open-source audio backend not available (Phase 1 stub).";
+    out.open_source_reason = "Open Audio backend disabled in this build (ONNX Runtime not found).";
+#endif
 
     return out;
 }
@@ -134,6 +153,11 @@ void VirtualAudioService::ThreadMain() {
     using namespace std::chrono;
 
     steady_clock::time_point nextStartRetry{};
+
+    // If the Open Audio backend fails to initialize, latch-disable it for a short
+    // cooldown to avoid rapid restart loops.
+    steady_clock::time_point openAudioCooldownUntil{};
+    std::string openAudioCooldownReason;
 
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
     std::unique_ptr<studiocast::maxine::afx::AfxApi> api;
@@ -222,10 +246,17 @@ void VirtualAudioService::ThreadMain() {
             st_.intensity = plan.intensity;
         }
 
-        // Backend selection (Phase 1: open-source backend is stubbed out).
+        // Backend selection.
         AudioBackendAvailability avail;
         if (AnyMicrophoneEffectRequested(cfg.effects)) {
-            avail = ProbeAudioBackendAvailability();
+            avail = ProbeAudioBackendAvailability(cfg);
+            const auto now2 = steady_clock::now();
+            if (now2 < openAudioCooldownUntil) {
+                avail.open_source_ok = false;
+                avail.open_source_reason = openAudioCooldownReason.empty()
+                                              ? "Open Audio backend is temporarily disabled due to a previous failure."
+                                              : openAudioCooldownReason;
+            }
         }
         const auto decision = ResolveAudioBackend(cfg.effects, avail);
         {
@@ -252,10 +283,18 @@ void VirtualAudioService::ThreadMain() {
         }
 
         const bool wantMaxine = (decision.backend == AudioBackendKind::kMaxine) && plan.enabled;
-        const char* desiredBackend = wantMaxine ? "maxine" : "passthrough";
+        const bool wantOpenAudio = (decision.backend == AudioBackendKind::kOpenSource) && plan.enabled;
 
+        std::string desiredBackend = "passthrough";
+        if (wantMaxine) {
+            desiredBackend = "maxine";
+        } else if (wantOpenAudio) {
+            desiredBackend = "open_source";
+        }
+
+        const bool effectsChanged = (!lastFx.has_value() || *lastFx != cfg.effects);
         const bool needRestart = (!pipeline) || (lastBackend != desiredBackend) || (lastSource != cfg.source_name) ||
-                                 (wantMaxine && (!lastFx.has_value() || *lastFx != cfg.effects));
+                                 ((wantMaxine || wantOpenAudio) && effectsChanged);
 
         if (needRestart) {
             if (pipeline) {
@@ -273,6 +312,87 @@ void VirtualAudioService::ThreadMain() {
                 lastAfxLib.clear();
                 lastFx.reset();
             }
+        }
+
+        if (wantOpenAudio) {
+            // Open-source backend (Phase 4 stub): validate model selection and keep the pipeline alive.
+            if (needRestart) {
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    st_.pipeline_starting = true;
+                    st_.pipeline_running = false;
+
+                    // Open-source backend does not require Maxine GPU selection.
+                    st_.gpu_index = -1;
+                    st_.gpu_name.clear();
+                    st_.gpu_compute_cap.clear();
+                }
+
+                studiocast::open_audio::ResolvedOpenAudioModel selected;
+                std::string oerr;
+                auto oa = studiocast::open_audio::OpenAudioAudioProcessor::CreateForMicrophone(cfg.effects, &selected, &oerr);
+                if (!oa) {
+                    // Fall back to pass-through with a cooldown to avoid restart loops.
+                    SetLastError("Open Audio initialization failed: " + oerr);
+                    openAudioCooldownUntil = now + milliseconds(std::max(250, cfg.start_retry_ms));
+                    openAudioCooldownReason = oerr;
+
+                    desiredBackend = "passthrough";
+                    processor = std::make_unique<PassthroughAudioProcessor>();
+
+                    // Update status to reflect actual backend (decision may still say open_source this tick).
+                    {
+                        std::lock_guard<std::mutex> lock(mu_);
+                        st_.effects_backend_active = "passthrough";
+                        st_.effects_note = "Open-source audio backend failed to initialize; using pass-through.\n" + oerr;
+                    }
+                } else {
+                    processor = std::move(oa);
+                }
+
+                pipeline = std::make_unique<studiocast::audio::AudioPipeline>(processor.get());
+
+                studiocast::audio::AudioPipelineConfig pcfg;
+                pcfg.source_name = cfg.source_name;
+                pcfg.sink_name = "studiocast_sink";
+
+                std::string perr;
+                if (!pipeline->Start(pcfg, &perr)) {
+                    SetLastError("Failed to start audio pipeline: " + perr);
+                    pipeline.reset();
+                    processor.reset();
+                    nextStartRetry = now + milliseconds(std::max(250, cfg.start_retry_ms));
+                    std::lock_guard<std::mutex> lock(mu_);
+                    st_.pipeline_starting = false;
+                    std::this_thread::sleep_for(milliseconds(pollMs));
+                    continue;
+                }
+
+                lastBackend = desiredBackend;
+                lastSource = cfg.source_name;
+                lastFx = cfg.effects;
+
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    st_.pipeline_starting = false;
+                    st_.pipeline_running = true;
+                    st_.last_error.clear();
+                }
+            }
+
+            if (pipeline) {
+                const auto stats = pipeline->GetStats();
+                if (!stats.last_error.empty()) {
+                    SetLastError(stats.last_error);
+                }
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    st_.pipeline_running = stats.running;
+                }
+            }
+
+            std::this_thread::sleep_for(milliseconds(pollMs));
+            continue;
         }
 
         if (!wantMaxine) {
