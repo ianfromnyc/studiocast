@@ -11,6 +11,12 @@ if(UNIX AND NOT APPLE)
 endif()
 option(STUDIOCAST_ENABLE_OPEN_CUDA "Enable Open CUDA backend (requires ONNX Runtime + CUDA EP)" ${_studiocast_default_open_cuda})
 
+set(_studiocast_default_open_audio OFF)
+if(UNIX AND NOT APPLE)
+  set(_studiocast_default_open_audio ON)
+endif()
+option(STUDIOCAST_ENABLE_OPEN_AUDIO "Enable Open Audio backend (requires ONNX Runtime; CPU EP baseline)" ${_studiocast_default_open_audio})
+
 function(studiocast_setup_options)
   # Intentionally light for now; expand later
 endfunction()

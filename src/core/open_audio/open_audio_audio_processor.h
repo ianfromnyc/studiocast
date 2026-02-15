@@ -6,6 +6,7 @@
 
 #include "core/audio/audio_processor.h"
 #include "core/audio/effects/broadcast_audio_effects.h"
+#include "core/open_audio/open_audio_onnx_session.h"
 
 namespace studiocast::open_audio {
 
@@ -67,6 +68,10 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
 
  private:
   ResolvedOpenAudioModel model_;
+
+  // Phase 5: ORT session is created at init time to validate that the selected
+  // model loads successfully and to expose provider details for tooling.
+  std::unique_ptr<OpenAudioOrtSession> ort_session_;
 };
 
 }  // namespace studiocast::open_audio

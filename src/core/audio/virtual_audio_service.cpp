@@ -63,9 +63,12 @@ AudioBackendAvailability ProbeAudioBackendAvailability(const VirtualAudioService
         }
     }
 
-#if STUDIOCAST_HAVE_ONNXRUNTIME
+#if !STUDIOCAST_ENABLE_OPEN_AUDIO
+    out.open_source_ok = false;
+    out.open_source_reason = "Open Audio backend is disabled in this build.";
+#elif STUDIOCAST_HAVE_ONNXRUNTIME
     // Open Audio backend availability probe.
-    // Phase 4: validate that a model can be resolved (installed pack or user path).
+    // Phase 5: validate that a model can be resolved (installed pack or user path).
     {
         std::string oerr;
         if (studiocast::open_audio::ResolveOpenAudioModelForMicrophone(cfg.effects, nullptr, &oerr)) {
@@ -78,7 +81,7 @@ AudioBackendAvailability ProbeAudioBackendAvailability(const VirtualAudioService
     }
 #else
     out.open_source_ok = false;
-    out.open_source_reason = "Open Audio backend disabled in this build (ONNX Runtime not found).";
+    out.open_source_reason = "Open Audio backend unavailable: ONNX Runtime not found at build time.";
 #endif
 
     return out;

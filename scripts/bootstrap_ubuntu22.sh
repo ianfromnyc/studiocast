@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ORT_VERSION="${ORT_VERSION:-1.18.1}"
+ORT_VERSION="${ORT_VERSION:-1.24.1}"
 ORT_FLAVOR="${ORT_FLAVOR:-gpu}"
 ORT_ARCH="${ORT_ARCH:-x64}"
 

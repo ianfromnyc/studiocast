@@ -40,7 +40,13 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
         reason_code;
   };
 
-#if STUDIOCAST_HAVE_ONNXRUNTIME
+#if !STUDIOCAST_ENABLE_OPEN_CUDA
+  od.ok = false;
+  block_vb_effects("disabled_in_build");
+  od.install_hints.push_back("Open CUDA backend is disabled in this build.");
+  od.install_hints.push_back(
+      "Rebuild with -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON (requires ONNX Runtime + CUDA EP).");
+#elif STUDIOCAST_HAVE_ONNXRUNTIME
   // CUDA driver/device gate. This avoids repeatedly attempting to start the
   // pipeline only to fail deep in Open CUDA initialization when no NVIDIA
   // driver/GPU is available.

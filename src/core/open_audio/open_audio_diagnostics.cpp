@@ -59,6 +59,12 @@ std::string OpenAudioDiagnostics::ToJson() const {
 
   oss << "\"ok\":" << BoolJson(ok) << ",";
 
+  oss << "\"onnxruntime_version\":\"" << JsonEscape(onnxruntime_version) << "\",";
+
+  oss << "\"onnxruntime_providers\":";
+  AppendJsonStringArray(&oss, onnxruntime_providers);
+  oss << ",";
+
   oss << "\"installed_models\":";
   AppendJsonStringArray(&oss, installed_models);
   oss << ",";

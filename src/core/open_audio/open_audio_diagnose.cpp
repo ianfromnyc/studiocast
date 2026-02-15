@@ -2,6 +2,7 @@
 
 #include "core/audio/effects/broadcast_audio_effect_contract.h"
 #include "core/open_audio/model_pack_registry.h"
+#include "core/open_audio/open_audio_onnx_session.h"
 #include "core/util/xdg.h"
 
 namespace studiocast::open_audio {
@@ -38,7 +39,18 @@ OpenAudioDiagnostics DiagnoseOpenAudioDefault() {
     od.blocked_effects[std::string(studiocast::audio::effects::contract::kEffectIdStudioVoice)] = reason_code;
   };
 
-#if STUDIOCAST_HAVE_ONNXRUNTIME
+#if !STUDIOCAST_ENABLE_OPEN_AUDIO
+  od.ok = false;
+  block_effects("disabled_in_build");
+  od.install_hints.push_back("Open Audio backend is disabled in this build.");
+  od.install_hints.push_back("Rebuild with -DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON (requires ONNX Runtime).");
+#elif STUDIOCAST_HAVE_ONNXRUNTIME
+  {
+    const auto ort = OpenAudioOrtSession::QueryRuntimeInfo();
+    od.onnxruntime_version = ort.version;
+    od.onnxruntime_providers = ort.providers;
+  }
+
   if (od.installed_models.empty()) {
     od.ok = false;
     block_effects("missing_model_packs");
@@ -53,7 +65,7 @@ OpenAudioDiagnostics DiagnoseOpenAudioDefault() {
   od.ok = false;
   block_effects("onnxruntime_not_found");
   od.install_hints.push_back("Open Audio backend is disabled in this build (ONNX Runtime not found).");
-  od.install_hints.push_back("Install onnxruntime and rebuild.");
+  od.install_hints.push_back("Install onnxruntime and rebuild (or set ONNXRUNTIME_ROOT).");
 #endif
 
   return od;

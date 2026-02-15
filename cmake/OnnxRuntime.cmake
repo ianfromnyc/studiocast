@@ -35,8 +35,48 @@ function(studiocast_configure_onnxruntime out_found out_target)
     if (PkgConfig_FOUND)
       pkg_check_modules(ONNXRUNTIME QUIET IMPORTED_TARGET onnxruntime)
       if (ONNXRUNTIME_FOUND)
-        set(_found TRUE)
-        set(_target PkgConfig::ONNXRUNTIME)
+        # NOTE: Some environments can have stale/broken pkg-config metadata that
+        # points to non-existent include directories. CMake treats missing paths
+        # in INTERFACE_INCLUDE_DIRECTORIES as a hard error during generation.
+        #
+        # Sanitize the imported target and only accept it if headers are actually
+        # present.
+        set(_ort_pkg_includes_ok "")
+        set(_ort_pkg_includes_bad "")
+        set(_ort_pkg_has_header FALSE)
+
+        get_target_property(_ort_pkg_includes PkgConfig::ONNXRUNTIME INTERFACE_INCLUDE_DIRECTORIES)
+        if (NOT _ort_pkg_includes)
+          set(_ort_pkg_includes "")
+        endif()
+
+        foreach (d IN LISTS _ort_pkg_includes)
+          if (d MATCHES "\\$<")
+            list(APPEND _ort_pkg_includes_ok "${d}")
+          elseif (EXISTS "${d}")
+            list(APPEND _ort_pkg_includes_ok "${d}")
+            if (EXISTS "${d}/onnxruntime_cxx_api.h")
+              set(_ort_pkg_has_header TRUE)
+            endif()
+          else()
+            list(APPEND _ort_pkg_includes_bad "${d}")
+          endif()
+        endforeach()
+
+        if (_ort_pkg_includes_bad)
+          set_target_properties(PkgConfig::ONNXRUNTIME PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${_ort_pkg_includes_ok}"
+          )
+        endif()
+
+        if (_ort_pkg_has_header)
+          set(_found TRUE)
+          set(_target PkgConfig::ONNXRUNTIME)
+        else()
+          message(STATUS "ONNX Runtime found via pkg-config but headers were not usable; ignoring pkg-config result. Install onnxruntime dev package or set ONNXRUNTIME_ROOT.")
+          set(_found FALSE)
+          set(_target "")
+        endif()
       endif()
     endif()
   endif()

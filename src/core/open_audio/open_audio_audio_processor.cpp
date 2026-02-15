@@ -201,6 +201,12 @@ std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForMicro
     const studiocast::audio::effects::BroadcastAudioEffects& fx,
     ResolvedOpenAudioModel* resolved_out,
     std::string* error) {
+#if !STUDIOCAST_ENABLE_OPEN_AUDIO
+  (void)fx;
+  (void)resolved_out;
+  if (error) *error = "Open Audio backend is disabled in this build (STUDIOCAST_ENABLE_OPEN_AUDIO=0).";
+  return nullptr;
+#else
   ResolvedOpenAudioModel resolved;
   std::string err;
   if (!ResolveOpenAudioModelForMicrophone(fx, &resolved, &err)) {
@@ -208,7 +214,36 @@ std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForMicro
     return nullptr;
   }
   if (resolved_out) *resolved_out = resolved;
-  return std::make_unique<OpenAudioAudioProcessor>(std::move(resolved));
+
+#if !STUDIOCAST_HAVE_ONNXRUNTIME
+  if (error) {
+    *error =
+        "Open Audio backend unavailable: ONNX Runtime was not found at build time (STUDIOCAST_HAVE_ONNXRUNTIME=0).";
+  }
+  return nullptr;
+#else
+  // Phase 5: create the ORT session up-front so we fail fast (actionable error)
+  // and avoid repeatedly attempting to load the model in the realtime thread.
+  OrtSessionOptions opts;
+  opts.prefer_cuda = true;  // CPU fallback is handled internally.
+  opts.cuda_device_id = 0;
+
+  OrtSessionInfo si;
+  std::string ort_err;
+  const auto onnx_path = resolved.onnx_path;
+  auto session = OpenAudioOrtSession::Create(onnx_path, opts, &si, &ort_err);
+  if (!session) {
+    if (error) {
+      *error = ort_err.empty() ? "Failed to create ONNX Runtime session for Open Audio model." : ort_err;
+    }
+    return nullptr;
+  }
+
+  auto proc = std::make_unique<OpenAudioAudioProcessor>(std::move(resolved));
+  proc->ort_session_ = std::move(session);
+  return proc;
+#endif  // STUDIOCAST_HAVE_ONNXRUNTIME
+#endif  // STUDIOCAST_ENABLE_OPEN_AUDIO
 }
 
 OpenAudioAudioProcessor::OpenAudioAudioProcessor(ResolvedOpenAudioModel model) : model_(std::move(model)) {}

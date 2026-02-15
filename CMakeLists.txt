@@ -63,6 +63,14 @@ if (STUDIOCAST_ENABLE_OPEN_CUDA)
     endif()
 endif()
 
+if (STUDIOCAST_ENABLE_OPEN_AUDIO)
+    if (_studiocast_onnxruntime_found)
+        message(STATUS "ONNX Runtime found (${_studiocast_onnxruntime_target}); Open Audio backend enabled.")
+    else()
+        message(STATUS "ONNX Runtime not found; Open Audio backend will be unavailable. Install onnxruntime or set ONNXRUNTIME_ROOT.")
+    endif()
+endif()
+
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
@@ -95,6 +103,8 @@ add_library(studiocast_core
         src/core/open_audio/model_pack_registry.cpp
         src/core/open_audio/open_audio_audio_processor.h
         src/core/open_audio/open_audio_audio_processor.cpp
+        src/core/open_audio/open_audio_onnx_session.h
+        src/core/open_audio/open_audio_onnx_session.cpp
         src/core/audio/effects/broadcast_audio_effect_contract.h
         src/core/util/dynlib.h
         src/core/util/dynlib.cpp
@@ -298,7 +308,12 @@ else()
     message(STATUS "libpulse-simple not found via pkg-config; audio pipeline is disabled. Install libpulse-dev to enable.")
 endif()
 
-if (STUDIOCAST_ENABLE_OPEN_CUDA AND _studiocast_onnxruntime_found)
+target_compile_definitions(studiocast_core PUBLIC
+    STUDIOCAST_ENABLE_OPEN_CUDA=$<BOOL:${STUDIOCAST_ENABLE_OPEN_CUDA}>
+    STUDIOCAST_ENABLE_OPEN_AUDIO=$<BOOL:${STUDIOCAST_ENABLE_OPEN_AUDIO}>
+)
+
+if ((_studiocast_onnxruntime_found) AND (STUDIOCAST_ENABLE_OPEN_CUDA OR STUDIOCAST_ENABLE_OPEN_AUDIO))
     target_link_libraries(studiocast_core PUBLIC ${_studiocast_onnxruntime_target})
     target_compile_definitions(studiocast_core PUBLIC STUDIOCAST_HAVE_ONNXRUNTIME=1)
 else()
