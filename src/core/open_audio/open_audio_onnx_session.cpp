@@ -1,8 +1,10 @@
 #include "core/open_audio/open_audio_onnx_session.h"
 
+#include <algorithm>
 #include <sstream>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #if STUDIOCAST_HAVE_ONNXRUNTIME
 #include <onnxruntime_c_api.h>
@@ -284,6 +286,86 @@ std::unique_ptr<OpenAudioOrtSession> OpenAudioOrtSession::Create(const std::file
       *error = std::string("Failed to create ONNX Runtime session: ") + e.what();
     }
     return nullptr;
+  }
+#endif
+}
+
+bool OpenAudioOrtSession::Run1D(const float* input,
+                                std::size_t samples,
+                                float* output,
+                                std::size_t output_capacity,
+                                std::size_t* output_samples,
+                                std::string* error) {
+  if (error) error->clear();
+  if (output_samples) *output_samples = 0;
+
+#if !STUDIOCAST_HAVE_ONNXRUNTIME
+  (void)input;
+  (void)samples;
+  (void)output;
+  (void)output_capacity;
+  if (error) {
+    *error = "ONNX Runtime is not available in this build (STUDIOCAST_HAVE_ONNXRUNTIME=0).";
+  }
+  return false;
+#else
+  if (!impl_ || !impl_->session) {
+    if (error) *error = "ORT session is not initialized.";
+    return false;
+  }
+  if (!input || !output) {
+    if (error) *error = "null buffer passed to Run1D";
+    return false;
+  }
+  if (samples == 0) return true;
+
+  if (impl_->info.input_names.empty() || impl_->info.output_names.empty() || impl_->info.input_names[0].empty() ||
+      impl_->info.output_names[0].empty()) {
+    if (error) *error = "ORT session does not expose input/output names for Run1D.";
+    return false;
+  }
+
+  try {
+    Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+
+    std::vector<int64_t> shape{1, static_cast<int64_t>(samples)};
+    Ort::Value input_tensor = Ort::Value::CreateTensor<float>(mem_info, const_cast<float*>(input), samples,
+                                                              shape.data(), shape.size());
+
+    const char* input_name = impl_->info.input_names[0].c_str();
+    const char* output_name = impl_->info.output_names[0].c_str();
+    const char* input_names[] = {input_name};
+    const char* output_names[] = {output_name};
+
+    auto outputs = impl_->session->Run(Ort::RunOptions{nullptr}, input_names, &input_tensor, 1, output_names, 1);
+    if (outputs.empty() || !outputs[0].IsTensor()) {
+      if (error) *error = "ORT Run() returned no tensor outputs.";
+      return false;
+    }
+
+    auto& out_val = outputs[0];
+    auto ti = out_val.GetTensorTypeAndShapeInfo();
+    const auto out_shape = ti.GetShape();
+    std::size_t out_len = 1;
+    for (auto d : out_shape) {
+      if (d > 0) out_len *= static_cast<std::size_t>(d);
+    }
+
+    float* out_data = out_val.GetTensorMutableData<float>();
+    const std::size_t to_copy = std::min(out_len, output_capacity);
+    std::copy_n(out_data, to_copy, output);
+    if (output_samples) *output_samples = to_copy;
+    return true;
+  } catch (const Ort::Exception& e) {
+    if (error) {
+      *error = std::string("ORT Run() failed: ") + e.what();
+    }
+    return false;
+  } catch (const std::exception& e) {
+    if (error) {
+      *error = std::string("ORT Run() failed: ") + e.what();
+    }
+    return false;
   }
 #endif
 }

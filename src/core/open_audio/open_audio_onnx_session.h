@@ -57,6 +57,24 @@ class OpenAudioOrtSession {
 
   const OrtSessionInfo& info() const;
 
+  // Convenience helper for waveform-style models with a single float tensor
+  // input/output. The first input and first output of the underlying ORT
+  // session are used.
+  //
+  // - input: mono samples
+  // - samples: number of mono samples
+  // - output: caller-provided buffer
+  // - output_capacity: maximum number of samples that can be written to output
+  // - output_samples: filled with number of valid samples on success
+  //
+  // Returns false on failure and fills `error`.
+  bool Run1D(const float* input,
+             std::size_t samples,
+             float* output,
+             std::size_t output_capacity,
+             std::size_t* output_samples,
+             std::string* error);
+
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

@@ -100,6 +100,8 @@ bool ResolveFromPackDir(const fs::path& pack_dir, ResolvedOpenAudioModel* out, s
     out->model_id = id;
     out->display_name = display;
     out->onnx_path = onnxPath;
+    out->sample_rate = 0;  // unknown for user-specified packs resolved here
+    out->channels = 1;
     out->is_user_path = true;
   }
   return true;
@@ -121,6 +123,8 @@ bool ResolveFromOnnxFile(const fs::path& onnxPath, ResolvedOpenAudioModel* out, 
     out->model_id.clear();
     out->display_name = onnxPath.filename().string();
     out->onnx_path = onnxPath;
+    out->sample_rate = 0;  // unknown; caller may assume pipeline sample rate
+    out->channels = 1;
     out->is_user_path = true;
   }
   return true;
@@ -192,6 +196,8 @@ bool ResolveOpenAudioModelForMicrophone(const studiocast::audio::effects::Broadc
     out->model_id = pack.id;
     out->display_name = pack.display_name;
     out->onnx_path = pack.onnx_path;
+    out->sample_rate = pack.sample_rate;
+    out->channels = pack.channels;
     out->is_user_path = false;
   }
   return true;
@@ -214,6 +220,15 @@ std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForMicro
     return nullptr;
   }
   if (resolved_out) *resolved_out = resolved;
+
+  // Map user "strength" (0..100) to a wet/dry mix.
+  // We keep it simple for now: linear mapping [20%, 100%] to avoid fully-dry
+  // or fully-wet extremes by default.
+  int strength = fx.microphone.strength;
+  if (strength < 0) strength = 0;
+  if (strength > 100) strength = 100;
+  const float t = static_cast<float>(strength) / 100.0f;
+  const float wet_mix = 0.2f + 0.8f * t;  // 0.2 .. 1.0
 
 #if !STUDIOCAST_HAVE_ONNXRUNTIME
   if (error) {
@@ -239,28 +254,85 @@ std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForMicro
     return nullptr;
   }
 
-  auto proc = std::make_unique<OpenAudioAudioProcessor>(std::move(resolved));
+  auto proc = std::make_unique<OpenAudioAudioProcessor>(std::move(resolved), wet_mix);
   proc->ort_session_ = std::move(session);
   return proc;
 #endif  // STUDIOCAST_HAVE_ONNXRUNTIME
 #endif  // STUDIOCAST_ENABLE_OPEN_AUDIO
 }
 
-OpenAudioAudioProcessor::OpenAudioAudioProcessor(ResolvedOpenAudioModel model) : model_(std::move(model)) {}
+OpenAudioAudioProcessor::OpenAudioAudioProcessor(ResolvedOpenAudioModel model, float wet_mix)
+    : model_(std::move(model)), wet_mix_(wet_mix) {}
 
 bool OpenAudioAudioProcessor::Process(const float* in,
                                       float* out,
                                       std::uint32_t frames,
                                       std::uint32_t channels,
                                       std::string* error) {
-  (void)error;
   if (!in || !out) {
     if (error) *error = "null audio buffer";
     return false;
   }
+
   const std::uint64_t samples64 = static_cast<std::uint64_t>(frames) * static_cast<std::uint64_t>(channels);
   const auto samples = static_cast<std::size_t>(samples64);
-  std::copy_n(in, samples, out);
+  if (samples == 0) return true;
+
+  // If ORT session is not available (should not happen after CreateForMicrophone),
+  // fall back to pass-through.
+  if (!ort_session_) {
+    std::copy_n(in, samples, out);
+    return true;
+  }
+
+  // Convert interleaved audio to mono for the model.
+  mono_in_.resize(frames);
+  if (channels == 1) {
+    std::copy_n(in, frames, mono_in_.data());
+  } else {
+    for (std::uint32_t f = 0; f < frames; ++f) {
+      float acc = 0.0f;
+      for (std::uint32_t c = 0; c < channels; ++c) {
+        const std::size_t idx = static_cast<std::size_t>(f) * channels + c;
+        acc += in[idx];
+      }
+      mono_in_[f] = acc / static_cast<float>(channels);
+    }
+  }
+
+  mono_out_.resize(frames);
+  std::size_t out_samples = 0;
+  std::string ort_err;
+  if (!ort_session_->Run1D(mono_in_.data(), frames, mono_out_.data(), mono_out_.size(), &out_samples, &ort_err)) {
+    // Fail open: log a best-effort error string and pass input through unchanged.
+    if (error) {
+      *error = std::string("Open Audio ORT run failed: ") + ort_err;
+    }
+    std::copy_n(in, samples, out);
+    return true;
+  }
+
+  if (out_samples < frames) {
+    // If the model produced fewer samples than requested, pad with dry mono input.
+    std::copy(mono_in_.begin() + static_cast<std::ptrdiff_t>(out_samples),
+              mono_in_.begin() + static_cast<std::ptrdiff_t>(frames),
+              mono_out_.begin() + static_cast<std::ptrdiff_t>(out_samples));
+    out_samples = frames;
+  }
+
+  const float wet = wet_mix_;
+  const float dry = 1.0f - wet;
+
+  // Fan-out processed mono to all channels with wet/dry mix.
+  for (std::uint32_t f = 0; f < frames; ++f) {
+    const float wet_sample = (f < out_samples) ? mono_out_[f] : mono_in_[f];
+    for (std::uint32_t c = 0; c < channels; ++c) {
+      const std::size_t idx = static_cast<std::size_t>(f) * channels + c;
+      const float dry_sample = in[idx];
+      out[idx] = wet * wet_sample + dry * dry_sample;
+    }
+  }
+
   return true;
 }
 

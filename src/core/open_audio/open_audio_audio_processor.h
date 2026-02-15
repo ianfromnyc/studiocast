@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "core/audio/audio_processor.h"
 #include "core/audio/effects/broadcast_audio_effects.h"
@@ -26,6 +27,11 @@ struct ResolvedOpenAudioModel {
 
   // Fully resolved ONNX file path.
   std::filesystem::path onnx_path;
+
+  // Optional metadata propagated from model pack (if available).
+  // These are best-effort hints for future extensions (e.g., resampling).
+  int sample_rate = 0;  // 0 = unknown
+  int channels = 1;     // expected model channels (usually 1)
 
   // Indicates whether the ONNX file came from a user-specified path.
   bool is_user_path = false;
@@ -56,7 +62,7 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
       ResolvedOpenAudioModel* resolved_out,
       std::string* error);
 
-  explicit OpenAudioAudioProcessor(ResolvedOpenAudioModel model);
+  OpenAudioAudioProcessor(ResolvedOpenAudioModel model, float wet_mix);
 
   const ResolvedOpenAudioModel& model() const { return model_; }
 
@@ -72,6 +78,15 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
   // Phase 5: ORT session is created at init time to validate that the selected
   // model loads successfully and to expose provider details for tooling.
   std::unique_ptr<OpenAudioOrtSession> ort_session_;
+
+  // Wet/dry mix (0..1). 1 = fully processed, 0 = fully dry.
+  float wet_mix_ = 1.0f;
+
+  // Scratch buffers for mono processing. We convert interleaved input to mono,
+  // run the model on mono, and then fan out the processed signal to all
+  // channels with wet/dry mixing.
+  std::vector<float> mono_in_;
+  std::vector<float> mono_out_;
 };
 
 }  // namespace studiocast::open_audio
