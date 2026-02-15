@@ -48,6 +48,18 @@ bool GetStringRequired(const util::json::Value::Object& o, const char* key, std:
   return true;
 }
 
+bool GetStringOptional(const util::json::Value::Object& o,
+                       const char* key,
+                       std::string* out,
+                       std::string* error) {
+  const auto* v = Get(o, key);
+  if (!v) return true;
+  const auto* s = v->AsString();
+  if (!s) return Fail(error, std::string("model.json: field '") + key + "' must be a string");
+  *out = *s;
+  return true;
+}
+
 bool GetIntOptional(const util::json::Value::Object& o, const char* key, int* out, std::string* error) {
   const auto* v = Get(o, key);
   if (!v) return true;
@@ -113,6 +125,48 @@ bool ParseModelJsonV1(const fs::path& pack_dir, ModelPack* out, std::string* err
   }
   if (out->channels <= 0) {
     return Fail(error, "model.json: channels must be positive");
+  }
+
+  // MVP engine currently supports only mono 16kHz or 48kHz waveform models.
+  if (out->channels != 1) {
+    return Fail(error, "model.json: channels must be 1 (mono models only)");
+  }
+  if (out->sample_rate != 16000 && out->sample_rate != 48000) {
+    return Fail(error, "model.json: sample_rate must be 16000 or 48000 (10ms-frame waveform models)");
+  }
+
+  // Optional: ONNX model I/O mapping for streaming models.
+  const auto* ioVal = Get(*obj, "onnx_io");
+  if (ioVal) {
+    const auto* ioObj = ioVal->AsObject();
+    if (!ioObj) return Fail(error, "model.json: field 'onnx_io' must be an object");
+
+    out->has_onnx_io = true;
+    if (!GetIntOptional(*ioObj, "frame_samples", &out->onnx_io.frame_samples, error)) return false;
+    if (!GetStringOptional(*ioObj, "audio_input", &out->onnx_io.audio_input, error)) return false;
+    if (!GetStringOptional(*ioObj, "audio_output", &out->onnx_io.audio_output, error)) return false;
+    if (!GetStringArrayOptional(*ioObj, "state_inputs", &out->onnx_io.state_inputs, error)) return false;
+    if (!GetStringArrayOptional(*ioObj, "state_outputs", &out->onnx_io.state_outputs, error)) return false;
+
+    if (out->onnx_io.frame_samples < 0) {
+      return Fail(error, "model.json: onnx_io.frame_samples must be >= 0");
+    }
+
+    // If frame_samples is specified, enforce 10ms framing to match the real-time pipeline.
+    if (out->onnx_io.frame_samples > 0) {
+      const int expected = out->sample_rate / 100;
+      if (expected <= 0 || out->onnx_io.frame_samples != expected) {
+        return Fail(error, "model.json: onnx_io.frame_samples must match sample_rate/100 (10ms frames)");
+      }
+    }
+
+    // If state inputs are declared, state outputs must match in count (and vice versa).
+    if (!out->onnx_io.state_inputs.empty() || !out->onnx_io.state_outputs.empty()) {
+      if (out->onnx_io.state_inputs.size() != out->onnx_io.state_outputs.size()) {
+        return Fail(error,
+                    "model.json: onnx_io.state_inputs and state_outputs must have the same length");
+      }
+    }
   }
 
   {

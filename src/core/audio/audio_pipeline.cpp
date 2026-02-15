@@ -154,6 +154,7 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
     processor_->Reset();
 
     std::string proc_err;
+    std::string last_proc_warning;
     while (!stop_.load(std::memory_order_acquire)) {
         if (::pa_simple_read(rec, in.data(), bytes_per_frame, &pa_err) < 0) {
             SetLastError("Pulse capture read failed: " + PulseErrorString(pa_err));
@@ -164,6 +165,11 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
         if (!processor_->Process(in.data(), out.data(), cfg.frame_samples, cfg.channels, &proc_err)) {
             SetLastError("AudioProcessor::Process failed: " + proc_err);
             break;
+        }
+
+        if (!proc_err.empty() && proc_err != last_proc_warning) {
+            SetLastError("AudioProcessor warning: " + proc_err);
+            last_proc_warning = proc_err;
         }
 
         if (::pa_simple_write(play, out.data(), bytes_per_frame, &pa_err) < 0) {

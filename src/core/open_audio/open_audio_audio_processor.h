@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -33,6 +35,23 @@ struct ResolvedOpenAudioModel {
   int sample_rate = 0;  // 0 = unknown
   int channels = 1;     // expected model channels (usually 1)
 
+  struct OnnxIo {
+    // Expected frame size (in samples) per inference call at model sample_rate.
+    // For the default 10ms framing this is sample_rate / 100 (e.g., 160 @ 16kHz).
+    int frame_samples = 0;
+
+    // Optional explicit tensor names for the primary waveform I/O.
+    std::string audio_input;
+    std::string audio_output;
+
+    // Optional explicit state tensor names for streaming models.
+    std::vector<std::string> state_inputs;
+    std::vector<std::string> state_outputs;
+  };
+
+  bool has_onnx_io = false;
+  OnnxIo onnx_io{};
+
   // Indicates whether the ONNX file came from a user-specified path.
   bool is_user_path = false;
 };
@@ -62,7 +81,21 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
       ResolvedOpenAudioModel* resolved_out,
       std::string* error);
 
-  OpenAudioAudioProcessor(ResolvedOpenAudioModel model, float wet_mix);
+  // Same as CreateForMicrophone but allows overriding ORT session options (e.g., CPU-only self-test).
+  static std::unique_ptr<OpenAudioAudioProcessor> CreateForMicrophoneWithOrtOptions(
+      const studiocast::audio::effects::BroadcastAudioEffects& fx,
+      const studiocast::open_audio::OrtSessionOptions& ort_opts,
+      ResolvedOpenAudioModel* resolved_out,
+      std::string* error);
+
+  explicit OpenAudioAudioProcessor(ResolvedOpenAudioModel model);
+  ~OpenAudioAudioProcessor() override;
+
+  // Update strength / mode without requiring a pipeline restart.
+  // Thread-safe for calls from the supervisor thread while Process() runs on the audio thread.
+  void UpdateFromMicrophoneConfig(const studiocast::audio::effects::BroadcastMicrophoneEffects& mic);
+
+  void Reset() override;
 
   const ResolvedOpenAudioModel& model() const { return model_; }
 
@@ -75,18 +108,54 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
  private:
   ResolvedOpenAudioModel model_;
 
-  // Phase 5: ORT session is created at init time to validate that the selected
-  // model loads successfully and to expose provider details for tooling.
-  std::unique_ptr<OpenAudioOrtSession> ort_session_;
+  // Active ORT session (CUDA if available, CPU otherwise). If a CUDA session is active
+  // and a CPU fallback was created, we can switch to CPU on the first runtime failure.
+  std::unique_ptr<OpenAudioOrtSession> ort_session_cuda_;
+  std::unique_ptr<OpenAudioOrtSession> ort_session_cpu_;
+  OpenAudioOrtSession* ort_session_active_ = nullptr;
+  bool using_cpu_fallback_ = false;
 
-  // Wet/dry mix (0..1). 1 = fully processed, 0 = fully dry.
-  float wet_mix_ = 1.0f;
+  // Model I/O binding (names, shapes, and optional streaming state buffers).
+  std::string audio_input_name_;
+  std::string audio_output_name_;
+  std::vector<std::string> state_input_names_;
+  std::vector<std::string> state_output_names_;
+  std::vector<int64_t> audio_input_shape_;
+  std::vector<int64_t> audio_output_shape_;
+  std::vector<std::vector<int64_t>> state_shapes_;
+  std::vector<std::size_t> state_sizes_;
+  std::vector<OpenAudioOrtSession::OrtRunInput> ort_inputs_;
+  std::vector<OpenAudioOrtSession::OrtRunOutput> ort_outputs_;
+
+  int state_toggle_ = 0;
+  std::vector<std::vector<float>> state_buf_[2];
+
+  // Runtime settings updated from the supervisor thread.
+  std::atomic<int> strength_{50};
+  std::atomic<bool> studio_voice_enabled_{false};
+
+  // Engine configuration derived from model pack metadata.
+  int model_sample_rate_ = 48000;
+  std::uint32_t model_frame_samples_ = 480;
 
   // Scratch buffers for mono processing. We convert interleaved input to mono,
   // run the model on mono, and then fan out the processed signal to all
   // channels with wet/dry mixing.
   std::vector<float> mono_in_;
   std::vector<float> mono_out_;
+
+  std::vector<float> model_in_;
+  std::vector<float> model_out_;
+
+  // Resampler state (48k <-> model_sample_rate). Only used when sample rates differ.
+  struct Decimator3;
+  struct Interpolator3;
+  std::unique_ptr<Decimator3> decim3_;
+  std::unique_ptr<Interpolator3> interp3_;
+
+  // Sticky warning after a runtime failure; surfaced via AudioPipeline last_error.
+  std::string sticky_warning_;
+  bool model_disabled_ = false;
 };
 
 }  // namespace studiocast::open_audio

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -32,6 +34,16 @@ struct OrtSessionInfo {
   // Human-friendly strings like: "tensor(float32) shape=[1, -1]".
   std::vector<std::string> input_descriptions;
   std::vector<std::string> output_descriptions;
+
+  // Structured tensor metadata for tool/debugging and engine bindings.
+  // Shapes are best-effort (may contain -1 for dynamic dimensions).
+  std::vector<std::vector<int64_t>> input_shapes;
+  std::vector<int> input_elem_types;
+  std::vector<std::vector<int64_t>> output_shapes;
+  std::vector<int> output_elem_types;
+
+  // Non-fatal warnings collected during session creation (e.g., CUDA EP unavailable).
+  std::vector<std::string> warnings;
 };
 
 // Thin wrapper around an ONNX Runtime session used by the Open Audio backend.
@@ -56,6 +68,32 @@ class OpenAudioOrtSession {
   OpenAudioOrtSession& operator=(const OpenAudioOrtSession&) = delete;
 
   const OrtSessionInfo& info() const;
+
+  struct OrtRunInput {
+    const char* name = nullptr;
+    const float* data = nullptr;
+    std::size_t num_floats = 0;
+    const int64_t* shape = nullptr;
+    std::size_t shape_rank = 0;
+  };
+
+  struct OrtRunOutput {
+    const char* name = nullptr;
+    float* data = nullptr;
+    std::size_t num_floats = 0;
+    const int64_t* shape = nullptr;
+    std::size_t shape_rank = 0;
+  };
+
+  // Run an ORT session with pre-allocated input/output tensors.
+  //
+  // All tensors are assumed to be float32 CPU buffers.
+  // Returns false on failure and fills `error`.
+  bool Run(const OrtRunInput* inputs,
+           std::size_t input_count,
+           const OrtRunOutput* outputs,
+           std::size_t output_count,
+           std::string* error);
 
   // Convenience helper for waveform-style models with a single float tensor
   // input/output. The first input and first output of the underlying ORT

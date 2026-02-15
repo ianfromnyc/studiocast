@@ -18,6 +18,12 @@ struct OpenAudioOrtSession::Impl {
 
 #if STUDIOCAST_HAVE_ONNXRUNTIME
   std::unique_ptr<Ort::Session> session;
+
+  // Scratch space to avoid per-frame heap churn in real-time processing.
+  std::vector<const char*> scratch_input_names;
+  std::vector<const char*> scratch_output_names;
+  std::vector<Ort::Value> scratch_inputs;
+  std::vector<Ort::Value> scratch_outputs;
 #endif
 };
 
@@ -218,6 +224,8 @@ std::unique_ptr<OpenAudioOrtSession> OpenAudioOrtSession::Create(const std::file
     const std::size_t in_count = session->GetInputCount();
     info.input_names.reserve(in_count);
     info.input_descriptions.reserve(in_count);
+    info.input_shapes.reserve(in_count);
+    info.input_elem_types.reserve(in_count);
     for (std::size_t i = 0; i < in_count; ++i) {
       auto name = session->GetInputNameAllocated(i, alloc);
       info.input_names.emplace_back(name ? name.get() : "");
@@ -228,19 +236,27 @@ std::unique_ptr<OpenAudioOrtSession> OpenAudioOrtSession::Create(const std::file
         if (onnx_type == ONNX_TYPE_TENSOR) {
           const auto tensor = ti.GetTensorTypeAndShapeInfo();
           info.input_descriptions.emplace_back(TensorDesc(tensor));
+          info.input_shapes.emplace_back(tensor.GetShape());
+          info.input_elem_types.emplace_back(static_cast<int>(tensor.GetElementType()));
         } else {
           std::ostringstream oss;
           oss << "onnx_type=" << static_cast<int>(onnx_type);
           info.input_descriptions.emplace_back(oss.str());
+          info.input_shapes.emplace_back(std::vector<int64_t>{});
+          info.input_elem_types.emplace_back(static_cast<int>(ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED));
         }
       } catch (const Ort::Exception& e) {
         info.input_descriptions.emplace_back(std::string("type_info_error: ") + e.what());
+        info.input_shapes.emplace_back(std::vector<int64_t>{});
+        info.input_elem_types.emplace_back(static_cast<int>(ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED));
       }
     }
 
     const std::size_t out_count = session->GetOutputCount();
     info.output_names.reserve(out_count);
     info.output_descriptions.reserve(out_count);
+    info.output_shapes.reserve(out_count);
+    info.output_elem_types.reserve(out_count);
     for (std::size_t i = 0; i < out_count; ++i) {
       auto name = session->GetOutputNameAllocated(i, alloc);
       info.output_names.emplace_back(name ? name.get() : "");
@@ -251,20 +267,23 @@ std::unique_ptr<OpenAudioOrtSession> OpenAudioOrtSession::Create(const std::file
         if (onnx_type == ONNX_TYPE_TENSOR) {
           const auto tensor = ti.GetTensorTypeAndShapeInfo();
           info.output_descriptions.emplace_back(TensorDesc(tensor));
+          info.output_shapes.emplace_back(tensor.GetShape());
+          info.output_elem_types.emplace_back(static_cast<int>(tensor.GetElementType()));
         } else {
           std::ostringstream oss;
           oss << "onnx_type=" << static_cast<int>(onnx_type);
           info.output_descriptions.emplace_back(oss.str());
+          info.output_shapes.emplace_back(std::vector<int64_t>{});
+          info.output_elem_types.emplace_back(static_cast<int>(ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED));
         }
       } catch (const Ort::Exception& e) {
         info.output_descriptions.emplace_back(std::string("type_info_error: ") + e.what());
+        info.output_shapes.emplace_back(std::vector<int64_t>{});
+        info.output_elem_types.emplace_back(static_cast<int>(ONNX_TENSOR_ELEMENT_DATA_TYPE_UNDEFINED));
       }
     }
-
     if (!cuda_warn.empty() && !using_cuda) {
-      // Expose a soft hint as an extra description entry so tools can surface it.
-      // We intentionally do not treat CUDA EP unavailability as fatal.
-      info.output_descriptions.push_back(std::string("note: cuda_ep_unavailable: ") + cuda_warn);
+      info.warnings.push_back(std::string("cuda_ep_unavailable: ") + cuda_warn);
     }
 
     auto impl = std::make_unique<Impl>();
@@ -286,6 +305,113 @@ std::unique_ptr<OpenAudioOrtSession> OpenAudioOrtSession::Create(const std::file
       *error = std::string("Failed to create ONNX Runtime session: ") + e.what();
     }
     return nullptr;
+  }
+#endif
+}
+
+bool OpenAudioOrtSession::Run(const OrtRunInput* inputs,
+                              std::size_t input_count,
+                              const OrtRunOutput* outputs,
+                              std::size_t output_count,
+                              std::string* error) {
+  if (error) error->clear();
+
+#if !STUDIOCAST_HAVE_ONNXRUNTIME
+  (void)inputs;
+  (void)input_count;
+  (void)outputs;
+  (void)output_count;
+  if (error) {
+    *error = "ONNX Runtime is not available in this build (STUDIOCAST_HAVE_ONNXRUNTIME=0).";
+  }
+  return false;
+#else
+  if (!impl_ || !impl_->session) {
+    if (error) *error = "ORT session is not initialized.";
+    return false;
+  }
+
+  if (!inputs || !outputs) {
+    if (error) *error = "null inputs/outputs passed to ORT Run().";
+    return false;
+  }
+  if (input_count == 0 || output_count == 0) {
+    if (error) *error = "ORT Run() requires at least one input and one output.";
+    return false;
+  }
+
+  try {
+    static Ort::MemoryInfo mem_info =
+        Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+
+    impl_->scratch_input_names.clear();
+    impl_->scratch_inputs.clear();
+    impl_->scratch_input_names.reserve(input_count);
+    impl_->scratch_inputs.reserve(input_count);
+
+    for (std::size_t i = 0; i < input_count; ++i) {
+      const auto& in = inputs[i];
+      if (!in.name || !*in.name) {
+        if (error) *error = "ORT Run() input has empty name.";
+        return false;
+      }
+      if (!in.data || in.num_floats == 0) {
+        if (error) *error = std::string("ORT Run() input '") + in.name + "' has empty buffer.";
+        return false;
+      }
+      if (!in.shape || in.shape_rank == 0) {
+        if (error) *error = std::string("ORT Run() input '") + in.name + "' has empty shape.";
+        return false;
+      }
+
+      impl_->scratch_input_names.push_back(in.name);
+      impl_->scratch_inputs.emplace_back(Ort::Value::CreateTensor<float>(
+          mem_info, const_cast<float*>(in.data), in.num_floats, in.shape, in.shape_rank));
+    }
+
+    impl_->scratch_output_names.clear();
+    impl_->scratch_outputs.clear();
+    impl_->scratch_output_names.reserve(output_count);
+    impl_->scratch_outputs.reserve(output_count);
+
+    for (std::size_t i = 0; i < output_count; ++i) {
+      const auto& o = outputs[i];
+      if (!o.name || !*o.name) {
+        if (error) *error = "ORT Run() output has empty name.";
+        return false;
+      }
+      if (!o.data || o.num_floats == 0) {
+        if (error) *error = std::string("ORT Run() output '") + o.name + "' has empty buffer.";
+        return false;
+      }
+      if (!o.shape || o.shape_rank == 0) {
+        if (error) *error = std::string("ORT Run() output '") + o.name + "' has empty shape.";
+        return false;
+      }
+
+      impl_->scratch_output_names.push_back(o.name);
+      impl_->scratch_outputs.emplace_back(Ort::Value::CreateTensor<float>(
+          mem_info, o.data, o.num_floats, o.shape, o.shape_rank));
+    }
+
+    impl_->session->Run(Ort::RunOptions{nullptr},
+                        impl_->scratch_input_names.data(),
+                        impl_->scratch_inputs.data(),
+                        input_count,
+                        impl_->scratch_output_names.data(),
+                        impl_->scratch_outputs.data(),
+                        output_count);
+    return true;
+  } catch (const Ort::Exception& e) {
+    if (error) {
+      *error = std::string("ORT Run() failed: ") + e.what();
+    }
+    return false;
+  } catch (const std::exception& e) {
+    if (error) {
+      *error = std::string("ORT Run() failed: ") + e.what();
+    }
+    return false;
   }
 #endif
 }
@@ -326,7 +452,7 @@ bool OpenAudioOrtSession::Run1D(const float* input,
   }
 
   try {
-    Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    static Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
 
     std::vector<int64_t> shape{1, static_cast<int64_t>(samples)};
     Ort::Value input_tensor = Ort::Value::CreateTensor<float>(mem_info, const_cast<float*>(input), samples,

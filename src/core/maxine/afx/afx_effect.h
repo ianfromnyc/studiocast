@@ -91,6 +91,10 @@ public:
     // Creates the effect handle, sets parameters, and calls `NvAFX_Load`.
     bool Load(std::string* error_out);
 
+    // Update intensity on a loaded effect without recreating the pipeline.
+    // Non-fatal; returns false if the parameter could not be set on the current effect.
+    bool UpdateIntensity(float intensity, std::string* error_out);
+
     // Runs one frame. Input/output are float PCM; `num_samples` is the number
     // of samples in `input` and `output`.
     bool Run(const float* input, float* output, std::uint32_t num_samples, std::string* error_out);

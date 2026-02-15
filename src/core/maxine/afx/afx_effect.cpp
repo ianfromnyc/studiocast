@@ -469,6 +469,28 @@ bool AfxEffect::Load(std::string* error_out) {
     return true;
 }
 
+bool AfxEffect::UpdateIntensity(float intensity, std::string* error_out) {
+    if (!loaded_ || !handle_) {
+        if (error_out) *error_out = "AFX effect not loaded.";
+        return false;
+    }
+    if (!api_ || !api_->IsInitialized()) {
+        if (error_out) *error_out = "AFX API is not initialized.";
+        return false;
+    }
+
+    std::string set_err;
+    if (!SetFloatAny(handle_, "intensity",
+                     {"intensityRatio", "intensity_ratio", "intensity", "strength"},
+                     intensity, &set_err)) {
+        if (error_out) *error_out = set_err;
+        return false;
+    }
+
+    cfg_.intensity = intensity;
+    return true;
+}
+
 bool AfxEffect::Run(const float* input, float* output, std::uint32_t num_samples, std::string* error_out) {
     if (!loaded_ || !handle_) {
         if (error_out) *error_out = "AFX effect not loaded.";

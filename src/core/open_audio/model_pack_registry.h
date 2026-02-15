@@ -22,6 +22,25 @@ struct ModelPack {
   int sample_rate = 16000;
   int channels = 1;
 
+  struct OnnxIo {
+    // Expected frame size in samples at the model sample rate.
+    // For 10ms frames this is sample_rate / 100 (e.g., 160 @ 16k).
+    int frame_samples = 0;
+
+    // Optional explicit tensor names for the primary waveform I/O.
+    // Empty means 'use session first input/output'.
+    std::string audio_input;
+    std::string audio_output;
+
+    // Optional state tensor names for streaming models.
+    // If empty, the engine will attempt to treat all non-audio inputs/outputs as state.
+    std::vector<std::string> state_inputs;
+    std::vector<std::string> state_outputs;
+  };
+
+  bool has_onnx_io = false;
+  OnnxIo onnx_io{};
+
   // Derived from install layout
   std::filesystem::path root_dir;
   std::filesystem::path manifest_path;
