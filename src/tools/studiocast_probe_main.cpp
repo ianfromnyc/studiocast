@@ -2424,7 +2424,12 @@ namespace {
                 using studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur;
 
                 const auto diag = studiocast::open_cuda::DiagnoseOpenCudaDefault();
-#if STUDIOCAST_HAVE_ONNXRUNTIME
+#if !STUDIOCAST_ENABLE_OPEN_CUDA
+                expectTrue("open_cuda_diag blocked when backend disabled in build", !diag.ok);
+                const auto it = diag.blocked_effects.find(std::string(kEffectIdVirtualBackgroundBlur));
+                expectTrue("open_cuda_diag reason disabled_in_build",
+                           it != diag.blocked_effects.end() && it->second == "disabled_in_build");
+#elif STUDIOCAST_HAVE_ONNXRUNTIME
                 expectTrue("open_cuda_diag has install_hints", !diag.install_hints.empty());
 #else
                 expectTrue("open_cuda_diag blocked when built without ORT", !diag.ok);
