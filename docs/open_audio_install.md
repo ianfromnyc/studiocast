@@ -10,8 +10,8 @@ StudioCast does **not** ship any model binaries in git.
 
 ## 1) Install curated models (recommended)
 
-The repo includes a helper script that downloads a curated, streaming-capable model (FastEnhancer) and installs it
-as a StudioCast model pack:
+The repo includes a helper script that downloads curated, **streaming-capable** FastEnhancer variants and installs
+them as StudioCast model packs:
 
 ```bash
 ./scripts/install_open_audio_models.sh
@@ -35,6 +35,12 @@ List curated packs:
 ./scripts/install_open_audio_models.sh --list
 ```
 
+Curated pack IDs (FastEnhancer, VCTK-Demand v1, 16kHz):
+
+- `fastenhancer_s_vd_v1` (small) — good default for general noise removal
+- `fastenhancer_m_vd_v1` (medium) — higher quality, good default for studio-voice style enhancement
+- `fastenhancer_l_vd_v1` (large) — best quality, most CPU/GPU cost
+
 ## 2) Validate discovery + ONNX Runtime session
 
 List installed packs:
@@ -43,16 +49,16 @@ List installed packs:
 build/studiocast-open audio-list-models
 ```
 
-Run an inference smoke test (prints tensor names/shapes and runs a few blocks):
+Run a session smoke test (prints tensor names/shapes and verifies the model loads):
 
 ```bash
-build/studiocast-open audio-self-test --model-id fastenhancer_m_vd_v1
+build/studiocast-open audio-self-test --model-id fastenhancer_s_vd_v1
 ```
 
 If you suspect CUDA EP issues, force CPU:
 
 ```bash
-build/studiocast-open audio-self-test --model-id fastenhancer_m_vd_v1 --cpu-only
+build/studiocast-open audio-self-test --model-id fastenhancer_s_vd_v1 --cpu-only
 ```
 
 ## 3) Enable in the GUI / config
@@ -61,7 +67,7 @@ In the GUI:
 
 - **Audio → Microphone Effects**
   - Backend: **AUTO** (preferred) or **OPEN_SOURCE**
-  - Model: **FastEnhancer-M (VCTK-Demand v1, 16kHz)**
+  - Model: **Default (auto)** or any FastEnhancer variant
   - Enable **Noise Removal** and/or **Studio Voice**
   - Adjust strength sliders
 

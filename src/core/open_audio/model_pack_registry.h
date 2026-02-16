@@ -67,9 +67,20 @@ class ModelPackRegistry {
 
   // Deterministic default selection.
   // Current behavior:
-  //  - Return first installed model ID (sorted).
+  //  - Prefer curated defaults for the requested effect when possible.
+  //  - Else return first installed model ID (sorted).
   //  - Else return empty string.
   std::string DefaultModelId() const;
+
+  // Deterministic default selection for a specific effect.
+  //
+  // effect_id should be one of:
+  //   - "noise_removal"
+  //   - "room_echo_removal"
+  //   - "studio_voice"
+  //
+  // If effect_id is empty, this behaves like DefaultModelId().
+  std::string DefaultModelIdForEffect(const std::string& effect_id) const;
 
   // Key is best-effort model id; if unknown, the directory name is used.
   const std::map<std::string, std::string>& Problems() const { return problems_; }

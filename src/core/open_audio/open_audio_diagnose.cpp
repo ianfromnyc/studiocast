@@ -32,7 +32,7 @@ OpenAudioDiagnostics DiagnoseOpenAudioDefault() {
 
   od.install_hints.push_back(std::string("Model packs: ") + openAudioRoot + "/<model_id>/");
   od.install_hints.push_back(
-      "Source builds: run ./scripts/install_open_audio_models.sh to install the curated FastEnhancer pack.");
+      "Source builds: run ./scripts/install_open_audio_models.sh to install curated FastEnhancer packs.");
   od.install_hints.push_back("Docs: docs/open_audio_install.md");
   od.install_hints.push_back(
       "Each pack must contain: model.json, the ONNX file referenced by onnx_filename, and LICENSE.txt.");

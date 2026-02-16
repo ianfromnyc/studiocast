@@ -202,7 +202,7 @@ static int CmdAudioInstallHints(const char* argv0) {
 
   std::cout << "Quick install (source builds):\n";
   std::cout << "  ./scripts/install_open_audio_models.sh\n\n";
-  std::cout << "Curated pack ID: fastenhancer_m_vd_v1\n";
+  std::cout << "Curated pack IDs: fastenhancer_s_vd_v1, fastenhancer_m_vd_v1, fastenhancer_l_vd_v1\n";
   std::cout << "Docs: docs/open_audio_install.md\n\n";
 
   std::cout << "A model pack is a directory named by <model_id>.\n";

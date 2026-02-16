@@ -164,7 +164,18 @@ bool ResolveOpenAudioModelForMicrophone(const studiocast::audio::effects::Broadc
 
   std::string id = mic.model_id;
   if (id.empty()) {
-    id = reg.DefaultModelId();
+    // Choose a default model based on the enabled effect.
+    std::string effect;
+    if (mic.studio_voice_enabled) {
+      effect = "studio_voice";
+    } else if (mic.room_echo_removal_enabled) {
+      effect = "room_echo_removal";
+    } else if (mic.noise_removal_enabled) {
+      effect = "noise_removal";
+    }
+
+    id = reg.DefaultModelIdForEffect(effect);
+    if (id.empty()) id = reg.DefaultModelId();
   }
   if (id.empty()) {
     return Fail(error,
@@ -235,7 +246,9 @@ bool ResolveOpenAudioModelForSpeaker(const studiocast::audio::effects::Broadcast
 
   std::string id = spk.model_id;
   if (id.empty()) {
-    id = reg.DefaultModelId();
+    const std::string effect = spk.noise_removal_enabled ? "noise_removal" : std::string();
+    id = reg.DefaultModelIdForEffect(effect);
+    if (id.empty()) id = reg.DefaultModelId();
   }
   if (id.empty()) {
     return Fail(error,

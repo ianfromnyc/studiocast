@@ -274,7 +274,52 @@ std::optional<ModelPack> ModelPackRegistry::ResolveModel(const std::string& id) 
 }
 
 std::string ModelPackRegistry::DefaultModelId() const {
-  if (models_.empty()) return std::string();
+  // Default for the most common case: microphone noise removal.
+  return DefaultModelIdForEffect("noise_removal");
+}
+
+std::string ModelPackRegistry::DefaultModelIdForEffect(const std::string& effect_id) const {
+  if (effect_id.empty()) return DefaultModelId();
+  if (models_.empty()) return {};
+
+  // Candidate models that declare support for the effect.
+  // If a model omits the `effects` list, we treat it as "supports all".
+  std::vector<const ModelPack*> candidates;
+  candidates.reserve(models_.size());
+  for (const auto& m : models_) {
+    if (m.effects.empty()) {
+      candidates.push_back(&m);
+      continue;
+    }
+    const bool supports = std::find(m.effects.begin(), m.effects.end(), effect_id) != m.effects.end();
+    if (supports) candidates.push_back(&m);
+  }
+
+  // Curated defaults (keep deterministic): pick a good trade-off for each effect.
+  // These are "best-effort" preferences; user config can override via model_id/model_path.
+  std::vector<std::string> prefer;
+  if (effect_id == "studio_voice") {
+    // Studio voice generally benefits from a stronger enhancer.
+    prefer = {"fastenhancer_m_vd_v1", "fastenhancer_l_vd_v1"};
+  } else if (effect_id == "room_echo_removal") {
+    // Echo/room removal is harder; prefer a stronger model when available.
+    prefer = {"fastenhancer_m_vd_v1", "fastenhancer_l_vd_v1", "fastenhancer_s_vd_v1"};
+  } else if (effect_id == "noise_removal") {
+    // Noise removal: prefer a lighter default, then scale up.
+    prefer = {"fastenhancer_s_vd_v1", "fastenhancer_m_vd_v1", "fastenhancer_l_vd_v1"};
+  } else {
+    // Unknown effect: fall back to generic selection.
+    prefer = {"fastenhancer_m_vd_v1", "fastenhancer_s_vd_v1", "fastenhancer_l_vd_v1"};
+  }
+
+  for (const auto& id : prefer) {
+    for (const auto* m : candidates) {
+      if (m && m->id == id) return m->id;
+    }
+  }
+
+  // Deterministic fallback: first candidate, otherwise first installed model.
+  if (!candidates.empty() && candidates.front()) return candidates.front()->id;
   return models_.front().id;
 }
 

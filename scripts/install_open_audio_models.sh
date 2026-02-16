@@ -21,14 +21,20 @@ DEFAULT_DEST_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/studiocast/models/open_a
 
 # Curated pack(s) shipped as metadata-only templates.
 MODEL_IDS=(
+  "fastenhancer_s_vd_v1"
   "fastenhancer_m_vd_v1"
+  "fastenhancer_l_vd_v1"
 )
 
 # Upstream download info (FastEnhancer ONNX release).
 FASTENHANCER_TAG="onnx-vd-v1.0.0"
 FASTENHANCER_BASE_URL="https://github.com/aask1357/fastenhancer/releases/download/${FASTENHANCER_TAG}"
+FASTENHANCER_S_ASSET="fastenhancer_s.onnx"
+FASTENHANCER_S_SHA256="e2d0e91bbfab4af1316bb2c41126a38c8b3cd015b93bb630d651af8fdbf7f2e8"
 FASTENHANCER_M_ASSET="fastenhancer_m.onnx"
 FASTENHANCER_M_SHA256="367059e724dd367c056dc906e9698ec5864c80c9a88e0597f7a2b0f81c506aaa"
+FASTENHANCER_L_ASSET="fastenhancer_l.onnx"
+FASTENHANCER_L_SHA256="915d4ae3871c3271e75c194e72a3ff031d5593be4f6f56ccb78df82071ef0750"
 
 usage() {
   cat <<USAGE
@@ -91,11 +97,13 @@ download_to() {
   fi
 }
 
-install_pack_fastenhancer_m() {
-  local dest_root="$1"
-  local force="$2"
+install_pack_fastenhancer_variant() {
+  local pack_id="$1"
+  local asset="$2"
+  local expected_sha256="$3"
+  local dest_root="$4"
+  local force="$5"
 
-  local pack_id="fastenhancer_m_vd_v1"
   local pack_dir="${dest_root}/${pack_id}"
   local tpl_dir="${TEMPLATES_DIR}/${pack_id}"
 
@@ -113,14 +121,14 @@ install_pack_fastenhancer_m() {
     cp -f "${tpl_dir}/README.txt" "${pack_dir}/README.txt"
   fi
 
-  local onnx_path="${pack_dir}/${FASTENHANCER_M_ASSET}"
-  local url="${FASTENHANCER_BASE_URL}/${FASTENHANCER_M_ASSET}"
+  local onnx_path="${pack_dir}/${asset}"
+  local url="${FASTENHANCER_BASE_URL}/${asset}"
 
   if [[ -f "${onnx_path}" && "${force}" != "1" ]]; then
     # Verify existing file.
     local got
     got="$(sha256_file "${onnx_path}")"
-    if [[ "${got}" == "${FASTENHANCER_M_SHA256}" ]]; then
+    if [[ "${got}" == "${expected_sha256}" ]]; then
       echo "✓ ${pack_id}: already installed (sha256 OK)"
       return 0
     fi
@@ -136,8 +144,8 @@ install_pack_fastenhancer_m() {
 
   local got
   got="$(sha256_file "${tmp}")"
-  if [[ "${got}" != "${FASTENHANCER_M_SHA256}" ]]; then
-    die "Checksum mismatch for ${FASTENHANCER_M_ASSET}. Expected ${FASTENHANCER_M_SHA256}, got ${got}"
+  if [[ "${got}" != "${expected_sha256}" ]]; then
+    die "Checksum mismatch for ${asset}. Expected ${expected_sha256}, got ${got}"
   fi
 
   mv -f "${tmp}" "${onnx_path}"
@@ -204,8 +212,14 @@ main() {
 
   for id in "${to_install[@]}"; do
     case "${id}" in
+      fastenhancer_s_vd_v1)
+        install_pack_fastenhancer_variant "fastenhancer_s_vd_v1" "${FASTENHANCER_S_ASSET}" "${FASTENHANCER_S_SHA256}" "${dest_root}" "${force}"
+        ;;
       fastenhancer_m_vd_v1)
-        install_pack_fastenhancer_m "${dest_root}" "${force}"
+        install_pack_fastenhancer_variant "fastenhancer_m_vd_v1" "${FASTENHANCER_M_ASSET}" "${FASTENHANCER_M_SHA256}" "${dest_root}" "${force}"
+        ;;
+      fastenhancer_l_vd_v1)
+        install_pack_fastenhancer_variant "fastenhancer_l_vd_v1" "${FASTENHANCER_L_ASSET}" "${FASTENHANCER_L_SHA256}" "${dest_root}" "${force}"
         ;;
       *)
         die "Unknown model id '${id}'. Use --list."
@@ -218,11 +232,13 @@ main() {
   echo "  1) Validate discovery:"
   echo "       build/studiocast-open audio-list-models"
   echo "  2) Validate ONNX Runtime session + IO:"
+  echo "       build/studiocast-open audio-self-test --model-id fastenhancer_s_vd_v1"
   echo "       build/studiocast-open audio-self-test --model-id fastenhancer_m_vd_v1"
+  echo "       build/studiocast-open audio-self-test --model-id fastenhancer_l_vd_v1"
   echo
   echo "GUI:"
   echo "  - Audio → Microphone Effects → Backend: OPEN_SOURCE or AUTO"
-  echo "  - Model: FastEnhancer-M (VCTK-Demand v1, 16kHz)"
+  echo "  - Model: Default (auto) or a FastEnhancer variant"
   echo
   echo "Daemon:"
   echo "  - Run: build/studiocastd"
