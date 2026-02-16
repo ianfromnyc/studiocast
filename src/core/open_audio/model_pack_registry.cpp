@@ -148,6 +148,98 @@ bool ParseModelJsonV1(const fs::path& pack_dir, ModelPack* out, std::string* err
     if (!GetStringArrayOptional(*ioObj, "state_inputs", &out->onnx_io.state_inputs, error)) return false;
     if (!GetStringArrayOptional(*ioObj, "state_outputs", &out->onnx_io.state_outputs, error)) return false;
 
+    // Optional auxiliary inputs.
+    const auto* auxVal = Get(*ioObj, "aux_inputs");
+    if (auxVal) {
+      const auto* auxObj = auxVal->AsObject();
+      if (!auxObj) return Fail(error, "model.json: field 'onnx_io.aux_inputs' must be an object");
+
+      // Currently supported: aux_inputs.strength
+      auto it = auxObj->find("strength");
+      if (it != auxObj->end()) {
+        const auto& v = it->second;
+        out->onnx_io.has_strength_input = true;
+
+        // Allow either a string (tensor name) or an object with more metadata.
+        if (const auto* sname = v.AsString()) {
+          if (sname->empty()) {
+            return Fail(error, "model.json: onnx_io.aux_inputs.strength must be non-empty");
+          }
+          out->onnx_io.strength_input.name = *sname;
+        } else {
+          const auto* sobj = v.AsObject();
+          if (!sobj) {
+            return Fail(error, "model.json: onnx_io.aux_inputs.strength must be a string or an object");
+          }
+
+          const auto* nameVal = Get(*sobj, "name");
+          if (!nameVal) return Fail(error, "model.json: onnx_io.aux_inputs.strength is missing required field 'name'");
+          const auto* nameStr = nameVal->AsString();
+          if (!nameStr || nameStr->empty()) {
+            return Fail(error, "model.json: onnx_io.aux_inputs.strength.name must be a non-empty string");
+          }
+          out->onnx_io.strength_input.name = *nameStr;
+
+          const auto* rangeVal = Get(*sobj, "range");
+          if (rangeVal) {
+            const auto* a = rangeVal->AsArray();
+            if (!a || a->size() != 2) {
+              return Fail(error, "model.json: onnx_io.aux_inputs.strength.range must be an array of 2 numbers");
+            }
+            const auto* lo = (*a)[0].AsNumber();
+            const auto* hi = (*a)[1].AsNumber();
+            if (!lo || !hi) {
+              return Fail(error, "model.json: onnx_io.aux_inputs.strength.range must contain only numbers");
+            }
+            out->onnx_io.strength_input.min_value = static_cast<float>(*lo);
+            out->onnx_io.strength_input.max_value = static_cast<float>(*hi);
+          }
+
+          const auto* shapeVal = Get(*sobj, "shape");
+          if (shapeVal) {
+            const auto* a = shapeVal->AsArray();
+            if (!a || a->empty()) {
+              return Fail(error, "model.json: onnx_io.aux_inputs.strength.shape must be a non-empty array of integers");
+            }
+            out->onnx_io.strength_input.shape.clear();
+            out->onnx_io.strength_input.shape.reserve(a->size());
+            for (const auto& el : *a) {
+              const auto* n = el.AsNumber();
+              if (!n) {
+                return Fail(error,
+                            "model.json: onnx_io.aux_inputs.strength.shape must contain only integers");
+              }
+              const int64_t d = static_cast<int64_t>(*n);
+              if (static_cast<double>(d) != *n || d <= 0) {
+                return Fail(error,
+                            "model.json: onnx_io.aux_inputs.strength.shape must contain only positive integers");
+              }
+              out->onnx_io.strength_input.shape.push_back(d);
+            }
+          }
+        }
+
+        // Defaults + validation.
+        if (out->onnx_io.strength_input.shape.empty()) {
+          out->onnx_io.strength_input.shape.push_back(1);
+        }
+        if (out->onnx_io.strength_input.max_value < out->onnx_io.strength_input.min_value) {
+          return Fail(error, "model.json: onnx_io.aux_inputs.strength.range is invalid (max < min)");
+        }
+
+        // For now, only scalar aux inputs are supported.
+        int64_t prod = 1;
+        for (const auto d : out->onnx_io.strength_input.shape) {
+          if (d <= 0) return Fail(error, "model.json: onnx_io.aux_inputs.strength.shape must be positive");
+          if (prod > 1) break;
+          prod *= d;
+        }
+        if (prod != 1) {
+          return Fail(error, "model.json: onnx_io.aux_inputs.strength.shape must have exactly 1 element (scalar)");
+        }
+      }
+    }
+
     if (out->onnx_io.frame_samples < 0) {
       return Fail(error, "model.json: onnx_io.frame_samples must be >= 0");
     }

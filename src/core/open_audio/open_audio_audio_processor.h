@@ -2,6 +2,8 @@
 
 #include <atomic>
 
+#include <cstdint>
+
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -35,6 +37,19 @@ struct ResolvedOpenAudioModel {
   int sample_rate = 0;  // 0 = unknown
   int channels = 1;     // expected model channels (usually 1)
 
+  struct AuxInput {
+    // Name of the tensor input.
+    std::string name;
+
+    // Optional range mapping for user-facing strength (0..1 normalized) to model domain.
+    float min_value = 0.0f;
+    float max_value = 1.0f;
+
+    // Optional explicit tensor shape for scalar inputs. Default is [1].
+    // The engine currently supports only scalar-shaped aux inputs (product(shape)==1).
+    std::vector<int64_t> shape;
+  };
+
   struct OnnxIo {
     // Expected frame size (in samples) per inference call at model sample_rate.
     // For the default 10ms framing this is sample_rate / 100 (e.g., 160 @ 16kHz).
@@ -47,6 +62,9 @@ struct ResolvedOpenAudioModel {
     // Optional explicit state tensor names for streaming models.
     std::vector<std::string> state_inputs;
     std::vector<std::string> state_outputs;
+
+    bool has_strength_input = false;
+    AuxInput strength_input{};
   };
 
   bool has_onnx_io = false;
@@ -135,6 +153,8 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
                std::string* error) override;
 
  private:
+  bool InitializeBindings(std::string* error);
+
   ResolvedOpenAudioModel model_;
 
   // Active ORT session (CUDA if available, CPU otherwise). If a CUDA session is active
@@ -147,6 +167,12 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
   // Model I/O binding (names, shapes, and optional streaming state buffers).
   std::string audio_input_name_;
   std::string audio_output_name_;
+  bool has_strength_input_ = false;
+  std::string strength_input_name_;
+  std::vector<int64_t> strength_input_shape_;
+  std::vector<float> strength_input_buf_;
+  float strength_input_min_ = 0.0f;
+  float strength_input_max_ = 1.0f;
   std::vector<std::string> state_input_names_;
   std::vector<std::string> state_output_names_;
   std::vector<int64_t> audio_input_shape_;
@@ -162,6 +188,10 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
   // Runtime settings updated from the supervisor thread.
   std::atomic<int> strength_{50};
   std::atomic<bool> studio_voice_enabled_{false};
+
+  // Effect context for strength curve mapping (set from config).
+  // 0=noise_removal, 1=room_echo_removal, 2=studio_voice, 3=speaker_noise_removal
+  std::atomic<int> strength_mode_{0};
 
   // Engine configuration derived from model pack metadata.
   int model_sample_rate_ = 48000;

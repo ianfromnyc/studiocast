@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -22,6 +23,20 @@ struct ModelPack {
   int sample_rate = 16000;
   int channels = 1;
 
+  struct AuxInput {
+    // Name of the tensor input.
+    std::string name;
+
+    // Optional range mapping for user-facing strength (0..1 normalized) to model domain.
+    // Value fed to the model is: min_value + t * (max_value - min_value)
+    float min_value = 0.0f;
+    float max_value = 1.0f;
+
+    // Optional explicit tensor shape for scalar inputs. Default is [1].
+    // The engine currently supports only scalar-shaped aux inputs (product(shape)==1).
+    std::vector<int64_t> shape;
+  };
+
   struct OnnxIo {
     // Expected frame size in samples at the model sample rate.
     // For 10ms frames this is sample_rate / 100 (e.g., 160 @ 16k).
@@ -36,6 +51,10 @@ struct ModelPack {
     // If empty, the engine will attempt to treat all non-audio inputs/outputs as state.
     std::vector<std::string> state_inputs;
     std::vector<std::string> state_outputs;
+
+    // Optional auxiliary inputs (e.g., strength control).
+    bool has_strength_input = false;
+    AuxInput strength_input{};
   };
 
   bool has_onnx_io = false;

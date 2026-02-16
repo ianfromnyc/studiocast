@@ -102,10 +102,15 @@ A model pack is a directory named by `<model_id>`:
   - `frame_samples` (int): required if the model’s input shape is dynamic/unknown
   - `audio_input` / `audio_output` (string): tensor names (often `wav_in` / `wav_out`)
   - `state_inputs` / `state_outputs` (array): cache tensor names (optional; StudioCast can infer if omitted)
+  - `aux_inputs` (object, optional): auxiliary control inputs
+    - `strength` (string or object): if present, StudioCast feeds the UI strength to the model directly
+      - object form: `{ "name": "<tensor>", "range": [min,max], "shape": [1] }`
 
-**Current constraint (Phase 6/7 implementation):**
-- 16 kHz models must be streaming **10 ms hop** (`frame_samples=160`).
+**Current constraints (Phase 12 implementation):**
+- Models must be streaming-friendly **10 ms hop** (`frame_samples = sample_rate/100`, e.g. 160 @ 16 kHz).
 - Multi-channel is not supported (mono only).
+- Supported model sample rates: **16 kHz** and **48 kHz**.
+  - 16 kHz models are supported via internal 48k↔16k resampling.
 - If you have a model with a different hop size (e.g. 256), you can still use it by wrapping/re-exporting it to a
   10 ms hop, or by extending the buffering logic in `OpenAudioAudioProcessor`.
 
