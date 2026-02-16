@@ -126,7 +126,7 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
 
     // Frame budget for processor time (10ms at 48k).
     const std::uint64_t frame_budget_us =
-        static_cast<std::uint64_t>(cfg.frame_samples) * 1000000ull / static_cast<std::uint64_t>(cfg.sample_rate);
+        static_cast<std::uint64_t>(cfg.frame_samples) * 1000000u / static_cast<std::uint64_t>(cfg.sample_rate);
 
     pa_buffer_attr rec_attr{};
     rec_attr.maxlength = static_cast<uint32_t>(bytes_per_frame * 4);
