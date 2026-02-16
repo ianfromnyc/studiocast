@@ -188,6 +188,8 @@ add_library(studiocast_core
         src/core/audio/audio_backend_resolver.cpp
         src/core/audio/audio_processor.h
         src/core/audio/audio_processor.cpp
+        src/core/audio/dsp/post_dsp_chain.h
+        src/core/audio/dsp/post_dsp_chain.cpp
         src/core/audio/effects/broadcast_audio_effects.h
         src/core/audio/effects/broadcast_audio_effects_plan.h
         src/core/audio/effects/broadcast_audio_effects_plan.cpp

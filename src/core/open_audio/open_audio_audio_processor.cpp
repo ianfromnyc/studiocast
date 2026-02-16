@@ -952,6 +952,13 @@ OpenAudioAudioProcessor::OpenAudioAudioProcessor(ResolvedOpenAudioModel model) :
 
   // If model pack didn't specify channels, assume mono.
   if (model_.channels <= 0) model_.channels = 1;
+
+  // Configure post-processing DSP stage (48kHz pipeline, mono). This stage is a
+  // safety net to prevent clipping and stabilize output levels.
+  std::string derr;
+  post_dsp_.Configure(/*sample_rate=*/48000, /*channels=*/1, &derr);
+  // Presence shelf is enabled dynamically when Studio Voice is active.
+  post_dsp_.SetPresenceShelf(studiocast::audio::dsp::PostDspChain::PresenceShelfConfig{});
 }
 
 OpenAudioAudioProcessor::~OpenAudioAudioProcessor() = default;
@@ -1227,6 +1234,8 @@ void OpenAudioAudioProcessor::Reset() {
   model_disabled_ = false;
   using_cpu_fallback_ = false;
 
+  post_dsp_.Reset();
+
   // Reset ORT session selection.
   if (ort_session_cuda_) {
     ort_session_active_ = ort_session_cuda_.get();
@@ -1382,6 +1391,21 @@ bool OpenAudioAudioProcessor::Process(const float* in,
       const float dry_sample = in[idx];
       out[idx] = wet * wet_sample + dry * dry_sample;
     }
+  }
+
+  // Post-processing polish DSP:
+  //  - safety limiter to avoid harsh clips when the model output overshoots
+  //  - optional gentle presence shelf for Studio Voice mode
+  {
+    studiocast::audio::dsp::PostDspChain::PresenceShelfConfig ps;
+    if (mode == StrengthMode::kStudioVoice && studio_voice_enabled_.load()) {
+      ps.enabled = true;
+      ps.freq_hz = 3200.0f;
+      ps.slope = 1.0f;
+      ps.gain_db = 2.0f * curve;
+    }
+    post_dsp_.SetPresenceShelf(ps);
+    post_dsp_.ProcessInPlace(out, frames, channels);
   }
 
   return true;

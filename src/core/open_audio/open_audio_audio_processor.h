@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "core/audio/audio_processor.h"
+#include "core/audio/dsp/post_dsp_chain.h"
 #include "core/audio/effects/broadcast_audio_effects.h"
 #include "core/open_audio/open_audio_onnx_session.h"
 
@@ -215,6 +216,11 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
   // Sticky warning after a runtime failure; surfaced via AudioPipeline last_error.
   std::string sticky_warning_;
   bool model_disabled_ = false;
+
+  // Post-processing "polish" DSP chain applied to the processed output.
+  // This is primarily a safety net to prevent clipping and stabilize output
+  // levels (especially for Studio Voice).
+  studiocast::audio::dsp::PostDspChain post_dsp_;
 };
 
 }  // namespace studiocast::open_audio
