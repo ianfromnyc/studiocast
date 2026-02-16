@@ -1,7 +1,13 @@
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/audio/effects/broadcast_audio_effects.h"
 #include "core/open_audio/model_pack_registry.h"
@@ -55,7 +61,11 @@ static void Usage(const char* argv0) {
             << "  " << argv0 << " audio-list-models\n"
             << "  " << argv0 << " audio-install-hints\n"
             << "  " << argv0
-            << " audio-self-test [--model-id <id>] [--model-path <path>] [--cpu-only]\n";
+            << " audio-self-test [--model-id <id>] [--model-path <path>] [--cpu-only]\n"
+            << "  " << argv0
+            << " audio-bench [--effect <noise_removal|room_echo_removal|noise_echo_removal|studio_voice|speaker_noise_removal>]"
+               " [--strength <0-100>] [--seconds <N>] [--frames <N>] [--warmup <N>] [--model-id <id>] [--model-path <path>]"
+               " [--cpu-only] [--csv]\n";
 }
 
 bool HasArg(int argc, char** argv, std::string_view flag) {
@@ -305,6 +315,256 @@ static int CmdAudioSelfTest(int argc, char** argv) {
 #endif
 }
 
+static int CmdAudioBench(int argc, char** argv) {
+  std::cout << "StudioCast Open Audio Bench\n\n";
+
+  const bool cpu_only = HasArg(argc, argv, "--cpu-only");
+  const bool csv = HasArg(argc, argv, "--csv");
+  const std::string model_id = GetArgValue(argc, argv, "--model-id");
+  const std::string model_path = GetArgValue(argc, argv, "--model-path");
+  const std::string effect = GetArgValue(argc, argv, "--effect");
+
+  int strength = 60;
+  if (const std::string strength_s = GetArgValue(argc, argv, "--strength"); !strength_s.empty()) {
+    try {
+      strength = std::stoi(strength_s);
+    } catch (...) {
+      std::cerr << "ERROR: Invalid --strength value: " << strength_s << "\n";
+      return 2;
+    }
+  }
+  if (strength < 0) strength = 0;
+  if (strength > 100) strength = 100;
+
+  int warmup = 50;
+  if (const std::string warmup_s = GetArgValue(argc, argv, "--warmup"); !warmup_s.empty()) {
+    try {
+      warmup = std::stoi(warmup_s);
+    } catch (...) {
+      std::cerr << "ERROR: Invalid --warmup value: " << warmup_s << "\n";
+      return 2;
+    }
+  }
+  if (warmup < 0) warmup = 0;
+
+  int frames = 0;
+  if (const std::string frames_s = GetArgValue(argc, argv, "--frames"); !frames_s.empty()) {
+    try {
+      frames = std::stoi(frames_s);
+    } catch (...) {
+      std::cerr << "ERROR: Invalid --frames value: " << frames_s << "\n";
+      return 2;
+    }
+  } else if (const std::string seconds_s = GetArgValue(argc, argv, "--seconds"); !seconds_s.empty()) {
+    try {
+      const double seconds = std::stod(seconds_s);
+      frames = static_cast<int>(seconds * 100.0 + 0.5);  // 10ms frames.
+    } catch (...) {
+      std::cerr << "ERROR: Invalid --seconds value: " << seconds_s << "\n";
+      return 2;
+    }
+  } else {
+    frames = 500;  // 5 seconds @ 10ms.
+  }
+
+  if (frames <= 0) {
+    std::cerr << "ERROR: frames must be > 0.\n";
+    return 2;
+  }
+
+#if !STUDIOCAST_ENABLE_OPEN_AUDIO
+  std::cerr << "ERROR: Open Audio backend is disabled in this build (STUDIOCAST_ENABLE_OPEN_AUDIO=0).\n";
+  return 2;
+#elif !STUDIOCAST_HAVE_ONNXRUNTIME
+  std::cerr << "ERROR: This build was compiled without ONNX Runtime (STUDIOCAST_HAVE_ONNXRUNTIME=0).\n";
+  std::cerr << "Rebuild with ONNX Runtime available (set ONNXRUNTIME_ROOT or install onnxruntime dev package).\n";
+  return 2;
+#else
+  std::string effect_kind = effect;
+  if (effect_kind.empty()) effect_kind = "noise_removal";
+
+  bool speaker = false;
+
+  studiocast::audio::effects::BroadcastAudioEffects fx;
+  fx.engine = studiocast::audio::effects::AudioEffectsEnginePreference::kOpenSource;
+
+  if (effect_kind == "speaker_noise_removal" || effect_kind == "speaker") {
+    speaker = true;
+    fx.speaker.noise_removal_enabled = true;
+    fx.speaker.strength = strength;
+    fx.speaker.model_id = model_id;
+    fx.speaker.model_path = model_path;
+  } else if (effect_kind == "room_echo_removal" || effect_kind == "echo") {
+    fx.microphone.room_echo_removal_enabled = true;
+    fx.microphone.strength = strength;
+    fx.microphone.model_id = model_id;
+    fx.microphone.model_path = model_path;
+  } else if (effect_kind == "noise_echo_removal" || effect_kind == "noise+echo") {
+    fx.microphone.noise_removal_enabled = true;
+    fx.microphone.room_echo_removal_enabled = true;
+    fx.microphone.strength = strength;
+    fx.microphone.model_id = model_id;
+    fx.microphone.model_path = model_path;
+  } else if (effect_kind == "studio_voice" || effect_kind == "studio") {
+    fx.microphone.studio_voice_enabled = true;
+    fx.microphone.strength = strength;
+    fx.microphone.model_id = model_id;
+    fx.microphone.model_path = model_path;
+  } else if (effect_kind == "noise_removal" || effect_kind == "noise") {
+    fx.microphone.noise_removal_enabled = true;
+    fx.microphone.strength = strength;
+    fx.microphone.model_id = model_id;
+    fx.microphone.model_path = model_path;
+  } else {
+    std::cerr << "ERROR: Unknown --effect: " << effect_kind << "\n";
+    std::cerr << "Allowed: noise_removal, room_echo_removal, noise_echo_removal, studio_voice, speaker_noise_removal\n";
+    return 2;
+  }
+
+  std::cout << "Effect        : " << effect_kind << "\n";
+  std::cout << "Strength      : " << strength << "\n";
+  std::cout << "Frames        : " << frames << "\n";
+  std::cout << "Warmup frames : " << warmup << "\n";
+  std::cout << "Provider pref : " << (cpu_only ? "CPU-only" : "CUDA (fallback to CPU)") << "\n\n";
+
+  const auto ort = studiocast::open_audio::OpenAudioOrtSession::QueryRuntimeInfo();
+  std::cout << "ONNX Runtime version: " << (ort.version.empty() ? "(unknown)" : ort.version) << "\n";
+  if (!ort.providers.empty()) {
+    std::cout << "Available providers:\n";
+    for (const auto& p : ort.providers) {
+      std::cout << "  - " << p << "\n";
+    }
+  }
+  std::cout << "\n";
+
+  studiocast::open_audio::OrtSessionOptions opts;
+  opts.prefer_cuda = !cpu_only;
+  opts.cuda_device_id = 0;
+
+  studiocast::open_audio::ResolvedOpenAudioModel resolved;
+  std::string err;
+
+  std::unique_ptr<studiocast::open_audio::OpenAudioAudioProcessor> processor;
+  if (speaker) {
+    processor = studiocast::open_audio::OpenAudioAudioProcessor::CreateForSpeakerWithOrtOptions(
+        fx, opts, &resolved, &err);
+  } else {
+    processor = studiocast::open_audio::OpenAudioAudioProcessor::CreateForMicrophoneWithOrtOptions(
+        fx, opts, &resolved, &err);
+  }
+
+  if (!processor) {
+    std::cerr << "ERROR: Failed to create Open Audio processor: " << (err.empty() ? "unknown error" : err) << "\n";
+    std::cerr << "Tip: run '" << argv[0] << " audio-list-models' to see installed packs.\n";
+    return 2;
+  }
+
+  std::cout << "Resolved model:\n";
+  std::cout << "  id          : " << (resolved.model_id.empty() ? "(user_path)" : resolved.model_id) << "\n";
+  std::cout << "  display_name: " << resolved.display_name << "\n";
+  std::cout << "  onnx_path   : " << resolved.onnx_path.string() << "\n";
+  std::cout << "  sample_rate : " << resolved.sample_rate << "\n";
+  std::cout << "  channels    : " << resolved.channels << "\n\n";
+
+  constexpr std::uint32_t kFrameSamples = 480;
+  constexpr std::uint32_t kChannels = 1;
+  constexpr std::uint64_t kBudgetUs = 10000;
+
+  std::vector<float> in(kFrameSamples * kChannels);
+  std::vector<float> out(kFrameSamples * kChannels);
+
+  // Deterministic synthetic input: sine + a touch of noise.
+  std::uint32_t rng = 0x12345678u;
+  double phase = 0.0;
+  const double phase_inc = 2.0 * 3.14159265358979323846 * 220.0 / 48000.0;
+
+  auto fill_frame = [&]() {
+    for (std::size_t i = 0; i < in.size(); ++i) {
+      rng = rng * 1664525u + 1013904223u;
+      const float n = static_cast<float>((rng >> 9) & 0x7FFFFF) / static_cast<float>(0x7FFFFF);
+      const float noise = (n * 2.0f - 1.0f) * 0.015f;
+      const float s = static_cast<float>(std::sin(phase)) * 0.12f;
+      phase += phase_inc;
+      if (phase > 2.0 * 3.14159265358979323846) phase -= 2.0 * 3.14159265358979323846;
+      in[i] = s + noise;
+    }
+  };
+
+  // Warmup (allocator / kernel cache).
+  processor->Reset();
+  for (int i = 0; i < warmup; ++i) {
+    fill_frame();
+    std::string perr;
+    (void)processor->Process(in.data(), out.data(), kFrameSamples, kChannels, &perr);
+  }
+
+  std::vector<std::uint64_t> us;
+  us.reserve(static_cast<std::size_t>(frames));
+
+  std::uint64_t over_budget = 0;
+  for (int i = 0; i < frames; ++i) {
+    fill_frame();
+    const auto t0 = std::chrono::steady_clock::now();
+    std::string perr;
+    const bool ok = processor->Process(in.data(), out.data(), kFrameSamples, kChannels, &perr);
+    const auto t1 = std::chrono::steady_clock::now();
+
+    if (!ok) {
+      std::cerr << "ERROR: Process failed at frame " << i << ": " << perr << "\n";
+      return 3;
+    }
+
+    const std::uint64_t dt_us =
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+    us.push_back(dt_us);
+    if (dt_us > kBudgetUs) ++over_budget;
+  }
+
+  std::uint64_t sum_us = 0;
+  std::uint64_t max_us = 0;
+  for (auto v : us) {
+    sum_us += v;
+    if (v > max_us) max_us = v;
+  }
+
+  std::vector<std::uint64_t> sorted = us;
+  std::sort(sorted.begin(), sorted.end());
+  auto pct = [&](double p) -> std::uint64_t {
+    if (sorted.empty()) return 0;
+    const double idx = (p / 100.0) * (static_cast<double>(sorted.size() - 1));
+    const std::size_t i = static_cast<std::size_t>(idx + 0.5);
+    return sorted[std::min(i, sorted.size() - 1)];
+  };
+
+  const double mean_ms = static_cast<double>(sum_us) / static_cast<double>(us.size()) / 1000.0;
+  const double p50_ms = static_cast<double>(pct(50.0)) / 1000.0;
+  const double p90_ms = static_cast<double>(pct(90.0)) / 1000.0;
+  const double p95_ms = static_cast<double>(pct(95.0)) / 1000.0;
+  const double p99_ms = static_cast<double>(pct(99.0)) / 1000.0;
+  const double max_ms = static_cast<double>(max_us) / 1000.0;
+
+  std::cout << std::fixed << std::setprecision(3);
+  std::cout << "Results (per 10ms @ 48kHz):\n";
+  std::cout << "  mean : " << mean_ms << " ms\n";
+  std::cout << "  p50  : " << p50_ms << " ms\n";
+  std::cout << "  p90  : " << p90_ms << " ms\n";
+  std::cout << "  p95  : " << p95_ms << " ms\n";
+  std::cout << "  p99  : " << p99_ms << " ms\n";
+  std::cout << "  max  : " << max_ms << " ms\n";
+  std::cout << "  budget (" << (kBudgetUs / 1000.0) << " ms) overruns: " << over_budget << " / " << us.size()
+            << "\n";
+
+  if (csv) {
+    std::cout << "\nframe,process_us\n";
+    for (std::size_t i = 0; i < us.size(); ++i) {
+      std::cout << i << "," << us[i] << "\n";
+    }
+  }
+
+  return 0;
+#endif
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -327,6 +587,7 @@ int main(int argc, char** argv) {
   if (cmd == "audio-list-models") return CmdAudioListModels();
   if (cmd == "audio-install-hints") return CmdAudioInstallHints(argv[0]);
   if (cmd == "audio-self-test") return CmdAudioSelfTest(argc, argv);
+  if (cmd == "audio-bench") return CmdAudioBench(argc, argv);
 
   Usage(argv[0]);
   return 1;

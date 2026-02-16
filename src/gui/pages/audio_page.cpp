@@ -719,6 +719,20 @@ namespace studiocast::gui {
         }
         if (!lastErr.isEmpty()) daemonStatusText_ += "last_error: " + lastErr + "\n";
 
+        if (pipeline.contains("process_ms_avg")) {
+            const double avgMs = pipeline.value("process_ms_avg").toDouble(0.0);
+            const double lastMs = pipeline.value("process_us_last").toDouble(0.0) / 1000.0;
+            const double maxMs = pipeline.value("process_us_max").toDouble(0.0) / 1000.0;
+            const int overruns = pipeline.value("process_overruns").toInt(0);
+            const qint64 frames = static_cast<qint64>(pipeline.value("frames_processed").toDouble(0.0));
+            daemonStatusText_ += QString("proc_ms_avg=%1 proc_ms_last=%2 proc_ms_max=%3 overruns=%4 frames=%5\n")
+                                    .arg(avgMs, 0, 'f', 3)
+                                    .arg(lastMs, 0, 'f', 3)
+                                    .arg(maxMs, 0, 'f', 3)
+                                    .arg(overruns)
+                                    .arg(frames);
+        }
+
         // Speakers status (daemon-managed routing).
         if (audio.contains("speakers")) {
             const auto spk = audio.value("speakers").toObject();
@@ -750,6 +764,21 @@ namespace studiocast::gui {
             if (!spkTarget.isEmpty()) daemonStatusText_ += "speakers_target_sink_active: " + spkTarget + "\n";
             if (!spkErr.isEmpty()) daemonStatusText_ += "speakers_last_error: " + spkErr + "\n";
             if (!spkPipeErr.isEmpty()) daemonStatusText_ += "speakers_pipeline_last_error: " + spkPipeErr + "\n";
+
+            if (spk.contains("pipeline_perf")) {
+                const auto perf = spk.value("pipeline_perf").toObject();
+                const double avgMs = perf.value("process_ms_avg").toDouble(0.0);
+                const double lastMs = perf.value("process_us_last").toDouble(0.0) / 1000.0;
+                const double maxMs = perf.value("process_us_max").toDouble(0.0) / 1000.0;
+                const int overruns = perf.value("process_overruns").toInt(0);
+                const qint64 frames = static_cast<qint64>(perf.value("frames_processed").toDouble(0.0));
+                daemonStatusText_ += QString("speakers_proc_ms_avg=%1 speakers_proc_ms_last=%2 speakers_proc_ms_max=%3 speakers_overruns=%4 speakers_frames=%5\n")
+                                        .arg(avgMs, 0, 'f', 3)
+                                        .arg(lastMs, 0, 'f', 3)
+                                        .arg(maxMs, 0, 'f', 3)
+                                        .arg(overruns)
+                                        .arg(frames);
+            }
         }
 
         if (!backendActive.isEmpty()) daemonStatusText_ += "backend_active: " + backendActive + "\n";

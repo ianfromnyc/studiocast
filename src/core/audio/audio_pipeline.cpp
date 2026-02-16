@@ -1,5 +1,7 @@
 #include "core/audio/audio_pipeline.h"
 
+#include <chrono>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -20,6 +22,14 @@ std::string PulseErrorString(int pa_error) {
     return std::string(s);
 }
 
+void AtomicMax(std::atomic<std::uint64_t>* v, std::uint64_t candidate) {
+    if (!v) return;
+    std::uint64_t cur = v->load(std::memory_order_relaxed);
+    while (candidate > cur && !v->compare_exchange_weak(cur, candidate, std::memory_order_relaxed)) {
+        // cur is updated with the latest value.
+    }
+}
+
 }  // namespace
 
 AudioPipeline::AudioPipeline(AudioProcessor* processor) : processor_(processor) {}
@@ -27,39 +37,41 @@ AudioPipeline::AudioPipeline(AudioProcessor* processor) : processor_(processor) 
 AudioPipeline::~AudioPipeline() { Stop(); }
 
 bool AudioPipeline::Start(const AudioPipelineConfig& cfg, std::string* error) {
+    if (error) error->clear();
+
+    if (running_.load(std::memory_order_acquire)) {
+        if (error) *error = "Audio pipeline is already running.";
+        return false;
+    }
+
+    // Reset stats.
+    frames_processed_.store(0, std::memory_order_relaxed);
+    process_time_us_sum_.store(0, std::memory_order_relaxed);
+    process_time_us_max_.store(0, std::memory_order_relaxed);
+    process_time_us_last_.store(0, std::memory_order_relaxed);
+    process_overruns_.store(0, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(mu_);
-        if (stats_.running) {
-            if (error) *error = "Audio pipeline is already running.";
-            return false;
-        }
-        stats_ = AudioPipelineStats{};
+        last_error_.clear();
     }
 
     if (!processor_) {
         SetLastError("Audio pipeline processor is null.");
         if (error) *error = GetStats().last_error;
-        Stop();
         return false;
     }
     if (cfg.sample_rate != 48000 || cfg.channels != 1) {
         SetLastError("Unsupported audio format: MVP requires mono 48kHz float32 (use Pulse to resample/downmix).");
         if (error) *error = GetStats().last_error;
-        Stop();
         return false;
     }
     if (cfg.frame_samples != 480) {
         SetLastError("Unsupported frame size: MVP requires 480 samples (10ms @ 48kHz).");
         if (error) *error = GetStats().last_error;
-        Stop();
         return false;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(mu_);
-        stats_.running = true;
-    }
-
+    running_.store(true, std::memory_order_release);
     stop_.store(false, std::memory_order_release);
     thread_ = std::thread([this, cfg] { ThreadMain(cfg); });
     return true;
@@ -70,21 +82,35 @@ void AudioPipeline::Stop() {
     if (thread_.joinable()) {
         thread_.join();
     }
-    std::lock_guard<std::mutex> lock(mu_);
-    stats_.running = false;
+    running_.store(false, std::memory_order_release);
 }
 
 AudioPipelineStats AudioPipeline::GetStats() const {
-    std::lock_guard<std::mutex> lock(mu_);
-    return stats_;
+    AudioPipelineStats out;
+    out.running = running_.load(std::memory_order_acquire);
+    out.frames_processed = frames_processed_.load(std::memory_order_relaxed);
+    out.process_time_us_sum = process_time_us_sum_.load(std::memory_order_relaxed);
+    out.process_time_us_max = process_time_us_max_.load(std::memory_order_relaxed);
+    out.process_time_us_last = process_time_us_last_.load(std::memory_order_relaxed);
+    out.process_overruns = process_overruns_.load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        out.last_error = last_error_;
+    }
+    return out;
 }
 
 void AudioPipeline::SetLastError(std::string msg) {
     std::lock_guard<std::mutex> lock(mu_);
-    stats_.last_error = std::move(msg);
+    last_error_ = std::move(msg);
 }
 
 void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
+    struct Guard {
+        AudioPipeline* self;
+        ~Guard() { self->running_.store(false, std::memory_order_release); }
+    } guard{this};
+
     const pa_sample_spec ss{
         .format = PA_SAMPLE_FLOAT32LE,
         .rate = static_cast<uint32_t>(cfg.sample_rate),
@@ -97,6 +123,10 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
 
     const std::uint32_t samples_per_frame = cfg.frame_samples * cfg.channels;
     const std::size_t bytes_per_frame = static_cast<std::size_t>(samples_per_frame) * sizeof(float);
+
+    // Frame budget for processor time (10ms at 48k).
+    const std::uint64_t frame_budget_us =
+        static_cast<std::uint64_t>(cfg.frame_samples) * 1000000ull / static_cast<std::uint64_t>(cfg.sample_rate);
 
     pa_buffer_attr rec_attr{};
     rec_attr.maxlength = static_cast<uint32_t>(bytes_per_frame * 4);
@@ -161,8 +191,21 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
             break;
         }
 
+        const auto t0 = std::chrono::steady_clock::now();
         proc_err.clear();
-        if (!processor_->Process(in.data(), out.data(), cfg.frame_samples, cfg.channels, &proc_err)) {
+        const bool ok = processor_->Process(in.data(), out.data(), cfg.frame_samples, cfg.channels, &proc_err);
+        const auto t1 = std::chrono::steady_clock::now();
+
+        const std::uint64_t proc_us =
+            static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+        process_time_us_sum_.fetch_add(proc_us, std::memory_order_relaxed);
+        process_time_us_last_.store(proc_us, std::memory_order_relaxed);
+        AtomicMax(&process_time_us_max_, proc_us);
+        if (proc_us > frame_budget_us) {
+            process_overruns_.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        if (!ok) {
             SetLastError("AudioProcessor::Process failed: " + proc_err);
             break;
         }
@@ -177,18 +220,12 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
             break;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            ++stats_.frames_processed;
-        }
+        frames_processed_.fetch_add(1, std::memory_order_relaxed);
     }
 
     ::pa_simple_drain(play, &pa_err);  // best-effort
     ::pa_simple_free(play);
     ::pa_simple_free(rec);
-
-    std::lock_guard<std::mutex> lock(mu_);
-    stats_.running = false;
 }
 
 }  // namespace studiocast::audio

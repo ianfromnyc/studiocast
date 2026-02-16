@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -67,8 +68,22 @@ struct VirtualAudioServiceStatus {
     float speakers_intensity = 0.0f;
     std::string speakers_pipeline_last_error;
 
+    // Speaker pipeline performance (best-effort realtime stats).
+    std::uint64_t speakers_pipeline_frames_processed = 0;
+    std::uint64_t speakers_pipeline_process_time_us_sum = 0;
+    std::uint64_t speakers_pipeline_process_time_us_max = 0;
+    std::uint64_t speakers_pipeline_process_time_us_last = 0;
+    std::uint64_t speakers_pipeline_process_overruns = 0;
+
     bool pipeline_running = false;
     bool pipeline_starting = false;
+
+    // Microphone pipeline performance (best-effort realtime stats).
+    std::uint64_t pipeline_frames_processed = 0;
+    std::uint64_t pipeline_process_time_us_sum = 0;
+    std::uint64_t pipeline_process_time_us_max = 0;
+    std::uint64_t pipeline_process_time_us_last = 0;
+    std::uint64_t pipeline_process_overruns = 0;
 
     std::string selected_source;
     std::string pipeline_sink = "studiocast_sink";

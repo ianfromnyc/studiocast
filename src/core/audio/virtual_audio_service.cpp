@@ -192,6 +192,16 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig& cfg, std::strin
         st_.speakers_route_mode.clear();
         st_.speakers_pipeline_running = false;
         st_.speakers_pipeline_starting = false;
+        st_.pipeline_frames_processed = 0;
+        st_.pipeline_process_time_us_sum = 0;
+        st_.pipeline_process_time_us_max = 0;
+        st_.pipeline_process_time_us_last = 0;
+        st_.pipeline_process_overruns = 0;
+        st_.speakers_pipeline_frames_processed = 0;
+        st_.speakers_pipeline_process_time_us_sum = 0;
+        st_.speakers_pipeline_process_time_us_max = 0;
+        st_.speakers_pipeline_process_time_us_last = 0;
+        st_.speakers_pipeline_process_overruns = 0;
         mic_created_ = false;
         speakers_created_ = false;
         speakers_loopback_running_ = false;
@@ -231,6 +241,16 @@ void VirtualAudioService::Stop() {
         st_.speakers_route_mode.clear();
         st_.speakers_pipeline_running = false;
         st_.speakers_pipeline_starting = false;
+        st_.pipeline_frames_processed = 0;
+        st_.pipeline_process_time_us_sum = 0;
+        st_.pipeline_process_time_us_max = 0;
+        st_.pipeline_process_time_us_last = 0;
+        st_.pipeline_process_overruns = 0;
+        st_.speakers_pipeline_frames_processed = 0;
+        st_.speakers_pipeline_process_time_us_sum = 0;
+        st_.speakers_pipeline_process_time_us_max = 0;
+        st_.speakers_pipeline_process_time_us_last = 0;
+        st_.speakers_pipeline_process_overruns = 0;
     }
 }
 
@@ -798,6 +818,11 @@ void VirtualAudioService::ThreadMain() {
                                 st_.speakers_pipeline_starting = false;
                                 st_.speakers_pipeline_running = false;
                                 st_.speakers_routing_active = false;
+                                st_.speakers_pipeline_frames_processed = 0;
+                                st_.speakers_pipeline_process_time_us_sum = 0;
+                                st_.speakers_pipeline_process_time_us_max = 0;
+                                st_.speakers_pipeline_process_time_us_last = 0;
+                                st_.speakers_pipeline_process_overruns = 0;
                                 st_.speakers_pipeline_last_error = "Failed to start speaker pipeline: " + perr;
                             }
 
@@ -829,6 +854,11 @@ void VirtualAudioService::ThreadMain() {
                             st_.speakers_pipeline_running = stats.running;
                             st_.speakers_routing_active = stats.running;
                             st_.speaker_target_sink_active = sinkName;
+                            st_.speakers_pipeline_frames_processed = stats.frames_processed;
+                            st_.speakers_pipeline_process_time_us_sum = stats.process_time_us_sum;
+                            st_.speakers_pipeline_process_time_us_max = stats.process_time_us_max;
+                            st_.speakers_pipeline_process_time_us_last = stats.process_time_us_last;
+                            st_.speakers_pipeline_process_overruns = stats.process_overruns;
                             if (!stats.last_error.empty()) {
                                 st_.speakers_pipeline_last_error = stats.last_error;
                             }
@@ -860,6 +890,11 @@ void VirtualAudioService::ThreadMain() {
                 std::lock_guard<std::mutex> lock(mu_);
                 st_.pipeline_running = false;
                 st_.pipeline_starting = false;
+                st_.pipeline_frames_processed = 0;
+                st_.pipeline_process_time_us_sum = 0;
+                st_.pipeline_process_time_us_max = 0;
+                st_.pipeline_process_time_us_last = 0;
+                st_.pipeline_process_overruns = 0;
                 st_.effect_selector.clear();
                 st_.feature_id.clear();
                 st_.intensity = 0.0f;
@@ -1030,6 +1065,11 @@ void VirtualAudioService::ThreadMain() {
                 {
                     std::lock_guard<std::mutex> lock(mu_);
                     st_.pipeline_running = stats.running;
+                    st_.pipeline_frames_processed = stats.frames_processed;
+                    st_.pipeline_process_time_us_sum = stats.process_time_us_sum;
+                    st_.pipeline_process_time_us_max = stats.process_time_us_max;
+                    st_.pipeline_process_time_us_last = stats.process_time_us_last;
+                    st_.pipeline_process_overruns = stats.process_overruns;
                 }
             }
 
@@ -1089,6 +1129,11 @@ void VirtualAudioService::ThreadMain() {
                 {
                     std::lock_guard<std::mutex> lock(mu_);
                     st_.pipeline_running = stats.running;
+                    st_.pipeline_frames_processed = stats.frames_processed;
+                    st_.pipeline_process_time_us_sum = stats.process_time_us_sum;
+                    st_.pipeline_process_time_us_max = stats.process_time_us_max;
+                    st_.pipeline_process_time_us_last = stats.process_time_us_last;
+                    st_.pipeline_process_overruns = stats.process_overruns;
                 }
             }
 
@@ -1221,6 +1266,11 @@ void VirtualAudioService::ThreadMain() {
             {
                 std::lock_guard<std::mutex> lock(mu_);
                 st_.pipeline_running = stats.running;
+                st_.pipeline_frames_processed = stats.frames_processed;
+                st_.pipeline_process_time_us_sum = stats.process_time_us_sum;
+                st_.pipeline_process_time_us_max = stats.process_time_us_max;
+                st_.pipeline_process_time_us_last = stats.process_time_us_last;
+                st_.pipeline_process_overruns = stats.process_overruns;
             }
         }
 

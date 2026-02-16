@@ -425,6 +425,17 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"source\":\"" << JsonEscape(acfg.source_name.empty() ? std::string("auto") : acfg.source_name) << "\",";
     oss << "\"mic_present\":" << BoolJson(ast.mic_present) << ",";
 
+    const double spk_proc_avg_ms =
+        ast.speakers_pipeline_frames_processed
+            ? (static_cast<double>(ast.speakers_pipeline_process_time_us_sum) /
+               static_cast<double>(ast.speakers_pipeline_frames_processed) / 1000.0)
+            : 0.0;
+    const double mic_proc_avg_ms =
+        ast.pipeline_frames_processed
+            ? (static_cast<double>(ast.pipeline_process_time_us_sum) /
+               static_cast<double>(ast.pipeline_frames_processed) / 1000.0)
+            : 0.0;
+
     // Speakers routing status (Phase 9: pass-through module-loopback).
     oss << "\"speakers\":{";
     oss << "\"enabled\":" << BoolJson(acfg.speakers_enabled) << ",";
@@ -440,7 +451,14 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"intensity\":" << ast.speakers_intensity << ",";
     oss << "\"target_sink_active\":\"" << JsonEscape(ast.speaker_target_sink_active) << "\",";
     oss << "\"last_error\":\"" << JsonEscape(ast.speakers_last_error) << "\",";
-    oss << "\"pipeline_last_error\":\"" << JsonEscape(ast.speakers_pipeline_last_error) << "\"";
+    oss << "\"pipeline_last_error\":\"" << JsonEscape(ast.speakers_pipeline_last_error) << "\",";
+    oss << "\"pipeline_perf\":{";
+    oss << "\"frames_processed\":" << ast.speakers_pipeline_frames_processed << ",";
+    oss << "\"process_ms_avg\":" << spk_proc_avg_ms << ",";
+    oss << "\"process_us_last\":" << ast.speakers_pipeline_process_time_us_last << ",";
+    oss << "\"process_us_max\":" << ast.speakers_pipeline_process_time_us_max << ",";
+    oss << "\"process_overruns\":" << ast.speakers_pipeline_process_overruns;
+    oss << "}";
     oss << "},";
 
     // Canonical effect model for GUI/CLI.
@@ -470,6 +488,11 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"effect_selector\":\"" << JsonEscape(ast.effect_selector) << "\",";
     oss << "\"feature_id\":\"" << JsonEscape(ast.feature_id) << "\",";
     oss << "\"intensity\":" << ast.intensity << ",";
+    oss << "\"frames_processed\":" << ast.pipeline_frames_processed << ",";
+    oss << "\"process_ms_avg\":" << mic_proc_avg_ms << ",";
+    oss << "\"process_us_last\":" << ast.pipeline_process_time_us_last << ",";
+    oss << "\"process_us_max\":" << ast.pipeline_process_time_us_max << ",";
+    oss << "\"process_overruns\":" << ast.pipeline_process_overruns << ",";
     oss << "\"gpu\":{";
     oss << "\"index\":" << ast.gpu_index << ",";
     oss << "\"name\":\"" << JsonEscape(ast.gpu_name) << "\",";

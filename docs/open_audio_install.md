@@ -61,6 +61,24 @@ If you suspect CUDA EP issues, force CPU:
 build/studiocast-open audio-self-test --model-id fastenhancer_s_vd_v1 --cpu-only
 ```
 
+Benchmark end-to-end processing time (per 10 ms frame):
+
+```bash
+build/studiocast-open audio-bench --effect noise_removal --model-id fastenhancer_s_vd_v1 --seconds 10
+```
+
+If you suspect CUDA EP issues, force CPU:
+
+```bash
+build/studiocast-open audio-bench --effect studio_voice --model-id fastenhancer_m_vd_v1 --seconds 10 --cpu-only
+```
+
+To emit per-frame timings:
+
+```bash
+build/studiocast-open audio-bench --effect noise_removal --model-id fastenhancer_s_vd_v1 --frames 200 --csv
+```
+
 ## 3) Enable in the GUI / config
 
 In the GUI:
