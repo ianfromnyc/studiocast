@@ -68,6 +68,18 @@ bool ResolveOpenAudioModelForMicrophone(const studiocast::audio::effects::Broadc
                                        ResolvedOpenAudioModel* out,
                                        std::string* error);
 
+// Resolve the Open Audio model selection for the speaker effects.
+//
+// Resolution order:
+//  1) speaker.model_path (file .onnx or directory containing model.json)
+//  2) speaker.model_id (installed pack id)
+//  3) default installed pack id
+//
+// Returns false with an actionable error string if no model can be resolved.
+bool ResolveOpenAudioModelForSpeaker(const studiocast::audio::effects::BroadcastAudioEffects& fx,
+                                    ResolvedOpenAudioModel* out,
+                                    std::string* error);
+
 // Open Audio processor (Phase 4 stub).
 //
 // For Phase 4 this processor is pass-through, but it validates model selection
@@ -88,12 +100,29 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
       ResolvedOpenAudioModel* resolved_out,
       std::string* error);
 
+  // Creates a processor for speaker effects.
+  // Returns nullptr and fills error if model selection cannot be resolved.
+  static std::unique_ptr<OpenAudioAudioProcessor> CreateForSpeaker(
+      const studiocast::audio::effects::BroadcastAudioEffects& fx,
+      ResolvedOpenAudioModel* resolved_out,
+      std::string* error);
+
+  // Same as CreateForSpeaker but allows overriding ORT session options.
+  static std::unique_ptr<OpenAudioAudioProcessor> CreateForSpeakerWithOrtOptions(
+      const studiocast::audio::effects::BroadcastAudioEffects& fx,
+      const studiocast::open_audio::OrtSessionOptions& ort_opts,
+      ResolvedOpenAudioModel* resolved_out,
+      std::string* error);
+
   explicit OpenAudioAudioProcessor(ResolvedOpenAudioModel model);
   ~OpenAudioAudioProcessor() override;
 
   // Update strength / mode without requiring a pipeline restart.
   // Thread-safe for calls from the supervisor thread while Process() runs on the audio thread.
   void UpdateFromMicrophoneConfig(const studiocast::audio::effects::BroadcastMicrophoneEffects& mic);
+
+  // Update speaker strength without requiring a pipeline restart.
+  void UpdateFromSpeakerConfig(const studiocast::audio::effects::BroadcastSpeakerEffects& spk);
 
   void Reset() override;
 

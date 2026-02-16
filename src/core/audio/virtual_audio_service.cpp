@@ -8,6 +8,7 @@
 #include <thread>
 
 #include "core/audio/audio_backend_resolver.h"
+#include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_mic.h"
 #include "core/audio/virtual_speaker.h"
 #include "core/config/settings.h"
@@ -15,6 +16,7 @@
 #include "core/maxine/gpu_selection.h"
 #include "core/maxine/paths.h"
 #include "core/open_audio/open_audio_audio_processor.h"
+#include "core/util/strings.h"
 
 // Effect planning is build-time independent from the Pulse audio pipeline.
 #include "core/maxine/afx/afx_effect.h"
@@ -30,49 +32,134 @@ namespace studiocast::audio {
 
 namespace {
 
-AudioBackendAvailability ProbeAudioBackendAvailability(const VirtualAudioServiceConfig& cfg) {
+constexpr const char* kVirtualMicSinkName = "studiocast_sink";
+constexpr const char* kVirtualSpeakersSinkName = "studiocast_speakers";
+
+bool IsVirtualSinkName(const std::string& name) {
+    return name == kVirtualMicSinkName || name == kVirtualSpeakersSinkName;
+}
+
+std::optional<std::string> ChooseSpeakerTargetSinkName(const std::string& configured_target,
+                                                      std::string* error) {
+    if (error) error->clear();
+
+    std::string chosen = studiocast::util::TrimCopy(configured_target);
+    std::string err;
+    if (chosen.empty()) {
+        // Prefer default sink, unless it's one of our virtual sinks.
+        auto def = pulse::GetDefaultSinkName(&err);
+        if (def && !IsVirtualSinkName(*def)) {
+            chosen = *def;
+        } else {
+            // If the user's default sink is our virtual device (common when testing), pick the first
+            // non-virtual sink as a best-effort physical target.
+            const auto sinks = pulse::ListSinks(&err);
+            for (const auto& s : sinks) {
+                if (!IsVirtualSinkName(s.name)) {
+                    chosen = s.name;
+                    break;
+                }
+            }
+            if (chosen.empty()) {
+                if (error) {
+                    *error = "Failed to choose a target sink. Default sink is virtual or missing.";
+                    if (!err.empty()) *error += " (note) " + err;
+                }
+                return std::nullopt;
+            }
+        }
+    }
+
+    if (IsVirtualSinkName(chosen)) {
+        if (error) *error = "Refusing to route speakers to '" + chosen + "' (feedback loop).";
+        return std::nullopt;
+    }
+
+    return chosen;
+}
+
+void FillMaxineAvailability(AudioBackendAvailability* out) {
+    if (!out) return;
+
+    // Maxine availability probe (audio needs AFX).
+    if (!studiocast::maxine::BackendBuilt()) {
+        out->maxine_ok = false;
+        out->maxine_reason = "Maxine support not enabled in this build.";
+        return;
+    }
+
+    const auto settings = studiocast::config::LoadSettings();
+    const auto sel = studiocast::maxine::SelectGpu(settings.gpu);
+    if (!sel.selected || !sel.selected->compute_capability) {
+        out->maxine_ok = false;
+        out->maxine_reason = "Failed to select a supported NVIDIA GPU.";
+        if (!sel.error.empty()) out->maxine_reason += " " + sel.error;
+        return;
+    }
+
+    const auto paths = studiocast::maxine::ResolveMaxinePaths();
+    if (!paths.afx.ok) {
+        out->maxine_ok = false;
+        out->maxine_reason = "AFX SDK not available";
+        if (!paths.afx.problems.empty()) {
+            out->maxine_reason += ": ";
+            out->maxine_reason += paths.afx.problems.front();
+        }
+        return;
+    }
+
+    out->maxine_ok = true;
+    out->maxine_reason.clear();
+}
+
+AudioBackendAvailability ProbeAudioBackendAvailabilityForMicrophone(const VirtualAudioServiceConfig& cfg) {
     AudioBackendAvailability out;
 
 #if !STUDIOCAST_HAVE_ONNXRUNTIME
     (void)cfg;
 #endif
 
-    // Maxine availability probe (audio needs AFX).
-    if (!studiocast::maxine::BackendBuilt()) {
-        out.maxine_ok = false;
-        out.maxine_reason = "Maxine support not enabled in this build.";
-    } else {
-        const auto settings = studiocast::config::LoadSettings();
-        const auto sel = studiocast::maxine::SelectGpu(settings.gpu);
-        if (!sel.selected || !sel.selected->compute_capability) {
-            out.maxine_ok = false;
-            out.maxine_reason = "Failed to select a supported NVIDIA GPU.";
-            if (!sel.error.empty()) out.maxine_reason += " " + sel.error;
-        } else {
-            const auto paths = studiocast::maxine::ResolveMaxinePaths();
-            if (!paths.afx.ok) {
-                out.maxine_ok = false;
-                out.maxine_reason = "AFX SDK not available";
-                if (!paths.afx.problems.empty()) {
-                    out.maxine_reason += ": ";
-                    out.maxine_reason += paths.afx.problems.front();
-                }
-            } else {
-                out.maxine_ok = true;
-                out.maxine_reason.clear();
-            }
-        }
-    }
+    FillMaxineAvailability(&out);
 
 #if !STUDIOCAST_ENABLE_OPEN_AUDIO
     out.open_source_ok = false;
     out.open_source_reason = "Open Audio backend is disabled in this build.";
 #elif STUDIOCAST_HAVE_ONNXRUNTIME
-    // Open Audio backend availability probe.
-    // Phase 5: validate that a model can be resolved (installed pack or user path).
+    // Open Audio backend availability probe: validate that a model can be resolved.
     {
         std::string oerr;
         if (studiocast::open_audio::ResolveOpenAudioModelForMicrophone(cfg.effects, nullptr, &oerr)) {
+            out.open_source_ok = true;
+            out.open_source_reason.clear();
+        } else {
+            out.open_source_ok = false;
+            out.open_source_reason = oerr.empty() ? "Open Audio backend unavailable." : oerr;
+        }
+    }
+#else
+    out.open_source_ok = false;
+    out.open_source_reason = "Open Audio backend unavailable: ONNX Runtime not found at build time.";
+#endif
+
+    return out;
+}
+
+AudioBackendAvailability ProbeAudioBackendAvailabilityForSpeaker(const VirtualAudioServiceConfig& cfg) {
+    AudioBackendAvailability out;
+
+#if !STUDIOCAST_HAVE_ONNXRUNTIME
+    (void)cfg;
+#endif
+
+    FillMaxineAvailability(&out);
+
+#if !STUDIOCAST_ENABLE_OPEN_AUDIO
+    out.open_source_ok = false;
+    out.open_source_reason = "Open Audio backend is disabled in this build.";
+#elif STUDIOCAST_HAVE_ONNXRUNTIME
+    {
+        std::string oerr;
+        if (studiocast::open_audio::ResolveOpenAudioModelForSpeaker(cfg.effects, nullptr, &oerr)) {
             out.open_source_ok = true;
             out.open_source_reason.clear();
         } else {
@@ -99,6 +186,12 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig& cfg, std::strin
         cfg_ = cfg;
         st_ = VirtualAudioServiceStatus{};
         st_.service_running = false;
+        st_.pipeline_running = false;
+        st_.pipeline_starting = false;
+        st_.speakers_routing_active = false;
+        st_.speakers_route_mode.clear();
+        st_.speakers_pipeline_running = false;
+        st_.speakers_pipeline_starting = false;
         mic_created_ = false;
         speakers_created_ = false;
         speakers_loopback_running_ = false;
@@ -134,6 +227,10 @@ void VirtualAudioService::Stop() {
         st_.service_running = false;
         st_.pipeline_running = false;
         st_.pipeline_starting = false;
+        st_.speakers_routing_active = false;
+        st_.speakers_route_mode.clear();
+        st_.speakers_pipeline_running = false;
+        st_.speakers_pipeline_starting = false;
     }
 }
 
@@ -161,11 +258,17 @@ void VirtualAudioService::ThreadMain() {
     using namespace std::chrono;
 
     steady_clock::time_point nextStartRetry{};
+    steady_clock::time_point nextSpeakerStartRetry{};
 
     // If the Open Audio backend fails to initialize, latch-disable it for a short
     // cooldown to avoid rapid restart loops.
     steady_clock::time_point openAudioCooldownUntil{};
     std::string openAudioCooldownReason;
+
+    // Separate cooldown for speaker processing, so a failure in one direction
+    // doesn't permanently disable the other.
+    steady_clock::time_point speakerOpenAudioCooldownUntil{};
+    std::string speakerOpenAudioCooldownReason;
 
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
     std::unique_ptr<studiocast::maxine::afx::AfxApi> api;
@@ -173,10 +276,21 @@ void VirtualAudioService::ThreadMain() {
     std::unique_ptr<AudioProcessor> processor;
     std::unique_ptr<studiocast::audio::AudioPipeline> pipeline;
 
+    // Independent speaker processing pipeline (virtual speakers -> physical sink).
+    std::unique_ptr<studiocast::maxine::afx::AfxApi> spk_api;
+    std::unique_ptr<studiocast::maxine::afx::AfxEffect> spk_fx;
+    std::unique_ptr<AudioProcessor> spk_processor;
+    std::unique_ptr<studiocast::audio::AudioPipeline> spk_pipeline;
+
     std::string lastBackend;
     std::optional<studiocast::audio::effects::BroadcastAudioEffects> lastFx;
     std::string lastSource;
     std::filesystem::path lastAfxLib;
+
+    std::string lastSpeakerBackend;
+    std::optional<studiocast::audio::effects::BroadcastSpeakerEffects> lastSpeakerFx;
+    std::string lastSpeakerTargetSink;
+    std::filesystem::path lastSpeakerAfxLib;
 #endif
 
     while (!stop_.load(std::memory_order_acquire)) {
@@ -187,6 +301,19 @@ void VirtualAudioService::ThreadMain() {
         }
 
         const int pollMs = std::max(25, cfg.poll_ms);
+
+        using Pref = studiocast::audio::effects::AudioEffectsEnginePreference;
+        const bool speakerEffectsRequested = AnySpeakerEffectRequested(cfg.effects);
+        const bool wantSpeakerProcessing = cfg.speakers_enabled && speakerEffectsRequested &&
+                                          (cfg.effects.engine != Pref::kOff);
+
+#if STUDIOCAST_HAVE_PULSE_SIMPLE
+        const bool wantSpeakerProcessingEffective = wantSpeakerProcessing;
+#else
+        // Speaker processing requires the daemon audio pipeline (libpulse-simple).
+        // If unavailable, always fall back to loopback pass-through.
+        const bool wantSpeakerProcessingEffective = false;
+#endif
 
         // Ensure virtual devices are present (best-effort).
         //
@@ -231,34 +358,123 @@ void VirtualAudioService::ThreadMain() {
                 }
             }
 
-            // Keep routing state consistent with config.
+            // Keep speakers routing state consistent with config.
+            //
+            // Pass-through mode uses Pulse module-loopback.
+            // When speaker effects are enabled, we disable the loopback and run a processed pipeline
+            // (see speaker pipeline supervisor below).
             if (cfg.speakers_enabled) {
-                const bool needLoopbackRestart = (!speakers_loopback_running_) ||
-                                                (speakers_loopback_target_ != cfg.speaker_target_sink) ||
-                                                (speakers_loopback_latency_ms_ != cfg.speaker_latency_ms);
-                if (needLoopbackRestart) {
-                    std::string err;
-                    if (studiocast::audio::StartSpeakerLoopback(cfg.speaker_target_sink,
-                                                              std::max(1, cfg.speaker_latency_ms),
-                                                              &err)) {
-                        speakers_created_ = true;
-                        speakers_loopback_running_ = true;
-                        speakers_loopback_target_ = cfg.speaker_target_sink;
-                        speakers_loopback_latency_ms_ = cfg.speaker_latency_ms;
-
-                        const auto state = studiocast::audio::LoadVirtualSpeakerState();
-                        {
-                            std::lock_guard<std::mutex> lock(mu_);
-                            st_.speakers_present = true;
-                            st_.speakers_routing_active = true;
-                            st_.speaker_target_sink_active = state.loopback_target_sink_name.value_or(std::string());
+                if (wantSpeakerProcessingEffective) {
+                    // Ensure loopback is stopped (avoid double-routing).
+                    if (speakers_loopback_running_) {
+                        std::string err;
+                        if (studiocast::audio::StopSpeakerLoopback(&err)) {
+                            speakers_loopback_running_ = false;
+                            speakers_loopback_target_.clear();
+                            speakers_loopback_latency_ms_ = 0;
+                            {
+                                std::lock_guard<std::mutex> lock(mu_);
+                                st_.speakers_routing_active = false;
+                                st_.speaker_target_sink_active.clear();
+                            }
+                            clearSpeakersError();
+                        } else {
+                            setSpeakersError("Failed to stop speakers routing: " + err);
                         }
-                        clearSpeakersError();
+                    }
+
+                    {
+                        std::lock_guard<std::mutex> lock(mu_);
+                        st_.speakers_route_mode = "pipeline";
+                    }
+                } else {
+#if STUDIOCAST_HAVE_PULSE_SIMPLE
+                    // If we are switching back to pass-through, stop the processed pipeline before
+                    // enabling loopback.
+                    if (spk_pipeline) {
+                        spk_pipeline->Stop();
+                        spk_pipeline.reset();
+                    }
+                    spk_processor.reset();
+                    if (spk_fx) {
+                        spk_fx->Destroy();
+                        spk_fx.reset();
+                    }
+                    spk_api.reset();
+                    lastSpeakerFx.reset();
+                    lastSpeakerBackend.clear();
+                    lastSpeakerTargetSink.clear();
+                    lastSpeakerAfxLib.clear();
+                    {
+                        std::lock_guard<std::mutex> lock(mu_);
+                        st_.speakers_pipeline_running = false;
+                        st_.speakers_pipeline_starting = false;
+                        st_.speakers_backend_active.clear();
+                        st_.speakers_effects_note.clear();
+                        st_.speakers_intensity = 0.0f;
+                        st_.speakers_pipeline_last_error.clear();
+                    }
+#endif
+
+                    const bool needLoopbackRestart = (!speakers_loopback_running_) ||
+                                                    (speakers_loopback_target_ != cfg.speaker_target_sink) ||
+                                                    (speakers_loopback_latency_ms_ != cfg.speaker_latency_ms);
+                    if (needLoopbackRestart) {
+                        std::string err;
+                        if (studiocast::audio::StartSpeakerLoopback(cfg.speaker_target_sink,
+                                                                  std::max(1, cfg.speaker_latency_ms),
+                                                                  &err)) {
+                            speakers_created_ = true;
+                            speakers_loopback_running_ = true;
+                            speakers_loopback_target_ = cfg.speaker_target_sink;
+                            speakers_loopback_latency_ms_ = cfg.speaker_latency_ms;
+
+                            const auto state = studiocast::audio::LoadVirtualSpeakerState();
+                            {
+                                std::lock_guard<std::mutex> lock(mu_);
+                                st_.speakers_present = true;
+                                st_.speakers_routing_active = true;
+                                st_.speakers_route_mode = "loopback";
+                                st_.speaker_target_sink_active =
+                                    state.loopback_target_sink_name.value_or(std::string());
+                            }
+                            clearSpeakersError();
+                        } else {
+                            setSpeakersError("Failed to start speakers routing: " + err);
+                        }
                     } else {
-                        setSpeakersError("Failed to start speakers routing: " + err);
+                        std::lock_guard<std::mutex> lock(mu_);
+                        st_.speakers_route_mode = "loopback";
                     }
                 }
             } else {
+#if STUDIOCAST_HAVE_PULSE_SIMPLE
+                // Stop processed speaker pipeline.
+                if (spk_pipeline) {
+                    spk_pipeline->Stop();
+                    spk_pipeline.reset();
+                }
+                spk_processor.reset();
+                if (spk_fx) {
+                    spk_fx->Destroy();
+                    spk_fx.reset();
+                }
+                spk_api.reset();
+                lastSpeakerFx.reset();
+                lastSpeakerBackend.clear();
+                lastSpeakerTargetSink.clear();
+                lastSpeakerAfxLib.clear();
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    st_.speakers_pipeline_running = false;
+                    st_.speakers_pipeline_starting = false;
+                    st_.speakers_backend_active.clear();
+                    st_.speakers_effects_note.clear();
+                    st_.speakers_intensity = 0.0f;
+                    st_.speakers_pipeline_last_error.clear();
+                }
+#endif
+
                 if (speakers_loopback_running_) {
                     std::string err;
                     if (studiocast::audio::StopSpeakerLoopback(&err)) {
@@ -274,6 +490,11 @@ void VirtualAudioService::ThreadMain() {
                     } else {
                         setSpeakersError("Failed to stop speakers routing: " + err);
                     }
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    st_.speakers_route_mode = "off";
                 }
 
                 // Optional cleanup: if the user disables the device, and we previously created it,
@@ -303,6 +524,320 @@ void VirtualAudioService::ThreadMain() {
             std::lock_guard<std::mutex> lock(mu_);
             st_.selected_source = cfg.source_name;
         }
+
+#if STUDIOCAST_HAVE_PULSE_SIMPLE
+        // Speaker processed pipeline supervisor.
+        //
+        // This runs independently from the microphone pipeline, allowing speaker noise
+        // removal even when microphone effects are disabled.
+        if (wantSpeakerProcessingEffective) {
+            if (!speakers_created_) {
+                // We can't route/process speaker audio until the virtual speakers device exists.
+                if (spk_pipeline) {
+                    spk_pipeline->Stop();
+                    spk_pipeline.reset();
+                }
+                spk_processor.reset();
+                if (spk_fx) {
+                    spk_fx->Destroy();
+                    spk_fx.reset();
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    st_.speakers_routing_active = false;
+                    st_.speakers_route_mode = "pipeline";
+                    st_.speaker_target_sink_active.clear();
+                    st_.speakers_pipeline_running = false;
+                    st_.speakers_pipeline_starting = false;
+                    if (st_.speakers_pipeline_last_error.empty()) {
+                        st_.speakers_pipeline_last_error = "Virtual speakers device not created.";
+                    }
+                }
+            } else {
+                const auto now = steady_clock::now();
+
+                // Compute the "plan" for speaker noise removal using the same AFX planner.
+                auto speakerPlan = studiocast::maxine::afx::PlanBroadcastMicrophoneEffect(
+                    /*studio_voice_enabled=*/false,
+                    /*noise_removal_enabled=*/cfg.effects.speaker.noise_removal_enabled,
+                    /*room_echo_removal_enabled=*/false,
+                    /*strength=*/cfg.effects.speaker.strength);
+                if (!speakerPlan.enabled) speakerPlan.intensity = 0.0f;
+
+                // Availability + backend selection.
+                AudioBackendAvailability speakerAvail = ProbeAudioBackendAvailabilityForSpeaker(cfg);
+                if (now < speakerOpenAudioCooldownUntil) {
+                    speakerAvail.open_source_ok = false;
+                    speakerAvail.open_source_reason = speakerOpenAudioCooldownReason.empty()
+                                                         ? "Open Audio backend is temporarily disabled due to a previous failure."
+                                                         : speakerOpenAudioCooldownReason;
+                }
+                const auto speakerDecision = ResolveAudioBackend(cfg.effects, speakerAvail);
+
+                const bool wantSpkMaxine = (speakerDecision.backend == AudioBackendKind::kMaxine) && speakerPlan.enabled;
+                const bool wantSpkOpenAudio = (speakerDecision.backend == AudioBackendKind::kOpenSource) && speakerPlan.enabled;
+
+                std::string desiredSpkBackend = "passthrough";
+                if (wantSpkMaxine) {
+                    desiredSpkBackend = "maxine";
+                } else if (wantSpkOpenAudio) {
+                    desiredSpkBackend = "open_source";
+                }
+
+                // Choose target sink. If misconfigured (virtual sink), fall back to a safe physical sink.
+                std::string sinkErr;
+                auto sinkOpt = ChooseSpeakerTargetSinkName(cfg.speaker_target_sink, &sinkErr);
+                if (!sinkOpt) {
+                    std::string sinkErr2;
+                    sinkOpt = ChooseSpeakerTargetSinkName(/*configured_target=*/"", &sinkErr2);
+                }
+
+                if (!sinkOpt) {
+                    // Can't route speakers anywhere.
+                    if (spk_pipeline) {
+                        spk_pipeline->Stop();
+                        spk_pipeline.reset();
+                    }
+                    spk_processor.reset();
+                    if (spk_fx) {
+                        spk_fx->Destroy();
+                        spk_fx.reset();
+                    }
+                    spk_api.reset();
+                    lastSpeakerFx.reset();
+                    lastSpeakerBackend.clear();
+                    lastSpeakerTargetSink.clear();
+                    lastSpeakerAfxLib.clear();
+
+                    {
+                        std::lock_guard<std::mutex> lock(mu_);
+                        st_.speakers_route_mode = "pipeline";
+                        st_.speakers_routing_active = false;
+                        st_.speaker_target_sink_active.clear();
+                        st_.speakers_pipeline_running = false;
+                        st_.speakers_pipeline_starting = false;
+                        st_.speakers_backend_active = "passthrough";
+                        st_.speakers_effects_note =
+                            "Speakers processing is enabled, but no valid output sink was found.";
+                        st_.speakers_intensity = speakerPlan.intensity;
+                        st_.speakers_pipeline_last_error = sinkErr;
+                    }
+                } else {
+                    const std::string sinkName = *sinkOpt;
+
+                    // Start/restart the pipeline if needed.
+                    const bool speakerEffectsChanged =
+                        (!lastSpeakerFx.has_value() || *lastSpeakerFx != cfg.effects.speaker);
+                    const bool spkPipelineDead = (spk_pipeline && !spk_pipeline->GetStats().running);
+                    const bool needSpkRestart = (!spk_pipeline) || spkPipelineDead ||
+                                                (lastSpeakerBackend != desiredSpkBackend) ||
+                                                (lastSpeakerTargetSink != sinkName) ||
+                                                ((wantSpkMaxine || wantSpkOpenAudio) && speakerEffectsChanged);
+
+                    if (now >= nextSpeakerStartRetry && needSpkRestart) {
+                        if (spk_pipeline) {
+                            spk_pipeline->Stop();
+                            spk_pipeline.reset();
+                        }
+                        spk_processor.reset();
+                        if (spk_fx) {
+                            spk_fx->Destroy();
+                            spk_fx.reset();
+                        }
+                        if (!wantSpkMaxine) {
+                            // Pass-through + open-source don't need the AFX runtime.
+                            spk_api.reset();
+                            lastSpeakerAfxLib.clear();
+                            lastSpeakerFx.reset();
+                        }
+
+                        {
+                            std::lock_guard<std::mutex> lock(mu_);
+                            st_.speakers_route_mode = "pipeline";
+                            st_.speakers_pipeline_starting = true;
+                            st_.speakers_pipeline_running = false;
+                            st_.speakers_routing_active = false;
+                            st_.speaker_target_sink_active = sinkName;
+                            st_.speakers_backend_active = std::string(ToString(speakerDecision.backend));
+                            st_.speakers_effects_note = speakerDecision.note;
+                            st_.speakers_intensity = speakerPlan.intensity;
+                            st_.speakers_pipeline_last_error.clear();
+                        }
+
+                        // Build the processor (Maxine/Open Audio/Passthrough), with graceful fallback.
+                        if (wantSpkOpenAudio) {
+                            studiocast::open_audio::ResolvedOpenAudioModel selected;
+                            std::string oerr;
+                            auto oa = studiocast::open_audio::OpenAudioAudioProcessor::CreateForSpeaker(
+                                cfg.effects, &selected, &oerr);
+                            if (!oa) {
+                                speakerOpenAudioCooldownUntil =
+                                    now + milliseconds(std::max(250, cfg.start_retry_ms));
+                                speakerOpenAudioCooldownReason = oerr;
+
+                                desiredSpkBackend = "passthrough";
+                                spk_processor = std::make_unique<PassthroughAudioProcessor>();
+                                {
+                                    std::lock_guard<std::mutex> lock(mu_);
+                                    st_.speakers_backend_active = "passthrough";
+                                    st_.speakers_effects_note =
+                                        "Open-source speaker backend failed to initialize; using pass-through.\n" +
+                                        oerr;
+                                    st_.speakers_pipeline_last_error = "Open Audio init failed: " + oerr;
+                                }
+                            } else {
+                                spk_processor = std::move(oa);
+                            }
+                        } else if (wantSpkMaxine) {
+                            // Resolve GPU selection (settings.conf) and AFX SDK paths.
+                            const auto settings = studiocast::config::LoadSettings();
+                            const auto sel = studiocast::maxine::SelectGpu(settings.gpu);
+                            if (!sel.selected || !sel.selected->compute_capability) {
+                                desiredSpkBackend = "passthrough";
+                                spk_processor = std::make_unique<PassthroughAudioProcessor>();
+                                {
+                                    std::lock_guard<std::mutex> lock(mu_);
+                                    st_.speakers_backend_active = "passthrough";
+                                    st_.speakers_effects_note =
+                                        "Failed to select a supported NVIDIA GPU for speaker effects; using pass-through.\n" +
+                                        sel.error;
+                                    st_.speakers_pipeline_last_error = "GPU selection failed: " + sel.error;
+                                }
+                            } else {
+                                const auto paths = studiocast::maxine::ResolveMaxinePaths();
+                                if (!paths.afx.ok) {
+                                    std::string msg = "AFX SDK not available";
+                                    if (!paths.afx.problems.empty()) {
+                                        msg += ": ";
+                                        msg += paths.afx.problems.front();
+                                    }
+                                    desiredSpkBackend = "passthrough";
+                                    spk_processor = std::make_unique<PassthroughAudioProcessor>();
+                                    {
+                                        std::lock_guard<std::mutex> lock(mu_);
+                                        st_.speakers_backend_active = "passthrough";
+                                        st_.speakers_effects_note =
+                                            "AFX SDK not available for speaker effects; using pass-through.\n" + msg;
+                                        st_.speakers_pipeline_last_error = msg;
+                                    }
+                                } else {
+                                    if (!spk_api || paths.afx.library != lastSpeakerAfxLib) {
+                                        spk_api = std::make_unique<studiocast::maxine::afx::AfxApi>();
+                                        std::string aerr;
+                                        if (!spk_api->InitializeFromLibraryPath(paths.afx.library, &aerr)) {
+                                            desiredSpkBackend = "passthrough";
+                                            spk_api.reset();
+                                            spk_processor = std::make_unique<PassthroughAudioProcessor>();
+                                            {
+                                                std::lock_guard<std::mutex> lock(mu_);
+                                                st_.speakers_backend_active = "passthrough";
+                                                st_.speakers_effects_note =
+                                                    "Failed to initialize AFX runtime for speaker effects; using pass-through.\n" +
+                                                    aerr;
+                                                st_.speakers_pipeline_last_error = "AFX init failed: " + aerr;
+                                            }
+                                        }
+                                        lastSpeakerAfxLib = paths.afx.library;
+                                    }
+
+                                    if (!spk_processor) {
+                                        if (!spk_fx) {
+                                            spk_fx = std::make_unique<studiocast::maxine::afx::AfxEffect>(spk_api.get());
+                                        } else {
+                                            spk_fx->SetApi(spk_api.get());
+                                        }
+
+                                        studiocast::maxine::afx::AfxEffectConfig e;
+                                        e.effect_selector = speakerPlan.effect_selector;
+                                        e.feature_id = speakerPlan.feature_id;
+                                        e.features_dir = paths.afx.features_dir;
+                                        e.compute_capability = sel.selected->compute_capability;
+                                        e.sample_rate = 48000;
+                                        e.frame_samples = 480;
+                                        e.channels = 1;
+                                        e.intensity = speakerPlan.intensity;
+                                        e.use_denoiser_v2_model = speakerPlan.use_denoiser_v2_model;
+
+                                        std::string ferr;
+                                        if (!spk_fx->Configure(e, &ferr) || !spk_fx->Load(&ferr)) {
+                                            desiredSpkBackend = "passthrough";
+                                            spk_fx->Destroy();
+                                            spk_fx.reset();
+                                            spk_processor = std::make_unique<PassthroughAudioProcessor>();
+                                            {
+                                                std::lock_guard<std::mutex> lock(mu_);
+                                                st_.speakers_backend_active = "passthrough";
+                                                st_.speakers_effects_note =
+                                                    "Failed to configure/load AFX speaker effect; using pass-through.\n" +
+                                                    ferr;
+                                                st_.speakers_pipeline_last_error = "AFX load failed: " + ferr;
+                                            }
+                                        } else {
+                                            spk_processor = std::make_unique<studiocast::maxine::afx::AfxAudioProcessor>(
+                                                spk_fx.get());
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            spk_processor = std::make_unique<PassthroughAudioProcessor>();
+                        }
+
+                        // Start pipeline (even in pass-through mode; this replaces module-loopback when
+                        // speaker effects are enabled).
+                        spk_pipeline = std::make_unique<studiocast::audio::AudioPipeline>(spk_processor.get());
+                        studiocast::audio::AudioPipelineConfig pcfg;
+                        pcfg.source_name = studiocast::audio::VirtualSpeakerMonitorSourceName();
+                        pcfg.sink_name = sinkName;
+
+                        std::string perr;
+                        if (!spk_pipeline->Start(pcfg, &perr)) {
+                            {
+                                std::lock_guard<std::mutex> lock(mu_);
+                                st_.speakers_pipeline_starting = false;
+                                st_.speakers_pipeline_running = false;
+                                st_.speakers_routing_active = false;
+                                st_.speakers_pipeline_last_error = "Failed to start speaker pipeline: " + perr;
+                            }
+
+                            spk_pipeline.reset();
+                            spk_processor.reset();
+                            nextSpeakerStartRetry = now + milliseconds(std::max(250, cfg.start_retry_ms));
+                        } else {
+                            lastSpeakerBackend = desiredSpkBackend;
+                            lastSpeakerTargetSink = sinkName;
+                            lastSpeakerFx = cfg.effects.speaker;
+
+                            {
+                                std::lock_guard<std::mutex> lock(mu_);
+                                st_.speakers_pipeline_starting = false;
+                                st_.speakers_pipeline_running = true;
+                                st_.speakers_routing_active = true;
+                                st_.speakers_backend_active = desiredSpkBackend;
+                                st_.speaker_target_sink_active = sinkName;
+                                // Preserve st_.speakers_effects_note (decision/fallback message).
+                                st_.speakers_pipeline_last_error.clear();
+                            }
+                        }
+                    }
+
+                    if (spk_pipeline) {
+                        const auto stats = spk_pipeline->GetStats();
+                        {
+                            std::lock_guard<std::mutex> lock(mu_);
+                            st_.speakers_pipeline_running = stats.running;
+                            st_.speakers_routing_active = stats.running;
+                            st_.speaker_target_sink_active = sinkName;
+                            if (!stats.last_error.empty()) {
+                                st_.speakers_pipeline_last_error = stats.last_error;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+#endif
 
         if (!cfg.enabled) {
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
@@ -356,7 +891,7 @@ void VirtualAudioService::ThreadMain() {
         // Backend selection.
         AudioBackendAvailability avail;
         if (AnyMicrophoneEffectRequested(cfg.effects)) {
-            avail = ProbeAudioBackendAvailability(cfg);
+            avail = ProbeAudioBackendAvailabilityForMicrophone(cfg);
             const auto now2 = steady_clock::now();
             if (now2 < openAudioCooldownUntil) {
                 avail.open_source_ok = false;
@@ -697,6 +1232,10 @@ void VirtualAudioService::ThreadMain() {
     if (pipeline) pipeline->Stop();
     processor.reset();
     if (fx) fx->Destroy();
+
+    if (spk_pipeline) spk_pipeline->Stop();
+    spk_processor.reset();
+    if (spk_fx) spk_fx->Destroy();
 #endif
 }
 

@@ -118,6 +118,12 @@ namespace studiocast::gui {
         QString daemonAiDisableReason_;
         QString daemonStatusText_;
 
+        // Last speaker routing status reported by the daemon (used to make the UI
+        // behave sensibly when routing is provided by the daemon pipeline rather than
+        // Pulse module-loopback).
+        bool daemonSpeakersRoutingActive_ = false;
+        QString daemonSpeakersRouteMode_;
+
         // Cached daemon effects blob so we can preserve fields not represented in this UI.
         QJsonObject lastAudioEffectsObj_;
 

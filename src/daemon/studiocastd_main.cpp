@@ -432,8 +432,15 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << "\"latency_ms\":" << acfg.speaker_latency_ms << ",";
     oss << "\"present\":" << BoolJson(ast.speakers_present) << ",";
     oss << "\"routing_active\":" << BoolJson(ast.speakers_routing_active) << ",";
+    oss << "\"route_mode\":\"" << JsonEscape(ast.speakers_route_mode.empty() ? std::string("off") : ast.speakers_route_mode) << "\",";
+    oss << "\"pipeline_running\":" << BoolJson(ast.speakers_pipeline_running) << ",";
+    oss << "\"pipeline_starting\":" << BoolJson(ast.speakers_pipeline_starting) << ",";
+    oss << "\"backend_active\":\"" << JsonEscape(ast.speakers_backend_active) << "\",";
+    oss << "\"effects_note\":\"" << JsonEscape(ast.speakers_effects_note) << "\",";
+    oss << "\"intensity\":" << ast.speakers_intensity << ",";
     oss << "\"target_sink_active\":\"" << JsonEscape(ast.speaker_target_sink_active) << "\",";
-    oss << "\"last_error\":\"" << JsonEscape(ast.speakers_last_error) << "\"";
+    oss << "\"last_error\":\"" << JsonEscape(ast.speakers_last_error) << "\",";
+    oss << "\"pipeline_last_error\":\"" << JsonEscape(ast.speakers_pipeline_last_error) << "\"";
     oss << "},";
 
     // Canonical effect model for GUI/CLI.

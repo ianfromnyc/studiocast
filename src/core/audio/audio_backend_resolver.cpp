@@ -19,12 +19,16 @@ bool AnyMicrophoneEffectRequested(const studiocast::audio::effects::BroadcastAud
            fx.microphone.room_echo_removal_enabled;
 }
 
+bool AnySpeakerEffectRequested(const studiocast::audio::effects::BroadcastAudioEffects& fx) {
+    return fx.speaker.noise_removal_enabled;
+}
+
 AudioBackendDecision ResolveAudioBackend(const studiocast::audio::effects::BroadcastAudioEffects& fx,
                                         const AudioBackendAvailability& avail) {
     AudioBackendDecision out;
 
-    const bool micRequested = AnyMicrophoneEffectRequested(fx);
-    if (!micRequested) {
+    const bool anyRequested = AnyAudioEffectRequested(fx);
+    if (!anyRequested) {
         out.backend = AudioBackendKind::kPassthrough;
         out.used_fallback = false;
         out.note.clear();

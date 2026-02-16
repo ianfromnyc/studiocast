@@ -53,8 +53,19 @@ struct VirtualAudioServiceStatus {
 
     bool speakers_present = false;
     bool speakers_routing_active = false;
+    // "off" (no routing), "loopback" (Pulse module-loopback pass-through),
+    // or "pipeline" (daemon processed pipeline).
+    std::string speakers_route_mode;
     std::string speaker_target_sink_active;
     std::string speakers_last_error;
+
+    // When speakers_route_mode == "pipeline", these describe the processed pipeline state.
+    bool speakers_pipeline_running = false;
+    bool speakers_pipeline_starting = false;
+    std::string speakers_backend_active;
+    std::string speakers_effects_note;
+    float speakers_intensity = 0.0f;
+    std::string speakers_pipeline_last_error;
 
     bool pipeline_running = false;
     bool pipeline_starting = false;

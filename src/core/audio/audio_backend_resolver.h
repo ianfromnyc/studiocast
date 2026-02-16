@@ -47,6 +47,14 @@ struct AudioBackendDecision {
 // Returns true if the user has enabled any microphone effect (regardless of backend).
 bool AnyMicrophoneEffectRequested(const studiocast::audio::effects::BroadcastAudioEffects& fx);
 
+// Returns true if the user has enabled any speaker effect (regardless of backend).
+bool AnySpeakerEffectRequested(const studiocast::audio::effects::BroadcastAudioEffects& fx);
+
+// Returns true if any audio effect is requested (microphone or speaker).
+inline bool AnyAudioEffectRequested(const studiocast::audio::effects::BroadcastAudioEffects& fx) {
+    return AnyMicrophoneEffectRequested(fx) || AnySpeakerEffectRequested(fx);
+}
+
 // Deterministically chooses the active backend based on:
 //  - fx.engine (AUTO/MAXINE/OPEN_SOURCE/OFF)
 //  - whether any effects are requested

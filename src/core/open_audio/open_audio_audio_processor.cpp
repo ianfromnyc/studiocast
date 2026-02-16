@@ -208,6 +208,77 @@ bool ResolveOpenAudioModelForMicrophone(const studiocast::audio::effects::Broadc
   return true;
 }
 
+bool ResolveOpenAudioModelForSpeaker(const studiocast::audio::effects::BroadcastAudioEffects& fx,
+                                    ResolvedOpenAudioModel* out,
+                                    std::string* error) {
+  if (error) error->clear();
+
+  const auto& spk = fx.speaker;
+
+  // 1) Explicit model path wins.
+  if (!spk.model_path.empty()) {
+    fs::path p = ExpandTilde(fs::path(spk.model_path));
+    std::error_code ec;
+    if (!fs::exists(p, ec) || ec) {
+      ec.clear();
+      return Fail(error, std::string("Open Audio speaker model_path does not exist: ") + p.string());
+    }
+    if (fs::is_directory(p, ec) && !ec) {
+      return ResolveFromPackDir(p, out, error);
+    }
+    ec.clear();
+    return ResolveFromOnnxFile(p, out, error);
+  }
+
+  // 2/3) Installed pack id or default.
+  const auto reg = ModelPackRegistry::ScanDefault();
+
+  std::string id = spk.model_id;
+  if (id.empty()) {
+    id = reg.DefaultModelId();
+  }
+  if (id.empty()) {
+    return Fail(error,
+                "Open Audio: no usable model packs found (install under ~/.local/share/studiocast/models/open_audio/<model_id>/)."
+    );
+  }
+
+  const auto packOpt = reg.ResolveModel(id);
+  if (!packOpt.has_value()) {
+    std::string msg = std::string("Open Audio: model_id '") + id + "' not found.";
+    if (!reg.ListModels().empty()) {
+      msg += " Available models: ";
+      for (std::size_t i = 0; i < reg.ListModels().size(); ++i) {
+        if (i) msg += ", ";
+        msg += reg.ListModels()[i].id;
+      }
+      msg += ".";
+    }
+    return Fail(error, msg);
+  }
+
+  const auto& pack = *packOpt;
+  std::error_code ec;
+  if (!fs::exists(pack.onnx_path, ec) || ec) {
+    ec.clear();
+    return Fail(error, std::string("Open Audio: missing ONNX file: ") + pack.onnx_path.string());
+  }
+  if (!fs::is_regular_file(pack.onnx_path, ec) || ec) {
+    ec.clear();
+    return Fail(error, std::string("Open Audio: ONNX path is not a file: ") + pack.onnx_path.string());
+  }
+
+  if (out) {
+    out->model_id = pack.id;
+    out->display_name = pack.display_name;
+    out->onnx_path = pack.onnx_path;
+    out->sample_rate = pack.sample_rate;
+    out->channels = pack.channels;
+    out->is_user_path = false;
+  }
+  return true;
+}
+
 std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForMicrophone(
     const studiocast::audio::effects::BroadcastAudioEffects& fx,
     ResolvedOpenAudioModel* resolved_out,
@@ -216,6 +287,81 @@ std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForMicro
   opts.prefer_cuda = true;
   opts.cuda_device_id = 0;
   return CreateForMicrophoneWithOrtOptions(fx, opts, resolved_out, error);
+}
+
+std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForSpeaker(
+    const studiocast::audio::effects::BroadcastAudioEffects& fx,
+    ResolvedOpenAudioModel* resolved_out,
+    std::string* error) {
+  OrtSessionOptions opts;
+  opts.prefer_cuda = true;
+  opts.cuda_device_id = 0;
+  return CreateForSpeakerWithOrtOptions(fx, opts, resolved_out, error);
+}
+
+std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForSpeakerWithOrtOptions(
+    const studiocast::audio::effects::BroadcastAudioEffects& fx,
+    const studiocast::open_audio::OrtSessionOptions& ort_opts,
+    ResolvedOpenAudioModel* resolved_out,
+    std::string* error) {
+#if !STUDIOCAST_ENABLE_OPEN_AUDIO
+  (void)fx;
+  (void)ort_opts;
+  (void)resolved_out;
+  if (error) *error = "Open Audio backend is disabled in this build (STUDIOCAST_ENABLE_OPEN_AUDIO=0).";
+  return nullptr;
+#else
+  ResolvedOpenAudioModel resolved;
+  std::string err;
+  if (!ResolveOpenAudioModelForSpeaker(fx, &resolved, &err)) {
+    if (error) *error = err;
+    return nullptr;
+  }
+  if (resolved_out) *resolved_out = resolved;
+
+#if !STUDIOCAST_HAVE_ONNXRUNTIME
+  (void)ort_opts;
+  if (error) {
+    *error =
+        "Open Audio backend unavailable: ONNX Runtime was not found at build time (STUDIOCAST_HAVE_ONNXRUNTIME=0).";
+  }
+  return nullptr;
+#else
+  OrtSessionInfo si;
+  std::string ort_err;
+  const auto onnx_path = resolved.onnx_path;
+  auto session = OpenAudioOrtSession::Create(onnx_path, ort_opts, &si, &ort_err);
+  if (!session) {
+    if (error) {
+      *error = ort_err.empty() ? "Failed to create ONNX Runtime session for Open Audio model." : ort_err;
+    }
+    return nullptr;
+  }
+
+  auto proc = std::make_unique<OpenAudioAudioProcessor>(std::move(resolved));
+  proc->UpdateFromSpeakerConfig(fx.speaker);
+
+  if (si.using_cuda) {
+    proc->ort_session_cuda_ = std::move(session);
+    proc->ort_session_active_ = proc->ort_session_cuda_.get();
+
+    OrtSessionOptions cpu_opts = ort_opts;
+    cpu_opts.prefer_cuda = false;
+    OrtSessionInfo cpu_si;
+    std::string cpu_err;
+    auto cpu = OpenAudioOrtSession::Create(onnx_path, cpu_opts, &cpu_si, &cpu_err);
+    if (cpu) {
+      proc->ort_session_cpu_ = std::move(cpu);
+    }
+  } else {
+    proc->ort_session_cpu_ = std::move(session);
+    proc->ort_session_active_ = proc->ort_session_cpu_.get();
+    proc->using_cpu_fallback_ = true;
+  }
+
+  return proc;
+#endif  // STUDIOCAST_HAVE_ONNXRUNTIME
+#endif  // STUDIOCAST_ENABLE_OPEN_AUDIO
 }
 
 std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForMicrophoneWithOrtOptions(
@@ -305,6 +451,14 @@ void OpenAudioAudioProcessor::UpdateFromMicrophoneConfig(const studiocast::audio
   if (s > 100) s = 100;
   strength_.store(s);
   studio_voice_enabled_.store(mic.studio_voice_enabled);
+}
+
+void OpenAudioAudioProcessor::UpdateFromSpeakerConfig(const studiocast::audio::effects::BroadcastSpeakerEffects& spk) {
+  int s = spk.strength;
+  if (s < 0) s = 0;
+  if (s > 100) s = 100;
+  strength_.store(s);
+  studio_voice_enabled_.store(false);
 }
 
 void OpenAudioAudioProcessor::Reset() {

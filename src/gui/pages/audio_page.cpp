@@ -566,7 +566,7 @@ namespace studiocast::gui {
         stopBtn_->setEnabled(hasLoopback);
 
         destroySpeakersBtn_->setEnabled(hasSpeakersSink);
-        stopSpeakersBtn_->setEnabled(hasSpeakersLoopback);
+        stopSpeakersBtn_->setEnabled(hasSpeakersLoopback || daemonSpeakersRoutingActive_);
     }
 
     void AudioPage::SetAiControlsEnabled(bool enabled, const QString& reason) {
@@ -622,6 +622,8 @@ namespace studiocast::gui {
 
     void AudioPage::RefreshDaemonAudioStatus() {
         daemonStatusText_.clear();
+        daemonSpeakersRoutingActive_ = false;
+        daemonSpeakersRouteMode_.clear();
 
         std::string json;
         QString err;
@@ -722,13 +724,32 @@ namespace studiocast::gui {
             const auto spk = audio.value("speakers").toObject();
             const bool spkPresent = spk.value("present").toBool(false);
             const bool spkRouting = spk.value("routing_active").toBool(false);
+            const QString spkRouteMode = spk.value("route_mode").toString();
+
+            // Cache for button logic (routing may be provided by the daemon pipeline,
+            // not by module-loopback).
+            daemonSpeakersRoutingActive_ = spkRouting;
+            daemonSpeakersRouteMode_ = spkRouteMode;
+            const bool spkPipeRunning = spk.value("pipeline_running").toBool(false);
+            const bool spkPipeStarting = spk.value("pipeline_starting").toBool(false);
+            const QString spkBackend = spk.value("backend_active").toString();
+            const QString spkNote = spk.value("effects_note").toString();
             const QString spkTarget = spk.value("target_sink_active").toString();
             const QString spkErr = spk.value("last_error").toString();
+            const QString spkPipeErr = spk.value("pipeline_last_error").toString();
 
             daemonStatusText_ += QString("speakers_present=%1\n").arg(spkPresent ? "true" : "false");
             daemonStatusText_ += QString("speakers_routing=%1\n").arg(spkRouting ? "active" : "off");
+            if (!spkRouteMode.isEmpty()) daemonStatusText_ += "speakers_route_mode: " + spkRouteMode + "\n";
+            if (spkPipeRunning || spkPipeStarting) {
+                daemonStatusText_ += QString("speakers_pipeline=%1\n")
+                                        .arg(spkPipeRunning ? "running" : (spkPipeStarting ? "starting" : "stopped"));
+            }
+            if (!spkBackend.isEmpty()) daemonStatusText_ += "speakers_backend_active: " + spkBackend + "\n";
+            if (!spkNote.trimmed().isEmpty()) daemonStatusText_ += "speakers_note: " + spkNote.trimmed() + "\n";
             if (!spkTarget.isEmpty()) daemonStatusText_ += "speakers_target_sink_active: " + spkTarget + "\n";
             if (!spkErr.isEmpty()) daemonStatusText_ += "speakers_last_error: " + spkErr + "\n";
+            if (!spkPipeErr.isEmpty()) daemonStatusText_ += "speakers_pipeline_last_error: " + spkPipeErr + "\n";
         }
 
         if (!backendActive.isEmpty()) daemonStatusText_ += "backend_active: " + backendActive + "\n";
