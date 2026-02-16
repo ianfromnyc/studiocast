@@ -9,6 +9,7 @@
 
 #include "core/audio/audio_backend_resolver.h"
 #include "core/audio/virtual_mic.h"
+#include "core/audio/virtual_speaker.h"
 #include "core/config/settings.h"
 #include "core/maxine/availability.h"
 #include "core/maxine/gpu_selection.h"
@@ -99,6 +100,10 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig& cfg, std::strin
         st_ = VirtualAudioServiceStatus{};
         st_.service_running = false;
         mic_created_ = false;
+        speakers_created_ = false;
+        speakers_loopback_running_ = false;
+        speakers_loopback_target_.clear();
+        speakers_loopback_latency_ms_ = 0;
     }
 
     stop_.store(false, std::memory_order_release);
@@ -183,15 +188,114 @@ void VirtualAudioService::ThreadMain() {
 
         const int pollMs = std::max(25, cfg.poll_ms);
 
-        // Ensure virtual mic is present (best-effort).
-        if (cfg.create_virtual_mic && !mic_created_) {
-            std::string err;
-            if (studiocast::audio::CreateVirtualMic(&err)) {
+        // Ensure virtual devices are present (best-effort).
+        //
+        // Note: `enabled` controls the microphone processing pipeline; virtual devices may be
+        // created and routed independently.
+        {
+            // Mic device.
+            if (cfg.create_virtual_mic && !mic_created_) {
+                std::string err;
+                if (studiocast::audio::CreateVirtualMic(&err)) {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    mic_created_ = true;
+                    st_.mic_present = true;
+                } else {
+                    SetLastError("Failed to create virtual mic: " + err);
+                }
+            }
+
+            // Speakers device and pass-through routing.
+            auto setSpeakersError = [&](std::string msg) {
                 std::lock_guard<std::mutex> lock(mu_);
-                mic_created_ = true;
-                st_.mic_present = true;
+                st_.speakers_last_error = std::move(msg);
+            };
+            auto clearSpeakersError = [&]() {
+                std::lock_guard<std::mutex> lock(mu_);
+                st_.speakers_last_error.clear();
+            };
+
+            const bool wantSpeakersDevice = cfg.create_virtual_speakers || cfg.speakers_enabled;
+
+            if (wantSpeakersDevice && !speakers_created_) {
+                std::string err;
+                if (studiocast::audio::CreateVirtualSpeaker(&err)) {
+                    speakers_created_ = true;
+                    {
+                        std::lock_guard<std::mutex> lock(mu_);
+                        st_.speakers_present = true;
+                    }
+                    clearSpeakersError();
+                } else {
+                    setSpeakersError("Failed to create virtual speakers: " + err);
+                }
+            }
+
+            // Keep routing state consistent with config.
+            if (cfg.speakers_enabled) {
+                const bool needLoopbackRestart = (!speakers_loopback_running_) ||
+                                                (speakers_loopback_target_ != cfg.speaker_target_sink) ||
+                                                (speakers_loopback_latency_ms_ != cfg.speaker_latency_ms);
+                if (needLoopbackRestart) {
+                    std::string err;
+                    if (studiocast::audio::StartSpeakerLoopback(cfg.speaker_target_sink,
+                                                              std::max(1, cfg.speaker_latency_ms),
+                                                              &err)) {
+                        speakers_created_ = true;
+                        speakers_loopback_running_ = true;
+                        speakers_loopback_target_ = cfg.speaker_target_sink;
+                        speakers_loopback_latency_ms_ = cfg.speaker_latency_ms;
+
+                        const auto state = studiocast::audio::LoadVirtualSpeakerState();
+                        {
+                            std::lock_guard<std::mutex> lock(mu_);
+                            st_.speakers_present = true;
+                            st_.speakers_routing_active = true;
+                            st_.speaker_target_sink_active = state.loopback_target_sink_name.value_or(std::string());
+                        }
+                        clearSpeakersError();
+                    } else {
+                        setSpeakersError("Failed to start speakers routing: " + err);
+                    }
+                }
             } else {
-                SetLastError("Failed to create virtual mic: " + err);
+                if (speakers_loopback_running_) {
+                    std::string err;
+                    if (studiocast::audio::StopSpeakerLoopback(&err)) {
+                        speakers_loopback_running_ = false;
+                        speakers_loopback_target_.clear();
+                        speakers_loopback_latency_ms_ = 0;
+                        {
+                            std::lock_guard<std::mutex> lock(mu_);
+                            st_.speakers_routing_active = false;
+                            st_.speaker_target_sink_active.clear();
+                        }
+                        clearSpeakersError();
+                    } else {
+                        setSpeakersError("Failed to stop speakers routing: " + err);
+                    }
+                }
+
+                // Optional cleanup: if the user disables the device, and we previously created it,
+                // destroy it. This keeps daemon-managed speaker state predictable.
+                if (!cfg.create_virtual_speakers && speakers_created_) {
+                    std::string err;
+                    if (studiocast::audio::DestroyVirtualSpeaker(&err)) {
+                        speakers_created_ = false;
+                        speakers_loopback_running_ = false;
+                        speakers_loopback_target_.clear();
+                        speakers_loopback_latency_ms_ = 0;
+                        {
+                            std::lock_guard<std::mutex> lock(mu_);
+                            st_.speakers_present = false;
+                            st_.speakers_routing_active = false;
+                            st_.speaker_target_sink_active.clear();
+                        }
+                        clearSpeakersError();
+                    } else {
+                        setSpeakersError("Failed to destroy virtual speakers: " + err);
+                    }
+                }
             }
         }
 

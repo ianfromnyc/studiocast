@@ -39,6 +39,19 @@ struct DaemonConfig {
   // Audio
   bool audio_enabled = false;
   bool audio_create_virtual_mic = true;
+
+  // Keep a virtual sink named "studiocast_speakers" available (daemon-owned).
+  // When enabled, other apps can select this as their output device.
+  bool audio_create_virtual_speakers = false;
+
+  // Pass-through speakers routing toggle (Phase 9): routes studiocast_speakers.monitor -> physical sink.
+  bool audio_speakers_enabled = false;
+
+  // Optional target sink name for speakers routing. Empty = Pulse default sink.
+  std::string audio_speaker_target_sink;
+
+  // Latency (ms) for speakers module-loopback.
+  int audio_speaker_latency_ms = 10;
   std::string audio_source; // empty = Pulse default
 
   // Canonical Broadcast-style audio effects.

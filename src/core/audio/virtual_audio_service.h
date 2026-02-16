@@ -18,6 +18,21 @@ struct VirtualAudioServiceConfig {
     // This is the preferred daemon-owned behavior for MVP.
     bool create_virtual_mic = true;
 
+    // Keep the virtual speakers device available even when microphone processing is disabled.
+    // When enabled, StudioCast creates a virtual sink named "studiocast_speakers".
+    bool create_virtual_speakers = false;
+
+    // When true, StudioCast routes the virtual speakers monitor stream into a physical sink.
+    // Phase 9 uses a Pulse module-loopback pass-through route (no ML processing yet).
+    bool speakers_enabled = false;
+
+    // Target sink name for speakers routing. Empty = Pulse default sink.
+    // The routing helper will refuse to loop back into StudioCast virtual sinks to avoid feedback.
+    std::string speaker_target_sink;
+
+    // Latency (ms) for module-loopback when speakers_enabled is true.
+    int speaker_latency_ms = 10;
+
     // Selected input source (Pulse source name). Empty = Pulse default source.
     std::string source_name;
 
@@ -35,6 +50,11 @@ struct VirtualAudioServiceStatus {
     bool service_running = false;
 
     bool mic_present = false;
+
+    bool speakers_present = false;
+    bool speakers_routing_active = false;
+    std::string speaker_target_sink_active;
+    std::string speakers_last_error;
 
     bool pipeline_running = false;
     bool pipeline_starting = false;
@@ -68,7 +88,8 @@ struct VirtualAudioServiceStatus {
 // MVP scope:
 //  - Virtual microphone is created via `pactl` modules.
 //  - Real-time processing is Maxine AFX-backed (no CPU fallbacks).
-//  - Speaker processing is intentionally left optional for future iteration.
+//  - Virtual speakers are created via `pactl` modules.
+//  - Phase 9 provides a pass-through speakers route via module-loopback (no ML yet).
 class VirtualAudioService final {
 public:
     VirtualAudioService() = default;
@@ -97,6 +118,11 @@ private:
 
     bool running_ = false;
     bool mic_created_ = false;
+
+    bool speakers_created_ = false;
+    bool speakers_loopback_running_ = false;
+    std::string speakers_loopback_target_;
+    int speakers_loopback_latency_ms_ = 0;
 
     VirtualAudioServiceConfig cfg_{};
     VirtualAudioServiceStatus st_{};

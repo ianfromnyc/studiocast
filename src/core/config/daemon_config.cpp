@@ -187,6 +187,18 @@ DaemonConfig LoadDaemonConfig() {
       if (auto it = kv.find("audio.create_virtual_mic"); it != kv.end()) {
         s.audio_create_virtual_mic = ParseBool(it->second, s.audio_create_virtual_mic);
       }
+      if (auto it = kv.find("audio.create_virtual_speakers"); it != kv.end()) {
+        s.audio_create_virtual_speakers = ParseBool(it->second, s.audio_create_virtual_speakers);
+      }
+      if (auto it = kv.find("audio.speakers.enabled"); it != kv.end()) {
+        s.audio_speakers_enabled = ParseBool(it->second, s.audio_speakers_enabled);
+      }
+      if (auto it = kv.find("audio.speakers.target_sink"); it != kv.end()) {
+        s.audio_speaker_target_sink = it->second;
+      }
+      if (auto it = kv.find("audio.speakers.latency_ms"); it != kv.end()) {
+        s.audio_speaker_latency_ms = ParseInt(it->second, s.audio_speaker_latency_ms);
+      }
       if (auto it = kv.find("audio.source"); it != kv.end()) {
         s.audio_source = it->second;
       }
@@ -516,6 +528,12 @@ bool SaveDaemonConfig(const DaemonConfig& s, std::string* error) {
   out << "# Audio\n";
   out << "audio.enabled = " << (s.audio_enabled ? "true" : "false") << "\n";
   out << "audio.create_virtual_mic = " << (s.audio_create_virtual_mic ? "true" : "false") << "\n";
+  out << "audio.create_virtual_speakers = " << (s.audio_create_virtual_speakers ? "true" : "false") << "\n";
+  out << "audio.speakers.enabled = " << (s.audio_speakers_enabled ? "true" : "false") << "\n";
+  if (!s.audio_speaker_target_sink.empty()) {
+    out << "audio.speakers.target_sink = " << s.audio_speaker_target_sink << "\n";
+  }
+  out << "audio.speakers.latency_ms = " << s.audio_speaker_latency_ms << "\n";
   if (!s.audio_source.empty()) out << "audio.source = " << s.audio_source << "\n";
   out << "\n";
 
@@ -581,6 +599,10 @@ studiocast::audio::VirtualAudioServiceConfig ToAudioServiceConfig(const DaemonCo
   studiocast::audio::VirtualAudioServiceConfig cfg;
   cfg.enabled = s.audio_enabled;
   cfg.create_virtual_mic = s.audio_create_virtual_mic;
+  cfg.create_virtual_speakers = s.audio_create_virtual_speakers;
+  cfg.speakers_enabled = s.audio_speakers_enabled;
+  cfg.speaker_target_sink = s.audio_speaker_target_sink;
+  cfg.speaker_latency_ms = s.audio_speaker_latency_ms;
   cfg.source_name = s.audio_source;
   cfg.effects = s.audio_effects;
   // Use defaults for polling/retry for now.
@@ -592,6 +614,10 @@ void ApplyAudioServiceConfigToDaemonConfig(const studiocast::audio::VirtualAudio
   if (!out) return;
   out->audio_enabled = cfg.enabled;
   out->audio_create_virtual_mic = cfg.create_virtual_mic;
+  out->audio_create_virtual_speakers = cfg.create_virtual_speakers;
+  out->audio_speakers_enabled = cfg.speakers_enabled;
+  out->audio_speaker_target_sink = cfg.speaker_target_sink;
+  out->audio_speaker_latency_ms = cfg.speaker_latency_ms;
   out->audio_source = cfg.source_name;
   out->audio_effects = cfg.effects;
 }

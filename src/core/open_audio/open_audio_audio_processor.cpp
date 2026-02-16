@@ -12,6 +12,11 @@ namespace fs = std::filesystem;
 
 namespace studiocast::open_audio {
 
+// Forward-declared in the header; Phase 5 uses these for 48k <-> model rate conversion.
+// Define them here so `std::unique_ptr` deletion sees complete types.
+struct OpenAudioAudioProcessor::Decimator3 {};
+struct OpenAudioAudioProcessor::Interpolator3 {};
+
 namespace {
 
 fs::path ExpandTilde(fs::path p) {
@@ -207,8 +212,20 @@ std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForMicro
     const studiocast::audio::effects::BroadcastAudioEffects& fx,
     ResolvedOpenAudioModel* resolved_out,
     std::string* error) {
+  OrtSessionOptions opts;
+  opts.prefer_cuda = true;
+  opts.cuda_device_id = 0;
+  return CreateForMicrophoneWithOrtOptions(fx, opts, resolved_out, error);
+}
+
+std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForMicrophoneWithOrtOptions(
+    const studiocast::audio::effects::BroadcastAudioEffects& fx,
+    const studiocast::open_audio::OrtSessionOptions& ort_opts,
+    ResolvedOpenAudioModel* resolved_out,
+    std::string* error) {
 #if !STUDIOCAST_ENABLE_OPEN_AUDIO
   (void)fx;
+  (void)ort_opts;
   (void)resolved_out;
   if (error) *error = "Open Audio backend is disabled in this build (STUDIOCAST_ENABLE_OPEN_AUDIO=0).";
   return nullptr;
@@ -221,32 +238,20 @@ std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForMicro
   }
   if (resolved_out) *resolved_out = resolved;
 
-  // Map user "strength" (0..100) to a wet/dry mix.
-  // We keep it simple for now: linear mapping [20%, 100%] to avoid fully-dry
-  // or fully-wet extremes by default.
-  int strength = fx.microphone.strength;
-  if (strength < 0) strength = 0;
-  if (strength > 100) strength = 100;
-  const float t = static_cast<float>(strength) / 100.0f;
-  const float wet_mix = 0.2f + 0.8f * t;  // 0.2 .. 1.0
-
 #if !STUDIOCAST_HAVE_ONNXRUNTIME
+  (void)ort_opts;
   if (error) {
     *error =
         "Open Audio backend unavailable: ONNX Runtime was not found at build time (STUDIOCAST_HAVE_ONNXRUNTIME=0).";
   }
   return nullptr;
 #else
-  // Phase 5: create the ORT session up-front so we fail fast (actionable error)
+  // Create the ORT session up-front so we fail fast (actionable error)
   // and avoid repeatedly attempting to load the model in the realtime thread.
-  OrtSessionOptions opts;
-  opts.prefer_cuda = true;  // CPU fallback is handled internally.
-  opts.cuda_device_id = 0;
-
   OrtSessionInfo si;
   std::string ort_err;
   const auto onnx_path = resolved.onnx_path;
-  auto session = OpenAudioOrtSession::Create(onnx_path, opts, &si, &ort_err);
+  auto session = OpenAudioOrtSession::Create(onnx_path, ort_opts, &si, &ort_err);
   if (!session) {
     if (error) {
       *error = ort_err.empty() ? "Failed to create ONNX Runtime session for Open Audio model." : ort_err;
@@ -254,15 +259,68 @@ std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForMicro
     return nullptr;
   }
 
-  auto proc = std::make_unique<OpenAudioAudioProcessor>(std::move(resolved), wet_mix);
-  proc->ort_session_ = std::move(session);
+  auto proc = std::make_unique<OpenAudioAudioProcessor>(std::move(resolved));
+  proc->UpdateFromMicrophoneConfig(fx.microphone);
+
+  if (si.using_cuda) {
+    proc->ort_session_cuda_ = std::move(session);
+    proc->ort_session_active_ = proc->ort_session_cuda_.get();
+
+    // Best-effort CPU fallback session (used when CUDA session fails at runtime).
+    OrtSessionOptions cpu_opts = ort_opts;
+    cpu_opts.prefer_cuda = false;
+    OrtSessionInfo cpu_si;
+    std::string cpu_err;
+    auto cpu = OpenAudioOrtSession::Create(onnx_path, cpu_opts, &cpu_si, &cpu_err);
+    if (cpu) {
+      proc->ort_session_cpu_ = std::move(cpu);
+    }
+  } else {
+    proc->ort_session_cpu_ = std::move(session);
+    proc->ort_session_active_ = proc->ort_session_cpu_.get();
+    proc->using_cpu_fallback_ = true;
+  }
+
   return proc;
 #endif  // STUDIOCAST_HAVE_ONNXRUNTIME
 #endif  // STUDIOCAST_ENABLE_OPEN_AUDIO
 }
 
-OpenAudioAudioProcessor::OpenAudioAudioProcessor(ResolvedOpenAudioModel model, float wet_mix)
-    : model_(std::move(model)), wet_mix_(wet_mix) {}
+OpenAudioAudioProcessor::OpenAudioAudioProcessor(ResolvedOpenAudioModel model) : model_(std::move(model)) {
+  if (model_.sample_rate > 0) {
+    model_sample_rate_ = model_.sample_rate;
+  }
+  if (model_.has_onnx_io && model_.onnx_io.frame_samples > 0) {
+    model_frame_samples_ = static_cast<std::uint32_t>(model_.onnx_io.frame_samples);
+  } else if (model_sample_rate_ > 0) {
+    model_frame_samples_ = static_cast<std::uint32_t>(model_sample_rate_ / 100);
+  }
+}
+
+OpenAudioAudioProcessor::~OpenAudioAudioProcessor() = default;
+
+void OpenAudioAudioProcessor::UpdateFromMicrophoneConfig(const studiocast::audio::effects::BroadcastMicrophoneEffects& mic) {
+  int s = mic.strength;
+  if (s < 0) s = 0;
+  if (s > 100) s = 100;
+  strength_.store(s);
+  studio_voice_enabled_.store(mic.studio_voice_enabled);
+}
+
+void OpenAudioAudioProcessor::Reset() {
+  mono_in_.clear();
+  mono_out_.clear();
+  model_in_.clear();
+  model_out_.clear();
+  sticky_warning_.clear();
+  model_disabled_ = false;
+  using_cpu_fallback_ = false;
+  if (ort_session_cuda_) {
+    ort_session_active_ = ort_session_cuda_.get();
+  } else {
+    ort_session_active_ = ort_session_cpu_.get();
+  }
+}
 
 bool OpenAudioAudioProcessor::Process(const float* in,
                                       float* out,
@@ -280,7 +338,7 @@ bool OpenAudioAudioProcessor::Process(const float* in,
 
   // If ORT session is not available (should not happen after CreateForMicrophone),
   // fall back to pass-through.
-  if (!ort_session_) {
+  if (!ort_session_active_ || model_disabled_) {
     std::copy_n(in, samples, out);
     return true;
   }
@@ -303,10 +361,18 @@ bool OpenAudioAudioProcessor::Process(const float* in,
   mono_out_.resize(frames);
   std::size_t out_samples = 0;
   std::string ort_err;
-  if (!ort_session_->Run1D(mono_in_.data(), frames, mono_out_.data(), mono_out_.size(), &out_samples, &ort_err)) {
+  if (!ort_session_active_->Run1D(mono_in_.data(), frames, mono_out_.data(), mono_out_.size(), &out_samples, &ort_err)) {
     // Fail open: log a best-effort error string and pass input through unchanged.
-    if (error) {
-      *error = std::string("Open Audio ORT run failed: ") + ort_err;
+    if (error) *error = std::string("Open Audio ORT run failed: ") + ort_err;
+
+    // If CUDA is active and CPU fallback exists, switch over once.
+    if (!using_cpu_fallback_ && ort_session_cuda_ && ort_session_cpu_) {
+      ort_session_active_ = ort_session_cpu_.get();
+      using_cpu_fallback_ = true;
+      sticky_warning_ = "Open Audio: switched to CPU fallback after a CUDA runtime failure.";
+    } else {
+      model_disabled_ = true;
+      sticky_warning_ = "Open Audio: disabled after repeated runtime failures.";
     }
     std::copy_n(in, samples, out);
     return true;
@@ -320,7 +386,10 @@ bool OpenAudioAudioProcessor::Process(const float* in,
     out_samples = frames;
   }
 
-  const float wet = wet_mix_;
+  // Map user "strength" (0..100) to a wet/dry mix.
+  const int strength = strength_.load();
+  const float t = static_cast<float>(strength) / 100.0f;
+  const float wet = 0.2f + 0.8f * t;  // 0.2 .. 1.0
   const float dry = 1.0f - wet;
 
   // Fan-out processed mono to all channels with wet/dry mix.

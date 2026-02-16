@@ -1892,6 +1892,10 @@ namespace {
                     auto dc_audio = dc;
                     dc_audio.audio_enabled = true;
                     dc_audio.audio_create_virtual_mic = true;
+                    dc_audio.audio_create_virtual_speakers = true;
+                    dc_audio.audio_speakers_enabled = true;
+                    dc_audio.audio_speaker_target_sink = "dummy_sink";
+                    dc_audio.audio_speaker_latency_ms = 15;
                     dc_audio.audio_source = "dummy_source";
                     dc_audio.audio_effects.microphone.noise_removal_enabled = true;
                     dc_audio.audio_effects.microphone.room_echo_removal_enabled = true;
@@ -1901,6 +1905,10 @@ namespace {
                     const auto ac = studiocast::config::ToAudioServiceConfig(dc_audio);
                     expectTrue("ToAudioServiceConfig enabled", ac.enabled);
                     expectTrue("ToAudioServiceConfig create_virtual_mic", ac.create_virtual_mic);
+                    expectTrue("ToAudioServiceConfig create_virtual_speakers", ac.create_virtual_speakers);
+                    expectTrue("ToAudioServiceConfig speakers_enabled", ac.speakers_enabled);
+                    expectEq("ToAudioServiceConfig speaker_target_sink", ac.speaker_target_sink, "dummy_sink");
+                    expectIntEq("ToAudioServiceConfig speaker_latency_ms", ac.speaker_latency_ms, 15);
                     expectEq("ToAudioServiceConfig source", ac.source_name, "dummy_source");
                     expectTrue("ToAudioServiceConfig noise enabled",
                                ac.effects.microphone.noise_removal_enabled);
@@ -1915,6 +1923,10 @@ namespace {
                     auto dc_save = dc;
                     dc_save.audio_enabled = true;
                     dc_save.audio_create_virtual_mic = true;
+                    dc_save.audio_create_virtual_speakers = true;
+                    dc_save.audio_speakers_enabled = true;
+                    dc_save.audio_speaker_target_sink = "dummy_sink";
+                    dc_save.audio_speaker_latency_ms = 15;
                     dc_save.audio_source = "dummy_source";
                     dc_save.audio_effects.microphone.noise_removal_enabled = true;
                     dc_save.audio_effects.microphone.room_echo_removal_enabled = true;
@@ -1952,6 +1964,10 @@ namespace {
                     const auto ac2 = studiocast::config::ToAudioServiceConfig(dc2);
                     expectTrue("roundtrip audio enabled", ac2.enabled);
                     expectTrue("roundtrip audio create_virtual_mic", ac2.create_virtual_mic);
+                    expectTrue("roundtrip audio create_virtual_speakers", ac2.create_virtual_speakers);
+                    expectTrue("roundtrip audio speakers_enabled", ac2.speakers_enabled);
+                    expectEq("roundtrip audio speaker_target_sink", ac2.speaker_target_sink, "dummy_sink");
+                    expectIntEq("roundtrip audio speaker_latency_ms", ac2.speaker_latency_ms, 15);
                     expectEq("roundtrip audio source", ac2.source_name, "dummy_source");
                     expectTrue("roundtrip audio noise enabled", ac2.effects.microphone.noise_removal_enabled);
                     expectTrue("roundtrip audio echo enabled", ac2.effects.microphone.room_echo_removal_enabled);

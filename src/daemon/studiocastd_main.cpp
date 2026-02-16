@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cctype>
 #include <csignal>
 #include <cstdint>
@@ -420,8 +421,20 @@ std::string StatusToJson(const studiocast::video::VirtualCameraServiceStatus& st
     oss << ",\"audio\":{";
     oss << "\"enabled\":" << BoolJson(acfg.enabled) << ",";
     oss << "\"create_virtual_mic\":" << BoolJson(acfg.create_virtual_mic) << ",";
+    oss << "\"create_virtual_speakers\":" << BoolJson(acfg.create_virtual_speakers) << ",";
     oss << "\"source\":\"" << JsonEscape(acfg.source_name.empty() ? std::string("auto") : acfg.source_name) << "\",";
     oss << "\"mic_present\":" << BoolJson(ast.mic_present) << ",";
+
+    // Speakers routing status (Phase 9: pass-through module-loopback).
+    oss << "\"speakers\":{";
+    oss << "\"enabled\":" << BoolJson(acfg.speakers_enabled) << ",";
+    oss << "\"target_sink\":\"" << JsonEscape(acfg.speaker_target_sink.empty() ? std::string("auto") : acfg.speaker_target_sink) << "\",";
+    oss << "\"latency_ms\":" << acfg.speaker_latency_ms << ",";
+    oss << "\"present\":" << BoolJson(ast.speakers_present) << ",";
+    oss << "\"routing_active\":" << BoolJson(ast.speakers_routing_active) << ",";
+    oss << "\"target_sink_active\":\"" << JsonEscape(ast.speaker_target_sink_active) << "\",";
+    oss << "\"last_error\":\"" << JsonEscape(ast.speakers_last_error) << "\"";
+    oss << "},";
 
     // Canonical effect model for GUI/CLI.
     oss << "\"audio_effects\":"
@@ -508,6 +521,10 @@ std::string AudioConfigToJson(const studiocast::audio::VirtualAudioServiceConfig
     oss << "{";
     oss << "\"enabled\":" << BoolJson(cfg.enabled) << ",";
     oss << "\"create_virtual_mic\":" << BoolJson(cfg.create_virtual_mic) << ",";
+    oss << "\"create_virtual_speakers\":" << BoolJson(cfg.create_virtual_speakers) << ",";
+    oss << "\"speakers_enabled\":" << BoolJson(cfg.speakers_enabled) << ",";
+    oss << "\"speaker_target_sink\":\"" << JsonEscape(cfg.speaker_target_sink.empty() ? std::string("auto") : cfg.speaker_target_sink) << "\",";
+    oss << "\"speaker_latency_ms\":" << cfg.speaker_latency_ms << ",";
     oss << "\"source\":\"" << JsonEscape(cfg.source_name.empty() ? std::string("auto") : cfg.source_name) << "\",";
     oss << "\"audio_effects\":" << studiocast::audio::effects::BroadcastAudioEffectsToJson(cfg.effects);
     oss << "}";
@@ -549,6 +566,60 @@ bool ApplyAudioConfigPatchJsonText(const std::string& jsonText,
             return false;
         }
         cfg->create_virtual_mic = *b;
+    }
+
+    // create_virtual_speakers
+    if (auto it = obj->find("create_virtual_speakers"); it != obj->end()) {
+        const bool* b = it->second.AsBool();
+        if (!b) {
+            if (error) *error = "create_virtual_speakers must be a boolean";
+            return false;
+        }
+        cfg->create_virtual_speakers = *b;
+    }
+
+    // speakers_enabled
+    if (auto it = obj->find("speakers_enabled"); it != obj->end()) {
+        const bool* b = it->second.AsBool();
+        if (!b) {
+            if (error) *error = "speakers_enabled must be a boolean";
+            return false;
+        }
+        cfg->speakers_enabled = *b;
+    }
+
+    // speaker_target_sink
+    if (auto it = obj->find("speaker_target_sink"); it != obj->end()) {
+        const std::string* s = it->second.AsString();
+        if (!s) {
+            if (error) *error = "speaker_target_sink must be a string";
+            return false;
+        }
+        cfg->speaker_target_sink = (*s == "auto") ? std::string() : *s;
+    }
+
+    // speaker_latency_ms
+    if (auto it = obj->find("speaker_latency_ms"); it != obj->end()) {
+        const double* n = it->second.AsNumber();
+        if (!n) {
+            if (error) *error = "speaker_latency_ms must be a number";
+            return false;
+        }
+        const int v = static_cast<int>(std::lround(*n));
+        if (std::fabs(*n - static_cast<double>(v)) > 1e-6) {
+            if (error) *error = "speaker_latency_ms must be an integer";
+            return false;
+        }
+        if (v < 1 || v > 5000) {
+            if (error) *error = "speaker_latency_ms out of range (expected 1..5000)";
+            return false;
+        }
+        cfg->speaker_latency_ms = v;
+    }
+
+    // Routing implies the speakers device must exist.
+    if (cfg->speakers_enabled) {
+        cfg->create_virtual_speakers = true;
     }
 
     // source

@@ -717,6 +717,20 @@ namespace studiocast::gui {
         }
         if (!lastErr.isEmpty()) daemonStatusText_ += "last_error: " + lastErr + "\n";
 
+        // Speakers status (daemon-managed routing).
+        if (audio.contains("speakers")) {
+            const auto spk = audio.value("speakers").toObject();
+            const bool spkPresent = spk.value("present").toBool(false);
+            const bool spkRouting = spk.value("routing_active").toBool(false);
+            const QString spkTarget = spk.value("target_sink_active").toString();
+            const QString spkErr = spk.value("last_error").toString();
+
+            daemonStatusText_ += QString("speakers_present=%1\n").arg(spkPresent ? "true" : "false");
+            daemonStatusText_ += QString("speakers_routing=%1\n").arg(spkRouting ? "active" : "off");
+            if (!spkTarget.isEmpty()) daemonStatusText_ += "speakers_target_sink_active: " + spkTarget + "\n";
+            if (!spkErr.isEmpty()) daemonStatusText_ += "speakers_last_error: " + spkErr + "\n";
+        }
+
         if (!backendActive.isEmpty()) daemonStatusText_ += "backend_active: " + backendActive + "\n";
         if (!maxineDiag.isEmpty()) daemonStatusText_ += maxineDiag;
 
@@ -1072,6 +1086,25 @@ namespace studiocast::gui {
     }
 
     void AudioPage::OnEnableVirtualSpeakers() {
+        // Preferred path: let the daemon manage the virtual speakers device + routing.
+        if (daemonAiSupported_) {
+            QJsonObject patch;
+            patch.insert("create_virtual_speakers", true);
+            patch.insert("speakers_enabled", true);
+            patch.insert("speaker_latency_ms", 10);
+
+            const auto json = QJsonDocument(patch).toJson(QJsonDocument::Compact);
+            std::string out;
+            QString err;
+            if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(), &out, &err)) {
+                ShowError("Audio", "Failed to enable speakers via daemon:\n\n" + err);
+                return;
+            }
+            RefreshStatus();
+            return;
+        }
+
+        // Fallback: direct pactl manipulation (debug/dev only).
         std::string err;
         if (!studiocast::audio::CreateVirtualSpeaker(&err)) {
             ShowError("Enable speakers failed", QString::fromStdString(err));
@@ -1088,6 +1121,20 @@ namespace studiocast::gui {
     }
 
     void AudioPage::OnStopSpeakersRouting() {
+        if (daemonAiSupported_) {
+            QJsonObject patch;
+            patch.insert("speakers_enabled", false);
+            const auto json = QJsonDocument(patch).toJson(QJsonDocument::Compact);
+            std::string out;
+            QString err;
+            if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(), &out, &err)) {
+                ShowError("Audio", "Failed to stop speakers routing via daemon:\n\n" + err);
+                return;
+            }
+            RefreshStatus();
+            return;
+        }
+
         std::string err;
         if (!studiocast::audio::StopSpeakerLoopback(&err)) {
             ShowError("Stop speakers routing failed", QString::fromStdString(err));
@@ -1097,6 +1144,21 @@ namespace studiocast::gui {
     }
 
     void AudioPage::OnDestroyVirtualSpeakers() {
+        if (daemonAiSupported_) {
+            QJsonObject patch;
+            patch.insert("speakers_enabled", false);
+            patch.insert("create_virtual_speakers", false);
+            const auto json = QJsonDocument(patch).toJson(QJsonDocument::Compact);
+            std::string out;
+            QString err;
+            if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(), &out, &err)) {
+                ShowError("Audio", "Failed to destroy speakers via daemon:\n\n" + err);
+                return;
+            }
+            RefreshStatus();
+            return;
+        }
+
         std::string err;
         if (!studiocast::audio::DestroyVirtualSpeaker(&err)) {
             ShowError("Destroy speakers failed", QString::fromStdString(err));
