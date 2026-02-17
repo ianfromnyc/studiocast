@@ -2484,6 +2484,40 @@ namespace {
                 const auto gate2 = studiocast::video::effects::EvaluateOpenCudaGate(fx, available);
                 expectTrue("open_cuda_gate blur allowed when available", gate2.ok);
 
+                // Auto Frame (Open CUDA) is also gated by the Open CUDA diagnostics.
+                {
+                    using studiocast::video::effects::contract::kEffectIdAutoFrame;
+
+                    studiocast::video::effects::BroadcastCameraEffects fx2;
+                    fx2.engine = studiocast::video::effects::EffectsEnginePreference::open_cuda;
+                    fx2.auto_frame.enabled = true;
+                    fx2.auto_frame.strength = 50;
+
+                    expectTrue("open_cuda_gate wants_auto_frame",
+                               studiocast::video::effects::WantsOpenCudaForPlannedEffects(fx2));
+
+                    studiocast::open_cuda::OpenCudaDiagnostics blocked2;
+                    blocked2.ok = false;
+                    blocked2.blocked_effects[std::string(kEffectIdAutoFrame)] = "missing_model_packs";
+
+                    const auto gate_af = studiocast::video::effects::EvaluateOpenCudaGate(fx2, blocked2);
+                    expectTrue("open_cuda_gate auto_frame blocked", !gate_af.ok);
+                    expectContains("open_cuda_gate auto_frame blocked message", gate_af.message,
+                                   "auto_frame unavailable (missing_model_packs)");
+
+                    auto fx2_for_pipeline = fx2;
+                    if (!gate_af.ok) {
+                        fx2_for_pipeline.auto_frame.enabled = false;
+                    }
+                    expectTrue("open_cuda_gate suppressed auto_frame", !fx2_for_pipeline.auto_frame.enabled);
+
+                    studiocast::open_cuda::OpenCudaDiagnostics available2;
+                    available2.ok = true;
+                    available2.available_effects = {"auto_frame"};
+                    const auto gate_af2 = studiocast::video::effects::EvaluateOpenCudaGate(fx2, available2);
+                    expectTrue("open_cuda_gate auto_frame allowed when available", gate_af2.ok);
+                }
+
                 auto fx_for_pipeline2 = fx;
                 if (!gate2.ok) {
                     fx_for_pipeline2.virtual_background.mode =

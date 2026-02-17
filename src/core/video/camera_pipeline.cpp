@@ -2021,6 +2021,426 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   } open_cuda_vb;
 
+  struct OpenCudaAutoFrameContext {
+    bool initialized = false;
+    bool enabled = false;
+
+    std::string last_error;
+    std::string active_model_id;
+
+    std::optional<studiocast::open_cuda::ModelPack> pack;
+    std::unique_ptr<studiocast::open_cuda::OpenCudaMattingSession> session;
+
+    studiocast::maxine::CudaDriverApi cuda;
+    studiocast::maxine::CUstream stream = nullptr;
+
+    studiocast::cuda::CudaImage gpu_rgb_in;
+    studiocast::cuda::CudaTensor alpha_tensor;
+
+    std::vector<float> alpha_cpu;
+    std::vector<std::uint8_t> tmp_rgb;
+
+    bool have_smoothed_crop = false;
+    studiocast::maxine::effects::RectF crop_smoothed_px;
+    bool last_had_detection = false;
+
+    ~OpenCudaAutoFrameContext() { Destroy(); }
+
+    void Destroy() {
+      initialized = false;
+      enabled = false;
+      last_error.clear();
+      active_model_id.clear();
+      pack.reset();
+      session.reset();
+      have_smoothed_crop = false;
+      last_had_detection = false;
+
+      std::string err;
+      if (cuda.IsInitialized()) {
+        if (stream) {
+          cuda.StreamSynchronize(stream, &err);
+          cuda.DestroyStream(stream, &err);
+          stream = nullptr;
+        }
+        gpu_rgb_in.Free(&cuda, &err);
+        alpha_tensor.Free(&cuda, &err);
+      }
+    }
+
+    static bool ComputeMatteBoxPxFromAlpha(const std::vector<float>& alpha,
+                                          int alpha_w,
+                                          int alpha_h,
+                                          int frame_w,
+                                          int frame_h,
+                                          studiocast::maxine::effects::RectF* out_box_px) {
+      if (!out_box_px) {
+        return false;
+      }
+      if (alpha.empty() || alpha_w <= 0 || alpha_h <= 0) {
+        return false;
+      }
+
+      // Threshold the matte and compute a tight bounding box around the foreground.
+      constexpr float kAlphaThreshold = 0.35f;
+      int min_x = alpha_w;
+      int min_y = alpha_h;
+      int max_x = -1;
+      int max_y = -1;
+      int count = 0;
+      for (int y = 0; y < alpha_h; ++y) {
+        const float* row = alpha.data() + (static_cast<size_t>(y) * static_cast<size_t>(alpha_w));
+        for (int x = 0; x < alpha_w; ++x) {
+          if (row[x] > kAlphaThreshold) {
+            min_x = std::min(min_x, x);
+            min_y = std::min(min_y, y);
+            max_x = std::max(max_x, x);
+            max_y = std::max(max_y, y);
+            ++count;
+          }
+        }
+      }
+
+      // Reject tiny detections to avoid jitter when the matte is effectively empty.
+      const int min_pixels = std::max(32, (alpha_w * alpha_h) / 500);  // ~0.2%
+      if (count < min_pixels || max_x < min_x || max_y < min_y) {
+        return false;
+      }
+
+      const float sx = static_cast<float>(frame_w) / static_cast<float>(alpha_w);
+      const float sy = static_cast<float>(frame_h) / static_cast<float>(alpha_h);
+
+      const float x0 = min_x * sx;
+      const float y0 = min_y * sy;
+      const float x1 = (max_x + 1) * sx;
+      const float y1 = (max_y + 1) * sy;
+
+      out_box_px->x = x0;
+      out_box_px->y = y0;
+      out_box_px->w = x1 - x0;
+      out_box_px->h = y1 - y0;
+      return true;
+    }
+
+    static void CropResizeRgb24Bilinear(const std::uint8_t* src,
+                                        int src_w,
+                                        int src_h,
+                                        size_t src_stride,
+                                        std::uint8_t* dst,
+                                        int dst_w,
+                                        int dst_h,
+                                        size_t dst_stride,
+                                        float crop_x,
+                                        float crop_y,
+                                        float crop_w,
+                                        float crop_h) {
+      if (!src || !dst) {
+        return;
+      }
+      if (src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) {
+        return;
+      }
+      crop_w = std::max(1.0f, crop_w);
+      crop_h = std::max(1.0f, crop_h);
+
+      const float scale_x = crop_w / static_cast<float>(dst_w);
+      const float scale_y = crop_h / static_cast<float>(dst_h);
+
+      for (int y = 0; y < dst_h; ++y) {
+        const float src_y = crop_y + (static_cast<float>(y) + 0.5f) * scale_y - 0.5f;
+        const float sy = std::clamp(src_y, 0.0f, static_cast<float>(src_h - 1));
+        const int y0 = static_cast<int>(sy);
+        const int y1 = std::min(y0 + 1, src_h - 1);
+        const float ty = sy - static_cast<float>(y0);
+
+        const std::uint8_t* row0 = src + static_cast<size_t>(y0) * src_stride;
+        const std::uint8_t* row1 = src + static_cast<size_t>(y1) * src_stride;
+        std::uint8_t* out = dst + static_cast<size_t>(y) * dst_stride;
+
+        for (int x = 0; x < dst_w; ++x) {
+          const float src_x = crop_x + (static_cast<float>(x) + 0.5f) * scale_x - 0.5f;
+          const float sx = std::clamp(src_x, 0.0f, static_cast<float>(src_w - 1));
+          const int x0 = static_cast<int>(sx);
+          const int x1 = std::min(x0 + 1, src_w - 1);
+          const float tx = sx - static_cast<float>(x0);
+
+          const std::uint8_t* p00 = row0 + x0 * 3;
+          const std::uint8_t* p01 = row0 + x1 * 3;
+          const std::uint8_t* p10 = row1 + x0 * 3;
+          const std::uint8_t* p11 = row1 + x1 * 3;
+
+          for (int c = 0; c < 3; ++c) {
+            const float v00 = static_cast<float>(p00[c]);
+            const float v01 = static_cast<float>(p01[c]);
+            const float v10 = static_cast<float>(p10[c]);
+            const float v11 = static_cast<float>(p11[c]);
+
+            const float v0 = v00 + (v01 - v00) * tx;
+            const float v1 = v10 + (v11 - v10) * tx;
+            const float v = v0 + (v1 - v0) * ty;
+
+            out[x * 3 + c] = static_cast<std::uint8_t>(std::clamp(v, 0.0f, 255.0f));
+          }
+        }
+      }
+    }
+
+    bool EnsureInitialized(int frame_w,
+                           int frame_h,
+                           const studiocast::video::effects::BroadcastCameraEffects& fx,
+                           std::string* error) {
+      if (frame_w <= 0 || frame_h <= 0) {
+        if (error) {
+          *error = "Open CUDA Auto Frame: invalid frame size.";
+        }
+        return false;
+      }
+
+      // We reuse the Open CUDA matting model packs for auto-frame (foreground -> crop).
+      studiocast::open_cuda::ModelPackRegistry reg;
+      std::string scan_err;
+      if (!reg.ScanDefault(&scan_err)) {
+        if (error) {
+          *error = "Open CUDA Auto Frame: Failed to scan model packs: " + scan_err;
+        }
+        return false;
+      }
+      if (reg.models().empty()) {
+        if (error) {
+          *error = "Open CUDA Auto Frame: No Open CUDA model packs installed.";
+        }
+        return false;
+      }
+
+      std::string requested_model_id = fx.virtual_background.model_id;
+      if (requested_model_id.empty()) {
+        requested_model_id = reg.DefaultModelId();
+      }
+
+      std::optional<studiocast::open_cuda::ModelPack> resolved = reg.ResolveModel(requested_model_id);
+      if (!resolved.has_value()) {
+        if (error) {
+          *error = "Open CUDA Auto Frame: Unknown model id '" + requested_model_id + "'.";
+        }
+        return false;
+      }
+      if (resolved->task != "matting") {
+        if (error) {
+          *error = "Open CUDA Auto Frame: model '" + requested_model_id + "' task must be 'matting'.";
+        }
+        return false;
+      }
+
+      // If we're already initialized with the same model and frame size, keep the context.
+      if (initialized && enabled && active_model_id == requested_model_id && gpu_rgb_in.w == frame_w &&
+          gpu_rgb_in.h == frame_h && pack.has_value() && pack->path == resolved->path) {
+        return true;
+      }
+
+      Destroy();
+      active_model_id = requested_model_id;
+      pack = resolved;
+
+      if (!cuda.IsInitialized()) {
+        std::string err;
+        if (!cuda.Initialize(&err)) {
+          if (error) {
+            *error = "Open CUDA Auto Frame: CUDA init failed: " + err;
+          }
+          return false;
+        }
+        if (!cuda.EnsureContext(&err)) {
+          if (error) {
+            *error = "Open CUDA Auto Frame: CUDA context failed: " + err;
+          }
+          return false;
+        }
+      }
+
+      {
+        std::string err;
+        if (!cuda.CreateStream(&stream, &err)) {
+          if (error) {
+            *error = "Open CUDA Auto Frame: CreateStream failed: " + err;
+          }
+          return false;
+        }
+      }
+
+      session = std::make_unique<studiocast::open_cuda::OpenCudaMattingSession>();
+      {
+        std::string err;
+        if (!session->EnsureInitialized(*pack, &cuda, stream, &err)) {
+          if (error) {
+            *error = "Open CUDA Auto Frame: Session init failed: " + err;
+          }
+          session.reset();
+          return false;
+        }
+      }
+
+      {
+        std::string err;
+        if (!gpu_rgb_in.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &err)) {
+          if (error) {
+            *error = "Open CUDA Auto Frame: GPU RGB alloc failed: " + err;
+          }
+          return false;
+        }
+      }
+      {
+        std::string err;
+        if (!alpha_tensor.ReallocIfNeededNchwF32(&cuda, 1, 1, pack->input.height, pack->input.width, &err)) {
+          if (error) {
+            *error = "Open CUDA Auto Frame: alpha tensor alloc failed: " + err;
+          }
+          return false;
+        }
+      }
+
+      have_smoothed_crop = false;
+      last_had_detection = false;
+
+      initialized = true;
+      enabled = true;
+      return true;
+    }
+
+    bool ApplyRgbInPlace(std::uint8_t* rgb,
+                         int width,
+                         int height,
+                         size_t stride,
+                         const studiocast::video::effects::BroadcastCameraEffects& fx,
+                         std::string* error) {
+      if (!fx.auto_frame.enabled) {
+        return true;
+      }
+      if (!rgb) {
+        if (error) {
+          *error = "Open CUDA Auto Frame: null RGB buffer.";
+        }
+        return false;
+      }
+
+      std::string err;
+      if (!EnsureInitialized(width, height, fx, &err)) {
+        if (error) {
+          *error = err;
+        }
+        return false;
+      }
+
+      if (!gpu_rgb_in.UploadFromCpuRgb24(&cuda, rgb, stride, stream, &err)) {
+        if (error) {
+          *error = "Open CUDA Auto Frame: UploadFromCpu failed: " + err;
+        }
+        return false;
+      }
+
+      if (!session->Run(stream, gpu_rgb_in, &alpha_tensor, &err)) {
+        if (error) {
+          *error = "Open CUDA Auto Frame: Matting inference failed: " + err;
+        }
+        return false;
+      }
+
+      if (!alpha_tensor.DownloadToCpuF32(&cuda, &alpha_cpu, stream, &err)) {
+        if (error) {
+          *error = "Open CUDA Auto Frame: alpha download failed: " + err;
+        }
+        return false;
+      }
+      if (!cuda.StreamSynchronize(stream, &err)) {
+        if (error) {
+          *error = "Open CUDA Auto Frame: StreamSynchronize failed: " + err;
+        }
+        return false;
+      }
+
+      studiocast::maxine::effects::RectF box_px;
+      const bool found = ComputeMatteBoxPxFromAlpha(alpha_cpu,
+                                                    pack->input.width,
+                                                    pack->input.height,
+                                                    width,
+                                                    height,
+                                                    &box_px);
+
+      // Use the same crop math as the Maxine auto-frame tracker for consistency.
+      studiocast::maxine::effects::AutoFrameKnobs knobs;
+      knobs.strength = fx.auto_frame.strength;
+      knobs.smoothing = fx.auto_frame.smoothing;
+      knobs.headroom = fx.auto_frame.headroom;
+
+      const float out_aspect = static_cast<float>(width) / static_cast<float>(height);
+      studiocast::maxine::effects::RectF target_crop = {};
+      if (found) {
+        target_crop = studiocast::maxine::effects::ArAutoFrameTracker::ComputeTargetCropFromBoxPx(
+            box_px, width, height, out_aspect, knobs);
+      } else {
+        const float strength01 = std::clamp(knobs.strength / 100.0f, 0.0f, 1.0f);
+        const float zoom = 1.0f + strength01 * 0.5f;  // up to ~1.5x
+        target_crop = studiocast::maxine::effects::ArAutoFrameTracker::CenterCrop(width, height, out_aspect, zoom);
+      }
+
+      auto clamp_crop = [&](studiocast::maxine::effects::RectF* r) {
+        if (!r) {
+          return;
+        }
+        r->w = std::clamp(r->w, 1.0f, static_cast<float>(width));
+        r->h = std::clamp(r->h, 1.0f, static_cast<float>(height));
+        r->x = std::clamp(r->x, 0.0f, static_cast<float>(width) - r->w);
+        r->y = std::clamp(r->y, 0.0f, static_cast<float>(height) - r->h);
+      };
+
+      if (!have_smoothed_crop) {
+        crop_smoothed_px = target_crop;
+        have_smoothed_crop = true;
+      } else {
+        const float a = studiocast::maxine::effects::ArAutoFrameTracker::SmoothingAlpha(knobs.smoothing);
+        crop_smoothed_px = studiocast::maxine::effects::Lerp(crop_smoothed_px, target_crop, a);
+      }
+      clamp_crop(&crop_smoothed_px);
+      last_had_detection = found;
+
+      // Early-out if crop is effectively full-frame.
+      constexpr float kEpsPx = 0.5f;
+      if (std::abs(crop_smoothed_px.x) <= kEpsPx && std::abs(crop_smoothed_px.y) <= kEpsPx &&
+          std::abs(crop_smoothed_px.w - width) <= kEpsPx && std::abs(crop_smoothed_px.h - height) <= kEpsPx) {
+        return true;
+      }
+
+      const size_t min_row_bytes = static_cast<size_t>(width) * 3;
+      if (stride < min_row_bytes) {
+        if (error) {
+          *error = "Open CUDA Auto Frame: unexpected RGB stride.";
+        }
+        return false;
+      }
+
+      tmp_rgb.resize(static_cast<size_t>(height) * stride);
+      CropResizeRgb24Bilinear(rgb,
+                              width,
+                              height,
+                              stride,
+                              tmp_rgb.data(),
+                              width,
+                              height,
+                              stride,
+                              crop_smoothed_px.x,
+                              crop_smoothed_px.y,
+                              crop_smoothed_px.w,
+                              crop_smoothed_px.h);
+
+      for (int y = 0; y < height; ++y) {
+        std::memcpy(rgb + (static_cast<size_t>(y) * stride),
+                    tmp_rgb.data() + (static_cast<size_t>(y) * stride),
+                    min_row_bytes);
+      }
+
+      return true;
+    }
+  } open_cuda_auto_frame;
+
   struct MaxineRelightingContext {
     bool initialized = false;
     std::string last_error;
@@ -3704,6 +4124,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   bool want_open_cuda_vb = false;
   bool have_open_cuda_vb = false;
 
+  bool want_open_cuda_auto_frame = false;
+  bool have_open_cuda_auto_frame = false;
+
   bool want_maxine_vignette_only = false;
   bool have_maxine_vignette_only = false;
 
@@ -3747,6 +4170,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     want_open_cuda_vb = false;
     have_open_cuda_vb = false;
+
+    want_open_cuda_auto_frame = false;
+    have_open_cuda_auto_frame = false;
 
     want_maxine_auto_frame = false;
     have_maxine_auto_frame = false;
@@ -3943,28 +4369,91 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
     } else if (has(studiocast::video::effects::contract::kEffectIdAutoFrame)) {
-      // Auto Frame is Maxine-only (AR + GPU crop/scale).
-      if (engine_open_cuda) {
-        if (!note.empty()) note += "\n";
-        note += "Auto Frame unavailable: requires Maxine backend.";
-      } else if (!maxine_strict_blocked) {
-        want_maxine_auto_frame = true;
+      const std::string stage_id = std::string(studiocast::video::effects::contract::kEffectIdAutoFrame);
 
-        std::string mx_err;
-        if (maxine_auto_frame.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
-          have_maxine_auto_frame = true;
-          set_backend(studiocast::video::effects::contract::kEffectIdAutoFrame, "maxine_ar_cuda");
-          if (!note.empty()) note += "\n";
-          note += "Maxine AR: Auto Frame (FaceBoxDetection + CUDA crop/scale).";
+      // Vignette attachment is only supported on the Maxine GPU paths. If we end up using the
+      // Open CUDA auto-frame path (or auto-frame is unavailable), we run vignette as a standalone
+      // stage by clearing the attachment.
+      const auto detach_vignette_from_auto_frame = [&]() {
+        if (has(studiocast::video::effects::contract::kEffectIdVignette) &&
+            plan.vignette_attach_to_effect_id == stage_id) {
+          plan.vignette_attach_to_effect_id.clear();
+        }
+      };
+
+      if (engine_open_cuda) {
+        // Open CUDA: auto-frame via matting + crop/scale.
+        want_open_cuda_auto_frame = true;
+        std::string oc_err;
+        if (open_cuda_auto_frame.EnsureInitialized(capA.width, capA.height, fx, &oc_err)) {
+          have_open_cuda_auto_frame = true;
+          set_backend(stage_id, "open_cuda");
+          if (!note.empty()) {
+            note += "\n";
+          }
+          note += "Open CUDA: Auto Frame (foreground matte + CPU crop/scale).";
+          detach_vignette_from_auto_frame();
         } else {
-          if (engine_maxine) {
-            append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::ar);
-            maxine_strict_blocked = true;
+          if (!note.empty()) {
+            note += "\n";
+          }
+          note += oc_err;
+          remove_stage_from_plan(stage_id);
+          detach_vignette_from_auto_frame();
+        }
+      } else if (!maxine_strict_blocked) {
+        // Maxine AR preferred; Open CUDA fallback when engine_preference=AUTO.
+        want_maxine_auto_frame = true;
+        std::string mx_err;
+        if (maxine_auto_frame.EnsureInitialized(capA.width,
+                                                capA.height,
+                                                capA.width / static_cast<float>(capA.height),
+                                                fx,
+                                                &mx_err)) {
+          have_maxine_auto_frame = true;
+          set_backend(stage_id, "maxine_ar_cuda");
+        } else if (engine_maxine) {
+          if (!note.empty()) {
+            note += "\n";
+          }
+          note += mx_err;
+          note += "\nMaxine backend required due to engine_preference=maxine.\n";
+          note += maxine_required_canonical_block;
+          maxine_strict_blocked = true;
+
+          // Auto-frame isn't available; don't leave vignette attached to a non-existent GPU stage.
+          detach_vignette_from_auto_frame();
+        } else {
+          // AUTO: fall back to Open CUDA.
+          want_open_cuda_auto_frame = true;
+          std::string oc_err;
+          if (open_cuda_auto_frame.EnsureInitialized(capA.width, capA.height, fx, &oc_err)) {
+            have_open_cuda_auto_frame = true;
+            set_backend(stage_id, "open_cuda");
+            if (!note.empty()) {
+              note += "\n";
+            }
+            note += "Open CUDA: Auto Frame (foreground matte + CPU crop/scale).";
+            detach_vignette_from_auto_frame();
           } else {
-            if (!note.empty()) note += "\n";
+            if (!note.empty()) {
+              note += "\n";
+            }
             note += mx_err;
+            if (!note.empty()) {
+              note += "\n";
+            }
+            note += oc_err;
+
+            remove_stage_from_plan(stage_id);
+            detach_vignette_from_auto_frame();
           }
         }
+      }
+
+      // If Auto Frame couldn't be initialized on any backend, make sure vignette isn't left attached.
+      if (!have_maxine_auto_frame && !have_open_cuda_auto_frame) {
+        detach_vignette_from_auto_frame();
       }
     }
 
@@ -4529,26 +5018,40 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
 
         if (stage_id == studiocast::video::effects::contract::kEffectIdAutoFrame) {
-          if (!have_maxine_auto_frame) return;
-          std::string mx_err;
-          if (!maxine_auto_frame.ApplyRgbInPlace(rgb.data(),
-                                                 capA.width,
-                                                 capA.height,
-                                                 rgbStride,
-                                                 fx,
-                                                 apply_vignette_on_auto_frame,
-                                                 vignette_center_x_px,
-                                                 vignette_center_y_px,
-                                                 &mx_err,
-                                                 defer_readback,
-                                                 &deferred_gpu_out)) {
-            {
-              std::lock_guard<std::mutex> lock(mu_);
-              last_error_ = "Maxine auto frame failed: " + mx_err;
+          if (have_maxine_auto_frame) {
+            std::string mx_err;
+            if (!maxine_auto_frame.ApplyRgbInPlace(rgb.data(),
+                                                   capA.width,
+                                                   capA.height,
+                                                   rgbStride,
+                                                   fx,
+                                                   apply_vignette_on_auto_frame,
+                                                   vignette_center_x_px,
+                                                   vignette_center_y_px,
+                                                   &mx_err,
+                                                   defer_readback,
+                                                   &deferred_gpu_out)) {
+              {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = "Maxine auto frame failed: " + mx_err;
+              }
+              fx_failed = true;
             }
-            fx_failed = true;
+            if (defer_readback && deferred_gpu_out.kind != DeferredGpuKind::none) have_deferred_gpu_out = true;
+            return;
           }
-          if (defer_readback && deferred_gpu_out.kind != DeferredGpuKind::none) have_deferred_gpu_out = true;
+
+          if (have_open_cuda_auto_frame) {
+            std::string oc_err;
+            if (!open_cuda_auto_frame.ApplyRgbInPlace(
+                    rgb.data(), capA.width, capA.height, rgbStride, fx, &oc_err)) {
+              {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = "Open CUDA auto frame failed: " + oc_err;
+              }
+              fx_failed = true;
+            }
+          }
           return;
         }
 

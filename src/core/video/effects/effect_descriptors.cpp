@@ -174,7 +174,9 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     VideoEffectDescriptor d;
     d.id = std::string(contract::kEffectIdAutoFrame);
     d.display_name = "Auto Frame";
-    d.required_components = {RequiredComponent::maxine_ar};
+    // Auto Frame can run either via Maxine AR (when available) or via the Open CUDA fallback.
+    // We only require the generic GPU utility component here.
+    d.required_components = {RequiredComponent::gpu_utility};
     d.mutex_groups = {std::string(contract::kMutexGroupBackgroundOrAutoFrame)};
     d.pipeline_order = 20;
     d.params = {
@@ -214,7 +216,9 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     VideoEffectDescriptor d;
     d.id = std::string(contract::kEffectIdEyeContact);
     d.display_name = "Eye Contact";
-    d.required_components = {RequiredComponent::maxine_ar};
+    // Auto Frame can run either via Maxine AR (when available) or via the Open CUDA fallback.
+    // We only require the generic GPU utility component here.
+    d.required_components = {RequiredComponent::gpu_utility};
     d.pipeline_order = 30;
     d.params = {
         ParamDescriptor{.id = std::string(contract::param::kEnabled),

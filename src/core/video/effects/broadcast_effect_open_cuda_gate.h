@@ -35,7 +35,8 @@ inline bool WantsOpenCudaForPlannedEffects(const BroadcastCameraEffects& fx) {
 
   return has(contract::kEffectIdVirtualBackgroundBlur) ||
          has(contract::kEffectIdVirtualBackgroundRemove) ||
-         has(contract::kEffectIdVirtualBackgroundReplace);
+         has(contract::kEffectIdVirtualBackgroundReplace) ||
+         has(contract::kEffectIdAutoFrame);
 }
 
 // Evaluates whether the Open CUDA-backed effects currently enabled by local
@@ -53,11 +54,12 @@ inline OpenCudaGateDecision EvaluateOpenCudaGate(const BroadcastCameraEffects& f
     return planned.count(std::string(id)) != 0;
   };
 
-  const bool wants_vb =
+  const bool wants_open_cuda =
       has(contract::kEffectIdVirtualBackgroundBlur) ||
       has(contract::kEffectIdVirtualBackgroundRemove) ||
-      has(contract::kEffectIdVirtualBackgroundReplace);
-  if (!wants_vb) {
+      has(contract::kEffectIdVirtualBackgroundReplace) ||
+      has(contract::kEffectIdAutoFrame);
+  if (!wants_open_cuda) {
     return out;
   }
 
@@ -93,6 +95,12 @@ inline OpenCudaGateDecision EvaluateOpenCudaGate(const BroadcastCameraEffects& f
       !avail.count(std::string(contract::kEffectIdVirtualBackgroundReplace))) {
     out.ok = false;
     out.message = format_blocked(contract::kEffectIdVirtualBackgroundReplace);
+    return out;
+  }
+  if (has(contract::kEffectIdAutoFrame) &&
+      !avail.count(std::string(contract::kEffectIdAutoFrame))) {
+    out.ok = false;
+    out.message = format_blocked(contract::kEffectIdAutoFrame);
     return out;
   }
 

@@ -32,18 +32,19 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
   od.install_hints.push_back("Example: " + openVideoRoot + "/segmentation/Good Quality/model.json");
   od.install_hints.push_back("Each pack must contain: model.json, model.onnx, LICENSE.txt");
 
-  const auto block_vb_effects = [&](const char* reason_code) {
+  const auto block_open_cuda_effects = [&](const char* reason_code) {
     od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur)] =
         reason_code;
     od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove)] =
         reason_code;
     od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace)] =
         reason_code;
+    od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdAutoFrame)] = reason_code;
   };
 
 #if !STUDIOCAST_ENABLE_OPEN_CUDA
   od.ok = false;
-  block_vb_effects("disabled_in_build");
+  block_open_cuda_effects("disabled_in_build");
   od.install_hints.push_back("Open CUDA backend is disabled in this build.");
   od.install_hints.push_back(
       "Rebuild with -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON (requires ONNX Runtime + CUDA EP).");
@@ -67,11 +68,11 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
 
   if (!cuda_ok) {
     od.ok = false;
-    block_vb_effects("cuda_unavailable");
+    block_open_cuda_effects("cuda_unavailable");
     od.install_hints.push_back(std::string("CUDA not available: ") + cuda_err);
   } else if (od.installed_models.empty()) {
     od.ok = false;
-    block_vb_effects("missing_model_packs");
+    block_open_cuda_effects("missing_model_packs");
     od.install_hints.push_back("No usable Open CUDA model packs were found.");
   } else {
     od.ok = true;
@@ -81,10 +82,11 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
         std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove));
     od.available_effects.push_back(
         std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace));
+    od.available_effects.push_back(std::string(studiocast::video::effects::contract::kEffectIdAutoFrame));
   }
 #else
   od.ok = false;
-  block_vb_effects("onnxruntime_not_found");
+  block_open_cuda_effects("onnxruntime_not_found");
   od.install_hints.push_back("Open CUDA backend is disabled in this build (ONNX Runtime not found). ");
   od.install_hints.push_back("Rebuild with -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON and ensure ONNXRUNTIME_ROOT is set.");
 #endif
