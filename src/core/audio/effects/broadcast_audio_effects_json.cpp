@@ -174,6 +174,8 @@ std::string BroadcastAudioEffectsToJson(const BroadcastAudioEffects& effects) {
     oss << "\"model_id\":\"" << studiocast::util::json::EscapeString(effects.speaker.model_id) << "\",";
     oss << "\"model_path\":\"" << studiocast::util::json::EscapeString(effects.speaker.model_path) << "\",";
     oss << "\"noise_removal_enabled\":" << (effects.speaker.noise_removal_enabled ? "true" : "false") << ",";
+    oss << "\"room_echo_removal_enabled\":"
+        << (effects.speaker.room_echo_removal_enabled ? "true" : "false") << ",";
     oss << "\"strength\":" << effects.speaker.strength << ",";
 
     oss << "\"superres\":{";
@@ -206,10 +208,10 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
     int schema = out->schema_version;
     if (!TryGetInt(*obj, "", "schema_version", &found, &schema, error)) return false;
     if (found) {
-        if (schema != 1 && schema != 2 && schema != kBroadcastAudioEffectsSchemaVersion) {
+        if (schema != 1 && schema != 2 && schema != 3 && schema != kBroadcastAudioEffectsSchemaVersion) {
             return Fail(error,
                         "unsupported schema_version " + std::to_string(schema) +
-                            " (expected 1, 2, or " + std::to_string(kBroadcastAudioEffectsSchemaVersion) + ")");
+                            " (expected 1, 2, 3, or " + std::to_string(kBroadcastAudioEffectsSchemaVersion) + ")");
         }
         if (schema != kBroadcastAudioEffectsSchemaVersion) {
             AddWarning(warnings,
@@ -316,7 +318,12 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
 
     if (const auto* spk = GetObj(*obj, "", "speaker", error)) {
         if (!CheckUnknownKeys(*spk,
-                              {"model_id", "model_path", "noise_removal_enabled", "strength", "superres"},
+                              {"model_id",
+                               "model_path",
+                               "noise_removal_enabled",
+                               "room_echo_removal_enabled",
+                               "strength",
+                               "superres"},
                               "speaker",
                               options,
                               warnings,
@@ -335,6 +342,10 @@ bool ParseBroadcastAudioEffectsJson(const studiocast::util::json::Value& root,
         bool en = out->speaker.noise_removal_enabled;
         if (!TryGetBool(*spk, "speaker", "noise_removal_enabled", &found, &en, error)) return false;
         if (found) out->speaker.noise_removal_enabled = en;
+
+        bool enEcho = out->speaker.room_echo_removal_enabled;
+        if (!TryGetBool(*spk, "speaker", "room_echo_removal_enabled", &found, &enEcho, error)) return false;
+        if (found) out->speaker.room_echo_removal_enabled = enEcho;
 
         int strength = out->speaker.strength;
         if (!TryGetInt(*spk, "speaker", "strength", &found, &strength, error)) return false;

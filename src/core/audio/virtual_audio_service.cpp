@@ -581,7 +581,7 @@ void VirtualAudioService::ThreadMain() {
                 auto speakerPlan = studiocast::maxine::afx::PlanBroadcastMicrophoneEffect(
                     /*studio_voice_enabled=*/false,
                     /*noise_removal_enabled=*/cfg.effects.speaker.noise_removal_enabled,
-                    /*room_echo_removal_enabled=*/false,
+                    /*room_echo_removal_enabled=*/cfg.effects.speaker.room_echo_removal_enabled,
                     /*strength=*/cfg.effects.speaker.strength);
                 if (!speakerPlan.enabled) speakerPlan.intensity = 0.0f;
 

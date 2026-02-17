@@ -5,7 +5,7 @@
 
 namespace studiocast::audio::effects {
 
-inline constexpr int kBroadcastAudioEffectsSchemaVersion = 3;
+inline constexpr int kBroadcastAudioEffectsSchemaVersion = 4;
 
 // Audio backend preference (mirrors the video backend selection UX).
 enum class AudioEffectsEnginePreference {
@@ -137,6 +137,7 @@ struct BroadcastSpeakerEffects {
     std::string model_path;
 
     bool noise_removal_enabled = false;
+    bool room_echo_removal_enabled = false;
 
     // 0..100-ish user knob (implementation-defined).
     int strength = 50;
@@ -151,7 +152,9 @@ struct BroadcastSpeakerEffects {
 
 inline bool operator==(const BroadcastSpeakerEffects& a, const BroadcastSpeakerEffects& b) {
     return a.model_id == b.model_id && a.model_path == b.model_path &&
-           a.noise_removal_enabled == b.noise_removal_enabled && a.strength == b.strength &&
+           a.noise_removal_enabled == b.noise_removal_enabled &&
+           a.room_echo_removal_enabled == b.room_echo_removal_enabled &&
+           a.strength == b.strength &&
            a.superres.enabled == b.superres.enabled && a.superres.mode == b.superres.mode;
 }
 

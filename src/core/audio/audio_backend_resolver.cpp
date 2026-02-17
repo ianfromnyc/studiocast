@@ -20,7 +20,7 @@ bool AnyMicrophoneEffectRequested(const studiocast::audio::effects::BroadcastAud
 }
 
 bool AnySpeakerEffectRequested(const studiocast::audio::effects::BroadcastAudioEffects& fx) {
-    return fx.speaker.noise_removal_enabled;
+    return fx.speaker.noise_removal_enabled || fx.speaker.room_echo_removal_enabled;
 }
 
 AudioBackendDecision ResolveAudioBackend(const studiocast::audio::effects::BroadcastAudioEffects& fx,

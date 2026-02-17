@@ -191,7 +191,7 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
   std::atomic<bool> studio_voice_enabled_{false};
 
   // Effect context for strength curve mapping (set from config).
-  // 0=noise_removal, 1=room_echo_removal, 2=studio_voice, 3=speaker_noise_removal
+  // 0=noise_removal, 1=room_echo_removal, 2=studio_voice, 3=speaker_noise_removal, 4=speaker_room_echo_removal
   std::atomic<int> strength_mode_{0};
 
   // Engine configuration derived from model pack metadata.

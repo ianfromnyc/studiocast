@@ -33,7 +33,6 @@ inline bool IsGpuStageEffectId(std::string_view id) {
   // "GPU stage" here means a stage that may host vignette attachment.
   using namespace contract;
 
-  if (id == kEffectIdVideoNoiseRemoval) return true;
   if (id == kEffectIdEyeContact) return true;
   if (id == kEffectIdVirtualKeyLight) return true;
   if (id == kEffectIdAutoFrame) return true;

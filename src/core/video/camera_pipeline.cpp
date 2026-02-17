@@ -25,6 +25,7 @@
 #include "core/maxine/effects/vfx_background_blur_effect.h"
 #include "core/maxine/effects/vfx_green_screen_effect.h"
 #include "core/maxine/effects/vfx_relighting_effect.h"
+#include "core/maxine/effects/vfx_denoise_effect.h"
 #include "core/maxine/cuda_crop_scale.h"
 #include "core/maxine/cuda_driver_api.h"
 #include "core/maxine/cuda_vignette.h"
@@ -2565,6 +2566,262 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   } maxine_relight;
 
+  struct MaxineDenoiseContext {
+    bool initialized = false;
+    std::string last_error;
+
+    studiocast::maxine::vfx::VfxApi vfx;
+    studiocast::maxine::NvcvApi nvcv;
+    studiocast::maxine::CudaDriverApi cuda;
+
+    std::filesystem::path model_dir;
+    std::unique_ptr<studiocast::maxine::effects::VfxDenoiseEffect> denoise;
+
+    std::vector<std::uint8_t> bgr_in;
+    std::vector<std::uint8_t> bgr_out;
+    studiocast::maxine::NvCVImage cpu_bgr_in{};
+    studiocast::maxine::NvCVImage cpu_bgr_out{};
+
+    // Denoise expects BGRf32 planar normalized on GPU (see VfxDenoiseEffect docs).
+    studiocast::maxine::NvCVImage gpu_bgr_f32_in{};
+    bool gpu_bgr_f32_in_allocated = false;
+
+    ~MaxineDenoiseContext() { Destroy(); }
+
+    void Destroy() {
+      denoise.reset();
+
+      if (gpu_bgr_f32_in_allocated && nvcv.IsInitialized() && nvcv.f().NvCVImage_Dealloc) {
+        (void)nvcv.f().NvCVImage_Dealloc(&gpu_bgr_f32_in);
+      }
+      gpu_bgr_f32_in = studiocast::maxine::NvCVImage{};
+      gpu_bgr_f32_in_allocated = false;
+
+      bgr_in.clear();
+      bgr_out.clear();
+      cpu_bgr_in = studiocast::maxine::NvCVImage{};
+      cpu_bgr_out = studiocast::maxine::NvCVImage{};
+
+      model_dir.clear();
+
+      initialized = false;
+    }
+
+    static std::filesystem::path InferModelsDirFromLibrary(const std::filesystem::path& lib) {
+      std::error_code ec;
+      std::filesystem::path p = lib.parent_path();
+      for (int i = 0; i < 5 && !p.empty(); ++i) {
+        const auto cand = p / "models";
+        if (std::filesystem::exists(cand, ec) && std::filesystem::is_directory(cand, ec)) {
+          return cand;
+        }
+        p = p.parent_path();
+      }
+      return {};
+    }
+
+    bool EnsureInitialized(int width,
+                           int height,
+                           const studiocast::video::effects::BroadcastCameraEffects& fx,
+                           std::string* error) {
+      last_error.clear();
+
+      if (initialized) {
+        // Live reconfiguration (strength).
+        std::string cfg_err;
+        if (denoise && !denoise->Configure(fx, &cfg_err)) {
+          if (error) *error = cfg_err;
+          return false;
+        }
+        return true;
+      }
+
+      std::string err;
+      if (!vfx.Initialize(&err)) {
+        last_error = "Maxine VFX runtime unavailable: " + err;
+        if (error) *error = last_error;
+        return false;
+      }
+      if (!nvcv.Initialize(studiocast::maxine::NvcvApi::Requirement::VfxCompat, &err)) {
+        last_error = "NvCVImage runtime unavailable: " + err;
+        if (error) *error = last_error;
+        return false;
+      }
+
+      {
+        std::string cuda_err;
+        if (!cuda.Initialize(&cuda_err)) {
+          last_error = "CUDA driver API unavailable: " + cuda_err;
+          if (error) *error = last_error;
+          return false;
+        }
+      }
+
+      // Model directory discovery.
+      {
+        const char* env = std::getenv("STUDIOCAST_MAXINE_MODELS_DIR");
+        if (env && *env) {
+          model_dir = std::filesystem::path(env);
+        }
+      }
+      if (model_dir.empty()) {
+        model_dir = InferModelsDirFromLibrary(vfx.library_path());
+      }
+
+      // Allocate CPU BGR staging buffers.
+      const std::size_t stride = static_cast<std::size_t>(width) * 3u;
+      bgr_in.resize(stride * static_cast<std::size_t>(height));
+      bgr_out.resize(stride * static_cast<std::size_t>(height));
+
+      if (!nvcv.f().NvCVImage_Init) {
+        last_error = "NvCVImage_Init missing from NvCVImage runtime.";
+        if (error) *error = last_error;
+        return false;
+      }
+
+      auto st = nvcv.f().NvCVImage_Init(&cpu_bgr_in,
+                                       static_cast<unsigned>(width),
+                                       static_cast<unsigned>(height),
+                                       static_cast<int>(stride),
+                                       bgr_in.data(),
+                                       studiocast::maxine::NVCV_BGR,
+                                       studiocast::maxine::NVCV_U8,
+                                       studiocast::maxine::NVCV_CHUNKY,
+                                       studiocast::maxine::NVCV_CPU);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        last_error = "NvCVImage_Init(cpu BGR in) failed: " + std::to_string(st);
+        if (error) *error = last_error;
+        return false;
+      }
+
+      st = nvcv.f().NvCVImage_Init(&cpu_bgr_out,
+                                  static_cast<unsigned>(width),
+                                  static_cast<unsigned>(height),
+                                  static_cast<int>(stride),
+                                  bgr_out.data(),
+                                  studiocast::maxine::NVCV_BGR,
+                                  studiocast::maxine::NVCV_U8,
+                                  studiocast::maxine::NVCV_CHUNKY,
+                                  studiocast::maxine::NVCV_CPU);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        last_error = "NvCVImage_Init(cpu BGR out) failed: " + std::to_string(st);
+        if (error) *error = last_error;
+        return false;
+      }
+
+      // Allocate GPU input (BGRf32 planar).
+      st = nvcv.f().NvCVImage_Alloc(&gpu_bgr_f32_in,
+                                   static_cast<unsigned>(width),
+                                   static_cast<unsigned>(height),
+                                   studiocast::maxine::NVCV_BGR,
+                                   studiocast::maxine::NVCV_F32,
+                                   studiocast::maxine::NVCV_PLANAR,
+                                   studiocast::maxine::NVCV_GPU,
+                                   /*alignment=*/0);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        last_error = "NvCVImage_Alloc(gpu BGRf32 planar) failed: " + std::to_string(st);
+        if (error) *error = last_error;
+        return false;
+      }
+      gpu_bgr_f32_in_allocated = true;
+
+      denoise = std::make_unique<studiocast::maxine::effects::VfxDenoiseEffect>(&vfx, &nvcv, model_dir);
+
+      std::string cfg_err;
+      if (!denoise->Configure(fx, &cfg_err)) {
+        last_error = cfg_err.empty() ? "Maxine denoise Configure failed." : cfg_err;
+        if (error) *error = last_error;
+        return false;
+      }
+
+      std::string init_err;
+      if (!denoise->Initialize(&init_err)) {
+        last_error = init_err.empty() ? "Maxine denoise Initialize failed." : init_err;
+        if (error) *error = last_error;
+        return false;
+      }
+
+      initialized = true;
+      return true;
+    }
+
+    bool ApplyRgbInPlace(std::uint8_t* rgb,
+                         int width,
+                         int height,
+                         std::size_t rgb_stride,
+                         const studiocast::video::effects::BroadcastCameraEffects& fx,
+                         std::string* error) {
+      if (!rgb) {
+        if (error) *error = "rgb buffer is null.";
+        return false;
+      }
+
+      if (!EnsureInitialized(width, height, fx, error)) {
+        return false;
+      }
+      if (!denoise) {
+        if (error) *error = "Maxine denoise not initialized.";
+        return false;
+      }
+
+      // RGB -> BGR (CPU staging).
+      const std::size_t bgr_stride = static_cast<std::size_t>(width) * 3u;
+      studiocast::video::Rgb24ToBgr24(rgb,
+                                     bgr_in.data(),
+                                     width,
+                                     height,
+                                     rgb_stride,
+                                     bgr_stride);
+
+      // CPU(BGRu8) -> GPU(BGRf32 planar)
+      const auto stream = denoise->cuda_stream();
+      auto st = nvcv.f().NvCVImage_Transfer(&cpu_bgr_in, &gpu_bgr_f32_in, 1.0f, stream, nullptr);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = "NvCVImage_Transfer(cpu->gpu BGRf32) failed: " + std::to_string(st);
+        return false;
+      }
+
+      studiocast::video::GpuFrame frame;
+      frame.width = width;
+      frame.height = height;
+      frame.nvcv_gpu = &gpu_bgr_f32_in;
+      frame.cuda_stream = stream;
+
+      std::string mx_err;
+      st = denoise->Process(frame, &mx_err);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = mx_err.empty() ? "Maxine denoise Process failed." : mx_err;
+        return false;
+      }
+
+      const auto* out_gpu = denoise->OutputGpu();
+      if (!out_gpu) {
+        if (error) *error = "Maxine denoise did not produce an output image.";
+        return false;
+      }
+
+      // GPU(BGRf32 planar) -> CPU(BGRu8)
+      st = nvcv.f().NvCVImage_Transfer(out_gpu, &cpu_bgr_out, 1.0f, stream, nullptr);
+      if (st != studiocast::maxine::NVCV_SUCCESS) {
+        if (error) *error = "NvCVImage_Transfer(gpu->cpu) failed: " + std::to_string(st);
+        return false;
+      }
+
+      if (!SyncAfterGpuToCpuTransfer(cuda, stream, "Maxine denoise: after gpu->cpu transfer", error)) {
+        return false;
+      }
+
+      // BGR -> RGB
+      studiocast::video::Bgr24ToRgb24(bgr_out.data(),
+                                     rgb,
+                                     width,
+                                     height,
+                                     bgr_stride,
+                                     rgb_stride);
+      return true;
+    }
+  } maxine_denoise;
+
   struct MaxineEyeContactContext {
     bool initialized = false;
     std::string last_error;
@@ -3438,6 +3695,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   bool want_maxine_relight = false;
   bool have_maxine_relight = false;
 
+  bool want_maxine_denoise = false;
+  bool have_maxine_denoise = false;
+
   bool want_maxine_bg_blur = false;
   bool have_maxine_bg_blur = false;
 
@@ -3497,6 +3757,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     want_maxine_relight = false;
     have_maxine_relight = false;
 
+    want_maxine_denoise = false;
+    have_maxine_denoise = false;
+
     want_maxine_vignette_only = false;
     have_maxine_vignette_only = false;
 
@@ -3535,6 +3798,32 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         plan.vignette_attach_to_effect_id.clear();
       }
     };
+
+    // Video Noise Removal (Maxine VFX).
+    if (has(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval)) {
+      if (engine_open_cuda) {
+        if (!note.empty()) note += "\n";
+        note += "Video Noise Removal unavailable: requires Maxine backend.";
+      } else if (!maxine_strict_blocked) {
+        want_maxine_denoise = true;
+
+        std::string mx_err;
+        if (maxine_denoise.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
+          have_maxine_denoise = true;
+          set_backend(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval, "maxine");
+          if (!note.empty()) note += "\n";
+          note += "Maxine VFX: Video Noise Removal.";
+        } else {
+          if (engine_maxine) {
+            append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::vfx);
+            maxine_strict_blocked = true;
+          } else {
+            if (!note.empty()) note += "\n";
+            note += mx_err;
+          }
+        }
+      }
+    }
 
     // Eye Contact (AR)
     if (has(studiocast::video::effects::contract::kEffectIdEyeContact)) {
@@ -4021,9 +4310,22 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         const bool defer_readback = is_open_cuda_stage_id(stage_id) ? true
                                                                     : (allow_defer_readback && (stage_id == last_stage_for_defer));
 
-        // Note: video noise removal exists in the effect schema but is not
-        // currently applied in the pipeline.
         if (stage_id == studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) {
+          if (!have_maxine_denoise) return;
+
+          std::string mx_err;
+          if (!maxine_denoise.ApplyRgbInPlace(rgb.data(),
+                                              capA.width,
+                                              capA.height,
+                                              rgbStride,
+                                              fx,
+                                              &mx_err)) {
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              last_error_ = "Maxine video noise removal failed: " + mx_err;
+            }
+            fx_failed = true;
+          }
           return;
         }
 

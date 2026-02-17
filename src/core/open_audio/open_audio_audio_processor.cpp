@@ -140,6 +140,7 @@ enum class StrengthMode : int {
   kRoomEchoRemoval = 1,
   kStudioVoice = 2,
   kSpeakerNoiseRemoval = 3,
+  kSpeakerRoomEchoRemoval = 4,
 };
 
 float StrengthCurve01(StrengthMode mode, float t01) {
@@ -154,6 +155,9 @@ float StrengthCurve01(StrengthMode mode, float t01) {
     case StrengthMode::kSpeakerNoiseRemoval:
       // Similar to noise removal.
       return std::pow(t, 1.25f);
+    case StrengthMode::kSpeakerRoomEchoRemoval:
+      // Match room echo removal ramp for speaker-side dereverb.
+      return std::pow(t, 0.75f);
     case StrengthMode::kNoiseRemoval:
     default:
       return std::pow(t, 1.25f);
@@ -174,6 +178,9 @@ float WetMixFromCurve01(StrengthMode mode, float curve01) {
       break;
     case StrengthMode::kSpeakerNoiseRemoval:
       min_wet = 0.18f;
+      break;
+    case StrengthMode::kSpeakerRoomEchoRemoval:
+      min_wet = 0.2f;
       break;
     case StrengthMode::kNoiseRemoval:
     default:
@@ -714,7 +721,12 @@ bool ResolveOpenAudioModelForSpeaker(const studiocast::audio::effects::Broadcast
 
   std::string id = spk.model_id;
   if (id.empty()) {
-    const std::string effect = spk.noise_removal_enabled ? "noise_removal" : std::string();
+    std::string effect;
+    if (spk.room_echo_removal_enabled) {
+      effect = "room_echo_removal";
+    } else if (spk.noise_removal_enabled) {
+      effect = "noise_removal";
+    }
     id = reg.DefaultModelIdForEffect(effect);
     if (id.empty()) id = reg.DefaultModelId();
   }
@@ -988,7 +1000,11 @@ void OpenAudioAudioProcessor::UpdateFromSpeakerConfig(const studiocast::audio::e
   if (s > 100) s = 100;
   strength_.store(s);
   studio_voice_enabled_.store(false);
-  strength_mode_.store(static_cast<int>(StrengthMode::kSpeakerNoiseRemoval));
+  StrengthMode mode = StrengthMode::kSpeakerNoiseRemoval;
+  if (spk.room_echo_removal_enabled) {
+    mode = StrengthMode::kSpeakerRoomEchoRemoval;
+  }
+  strength_mode_.store(static_cast<int>(mode));
 }
 
 bool OpenAudioAudioProcessor::InitializeBindings(std::string* error) {
