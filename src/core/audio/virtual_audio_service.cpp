@@ -25,6 +25,7 @@
 #include "core/audio/audio_pipeline.h"
 #include "core/audio/audio_processor.h"
 #include "core/maxine/afx/afx_audio_processor.h"
+#include "core/maxine/afx/afx_stereo_audio_processor.h"
 #include "core/maxine/afx_api.h"
 #endif
 
@@ -775,6 +776,9 @@ void VirtualAudioService::ThreadMain() {
                                         e.compute_capability = sel.selected->compute_capability;
                                         e.sample_rate = 48000;
                                         e.frame_samples = 480;
+                                        // AFX speaker effects are treated as mono voice processors.
+                                        // We keep the effect configured for mono and preserve stereo in the
+                                        // AudioProcessor wrapper via Mid/Side processing.
                                         e.channels = 1;
                                         e.intensity = speakerPlan.intensity;
                                         e.use_denoiser_v2_model = speakerPlan.use_denoiser_v2_model;
@@ -794,7 +798,8 @@ void VirtualAudioService::ThreadMain() {
                                                 st_.speakers_pipeline_last_error = "AFX load failed: " + ferr;
                                             }
                                         } else {
-                                            spk_processor = std::make_unique<studiocast::maxine::afx::AfxAudioProcessor>(
+                                            spk_processor =
+                                                std::make_unique<studiocast::maxine::afx::AfxStereoAudioProcessor>(
                                                 spk_fx.get());
                                         }
                                     }
@@ -810,6 +815,8 @@ void VirtualAudioService::ThreadMain() {
                         studiocast::audio::AudioPipelineConfig pcfg;
                         pcfg.source_name = studiocast::audio::VirtualSpeakerMonitorSourceName();
                         pcfg.sink_name = sinkName;
+                        // Speaker processing should preserve stereo.
+                        pcfg.channels = 2;
 
                         std::string perr;
                         if (!spk_pipeline->Start(pcfg, &perr)) {

@@ -204,6 +204,10 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
   std::vector<float> mono_in_;
   std::vector<float> mono_out_;
 
+  // Scratch buffer used when preserving stereo via Mid/Side processing in the
+  // speaker pipeline.
+  std::vector<float> side_;
+
   std::vector<float> model_in_;
   std::vector<float> model_out_;
 

@@ -41,7 +41,7 @@ struct AudioPipelineStats {
 // Real-time audio pipeline:
 //  Pulse (capture) -> AudioProcessor (Process) -> Pulse (playback into a sink).
 //
-// MVP format: mono float32 @ 48kHz, 10ms frames.
+// MVP format: float32 @ 48kHz, 10ms frames (1ch for mic, 2ch supported for speakers).
 class AudioPipeline {
 public:
     explicit AudioPipeline(AudioProcessor* processor);

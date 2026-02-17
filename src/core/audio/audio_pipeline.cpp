@@ -60,8 +60,9 @@ bool AudioPipeline::Start(const AudioPipelineConfig& cfg, std::string* error) {
         if (error) *error = GetStats().last_error;
         return false;
     }
-    if (cfg.sample_rate != 48000 || cfg.channels != 1) {
-        SetLastError("Unsupported audio format: MVP requires mono 48kHz float32 (use Pulse to resample/downmix).");
+    if (cfg.sample_rate != 48000 || (cfg.channels != 1 && cfg.channels != 2)) {
+        SetLastError(
+            "Unsupported audio format: requires 48kHz float32 with 1 or 2 channels (use Pulse to resample/downmix).");
         if (error) *error = GetStats().last_error;
         return false;
     }

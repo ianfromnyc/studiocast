@@ -465,9 +465,9 @@ static int CmdAudioBench(int argc, char** argv) {
   std::cout << "  onnx_path   : " << resolved.onnx_path.string() << "\n";
   std::cout << "  sample_rate : " << resolved.sample_rate << "\n";
   std::cout << "  channels    : " << resolved.channels << "\n\n";
-
+  
   constexpr std::uint32_t kFrameSamples = 480;
-  constexpr std::uint32_t kChannels = 1;
+  const std::uint32_t kChannels = speaker ? 2 : 1;
   constexpr std::uint64_t kBudgetUs = 10000;
 
   std::vector<float> in(kFrameSamples * kChannels);

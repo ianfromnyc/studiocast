@@ -873,6 +873,13 @@ std::unique_ptr<OpenAudioAudioProcessor> OpenAudioAudioProcessor::CreateForSpeak
     return nullptr;
   }
 
+  // Speaker processing runs as stereo in the Pulse pipeline. Configure the post
+  // DSP stage for 2 channels (DC blocker + safety limiter).
+  {
+    std::string derr;
+    (void)proc->post_dsp_.Configure(/*sample_rate=*/48000, /*channels=*/2, &derr);
+  }
+
   return proc;
 #endif  // STUDIOCAST_HAVE_ONNXRUNTIME
 #endif  // STUDIOCAST_ENABLE_OPEN_AUDIO
@@ -1299,11 +1306,29 @@ bool OpenAudioAudioProcessor::Process(const float* in,
     return true;
   }
 
+  // Determine the active strength curve mode first so we can decide whether to
+  // preserve stereo for speaker processing.
+  const StrengthMode mode = static_cast<StrengthMode>(strength_mode_.load());
+  const bool use_mid_side_stereo =
+      (channels == 2) &&
+      (mode == StrengthMode::kSpeakerNoiseRemoval || mode == StrengthMode::kSpeakerRoomEchoRemoval);
+
   // Convert interleaved audio to mono.
+  //  - Mic path: mono input.
+  //  - Speaker path (stereo): process Mid only, preserve Side.
   mono_in_.resize(frames);
   if (channels == 1) {
     std::copy_n(in, frames, mono_in_.data());
+  } else if (use_mid_side_stereo) {
+    side_.resize(frames);
+    for (std::uint32_t f = 0; f < frames; ++f) {
+      const float l = in[static_cast<std::size_t>(f) * 2 + 0];
+      const float r = in[static_cast<std::size_t>(f) * 2 + 1];
+      mono_in_[f] = 0.5f * (l + r);  // Mid
+      side_[f] = 0.5f * (l - r);     // Side
+    }
   } else {
+    // Generic multichannel fallback: average to mono.
     for (std::uint32_t f = 0; f < frames; ++f) {
       float acc = 0.0f;
       for (std::uint32_t c = 0; c < channels; ++c) {
@@ -1341,7 +1366,6 @@ bool OpenAudioAudioProcessor::Process(const float* in,
   // Strength mapping.
   const int strength = strength_.load();
   const float t = Clamp01(static_cast<float>(strength) / 100.0f);
-  const StrengthMode mode = static_cast<StrengthMode>(strength_mode_.load());
   const float curve = StrengthCurve01(mode, t);
 
   float wet = 1.0f;
@@ -1399,13 +1423,34 @@ bool OpenAudioAudioProcessor::Process(const float* in,
     std::copy_n(model_out_.data(), model_out_.size(), mono_out_.data());
   }
 
-  // Fan-out processed mono to all channels with wet/dry mix.
-  for (std::uint32_t f = 0; f < frames; ++f) {
-    const float wet_sample = mono_out_[f];
-    for (std::uint32_t c = 0; c < channels; ++c) {
-      const std::size_t idx = static_cast<std::size_t>(f) * channels + c;
-      const float dry_sample = in[idx];
-      out[idx] = wet * wet_sample + dry * dry_sample;
+  // Mix processed audio back to the pipeline format.
+  if (channels == 1) {
+    for (std::uint32_t f = 0; f < frames; ++f) {
+      out[f] = wet * mono_out_[f] + dry * in[f];
+    }
+  } else if (use_mid_side_stereo) {
+    // Stereo-safe speaker processing: preserve Side.
+    for (std::uint32_t f = 0; f < frames; ++f) {
+      const float mid = mono_out_[f];
+      const float side = (f < side_.size()) ? side_[f] : 0.0f;
+      const float proc_l = mid + side;
+      const float proc_r = mid - side;
+
+      const std::size_t idx = static_cast<std::size_t>(f) * 2;
+      const float dry_l = in[idx + 0];
+      const float dry_r = in[idx + 1];
+      out[idx + 0] = wet * proc_l + dry * dry_l;
+      out[idx + 1] = wet * proc_r + dry * dry_r;
+    }
+  } else {
+    // Generic multichannel fallback: fan out processed mono.
+    for (std::uint32_t f = 0; f < frames; ++f) {
+      const float wet_sample = mono_out_[f];
+      for (std::uint32_t c = 0; c < channels; ++c) {
+        const std::size_t idx = static_cast<std::size_t>(f) * channels + c;
+        const float dry_sample = in[idx];
+        out[idx] = wet * wet_sample + dry * dry_sample;
+      }
     }
   }
 
