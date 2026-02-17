@@ -242,7 +242,7 @@ void VirtualCameraService::ThreadMain() {
         //
         // Keep the output open even when we're idle so consumers can discover
         // the device. Heavy processing (camera capture + effects) is still
-        // gated by consumerPresent/always_on below.
+        // gated by consumerPresent below.
         {
             std::string oerr;
             if (!pipeline_.EnsureOutputOpen(cfg.pipeline, &oerr)) {
@@ -278,7 +278,7 @@ void VirtualCameraService::ThreadMain() {
         bool effectsSuppressed = false;
         std::string suppressMsg;
 
-        const bool wantRunRequested = cfg.enabled && (cfg.always_on || consumerPresent);
+        const bool wantRunRequested = cfg.enabled && consumerPresent;
         bool wantRun = wantRunRequested;
 
         // Gate expensive capture/processing threads based on engine availability.
