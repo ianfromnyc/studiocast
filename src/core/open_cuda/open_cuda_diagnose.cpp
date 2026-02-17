@@ -25,10 +25,11 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
   od.missing_models = reg.Problems();
 
   const auto modelsRoot = studiocast::util::StudioCastModelsDir();
-  const auto openCudaRoot = modelsRoot.empty() ? std::string("~/.local/share/studiocast/models/open_cuda")
-                                             : (modelsRoot / "open_cuda").string();
+  const auto openVideoRoot = modelsRoot.empty() ? std::string("~/.local/share/studiocast/models/open_video")
+                                               : (modelsRoot / "open_video").string();
 
-  od.install_hints.push_back(std::string("Model packs: ") + openCudaRoot + "/<model_id>/");
+  od.install_hints.push_back(std::string("Model packs: ") + openVideoRoot + "/<subject>/<pack_dir>/");
+  od.install_hints.push_back("Example: " + openVideoRoot + "/segmentation/Good Quality/model.json");
   od.install_hints.push_back("Each pack must contain: model.json, model.onnx, LICENSE.txt");
 
   const auto block_vb_effects = [&](const char* reason_code) {

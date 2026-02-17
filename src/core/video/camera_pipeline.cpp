@@ -1625,7 +1625,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       if (requested_model_id.empty()) {
         last_error =
-            "Open CUDA: no usable model packs found (install under ~/.local/share/studiocast/models/open_cuda/<model_id>/).";
+            "Open CUDA: no usable model packs found (install under ~/.local/share/studiocast/models/open_video/<subject>/<pack_dir>/).";
         if (error) *error = last_error;
         return false;
       }

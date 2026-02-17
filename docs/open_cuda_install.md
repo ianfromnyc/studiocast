@@ -64,10 +64,10 @@ If the daemon reports `onnxruntime_not_found`, it usually means ONNX Runtime was
 
 Open CUDA discovers **user-supplied model packs** at runtime.
 
-The default model root is:
+The recommended (human-friendly) model root is:
 
 ```
-~/.local/share/studiocast/models/open_cuda/
+~/.local/share/studiocast/models/open_video/
 ```
 
 To print the authoritative path on your machine:
@@ -78,10 +78,13 @@ To print the authoritative path on your machine:
 
 ### Model pack layout
 
-Each model pack is a directory named by `<model_id>`:
+Each model pack is a directory containing `model.json`, `model.onnx`, and `LICENSE.txt`.
+The directory name does **not** need to match `model.json:id` (human-friendly names are OK).
+
+Recommended layout (mirrors `scripts/model_packs/open_video`):
 
 ```text
-~/.local/share/studiocast/models/open_cuda/<model_id>/
+~/.local/share/studiocast/models/open_video/<subject>/<pack_dir>/
   model.onnx
   model.json
   LICENSE.txt
@@ -305,5 +308,5 @@ If `virtual_background.model_id` references a model pack that is not currently i
 
 Fix:
 
-- Install the missing pack under `~/.local/share/studiocast/models/open_cuda/<model_id>/`, or
+- Install the missing pack under `~/.local/share/studiocast/models/open_video/<subject>/<pack_dir>/`, or
 - Switch the Model dropdown back to **Default (auto)** (clears `model_id`), or pick another installed model.

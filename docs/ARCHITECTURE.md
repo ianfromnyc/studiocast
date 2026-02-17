@@ -76,7 +76,12 @@ The `open_cuda` backend (ONNX Runtime CUDA EP) discovers user-supplied model pac
 
 Default root:
 
-- `~/.local/share/studiocast/models/open_cuda/<model_id>/`
+- `~/.local/share/studiocast/models/open_video/<subject>/<pack_dir>/`
+
+Where:
+
+- `<subject>` is a functional category like `segmentation`.
+- `<pack_dir>` is any directory name (it does not need to match `model.json:id`).
 
 Each pack contains:
 

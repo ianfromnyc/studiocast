@@ -49,12 +49,21 @@ struct ModelPack {
   std::optional<std::filesystem::path> license_path;
 };
 
-// Registry for model packs under:
-//   <models_root>/open_cuda/<model_id>/
-// where <models_root> is normally ~/.local/share/studiocast/models.
+// Registry for model packs under the StudioCast models directory.
+//
+// Current layout (human-friendly; mirrors scripts/model_packs/open_video):
+//   <models_root>/open_video/<subject>/<pack_dir>/
+//
+// Where:
+//   - <models_root> is normally ~/.local/share/studiocast/models.
+//   - <subject> is a functional category like "segmentation".
+//   - <pack_dir> is any directory name (it does not need to match model.json:id).
 class ModelPackRegistry {
  public:
-  // Scan the given Open CUDA models directory (the directory containing <model_id>/...).
+  // Scan the given Open CUDA models directory.
+  //
+  // Packs are discovered by recursively searching for "model.json".
+  // The pack directory is the parent directory containing "model.json".
   //
   // Any pack that fails to load/validate is recorded in Problems() with a reason string.
   // Valid packs are available via ListModels()/ResolveModel().

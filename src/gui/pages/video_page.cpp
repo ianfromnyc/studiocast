@@ -1683,7 +1683,7 @@ void VideoPage::UpdateUiEnabled() {
         if (!st.open_cuda_install_hints.isEmpty()) {
           s += "\n\n" + st.open_cuda_install_hints.join("\n");
         } else {
-          s += "\n\nModel packs: ~/.local/share/studiocast/models/open_cuda/<model_id>/";
+          s += "\n\nModel packs: ~/.local/share/studiocast/models/open_video/<subject>/<pack_dir>/";
         }
 
         s += "\n\nRun: studiocast-open install-hints";

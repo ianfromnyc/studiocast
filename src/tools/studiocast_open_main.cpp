@@ -21,7 +21,7 @@ namespace fs = std::filesystem;
 namespace {
 
 std::string DefaultOpenCudaRootHint() {
-  return "~/.local/share/studiocast/models/open_cuda";
+  return "~/.local/share/studiocast/models/open_video";
 }
 
 std::string DefaultOpenAudioRootHint() {
@@ -31,7 +31,7 @@ std::string DefaultOpenAudioRootHint() {
 fs::path OpenCudaRootPath() {
   const auto modelsRoot = studiocast::util::StudioCastModelsDir();
   if (modelsRoot.empty()) return {};
-  return modelsRoot / "open_cuda";
+  return modelsRoot / "open_video";
 }
 
 std::string OpenCudaRootForDisplay() {
@@ -88,9 +88,9 @@ static int CmdPaths() {
   std::cout << "StudioCast Paths (Open CUDA)\n";
   std::cout << "  Open CUDA models root: " << OpenCudaRootForDisplay() << "\n";
   std::cout << "\nExpected model pack layout:\n";
-  std::cout << "  " << OpenCudaRootForDisplay() << "/<model_id>/model.json\n";
-  std::cout << "  " << OpenCudaRootForDisplay() << "/<model_id>/model.onnx\n";
-  std::cout << "  " << OpenCudaRootForDisplay() << "/<model_id>/LICENSE.txt\n";
+  std::cout << "  " << OpenCudaRootForDisplay() << "/<subject>/<pack_dir>/model.json\n";
+  std::cout << "  " << OpenCudaRootForDisplay() << "/<subject>/<pack_dir>/model.onnx\n";
+  std::cout << "  " << OpenCudaRootForDisplay() << "/<subject>/<pack_dir>/LICENSE.txt\n";
   return 0;
 }
 
@@ -135,17 +135,18 @@ static int CmdInstallHints(const char* argv0) {
   std::cout << "StudioCast Open CUDA Install Hints\n\n";
   std::cout << "Model packs root:\n  " << OpenCudaRootForDisplay() << "\n\n";
 
-  std::cout << "A model pack is a directory named by <model_id>.\n";
+  std::cout << "A model pack is a directory containing model.json, model.onnx, LICENSE.txt.\n";
+  std::cout << "The directory name does NOT need to match model.json:id (human-friendly names are OK).\n";
   std::cout << "Required files:\n";
   std::cout << "  - model.json   (metadata)\n";
   std::cout << "  - model.onnx   (ONNX model)\n";
   std::cout << "  - LICENSE.txt  (model license text)\n\n";
 
   std::cout << "Create a new pack (example):\n";
-  std::cout << "  mkdir -p \"" << OpenCudaRootForDisplay() << "/modnet\"\n";
-  std::cout << "  cp /path/to/model.onnx \"" << OpenCudaRootForDisplay() << "/modnet/model.onnx\"\n";
-  std::cout << "  cp /path/to/model.json \"" << OpenCudaRootForDisplay() << "/modnet/model.json\"\n";
-  std::cout << "  cp /path/to/LICENSE.txt \"" << OpenCudaRootForDisplay() << "/modnet/LICENSE.txt\"\n\n";
+  std::cout << "  mkdir -p \"" << OpenCudaRootForDisplay() << "/segmentation/Good Quality\"\n";
+  std::cout << "  cp /path/to/model.onnx \"" << OpenCudaRootForDisplay() << "/segmentation/Good Quality/model.onnx\"\n";
+  std::cout << "  cp /path/to/model.json \"" << OpenCudaRootForDisplay() << "/segmentation/Good Quality/model.json\"\n";
+  std::cout << "  cp /path/to/LICENSE.txt \"" << OpenCudaRootForDisplay() << "/segmentation/Good Quality/LICENSE.txt\"\n\n";
 
   std::cout << "Validate discovery:\n";
   std::cout << "  " << argv0 << " list-models\n";
@@ -215,7 +216,8 @@ static int CmdAudioInstallHints(const char* argv0) {
   std::cout << "Curated pack IDs: fastenhancer_s_vd_v1, fastenhancer_m_vd_v1, fastenhancer_l_vd_v1\n";
   std::cout << "Docs: docs/open_audio_install.md\n\n";
 
-  std::cout << "A model pack is a directory named by <model_id>.\n";
+  std::cout << "A model pack is a directory containing model.json, model.onnx, LICENSE.txt.\n";
+  std::cout << "The directory name does NOT need to match model.json:id (human-friendly names are OK).\n";
   std::cout << "Required files:\n";
   std::cout << "  - model.json   (metadata)\n";
   std::cout << "  - <model>.onnx (ONNX model)\n";

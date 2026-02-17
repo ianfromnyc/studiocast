@@ -14,6 +14,8 @@ namespace studiocast::open_cuda {
 
 namespace {
 
+constexpr int kMaxPackScanDepth = 6;
+
 std::string PathForError(const fs::path& p) {
   // Avoid platform-specific quoting. We only need human-readable paths.
   return p.string();
@@ -192,6 +194,60 @@ bool ParseModelJsonV1(const fs::path& pack_dir, ModelPack* out, std::string* err
   return true;
 }
 
+
+std::string PackDirKey(const fs::path& root, const fs::path& pack_dir) {
+  // Use a stable, human-readable key for error reporting.
+  // Prefer the relative path from the scan root, prefixed with the root directory name.
+  // Example:
+  //   open_video/segmentation/Best Quality
+  std::error_code ec;
+  fs::path rel = fs::relative(pack_dir, root, ec);
+  std::string rels;
+  if (!ec && !rel.empty() && rel != ".") {
+    rels = rel.generic_string();
+  } else {
+    rels = pack_dir.filename().string();
+  }
+
+  const std::string rootName = root.filename().string();
+  if (rootName.empty()) return rels;
+  if (rels.empty()) return rootName;
+  return rootName + "/" + rels;
+}
+
+std::vector<fs::path> DiscoverPackDirs(const fs::path& root) {
+  std::vector<fs::path> out;
+  std::error_code ec;
+
+  for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
+       !ec && it != fs::recursive_directory_iterator();
+       it.increment(ec)) {
+    const auto& e = *it;
+
+    if (it.depth() > kMaxPackScanDepth) {
+      it.disable_recursion_pending();
+      continue;
+    }
+
+    if (!e.is_regular_file(ec) || ec) {
+      ec.clear();
+      continue;
+    }
+
+    if (e.path().filename() == "model.json") {
+      out.push_back(e.path().parent_path());
+    }
+  }
+
+  // Make deterministic.
+  std::sort(out.begin(), out.end(), [](const fs::path& a, const fs::path& b) {
+    return a.generic_string() < b.generic_string();
+  });
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+
+  return out;
+}
+
 }  // namespace
 
 ModelPackRegistry ModelPackRegistry::Scan(const fs::path& open_cuda_models_dir) {
@@ -205,27 +261,19 @@ ModelPackRegistry ModelPackRegistry::Scan(const fs::path& open_cuda_models_dir) 
   }
   if (!fs::is_directory(open_cuda_models_dir, ec) || ec) {
     reg.problems_[open_cuda_models_dir.filename().string()] =
-        std::string("open_cuda models path is not a directory: ") + PathForError(open_cuda_models_dir);
+        std::string("model packs path is not a directory: ") + PathForError(open_cuda_models_dir);
     return reg;
   }
 
-  std::vector<fs::path> dirs;
-  for (fs::directory_iterator it(open_cuda_models_dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
-    const auto& e = *it;
-    if (!e.is_directory(ec) || ec) {
-      ec.clear();
-      continue;
-    }
-    dirs.push_back(e.path());
-  }
+  // Packs are discovered by searching for model.json recursively.
+  // This supports human-friendly categorization like:
+  //   open_video/segmentation/Best Quality/model.json
+  const std::vector<fs::path> dirs = DiscoverPackDirs(open_cuda_models_dir);
 
-  std::sort(dirs.begin(), dirs.end(), [](const fs::path& a, const fs::path& b) {
-    return a.filename().string() < b.filename().string();
-  });
 
   std::map<std::string, fs::path> seenIds;
   for (const auto& d : dirs) {
-    const std::string dirKey = d.filename().string();
+    const std::string dirKey = PackDirKey(open_cuda_models_dir, d);
 
     ModelPack pack;
     std::string perr;
@@ -265,7 +313,7 @@ ModelPackRegistry ModelPackRegistry::Scan(const fs::path& open_cuda_models_dir) 
 ModelPackRegistry ModelPackRegistry::ScanDefault() {
   const auto modelsRoot = util::StudioCastModelsDir();
   if (modelsRoot.empty()) return {};
-  return Scan(modelsRoot / "open_cuda");
+  return Scan(modelsRoot / "open_video");
 }
 
 std::optional<ModelPack> ModelPackRegistry::ResolveModel(const std::string& id) const {
