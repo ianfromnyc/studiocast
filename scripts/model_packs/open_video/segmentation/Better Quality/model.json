@@ -1,0 +1,25 @@
+{
+  "id": "birefnet_lite",
+  "display_name": "BiRefNet Lite (1024)",
+  "task": "matting",
+  "onnx_filename": "model.onnx",
+  "input": {
+    "name": "input_image",
+    "layout": "nchw",
+    "dtype": "float32",
+    "width": 1024,
+    "height": 1024,
+    "channels": 3
+  },
+  "output": {
+    "name": "alpha",
+    "kind": "alpha",
+    "dtype": "float32"
+  },
+  "preprocess": {
+    "mean": [0.485, 0.456, 0.406],
+    "std":  [0.229, 0.224, 0.225],
+    "color": "rgb",
+    "range": "0..1"
+  }
+}

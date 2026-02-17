@@ -1,0 +1,10 @@
+BiRefNet Lite ONNX Model Pack for StudioCast (Open CUDA backend)
+
+Upstream model: onnx-community/BiRefNet_lite-ONNX
+License shown by upstream: MIT
+
+This pack downloads the ONNX weights from Hugging Face and patches the model
+graph to expose a sigmoid(alpha) output named "alpha" for runtime compatibility.
+
+You must review and comply with the upstream license and any dataset/model terms:
+- Hugging Face model page: onnx-community/BiRefNet_lite-ONNX
