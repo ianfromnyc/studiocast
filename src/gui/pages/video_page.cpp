@@ -71,9 +71,10 @@ class VideoPreviewWidget final : public QWidget {
  protected:
   void paintEvent(QPaintEvent* /*event*/) override {
     QPainter p(this);
-    p.fillRect(rect(), QColor(0x11, 0x11, 0x11));
+    // Paint using palette colors to match the active global theme.
+    p.fillRect(rect(), palette().color(QPalette::Base));
 
-    p.setPen(QColor(0x33, 0x33, 0x33));
+    p.setPen(palette().color(QPalette::Mid));
     p.drawRect(rect().adjusted(0, 0, -1, -1));
 
     const QRect content = rect().adjusted(8, 8, -8, -8);
@@ -87,7 +88,7 @@ class VideoPreviewWidget final : public QWidget {
       return;
     }
 
-    p.setPen(QColor(0xaa, 0xaa, 0xaa));
+    p.setPen(palette().color(QPalette::Text));
     const QString text = statusText_.isEmpty() ? QStringLiteral("Preview") : statusText_;
     p.drawText(content, Qt::AlignCenter | Qt::TextWordWrap, text);
   }
@@ -507,7 +508,7 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   root->setSpacing(12);
 
   auto* title = new QLabel("Camera", this);
-  title->setStyleSheet("font-size: 20px; font-weight: 600;");
+  title->setProperty("scRole", "title");
   root->addWidget(title);
 
   auto* box = new QGroupBox("Processed Camera → Virtual Camera (daemon-driven)", this);
@@ -570,15 +571,14 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   engineRow->addSpacing(12);
   engineRow->addWidget(new QLabel("Active:", box));
   effectEngineValue_ = new QLabel("—", box);
-  effectEngineValue_->setStyleSheet("font-weight: 600;");
+  effectEngineValue_->setProperty("scRole", "value");
   engineRow->addWidget(effectEngineValue_);
   engineRow->addStretch(1);
   boxLayout->addLayout(engineRow);
 
   maxineBanner_ = new QLabel(box);
   maxineBanner_->setWordWrap(true);
-  maxineBanner_->setStyleSheet(
-      "background: #3a1414; border: 1px solid #663333; color: #f0d0d0; padding: 8px; border-radius: 4px;");
+  maxineBanner_->setProperty("scBanner", "warning");
   maxineBanner_->setVisible(false);
   boxLayout->addWidget(maxineBanner_);
 

@@ -55,6 +55,8 @@ void MainWindow::BuildUi() {
 
   nav_ = new QListWidget(central);
   nav_->setFixedWidth(220);
+  nav_->setProperty("scRole", "nav");
+  nav_->setSpacing(2);
   nav_->addItem("Microphone");
   nav_->addItem("Camera");
   nav_->setCurrentRow(0);

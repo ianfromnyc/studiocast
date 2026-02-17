@@ -332,6 +332,7 @@ add_executable(studiocast
         src/main.cpp
         src/gui/theme.h
         src/gui/theme.cpp
+        src/gui/resources/gui_resources.qrc
         src/gui/main_window.h
         src/gui/main_window.cpp
         src/gui/pages/audio_page.h

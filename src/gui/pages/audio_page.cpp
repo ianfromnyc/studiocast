@@ -84,7 +84,7 @@ namespace studiocast::gui {
         root->setSpacing(12);
 
         auto *title = new QLabel("Microphone", this);
-        title->setStyleSheet("font-size: 20px; font-weight: 600;");
+        title->setProperty("scRole", "title");
         root->addWidget(title);
 
         // -----------------------
@@ -105,22 +105,21 @@ namespace studiocast::gui {
         engineRow->addSpacing(12);
         engineRow->addWidget(new QLabel("Active:", aiBox));
         engineActiveValue_ = new QLabel("—", aiBox);
-        engineActiveValue_->setStyleSheet("font-weight: 600;");
+        engineActiveValue_->setProperty("scRole", "value");
         engineRow->addWidget(engineActiveValue_);
         engineRow->addStretch(1);
         aiLayout->addLayout(engineRow);
 
         aiInfoBanner_ = new QLabel(aiBox);
         aiInfoBanner_->setWordWrap(true);
-        aiInfoBanner_->setStyleSheet(
-            "background: #14213a; border: 1px solid #334466; color: #d0e0f0; padding: 8px; border-radius: 4px;");
+        aiInfoBanner_->setProperty("scBanner", "info");
         aiInfoBanner_->setVisible(false);
         aiLayout->addWidget(aiInfoBanner_);
 
         aiBanner_ = new QLabel(aiBox);
         aiBanner_->setWordWrap(true);
-        aiBanner_->setStyleSheet(
-            "background: #3a1414; border: 1px solid #663333; color: #f0d0d0; padding: 8px; border-radius: 4px;");
+        // Used for "daemon unavailable" and similar top-level issues.
+        aiBanner_->setProperty("scBanner", "warning");
         aiBanner_->setVisible(false);
         aiLayout->addWidget(aiBanner_);
 
@@ -262,7 +261,7 @@ namespace studiocast::gui {
         root->addWidget(vmicBox);
 
         auto *speakersTitle = new QLabel("Speakers", this);
-        speakersTitle->setStyleSheet("font-size: 20px; font-weight: 600;");
+        speakersTitle->setProperty("scRole", "title");
         root->addWidget(speakersTitle);
 
         // -----------------------
