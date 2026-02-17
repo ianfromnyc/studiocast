@@ -3,147 +3,183 @@
 #include <QJsonObject>
 #include <QStringList>
 #include <QWidget>
+
 #include <vector>
+
 #include "core/audio/pulse/pactl.h"
 
-class QComboBox;
 class QCheckBox;
+class QComboBox;
+class QGroupBox;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
 class QSlider;
 class QSpinBox;
+class QToolButton;
 class QTimer;
 
 namespace studiocast::gui {
-    class AudioPage final : public QWidget {
-        Q_OBJECT
+enum class AudioPageMode {
+  Microphone,
+  Speakers,
+};
 
-    public:
-        explicit AudioPage(QWidget *parent = nullptr);
+class AudioPage final : public QWidget {
+  Q_OBJECT
 
-    private slots:
-        void RefreshSources();
+ public:
+  explicit AudioPage(AudioPageMode mode, QWidget* parent = nullptr);
 
-        void RefreshStatus();
+ private slots:
+  void RefreshSources();
 
-        void OnAiNoiseToggled(bool checked);
-        void OnAiEchoToggled(bool checked);
-        void OnAiStudioVoiceToggled(bool checked);
-        void OnAiStrengthChanged(int v);
+  void RefreshStatus();
 
-        void OnAiEngineChanged(int index);
-        void OnAiOpenAudioModelChanged(int index);
-        void OnAiOpenAudioModelPathEdited();
-        void OnAiBrowseOpenAudioModel();
-        void OnOpenAudioInstallHints();
+  void OnAiNoiseToggled(bool checked);
+  void OnAiEchoToggled(bool checked);
+  void OnAiStudioVoiceToggled(bool checked);
+  void OnAiStrengthChanged(int v);
 
-        void OnAiSpeakerNoiseToggled(bool checked);
-        void OnAiSpeakerStrengthChanged(int v);
+  void OnAiEngineChanged(int index);
+  void OnAiOpenAudioModelChanged(int index);
+  void OnAiOpenAudioModelPathEdited();
+  void OnAiBrowseOpenAudioModel();
+  void OnOpenAudioInstallHints();
 
-        void OnAiStart();
-        void OnAiStop();
+  void OnAiSpeakerNoiseToggled(bool checked);
+  void OnAiSpeakerEchoToggled(bool checked);
+  void OnAiSpeakerStrengthChanged(int v);
+  void OnAiSpeakerOpenAudioModelChanged(int index);
+  void OnAiSpeakerOpenAudioModelPathEdited();
+  void OnAiSpeakerBrowseOpenAudioModel();
 
-        void OnCreateVirtualMic();
+  void OnAiStart();
+  void OnAiStop();
 
-        void OnDestroyVirtualMic();
+  void OnCreateVirtualMic();
+  void OnDestroyVirtualMic();
+  void OnStartLoopback();
+  void OnStopLoopback();
+  void OnSourceChanged(int index);
 
-        void OnStartLoopback();
+  void OnEnableVirtualSpeakers();
+  void OnStopSpeakersRouting();
+  void OnDestroyVirtualSpeakers();
 
-        void OnStopLoopback();
+  void OnToggleAdvanced(bool checked);
 
-        void OnSourceChanged(int index);
+ private:
+  void ShowError(const QString& title, const QString& details);
 
-        void OnEnableVirtualSpeakers();
+  void RefreshDaemonAudioStatus();
+  void PushDaemonAudioConfig();
+  void PushDaemonSourceSelection();
+  void SetAiControlsEnabled(bool enabled, const QString& reason);
 
-        void OnStopSpeakersRouting();
+  void UpdateEngineUiVisibility();
+  void UpdateMicInterlocks();
 
-        void OnDestroyVirtualSpeakers();
+  void SetAdvancedVisible(bool visible);
 
-    private:
-        void ShowError(const QString &title, const QString &details);
+  AudioPageMode mode_ = AudioPageMode::Microphone;
 
-        void RefreshDaemonAudioStatus();
-        void PushDaemonAudioConfig();
-        void PushDaemonSourceSelection();
-        void SetAiControlsEnabled(bool enabled, const QString& reason);
+  // --- Shared high-level sections
+  QLabel* titleLabel_ = nullptr;
+  QToolButton* advancedToggle_ = nullptr;
 
-        void UpdateEngineUiVisibility();
-        void UpdateMicInterlocks();
+  QGroupBox* backendBox_ = nullptr;
 
-        QComboBox *sourceCombo_ = nullptr;
-        QPushButton *refreshSourcesBtn_ = nullptr;
+  // --- Microphone UI (may be nullptr in Speakers mode)
+  QGroupBox* micEffectsBox_ = nullptr;
+  QComboBox* sourceCombo_ = nullptr;
+  QPushButton* refreshSourcesBtn_ = nullptr;
+  QSpinBox* latencySpin_ = nullptr;
 
-        QComboBox *portCombo_ = nullptr;
-        std::vector<studiocast::audio::pulse::PactlSourceInfo> cachedSources_;
+  // Daemon-driven AFX controls (MVP).
+  QLabel* aiBanner_ = nullptr;
 
+  // Backend selection (mirrors video_page.cpp "Effect engine").
+  QComboBox* engineCombo_ = nullptr;
+  QLabel* engineActiveValue_ = nullptr;
 
-        QSpinBox *latencySpin_ = nullptr;
+  // Informational banner for backend selection/fallback notes.
+  QLabel* aiInfoBanner_ = nullptr;
 
-        // Daemon-driven AFX controls (MVP).
-        QLabel* aiBanner_ = nullptr;
+  // Open-source model selection (Open Audio packs) - microphone.
+  QLabel* openAudioModelLabel_ = nullptr;
+  QComboBox* openAudioModelCombo_ = nullptr;
+  QLabel* openAudioModelPathLabel_ = nullptr;
+  QLineEdit* openAudioModelPathEdit_ = nullptr;
+  QPushButton* browseOpenAudioModelBtn_ = nullptr;
+  QPushButton* openAudioInstallHintsBtn_ = nullptr;
 
-        // Backend selection (mirrors video_page.cpp "Effect engine").
-        QComboBox* engineCombo_ = nullptr;
-        QLabel* engineActiveValue_ = nullptr;
+  QCheckBox* noiseRemovalCb_ = nullptr;
+  QCheckBox* echoRemovalCb_ = nullptr;
+  QCheckBox* studioVoiceCb_ = nullptr;
+  QSlider* strengthSlider_ = nullptr;
+  QLabel* strengthValueLabel_ = nullptr;
 
-        // Informational banner for backend selection/fallback notes.
-        QLabel* aiInfoBanner_ = nullptr;
+  QPushButton* aiStartBtn_ = nullptr;
+  QPushButton* aiStopBtn_ = nullptr;
+  QPushButton* aiRefreshBtn_ = nullptr;
 
-        // Open-source model selection (Open Audio packs).
-        QLabel* openAudioModelLabel_ = nullptr;
-        QComboBox* openAudioModelCombo_ = nullptr;
-        QLabel* openAudioModelPathLabel_ = nullptr;
-        QLineEdit* openAudioModelPathEdit_ = nullptr;
-        QPushButton* browseOpenAudioModelBtn_ = nullptr;
-        QPushButton* openAudioInstallHintsBtn_ = nullptr;
+  // Advanced / legacy loopback and virtual device controls (microphone).
+  QGroupBox* legacyInputBox_ = nullptr;
+  QGroupBox* vmicBox_ = nullptr;
 
-        QCheckBox* noiseRemovalCb_ = nullptr;
-        QCheckBox* echoRemovalCb_ = nullptr;
-        QCheckBox* studioVoiceCb_ = nullptr;
-        QSlider* strengthSlider_ = nullptr;
-        QLabel* strengthValueLabel_ = nullptr;
+  QComboBox* portCombo_ = nullptr;
+  std::vector<studiocast::audio::pulse::PactlSourceInfo> cachedSources_;
 
-        QCheckBox* speakerNoiseRemovalCb_ = nullptr;
-        QSlider* speakerStrengthSlider_ = nullptr;
-        QLabel* speakerStrengthValueLabel_ = nullptr;
+  QPushButton* createBtn_ = nullptr;
+  QPushButton* destroyBtn_ = nullptr;
+  QPushButton* startBtn_ = nullptr;
+  QPushButton* stopBtn_ = nullptr;
 
-        QPushButton* aiStartBtn_ = nullptr;
-        QPushButton* aiStopBtn_ = nullptr;
-        QPushButton* aiRefreshBtn_ = nullptr;
+  // --- Speakers UI (may be nullptr in Microphone mode)
+  QGroupBox* speakerEffectsBox_ = nullptr;
+  QCheckBox* speakerNoiseRemovalCb_ = nullptr;
+  QCheckBox* speakerEchoRemovalCb_ = nullptr;
+  QSlider* speakerStrengthSlider_ = nullptr;
+  QLabel* speakerStrengthValueLabel_ = nullptr;
 
-        bool updatingAiUi_ = false;
-        bool daemonAiSupported_ = false;
-        QString daemonAiDisableReason_;
-        QString daemonStatusText_;
+  // Open-source model selection - speakers.
+  QLabel* speakerOpenAudioModelLabel_ = nullptr;
+  QComboBox* speakerOpenAudioModelCombo_ = nullptr;
+  QLabel* speakerOpenAudioModelPathLabel_ = nullptr;
+  QLineEdit* speakerOpenAudioModelPathEdit_ = nullptr;
+  QPushButton* speakerBrowseOpenAudioModelBtn_ = nullptr;
 
-        // Last speaker routing status reported by the daemon (used to make the UI
-        // behave sensibly when routing is provided by the daemon pipeline rather than
-        // Pulse module-loopback).
-        bool daemonSpeakersRoutingActive_ = false;
-        QString daemonSpeakersRouteMode_;
+  QGroupBox* speakersBox_ = nullptr;
+  QPushButton* enableSpeakersBtn_ = nullptr;
+  QPushButton* stopSpeakersBtn_ = nullptr;
+  QPushButton* destroySpeakersBtn_ = nullptr;
 
-        // Cached daemon effects blob so we can preserve fields not represented in this UI.
-        QJsonObject lastAudioEffectsObj_;
+  // --- Status
+  QGroupBox* statusBox_ = nullptr;
+  QPlainTextEdit* statusText_ = nullptr;
+  QPushButton* refreshStatusBtn_ = nullptr;
 
-        // Cached Open Audio diagnostics (for install hints dialog).
-        bool openAudioStatusPresent_ = false;
-        bool openAudioOk_ = false;
-        QStringList openAudioInstallHints_;
+  // --- Shared state
+  bool updatingAiUi_ = false;
+  bool daemonAiSupported_ = false;
+  QString daemonAiDisableReason_;
+  QString daemonStatusText_;
 
-        QPushButton *createBtn_ = nullptr;
-        QPushButton *destroyBtn_ = nullptr;
-        QPushButton *startBtn_ = nullptr;
-        QPushButton *stopBtn_ = nullptr;
+  // Last speaker routing status reported by the daemon.
+  bool daemonSpeakersRoutingActive_ = false;
+  QString daemonSpeakersRouteMode_;
 
-        QPushButton *enableSpeakersBtn_ = nullptr;
-        QPushButton *stopSpeakersBtn_ = nullptr;
-        QPushButton *destroySpeakersBtn_ = nullptr;
+  // Cached daemon effects blob so we can preserve fields not represented in this UI.
+  QJsonObject lastAudioEffectsObj_;
 
-        QPlainTextEdit *statusText_ = nullptr;
-        QPushButton *refreshStatusBtn_ = nullptr;
+  // Cached Open Audio diagnostics (for install hints dialog).
+  bool openAudioStatusPresent_ = false;
+  bool openAudioOk_ = false;
+  QStringList openAudioInstallHints_;
 
-        QTimer *pollTimer_ = nullptr;
-    };
-} // namespace studiocast::gui
+  QTimer* pollTimer_ = nullptr;
+};
+
+}  // namespace studiocast::gui

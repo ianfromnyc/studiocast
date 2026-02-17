@@ -3,16 +3,19 @@
 #include <algorithm>
 #include <QAction>
 #include <QApplication>
+#include <QFrame>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLayout>
-#include <QListWidget>
+#include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QScrollArea>
 #include <QScreen>
 #include <QStackedWidget>
+#include <QTabBar>
+#include <QVBoxLayout>
 #include <QWidget>
 
 #include "gui/pages/audio_page.h"
@@ -21,13 +24,22 @@
 
 namespace studiocast::gui {
 
+namespace {
+QScrollArea* WrapScrollable(QWidget* page, QWidget* parent) {
+  auto* scroll = new QScrollArea(parent);
+  scroll->setWidgetResizable(true);
+  scroll->setFrameShape(QFrame::NoFrame);
+  scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  scroll->setWidget(page);
+  return scroll;
+}
+}  // namespace
+
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   setWindowTitle("StudioCast");
 
   // Choose a sane initial size that fits on smaller displays.
-  // If the UI ends up taller than the screen, the central scroll area will
-  // allow reaching everything.
-  constexpr QSize kDesiredSize{1100, 700};
+  constexpr QSize kDesiredSize{1100, 720};
   const QScreen* screen = QGuiApplication::primaryScreen();
   if (screen) {
     const QSize avail = screen->availableGeometry().size();
@@ -44,32 +56,45 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 void MainWindow::BuildUi() {
-  auto* scrollArea = new QScrollArea(this);
-  scrollArea->setWidgetResizable(true);
+  auto* central = new QWidget(this);
+  auto* root = new QVBoxLayout(central);
+  root->setContentsMargins(0, 0, 0, 0);
+  root->setSpacing(0);
 
-  auto* central = new QWidget(scrollArea);
-  auto* layout = new QHBoxLayout(central);
-  layout->setContentsMargins(12, 12, 12, 12);
-  layout->setSpacing(12);
-  layout->setSizeConstraint(QLayout::SetMinimumSize);
+  // Top bar (Broadcast-style tabs).
+  topBar_ = new QFrame(central);
+  topBar_->setObjectName("scTopBar");
+  auto* topLayout = new QHBoxLayout(topBar_);
+  topLayout->setContentsMargins(16, 12, 16, 12);
+  topLayout->setSpacing(12);
 
-  nav_ = new QListWidget(central);
-  nav_->setFixedWidth(220);
-  nav_->setProperty("scRole", "nav");
-  nav_->setSpacing(2);
-  nav_->addItem("Microphone");
-  nav_->addItem("Camera");
-  nav_->setCurrentRow(0);
+  brandLabel_ = new QLabel("StudioCast", topBar_);
+  brandLabel_->setProperty("scRole", "brand");
+  topLayout->addWidget(brandLabel_);
+
+  tabs_ = new QTabBar(topBar_);
+  tabs_->setExpanding(false);
+  tabs_->setDrawBase(false);
+  tabs_->addTab("Microphone");
+  tabs_->addTab("Speakers");
+  tabs_->addTab("Camera");
+  tabs_->setCurrentIndex(0);
+  topLayout->addStretch(1);
+  topLayout->addWidget(tabs_, 0, Qt::AlignCenter);
+  topLayout->addStretch(1);
+
+  root->addWidget(topBar_, 0);
 
   pages_ = new QStackedWidget(central);
-  pages_->addWidget(new AudioPage(pages_));
-  pages_->addWidget(new VideoPage(pages_));
 
-  layout->addWidget(nav_);
-  layout->addWidget(pages_, /*stretch*/ 1);
+  // Each page gets its own scroll area so the header stays fixed.
+  pages_->addWidget(WrapScrollable(new AudioPage(AudioPageMode::Microphone, pages_), pages_));
+  pages_->addWidget(WrapScrollable(new AudioPage(AudioPageMode::Speakers, pages_), pages_));
+  pages_->addWidget(WrapScrollable(new VideoPage(pages_), pages_));
 
-  scrollArea->setWidget(central);
-  setCentralWidget(scrollArea);
+  root->addWidget(pages_, 1);
+
+  setCentralWidget(central);
 }
 
 void MainWindow::BuildMenu() {
@@ -89,7 +114,7 @@ void MainWindow::BuildMenu() {
 }
 
 void MainWindow::ConnectSignals() {
-  connect(nav_, &QListWidget::currentRowChanged, pages_, &QStackedWidget::setCurrentIndex);
+  connect(tabs_, &QTabBar::currentChanged, pages_, &QStackedWidget::setCurrentIndex);
 }
 
 }  // namespace studiocast::gui

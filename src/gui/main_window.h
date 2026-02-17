@@ -2,7 +2,9 @@
 
 #include <QMainWindow>
 
-class QListWidget;
+class QFrame;
+class QLabel;
+class QTabBar;
 class QStackedWidget;
 
 namespace studiocast::gui {
@@ -18,7 +20,9 @@ class MainWindow final : public QMainWindow {
   void ConnectSignals();
   void BuildMenu();
 
-  QListWidget* nav_ = nullptr;
+  QFrame* topBar_ = nullptr;
+  QLabel* brandLabel_ = nullptr;
+  QTabBar* tabs_ = nullptr;
   QStackedWidget* pages_ = nullptr;
 };
 
