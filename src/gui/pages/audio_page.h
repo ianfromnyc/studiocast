@@ -8,7 +8,6 @@
 
 #include "core/audio/pulse/pactl.h"
 
-class QCheckBox;
 class QComboBox;
 class QGroupBox;
 class QLabel;
@@ -21,6 +20,7 @@ class QToolButton;
 class QTimer;
 
 namespace studiocast::gui {
+
 enum class AudioPageMode {
   Microphone,
   Speakers,
@@ -34,29 +34,24 @@ class AudioPage final : public QWidget {
 
  private slots:
   void RefreshSources();
-
   void RefreshStatus();
 
-  void OnAiNoiseToggled(bool checked);
-  void OnAiEchoToggled(bool checked);
-  void OnAiStudioVoiceToggled(bool checked);
   void OnAiStrengthChanged(int v);
+  void OnAiSpeakerStrengthChanged(int v);
 
   void OnAiEngineChanged(int index);
+
+  void OnMicEffectChanged(int index);
+  void OnSpeakerEffectChanged(int index);
+
   void OnAiOpenAudioModelChanged(int index);
   void OnAiOpenAudioModelPathEdited();
   void OnAiBrowseOpenAudioModel();
   void OnOpenAudioInstallHints();
 
-  void OnAiSpeakerNoiseToggled(bool checked);
-  void OnAiSpeakerEchoToggled(bool checked);
-  void OnAiSpeakerStrengthChanged(int v);
   void OnAiSpeakerOpenAudioModelChanged(int index);
   void OnAiSpeakerOpenAudioModelPathEdited();
   void OnAiSpeakerBrowseOpenAudioModel();
-
-  void OnAiStart();
-  void OnAiStop();
 
   void OnCreateVirtualMic();
   void OnDestroyVirtualMic();
@@ -79,7 +74,6 @@ class AudioPage final : public QWidget {
   void SetAiControlsEnabled(bool enabled, const QString& reason);
 
   void UpdateEngineUiVisibility();
-  void UpdateMicInterlocks();
 
   void SetAdvancedVisible(bool visible);
 
@@ -91,12 +85,6 @@ class AudioPage final : public QWidget {
 
   QGroupBox* backendBox_ = nullptr;
 
-  // --- Microphone UI (may be nullptr in Speakers mode)
-  QGroupBox* micEffectsBox_ = nullptr;
-  QComboBox* sourceCombo_ = nullptr;
-  QPushButton* refreshSourcesBtn_ = nullptr;
-  QSpinBox* latencySpin_ = nullptr;
-
   // Daemon-driven AFX controls (MVP).
   QLabel* aiBanner_ = nullptr;
 
@@ -107,6 +95,17 @@ class AudioPage final : public QWidget {
   // Informational banner for backend selection/fallback notes.
   QLabel* aiInfoBanner_ = nullptr;
 
+  // --- Microphone UI (may be nullptr in Speakers mode)
+  QGroupBox* micEffectsBox_ = nullptr;
+  QComboBox* sourceCombo_ = nullptr;
+  QPushButton* refreshSourcesBtn_ = nullptr;
+
+  // Broadcast-like single effect selector.
+  QComboBox* micEffectCombo_ = nullptr;
+
+  QSlider* strengthSlider_ = nullptr;
+  QLabel* strengthValueLabel_ = nullptr;
+
   // Open-source model selection (Open Audio packs) - microphone.
   QLabel* openAudioModelLabel_ = nullptr;
   QComboBox* openAudioModelCombo_ = nullptr;
@@ -115,21 +114,12 @@ class AudioPage final : public QWidget {
   QPushButton* browseOpenAudioModelBtn_ = nullptr;
   QPushButton* openAudioInstallHintsBtn_ = nullptr;
 
-  QCheckBox* noiseRemovalCb_ = nullptr;
-  QCheckBox* echoRemovalCb_ = nullptr;
-  QCheckBox* studioVoiceCb_ = nullptr;
-  QSlider* strengthSlider_ = nullptr;
-  QLabel* strengthValueLabel_ = nullptr;
-
-  QPushButton* aiStartBtn_ = nullptr;
-  QPushButton* aiStopBtn_ = nullptr;
-  QPushButton* aiRefreshBtn_ = nullptr;
-
   // Advanced / legacy loopback and virtual device controls (microphone).
   QGroupBox* legacyInputBox_ = nullptr;
   QGroupBox* vmicBox_ = nullptr;
 
   QComboBox* portCombo_ = nullptr;
+  QSpinBox* latencySpin_ = nullptr;
   std::vector<studiocast::audio::pulse::PactlSourceInfo> cachedSources_;
 
   QPushButton* createBtn_ = nullptr;
@@ -139,8 +129,8 @@ class AudioPage final : public QWidget {
 
   // --- Speakers UI (may be nullptr in Microphone mode)
   QGroupBox* speakerEffectsBox_ = nullptr;
-  QCheckBox* speakerNoiseRemovalCb_ = nullptr;
-  QCheckBox* speakerEchoRemovalCb_ = nullptr;
+  QComboBox* speakerEffectCombo_ = nullptr;
+
   QSlider* speakerStrengthSlider_ = nullptr;
   QLabel* speakerStrengthValueLabel_ = nullptr;
 

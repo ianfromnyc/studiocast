@@ -29,6 +29,49 @@ QMainWindow::separator {
   height: 1px;
 }
 
+
+/* Top bar */
+QFrame#scTopBar {
+  background: #121A26;
+  border-bottom: 1px solid #273247;
+}
+
+QLabel[scRole="brand"] {
+  font-size: 14.5pt;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: #E7EEF8;
+  background: transparent;
+}
+
+/* Broadcast-like tab chips */
+QTabBar {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid #273247;
+  border-radius: 999px;
+  padding: 3px;
+}
+
+QTabBar::tab {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 6px 14px;
+  color: #A9B4C5;
+  min-width: 64px;
+}
+
+QTabBar::tab:hover:!selected {
+  background: rgba(255, 255, 255, 0.05);
+  color: #E7EEF8;
+}
+
+QTabBar::tab:selected {
+  background: rgba(45, 212, 255, 0.16);
+  border-color: rgba(45, 212, 255, 0.45);
+  color: #E7EEF8;
+}
+
 /* Scroll areas */
 QScrollArea {
   background: transparent;

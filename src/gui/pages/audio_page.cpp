@@ -1,6 +1,5 @@
 #include "audio_page.h"
 
-#include <QCheckBox>
 #include <QComboBox>
 #include <QFileDialog>
 #include <QGroupBox>
@@ -194,17 +193,18 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget* parent) : QWidget(parent), mod
       modelPathRow->addWidget(browseOpenAudioModelBtn_);
       aiLayout->addLayout(modelPathRow);
 
-      // Effect toggles
-      auto* aiRow = new QHBoxLayout();
-      noiseRemovalCb_ = new QCheckBox("Noise removal", micEffectsBox_);
-      echoRemovalCb_ = new QCheckBox("Room echo removal", micEffectsBox_);
-      studioVoiceCb_ = new QCheckBox("Studio voice", micEffectsBox_);
-
-      aiRow->addWidget(noiseRemovalCb_);
-      aiRow->addWidget(echoRemovalCb_);
-      aiRow->addWidget(studioVoiceCb_);
-      aiRow->addStretch(1);
-      aiLayout->addLayout(aiRow);
+      // Effect selection (Broadcast-style single selector).
+      auto* effectRow = new QHBoxLayout();
+      effectRow->addWidget(new QLabel("Effect:", micEffectsBox_));
+      micEffectCombo_ = new QComboBox(micEffectsBox_);
+      micEffectCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+      micEffectCombo_->addItem("Off", "off");
+      micEffectCombo_->addItem("Noise removal", "noise");
+      micEffectCombo_->addItem("Room echo removal", "echo");
+      micEffectCombo_->addItem("Noise + echo (combined)", "noise_echo");
+      micEffectCombo_->addItem("Studio voice", "studio_voice");
+      effectRow->addWidget(micEffectCombo_, 1);
+      aiLayout->addLayout(effectRow);
 
       // Strength
       auto* strengthRow = new QHBoxLayout();
@@ -219,21 +219,12 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget* parent) : QWidget(parent), mod
       strengthRow->addWidget(strengthValueLabel_);
       aiLayout->addLayout(strengthRow);
 
-      auto* buttonsRow = new QHBoxLayout();
-      aiStartBtn_ = new QPushButton("Start", micEffectsBox_);
-      aiStartBtn_->setProperty("scVariant", "primary");
-      aiStopBtn_ = new QPushButton("Stop", micEffectsBox_);
-      aiRefreshBtn_ = new QPushButton("Refresh status", micEffectsBox_);
-
-      buttonsRow->addWidget(aiStartBtn_);
-      buttonsRow->addWidget(aiStopBtn_);
-      buttonsRow->addWidget(aiRefreshBtn_);
-      buttonsRow->addStretch(1);
-      aiLayout->addLayout(buttonsRow);
-
-      aiLayout->addWidget(
-          new QLabel("Tip: Studio voice is mutually exclusive with Noise removal and Room echo removal.",
-                     micEffectsBox_));
+      auto* tip = new QLabel(
+          "Tip: Set Effect to Off for pass-through. In other apps, choose “StudioCast Microphone”.",
+          micEffectsBox_);
+      tip->setWordWrap(true);
+      tip->setProperty("scRole", "muted");
+      aiLayout->addWidget(tip);
     }
     root->addWidget(micEffectsBox_);
 
@@ -325,13 +316,17 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget* parent) : QWidget(parent), mod
       modelPathRow->addWidget(speakerBrowseOpenAudioModelBtn_);
       spkLayout->addLayout(modelPathRow);
 
-      auto* row = new QHBoxLayout();
-      speakerNoiseRemovalCb_ = new QCheckBox("Noise removal", speakerEffectsBox_);
-      speakerEchoRemovalCb_ = new QCheckBox("Room echo removal", speakerEffectsBox_);
-      row->addWidget(speakerNoiseRemovalCb_);
-      row->addWidget(speakerEchoRemovalCb_);
-      row->addStretch(1);
-      spkLayout->addLayout(row);
+      // Effect selection (Broadcast-style single selector).
+      auto* effectRow = new QHBoxLayout();
+      effectRow->addWidget(new QLabel("Effect:", speakerEffectsBox_));
+      speakerEffectCombo_ = new QComboBox(speakerEffectsBox_);
+      speakerEffectCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+      speakerEffectCombo_->addItem("Off", "off");
+      speakerEffectCombo_->addItem("Noise removal", "noise");
+      speakerEffectCombo_->addItem("Room echo removal", "echo");
+      speakerEffectCombo_->addItem("Noise + echo (combined)", "noise_echo");
+      effectRow->addWidget(speakerEffectCombo_, 1);
+      spkLayout->addLayout(effectRow);
 
       auto* strengthRow = new QHBoxLayout();
       strengthRow->addWidget(new QLabel("Strength:", speakerEffectsBox_));
@@ -424,15 +419,16 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget* parent) : QWidget(parent), mod
     connect(openAudioInstallHintsBtn_, &QPushButton::clicked, this, &AudioPage::OnOpenAudioInstallHints);
   }
 
-  if (noiseRemovalCb_) connect(noiseRemovalCb_, &QCheckBox::toggled, this, &AudioPage::OnAiNoiseToggled);
-  if (echoRemovalCb_) connect(echoRemovalCb_, &QCheckBox::toggled, this, &AudioPage::OnAiEchoToggled);
-  if (studioVoiceCb_) connect(studioVoiceCb_, &QCheckBox::toggled, this, &AudioPage::OnAiStudioVoiceToggled);
+  if (micEffectCombo_) {
+    connect(micEffectCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &AudioPage::OnMicEffectChanged);
+  }
   if (strengthSlider_) connect(strengthSlider_, &QSlider::valueChanged, this, &AudioPage::OnAiStrengthChanged);
 
-  if (speakerNoiseRemovalCb_)
-    connect(speakerNoiseRemovalCb_, &QCheckBox::toggled, this, &AudioPage::OnAiSpeakerNoiseToggled);
-  if (speakerEchoRemovalCb_)
-    connect(speakerEchoRemovalCb_, &QCheckBox::toggled, this, &AudioPage::OnAiSpeakerEchoToggled);
+  if (speakerEffectCombo_) {
+    connect(speakerEffectCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &AudioPage::OnSpeakerEffectChanged);
+  }
   if (speakerStrengthSlider_)
     connect(speakerStrengthSlider_, &QSlider::valueChanged, this, &AudioPage::OnAiSpeakerStrengthChanged);
   if (speakerOpenAudioModelCombo_) {
@@ -448,9 +444,6 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget* parent) : QWidget(parent), mod
             &AudioPage::OnAiSpeakerBrowseOpenAudioModel);
   }
 
-  if (aiStartBtn_) connect(aiStartBtn_, &QPushButton::clicked, this, &AudioPage::OnAiStart);
-  if (aiStopBtn_) connect(aiStopBtn_, &QPushButton::clicked, this, &AudioPage::OnAiStop);
-  if (aiRefreshBtn_) connect(aiRefreshBtn_, &QPushButton::clicked, this, &AudioPage::RefreshStatus);
 
   if (createBtn_) connect(createBtn_, &QPushButton::clicked, this, &AudioPage::OnCreateVirtualMic);
   if (destroyBtn_) connect(destroyBtn_, &QPushButton::clicked, this, &AudioPage::OnDestroyVirtualMic);
@@ -713,28 +706,35 @@ void AudioPage::SetAiControlsEnabled(bool enabled, const QString& reason) {
   if (speakerOpenAudioModelPathEdit_) speakerOpenAudioModelPathEdit_->setEnabled(enabled);
   if (speakerBrowseOpenAudioModelBtn_) speakerBrowseOpenAudioModelBtn_->setEnabled(enabled);
 
-  // Microphone toggles
-  if (noiseRemovalCb_) noiseRemovalCb_->setEnabled(enabled);
-  if (echoRemovalCb_) echoRemovalCb_->setEnabled(enabled);
-  if (studioVoiceCb_) studioVoiceCb_->setEnabled(enabled);
+  // Microphone controls
+  if (micEffectCombo_) micEffectCombo_->setEnabled(enabled);
   if (strengthSlider_) strengthSlider_->setEnabled(enabled);
   if (strengthValueLabel_) strengthValueLabel_->setEnabled(enabled);
 
-  // Speaker toggles
-  if (speakerNoiseRemovalCb_) speakerNoiseRemovalCb_->setEnabled(enabled);
-  if (speakerEchoRemovalCb_) speakerEchoRemovalCb_->setEnabled(enabled);
+  // Speaker controls
+  if (speakerEffectCombo_) speakerEffectCombo_->setEnabled(enabled);
   if (speakerStrengthSlider_) speakerStrengthSlider_->setEnabled(enabled);
   if (speakerStrengthValueLabel_) speakerStrengthValueLabel_->setEnabled(enabled);
-
-  if (aiStartBtn_) aiStartBtn_->setEnabled(enabled);
-  if (aiStopBtn_) aiStopBtn_->setEnabled(enabled);
 
   if (aiBanner_) {
     aiBanner_->setVisible(!enabled && !reason.isEmpty());
     aiBanner_->setText(reason);
   }
 
-  UpdateMicInterlocks();
+  // Disable strength sliders when effect is Off (Broadcast-like).
+  if (enabled) {
+    if (micEffectCombo_ && strengthSlider_) {
+      const bool active = micEffectCombo_->currentData().toString() != "off";
+      strengthSlider_->setEnabled(active);
+      if (strengthValueLabel_) strengthValueLabel_->setEnabled(active);
+    }
+    if (speakerEffectCombo_ && speakerStrengthSlider_) {
+      const bool active = speakerEffectCombo_->currentData().toString() != "off";
+      speakerStrengthSlider_->setEnabled(active);
+      if (speakerStrengthValueLabel_) speakerStrengthValueLabel_->setEnabled(active);
+    }
+  }
+
   UpdateEngineUiVisibility();
 }
 
@@ -769,16 +769,6 @@ void AudioPage::UpdateEngineUiVisibility() {
   if (openAudioInstallHintsBtn_) openAudioInstallHintsBtn_->setVisible(showOpen);
 }
 
-void AudioPage::UpdateMicInterlocks() {
-  if (!noiseRemovalCb_ || !echoRemovalCb_ || !studioVoiceCb_ || !strengthSlider_) return;
-
-  const bool studio = studioVoiceCb_->isChecked();
-  const bool allowNoiseEcho = daemonAiSupported_ && !studio;
-  noiseRemovalCb_->setEnabled(allowNoiseEcho);
-  echoRemovalCb_->setEnabled(allowNoiseEcho);
-  strengthSlider_->setEnabled(allowNoiseEcho);
-  if (strengthValueLabel_) strengthValueLabel_->setEnabled(allowNoiseEcho);
-}
 
 void AudioPage::RefreshDaemonAudioStatus() {
   daemonStatusText_.clear();
@@ -1042,9 +1032,26 @@ void AudioPage::RefreshDaemonAudioStatus() {
 
   updatingAiUi_ = true;
 
-  if (noiseRemovalCb_) noiseRemovalCb_->setChecked(noise);
-  if (echoRemovalCb_) echoRemovalCb_->setChecked(echo);
-  if (studioVoiceCb_) studioVoiceCb_->setChecked(studio);
+  auto setComboById = [](QComboBox* combo, const QString& id) {
+    if (!combo) return;
+    const int idx = combo->findData(id);
+    combo->setCurrentIndex(idx >= 0 ? idx : 0);
+  };
+
+  if (micEffectCombo_) {
+    QString id = "off";
+    if (studio) {
+      id = "studio_voice";
+    } else if (noise && echo) {
+      id = "noise_echo";
+    } else if (noise) {
+      id = "noise";
+    } else if (echo) {
+      id = "echo";
+    }
+    setComboById(micEffectCombo_, id);
+  }
+
   if (strengthSlider_) {
     strengthSlider_->setValue(std::max(0, std::min(100, strength)));
   }
@@ -1060,8 +1067,18 @@ void AudioPage::RefreshDaemonAudioStatus() {
     openAudioModelPathEdit_->setText(micModelPath);
   }
 
-  if (speakerNoiseRemovalCb_) speakerNoiseRemovalCb_->setChecked(spkNoise);
-  if (speakerEchoRemovalCb_) speakerEchoRemovalCb_->setChecked(spkEcho);
+  if (speakerEffectCombo_) {
+    QString id = "off";
+    if (spkNoise && spkEcho) {
+      id = "noise_echo";
+    } else if (spkNoise) {
+      id = "noise";
+    } else if (spkEcho) {
+      id = "echo";
+    }
+    setComboById(speakerEffectCombo_, id);
+  }
+
   if (speakerStrengthSlider_) {
     speakerStrengthSlider_->setValue(std::max(0, std::min(100, spkStrength)));
   }
@@ -1077,12 +1094,20 @@ void AudioPage::RefreshDaemonAudioStatus() {
     speakerOpenAudioModelPathEdit_->setText(spkModelPath);
   }
 
-  if (aiStartBtn_) aiStartBtn_->setEnabled(!audioEnabled);
-  if (aiStopBtn_) aiStopBtn_->setEnabled(audioEnabled);
-
   updatingAiUi_ = false;
 
-  UpdateMicInterlocks();
+  // Disable strength sliders when effect is Off (Broadcast-like).
+  if (micEffectCombo_ && strengthSlider_) {
+    const bool active = daemonAiSupported_ && (micEffectCombo_->currentData().toString() != "off");
+    strengthSlider_->setEnabled(active);
+    if (strengthValueLabel_) strengthValueLabel_->setEnabled(active);
+  }
+  if (speakerEffectCombo_ && speakerStrengthSlider_) {
+    const bool active = daemonAiSupported_ && (speakerEffectCombo_->currentData().toString() != "off");
+    speakerStrengthSlider_->setEnabled(active);
+    if (speakerStrengthValueLabel_) speakerStrengthValueLabel_->setEnabled(active);
+  }
+
   UpdateEngineUiVisibility();
 }
 
@@ -1116,10 +1141,11 @@ void AudioPage::PushDaemonAudioConfig() {
   effects.insert("engine", engine);
 
   // Microphone (only if this page has mic controls).
-  if (noiseRemovalCb_ && echoRemovalCb_ && studioVoiceCb_ && strengthSlider_) {
-    const bool studio = studioVoiceCb_->isChecked();
-    const bool noise = !studio && noiseRemovalCb_->isChecked();
-    const bool echo = !studio && echoRemovalCb_->isChecked();
+  if (micEffectCombo_ && strengthSlider_) {
+    const QString sel = micEffectCombo_->currentData().toString();
+    const bool studio = (sel == "studio_voice");
+    const bool noise = (sel == "noise") || (sel == "noise_echo");
+    const bool echo = (sel == "echo") || (sel == "noise_echo");
     const int strength = std::max(0, std::min(100, strengthSlider_->value()));
 
     QJsonObject mic = effects.value("microphone").toObject();
@@ -1133,9 +1159,10 @@ void AudioPage::PushDaemonAudioConfig() {
   }
 
   // Speaker (only if this page has speaker controls).
-  if (speakerNoiseRemovalCb_ && speakerEchoRemovalCb_ && speakerStrengthSlider_) {
-    const bool spkNoise = speakerNoiseRemovalCb_->isChecked();
-    const bool spkEcho = speakerEchoRemovalCb_->isChecked();
+  if (speakerEffectCombo_ && speakerStrengthSlider_) {
+    const QString sel = speakerEffectCombo_->currentData().toString();
+    const bool spkNoise = (sel == "noise") || (sel == "noise_echo");
+    const bool spkEcho = (sel == "echo") || (sel == "noise_echo");
     const int spkStrength = std::max(0, std::min(100, speakerStrengthSlider_->value()));
 
     QJsonObject spk = effects.value("speaker").toObject();
@@ -1150,9 +1177,12 @@ void AudioPage::PushDaemonAudioConfig() {
   QJsonObject patch;
   patch.insert("audio_effects", effects);
 
-  // In microphone mode we also toggle the service enabled flag based on mic effects.
-  if (noiseRemovalCb_ && echoRemovalCb_ && studioVoiceCb_) {
-    const bool enabled = studioVoiceCb_->isChecked() || noiseRemovalCb_->isChecked() || echoRemovalCb_->isChecked();
+  // In microphone mode we also toggle the service enabled flag.
+  //
+  // Note: Effect "Off" is still meaningful (it requests pass-through), so we keep the pipeline
+  // running unless the backend is explicitly Off.
+  if (micEffectCombo_) {
+    const bool enabled = (engine != "off");
     patch.insert("enabled", enabled);
     patch.insert("create_virtual_mic", true);
   }
@@ -1206,52 +1236,30 @@ void AudioPage::OnOpenAudioInstallHints() {
   QMessageBox::information(this, "Open Audio install hints", msg);
 }
 
-void AudioPage::OnAiNoiseToggled(bool checked) {
+void AudioPage::OnMicEffectChanged(int /*index*/) {
   if (updatingAiUi_) return;
-  if (!studioVoiceCb_ || !noiseRemovalCb_ || !echoRemovalCb_) return;
-  if (checked && studioVoiceCb_->isChecked()) {
-    updatingAiUi_ = true;
-    studioVoiceCb_->setChecked(false);
-    updatingAiUi_ = false;
+
+  if (micEffectCombo_ && strengthSlider_) {
+    const bool active = daemonAiSupported_ && (micEffectCombo_->currentData().toString() != "off");
+    strengthSlider_->setEnabled(active);
+    if (strengthValueLabel_) strengthValueLabel_->setEnabled(active);
   }
-  UpdateMicInterlocks();
+
   PushDaemonAudioConfig();
 }
 
-void AudioPage::OnAiEchoToggled(bool checked) {
+void AudioPage::OnSpeakerEffectChanged(int /*index*/) {
   if (updatingAiUi_) return;
-  if (!studioVoiceCb_ || !noiseRemovalCb_ || !echoRemovalCb_) return;
-  if (checked && studioVoiceCb_->isChecked()) {
-    updatingAiUi_ = true;
-    studioVoiceCb_->setChecked(false);
-    updatingAiUi_ = false;
+
+  if (speakerEffectCombo_ && speakerStrengthSlider_) {
+    const bool active = daemonAiSupported_ && (speakerEffectCombo_->currentData().toString() != "off");
+    speakerStrengthSlider_->setEnabled(active);
+    if (speakerStrengthValueLabel_) speakerStrengthValueLabel_->setEnabled(active);
   }
-  UpdateMicInterlocks();
+
   PushDaemonAudioConfig();
 }
 
-void AudioPage::OnAiStudioVoiceToggled(bool checked) {
-  if (updatingAiUi_) return;
-  if (!studioVoiceCb_ || !noiseRemovalCb_ || !echoRemovalCb_) return;
-  if (checked) {
-    updatingAiUi_ = true;
-    noiseRemovalCb_->setChecked(false);
-    echoRemovalCb_->setChecked(false);
-    updatingAiUi_ = false;
-  }
-  UpdateMicInterlocks();
-  PushDaemonAudioConfig();
-}
-
-void AudioPage::OnAiSpeakerNoiseToggled(bool /*checked*/) {
-  if (updatingAiUi_) return;
-  PushDaemonAudioConfig();
-}
-
-void AudioPage::OnAiSpeakerEchoToggled(bool /*checked*/) {
-  if (updatingAiUi_) return;
-  PushDaemonAudioConfig();
-}
 
 void AudioPage::OnAiSpeakerStrengthChanged(int v) {
   if (speakerStrengthValueLabel_) {
@@ -1290,23 +1298,6 @@ void AudioPage::OnAiStrengthChanged(int v) {
   PushDaemonAudioConfig();
 }
 
-void AudioPage::OnAiStart() {
-  std::string out;
-  QString err;
-  if (!DaemonRequest("AUDIO_START", &out, &err)) {
-    ShowError("Audio", "Failed to start daemon audio:\n\n" + err);
-  }
-  RefreshDaemonAudioStatus();
-}
-
-void AudioPage::OnAiStop() {
-  std::string out;
-  QString err;
-  if (!DaemonRequest("AUDIO_STOP", &out, &err)) {
-    ShowError("Audio", "Failed to stop daemon audio:\n\n" + err);
-  }
-  RefreshDaemonAudioStatus();
-}
 
 void AudioPage::OnCreateVirtualMic() {
   std::string err;
