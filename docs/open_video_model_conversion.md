@@ -55,9 +55,11 @@ cp -f "$TPL/LICENSE.txt" "$DEST/LICENSE.txt"
 Validate discovery:
 
 ```bash
-# Open CUDA helper tool can show all discovered packs.
-# (Depending on your repo version this may be split into list-models vs video-list-models.)
-./build/studiocast-open list-models
+# Show discovered Open Video packs.
+./build/studiocast-open video-list-models
+
+# Validate that ONNX Runtime can load the model (requires ORT-enabled build).
+./build/studiocast-open video-self-test --task face_detection
 ```
 
 ---

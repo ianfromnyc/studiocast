@@ -15,6 +15,7 @@
 #include "core/open_audio/open_audio_onnx_session.h"
 #include "core/open_cuda/model_pack_registry.h"
 #include "core/open_video/model_pack_registry.h"
+#include "core/open_video/open_video_onnx_session.h"
 #include "core/util/xdg.h"
 
 namespace fs = std::filesystem;
@@ -61,6 +62,8 @@ static void Usage(const char* argv0) {
             << "  " << argv0 << " video-paths\n"
             << "  " << argv0 << " video-list-models [--task <task>]\n"
             << "  " << argv0 << " video-install-hints\n"
+            << "  " << argv0
+            << " video-self-test [--model-id <id>] [--task <task>] [--model-path <path>] [--cpu-only]\n"
             << "\n"
             << "  " << argv0 << " audio-paths\n"
             << "  " << argv0 << " audio-list-models\n"
@@ -253,7 +256,141 @@ static int CmdVideoInstallHints(const char* argv0) {
   std::cout << "Tip: filter by task (e.g. face_detection):\n";
   std::cout << "  " << argv0 << " video-list-models --task face_detection\n";
 
+  std::cout << "\nValidate ONNX Runtime session creation:\n";
+  std::cout << "  " << argv0 << " video-self-test --task face_detection\n";
+
   return 0;
+}
+
+static int CmdVideoSelfTest(int argc, char** argv) {
+  std::cout << "StudioCast Open Video Self-Test\n\n";
+
+  const bool cpu_only = HasArg(argc, argv, "--cpu-only");
+  const std::string task = GetArgValue(argc, argv, "--task");
+  const std::string model_id = GetArgValue(argc, argv, "--model-id");
+  const std::string model_path = GetArgValue(argc, argv, "--model-path");
+
+#if !STUDIOCAST_HAVE_ONNXRUNTIME
+  std::cerr << "ERROR: This build was compiled without ONNX Runtime (STUDIOCAST_HAVE_ONNXRUNTIME=0).\n";
+  std::cerr << "Rebuild with ONNX Runtime available (set ONNXRUNTIME_ROOT or install onnxruntime dev package).\n";
+  (void)cpu_only;
+  (void)task;
+  (void)model_id;
+  (void)model_path;
+  return 2;
+#else
+  const auto ort = studiocast::open_video::OpenVideoOrtSession::QueryRuntimeInfo();
+  std::cout << "ONNX Runtime version: " << (ort.version.empty() ? "(unknown)" : ort.version) << "\n";
+  if (ort.providers.empty()) {
+    std::cout << "Available providers: (unknown)\n";
+  } else {
+    std::cout << "Available providers:\n";
+    for (const auto& p : ort.providers) {
+      std::cout << "  - " << p << "\n";
+    }
+  }
+
+  std::vector<fs::path> onnx_paths;
+  std::string chosen;
+
+  if (!model_path.empty()) {
+    fs::path p(model_path);
+    if (p.empty()) {
+      std::cerr << "ERROR: --model-path is empty\n";
+      return 2;
+    }
+    if (fs::is_directory(p)) {
+      std::cerr << "ERROR: --model-path must point to a .onnx file (directories are not supported yet): "
+                << p.string() << "\n";
+      return 2;
+    }
+    onnx_paths.push_back(p);
+    chosen = p.string();
+  } else {
+    const auto reg = studiocast::open_video::ModelPackRegistry::ScanDefault();
+    std::string id = model_id;
+    if (id.empty()) {
+      id = reg.DefaultModelIdForTask(task);
+    }
+    if (id.empty()) {
+      std::cerr << "ERROR: No Open Video packs installed.";
+      if (!task.empty()) {
+        std::cerr << " (task=" << task << ")";
+      }
+      std::cerr << "\n";
+      std::cerr << "Run: " << argv[0] << " video-install-hints\n";
+      return 2;
+    }
+
+    auto packOpt = reg.ResolveModel(id);
+    if (!packOpt) {
+      std::cerr << "ERROR: Unknown model id: " << id << "\n";
+      std::cerr << "Run: " << argv[0] << " video-list-models";
+      if (!task.empty()) std::cerr << " --task " << task;
+      std::cerr << "\n";
+      return 2;
+    }
+    chosen = id;
+
+    for (const auto& f : packOpt->files) {
+      if (f.kind == "onnx") {
+        onnx_paths.push_back(f.path);
+      }
+    }
+
+    if (onnx_paths.empty()) {
+      std::cerr << "ERROR: Pack '" << id << "' declares no ONNX files to load.\n";
+      return 2;
+    }
+  }
+
+  std::cout << "\nSelected: " << chosen << "\n";
+  if (!task.empty()) std::cout << "Task filter: " << task << "\n";
+  std::cout << "CUDA preference: " << (cpu_only ? "CPU-only" : "AUTO (prefer CUDA)") << "\n";
+
+  studiocast::open_video::OrtSessionOptions opts;
+  opts.prefer_cuda = !cpu_only;
+
+  int failures = 0;
+  for (const auto& onnx : onnx_paths) {
+    std::cout << "\nModel: " << onnx.string() << "\n";
+    studiocast::open_video::OrtSessionInfo info;
+    std::string err;
+    auto session = studiocast::open_video::OpenVideoOrtSession::Create(onnx, opts, &info, &err);
+    if (!session) {
+      std::cerr << "ERROR: Failed to create session: " << (err.empty() ? "unknown" : err) << "\n";
+      failures++;
+      continue;
+    }
+
+    std::cout << "  using_cuda: " << (info.using_cuda ? "yes" : "no") << "\n";
+    if (!info.warnings.empty()) {
+      std::cout << "  warnings:\n";
+      for (const auto& w : info.warnings) {
+        std::cout << "    - " << w << "\n";
+      }
+    }
+
+    std::cout << "  inputs:\n";
+    for (std::size_t i = 0; i < info.input_names.size(); ++i) {
+      std::cout << "    - " << info.input_names[i] << ": "
+                << (i < info.input_descriptions.size() ? info.input_descriptions[i] : "") << "\n";
+    }
+    std::cout << "  outputs:\n";
+    for (std::size_t i = 0; i < info.output_names.size(); ++i) {
+      std::cout << "    - " << info.output_names[i] << ": "
+                << (i < info.output_descriptions.size() ? info.output_descriptions[i] : "") << "\n";
+    }
+  }
+
+  if (failures == 0) {
+    std::cout << "\nOK: all sessions created successfully.\n";
+    return 0;
+  }
+
+  std::cerr << "\nFAILED: " << failures << " session(s) could not be created.\n";
+  return 2;
+#endif
 }
 
 static int CmdAudioPaths() {
@@ -686,6 +823,11 @@ int main(int argc, char** argv) {
   if (cmd == "paths") return CmdPaths();
   if (cmd == "list-models") return CmdListModels();
   if (cmd == "install-hints") return CmdInstallHints(argv[0]);
+
+  if (cmd == "video-paths") return CmdVideoPaths();
+  if (cmd == "video-list-models") return CmdVideoListModels(argc, argv);
+  if (cmd == "video-install-hints") return CmdVideoInstallHints(argv[0]);
+  if (cmd == "video-self-test") return CmdVideoSelfTest(argc, argv);
 
   if (cmd == "audio-paths") return CmdAudioPaths();
   if (cmd == "audio-list-models") return CmdAudioListModels();
