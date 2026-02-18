@@ -45,10 +45,7 @@
       "range": "0..1"
     },
     "postprocess": {
-      "clamp": [
-        0.0,
-        1.0
-      ]
+      "clamp": [0.0, 1.0]
     }
   },
   "origin": {

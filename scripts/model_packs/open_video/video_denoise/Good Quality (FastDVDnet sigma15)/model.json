@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "id": "fastdvdnet_sigma15",
+  "display_name": "FastDVDnet Video Denoise (sigma=15)",
+  "task": "video_denoise",
+  "files": [
+    {
+      "name": "fastdvdnet_sigma15.onnx",
+      "kind": "onnx",
+      "role": "main",
+      "sha256": ""
+    }
+  ],
+  "onnx": {
+    "main": "fastdvdnet_sigma15.onnx",
+    "inputs": [
+      {
+        "name": "noisy",
+        "layout": "nchw",
+        "dtype": "float32",
+        "channels": 9,
+        "dynamic_hw": true,
+        "note": "3-frame patch concatenated on channels: [prev|curr|next]"
+      },
+      {
+        "name": "sigma",
+        "layout": "nchw",
+        "dtype": "float32",
+        "channels": 1,
+        "dynamic_hw": true,
+        "note": "noise map; expected to be constant over the frame for a fixed sigma"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "denoised",
+        "kind": "rgb",
+        "dtype": "float32",
+        "channels": 3,
+        "dynamic_hw": true
+      }
+    ],
+    "preprocess": {
+      "color": "rgb",
+      "range": "0..1"
+    },
+    "postprocess": {
+      "clamp": [0.0, 1.0]
+    }
+  },
+  "origin": {
+    "upstream_repo": "https://github.com/m-tassano/fastdvdnet",
+    "paper": "https://arxiv.org/abs/1907.01361",
+    "license": "MIT",
+    "notes": "The ONNX file is expected to be a StudioCast-converted export of the upstream PyTorch model.\nThis pack is a template (no binaries are committed)."
+  }
+}

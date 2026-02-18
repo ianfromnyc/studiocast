@@ -57,6 +57,12 @@ For example, `face_detection/` includes YuNet in three tiers:
 - **Better Quality (YuNet INT8 BQ)** — blockwise-quantized int8 variant (good accuracy, still fast)
 - **Best Quality (YuNet FP32)** — reference fp32 model (highest compatibility)
 
+Similarly, `video_denoise/` includes FastDVDnet sigma preset packs:
+
+- **Good Quality (FastDVDnet sigma15)** — light denoise / detail-preserving (best for mild noise)
+- **Better Quality (FastDVDnet sigma25)** — balanced default for typical webcam noise
+- **Best Quality (FastDVDnet sigma50)** — strongest denoise (best for extreme low-light noise; may soften fine detail)
+
 
 ## Tasks
 

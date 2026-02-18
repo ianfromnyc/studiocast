@@ -15,6 +15,7 @@ Installed model packs live at:
   - Templates include YuNet in Good/Better/Best variants (int8 / int8bq / fp32).
 - `face_landmarks/` — facial landmark detectors
 - `video_denoise/` — video denoising models
+  - Templates include FastDVDnet sigma presets in Good/Better/Best variants (sigma15 / sigma25 / sigma50).
 - `eye_contact/` — gaze/eye contact models
 
 ## What’s in a pack?
