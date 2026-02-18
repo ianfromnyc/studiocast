@@ -299,11 +299,11 @@ void VirtualCameraService::ThreadMain() {
                                   has(effects::contract::kEffectIdVirtualBackgroundReplace);
 
             const bool wants_auto_frame = has(effects::contract::kEffectIdAutoFrame);
-            const bool wants_open_cuda_fx = wants_vb || wants_auto_frame;
+            const bool wants_key_light = has(effects::contract::kEffectIdVirtualKeyLight);
+            const bool wants_open_cuda_fx = wants_vb || wants_auto_frame || wants_key_light;
 
             // Effects that currently require Maxine (no Open CUDA implementation).
             const bool wants_maxine_only = has(effects::contract::kEffectIdVideoNoiseRemoval) ||
-                                           has(effects::contract::kEffectIdVirtualKeyLight) ||
                                            has(effects::contract::kEffectIdEyeContact);
 
             const auto ttl = std::chrono::seconds(2);
@@ -350,6 +350,7 @@ void VirtualCameraService::ThreadMain() {
                     // that have an Open CUDA implementation.
                     bool vb_available_in_maxine = false;
                     bool auto_frame_available_in_maxine = false;
+                    bool key_light_available_in_maxine = false;
                     if (maxineDiag.has_value()) {
                         const std::set<std::string> mx_avail(maxineDiag->available_effects.begin(),
                                                              maxineDiag->available_effects.end());
@@ -372,11 +373,16 @@ void VirtualCameraService::ThreadMain() {
                             auto_frame_available_in_maxine =
                                 mx_avail.count(std::string(effects::contract::kEffectIdAutoFrame)) != 0;
                         }
+                        if (wants_key_light) {
+                            key_light_available_in_maxine =
+                                mx_avail.count(std::string(effects::contract::kEffectIdVirtualKeyLight)) != 0;
+                        }
                     }
 
                     // If any requested Open CUDA-capable effect is not available in Maxine, require Open CUDA.
                     needOpenCudaGate = (wants_vb && !vb_available_in_maxine) ||
-                                       (wants_auto_frame && !auto_frame_available_in_maxine);
+                                       (wants_auto_frame && !auto_frame_available_in_maxine) ||
+                                       (wants_key_light && !key_light_available_in_maxine);
                 }
 
                 if (needOpenCudaGate && effects::WantsOpenCudaForPlannedEffects(cfg.pipeline.effects)) {
@@ -393,6 +399,7 @@ void VirtualCameraService::ThreadMain() {
                             suppressMsg = gate.message;
                             effects_for_pipeline.virtual_background.mode = effects::VirtualBackgroundMode::none;
                             effects_for_pipeline.auto_frame.enabled = false;
+                            effects_for_pipeline.virtual_key_light.enabled = false;
                         }
                     }
                 }

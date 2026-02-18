@@ -2518,6 +2518,40 @@ namespace {
                     expectTrue("open_cuda_gate auto_frame allowed when available", gate_af2.ok);
                 }
 
+                // Virtual Key Light (Open CUDA) is also gated by the Open CUDA diagnostics.
+                {
+                    using studiocast::video::effects::contract::kEffectIdVirtualKeyLight;
+
+                    studiocast::video::effects::BroadcastCameraEffects fx3;
+                    fx3.engine = studiocast::video::effects::EffectsEnginePreference::open_cuda;
+                    fx3.virtual_key_light.enabled = true;
+                    fx3.virtual_key_light.intensity = 60;
+
+                    expectTrue("open_cuda_gate wants_virtual_key_light",
+                               studiocast::video::effects::WantsOpenCudaForPlannedEffects(fx3));
+
+                    studiocast::open_cuda::OpenCudaDiagnostics blocked3;
+                    blocked3.ok = false;
+                    blocked3.blocked_effects[std::string(kEffectIdVirtualKeyLight)] = "missing_model_packs";
+
+                    const auto gate_kl = studiocast::video::effects::EvaluateOpenCudaGate(fx3, blocked3);
+                    expectTrue("open_cuda_gate virtual_key_light blocked", !gate_kl.ok);
+                    expectContains("open_cuda_gate virtual_key_light blocked message", gate_kl.message,
+                                   "virtual_key_light unavailable (missing_model_packs)");
+
+                    auto fx3_for_pipeline = fx3;
+                    if (!gate_kl.ok) {
+                        fx3_for_pipeline.virtual_key_light.enabled = false;
+                    }
+                    expectTrue("open_cuda_gate suppressed virtual_key_light", !fx3_for_pipeline.virtual_key_light.enabled);
+
+                    studiocast::open_cuda::OpenCudaDiagnostics available3;
+                    available3.ok = true;
+                    available3.available_effects = {"virtual_key_light"};
+                    const auto gate_kl2 = studiocast::video::effects::EvaluateOpenCudaGate(fx3, available3);
+                    expectTrue("open_cuda_gate virtual_key_light allowed when available", gate_kl2.ok);
+                }
+
                 auto fx_for_pipeline2 = fx;
                 if (!gate2.ok) {
                     fx_for_pipeline2.virtual_background.mode =

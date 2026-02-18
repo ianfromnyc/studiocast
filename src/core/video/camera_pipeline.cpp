@@ -2197,15 +2197,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       // We reuse the Open CUDA matting model packs for auto-frame (foreground -> crop).
-      studiocast::open_cuda::ModelPackRegistry reg;
-      std::string scan_err;
-      if (!reg.ScanDefault(&scan_err)) {
-        if (error) {
-          *error = "Open CUDA Auto Frame: Failed to scan model packs: " + scan_err;
-        }
-        return false;
-      }
-      if (reg.models().empty()) {
+      const auto reg = studiocast::open_cuda::ModelPackRegistry::ScanDefault();
+      if (reg.ListModels().empty()) {
         if (error) {
           *error = "Open CUDA Auto Frame: No Open CUDA model packs installed.";
         }
@@ -2233,7 +2226,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       // If we're already initialized with the same model and frame size, keep the context.
       if (initialized && enabled && active_model_id == requested_model_id && gpu_rgb_in.w == frame_w &&
-          gpu_rgb_in.h == frame_h && pack.has_value() && pack->path == resolved->path) {
+          gpu_rgb_in.h == frame_h && pack.has_value() && pack->onnx_path == resolved->onnx_path) {
         return true;
       }
 
@@ -2267,10 +2260,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
       }
 
-      session = std::make_unique<studiocast::open_cuda::OpenCudaMattingSession>();
+      session = std::make_unique<studiocast::open_cuda::OpenCudaMattingSession>(&cuda, *pack);
       {
         std::string err;
-        if (!session->EnsureInitialized(*pack, &cuda, stream, &err)) {
+        if (!session->EnsureInitialized(frame_w, frame_h, &err)) {
           if (error) {
             *error = "Open CUDA Auto Frame: Session init failed: " + err;
           }
@@ -2440,6 +2433,327 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return true;
     }
   } open_cuda_auto_frame;
+
+  // Open-source (Open CUDA) Virtual Key Light.
+  //
+  // Implementation approach:
+  //  - Use the same Open CUDA matting model packs (foreground matte) used by virtual background.
+  //  - Apply a lightweight, masked "key light" as an RGB interpolation toward a tinted
+  //    highlight color on the CPU.
+  //
+  // This keeps dependencies minimal (no custom CUDA kernels/ptx updates) while still
+  // producing a Broadcast-like "lift" on the subject.
+  struct OpenCudaKeyLightContext {
+    bool initialized = false;
+    bool enabled = false;
+    std::string last_error;
+    std::string active_model_id;
+    std::optional<studiocast::open_cuda::ModelPack> pack;
+    std::unique_ptr<studiocast::open_cuda::OpenCudaMattingSession> session;
+
+    studiocast::maxine::CudaDriverApi cuda;
+    studiocast::maxine::CUstream stream = nullptr;
+
+    studiocast::cuda::CudaImage gpu_rgb_in;
+    studiocast::cuda::CudaTensor alpha_tensor;
+    std::vector<float> alpha_cpu;
+
+    ~OpenCudaKeyLightContext() { Destroy(); }
+
+    void Destroy() {
+      initialized = false;
+      enabled = false;
+      last_error.clear();
+      active_model_id.clear();
+      pack.reset();
+      session.reset();
+
+      std::string err;
+      if (cuda.IsInitialized()) {
+        if (stream) {
+          cuda.StreamSynchronize(stream, &err);
+          cuda.DestroyStream(stream, &err);
+          stream = nullptr;
+        }
+        gpu_rgb_in.Free(&cuda, &err);
+        alpha_tensor.Free(&cuda, &err);
+      }
+    }
+
+    static void ResolveTargetColorFromTemperaturePreset(int preset,
+                                                        float* out_r,
+                                                        float* out_g,
+                                                        float* out_b) {
+      // Simple perceptual targets (sRGB-ish). These are not physically accurate; they are
+      // tuned to "feel" like Broadcast's warm/cool key light in a subtle way.
+      // preset: 0=neutral, 1=warm, 2=cool
+      float r = 255.0f;
+      float g = 255.0f;
+      float b = 255.0f;
+      if (preset == 1) {
+        // Warm.
+        r = 255.0f;
+        g = 242.0f;
+        b = 228.0f;
+      } else if (preset == 2) {
+        // Cool.
+        r = 228.0f;
+        g = 242.0f;
+        b = 255.0f;
+      }
+      if (out_r) *out_r = r;
+      if (out_g) *out_g = g;
+      if (out_b) *out_b = b;
+    }
+
+    bool EnsureInitialized(int frame_w,
+                           int frame_h,
+                           const studiocast::video::effects::BroadcastCameraEffects& fx,
+                           std::string* error) {
+      if (frame_w <= 0 || frame_h <= 0) {
+        if (error) {
+          *error = "Open CUDA Virtual Key Light: invalid frame size.";
+        }
+        return false;
+      }
+
+      // We reuse the Open CUDA matting model packs (foreground matte).
+      const auto reg = studiocast::open_cuda::ModelPackRegistry::ScanDefault();
+      if (reg.ListModels().empty()) {
+        if (error) {
+          *error = "Open CUDA Virtual Key Light: No Open CUDA model packs installed.";
+        }
+        return false;
+      }
+
+      std::string requested_model_id = fx.virtual_background.model_id;
+      if (requested_model_id.empty()) {
+        requested_model_id = reg.DefaultModelId();
+      }
+
+      std::optional<studiocast::open_cuda::ModelPack> resolved = reg.ResolveModel(requested_model_id);
+      if (!resolved.has_value()) {
+        if (error) {
+          *error = "Open CUDA Virtual Key Light: Unknown model id '" + requested_model_id + "'.";
+        }
+        return false;
+      }
+      if (resolved->task != "matting") {
+        if (error) {
+          *error = "Open CUDA Virtual Key Light: model '" + requested_model_id + "' task must be 'matting'.";
+        }
+        return false;
+      }
+
+      // If already initialized with same model and frame size, keep the context.
+      if (initialized && enabled && active_model_id == requested_model_id && gpu_rgb_in.w == frame_w &&
+          gpu_rgb_in.h == frame_h && pack.has_value() && pack->onnx_path == resolved->onnx_path) {
+        return true;
+      }
+
+      Destroy();
+      active_model_id = requested_model_id;
+      pack = resolved;
+
+      if (!cuda.IsInitialized()) {
+        std::string err;
+        if (!cuda.Initialize(&err)) {
+          if (error) {
+            *error = "Open CUDA Virtual Key Light: CUDA init failed: " + err;
+          }
+          return false;
+        }
+        if (!cuda.EnsureContext(&err)) {
+          if (error) {
+            *error = "Open CUDA Virtual Key Light: CUDA context failed: " + err;
+          }
+          return false;
+        }
+      }
+
+      {
+        std::string err;
+        if (!cuda.CreateStream(&stream, &err)) {
+          if (error) {
+            *error = "Open CUDA Virtual Key Light: CreateStream failed: " + err;
+          }
+          return false;
+        }
+      }
+
+      session = std::make_unique<studiocast::open_cuda::OpenCudaMattingSession>(&cuda, *pack);
+      {
+        std::string err;
+        if (!session->EnsureInitialized(frame_w, frame_h, &err)) {
+          if (error) {
+            *error = "Open CUDA Virtual Key Light: Session init failed: " + err;
+          }
+          session.reset();
+          return false;
+        }
+      }
+
+      {
+        std::string err;
+        if (!gpu_rgb_in.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &err)) {
+          if (error) {
+            *error = "Open CUDA Virtual Key Light: GPU RGB alloc failed: " + err;
+          }
+          return false;
+        }
+      }
+      {
+        std::string err;
+        if (!alpha_tensor.ReallocIfNeededNchwF32(&cuda, 1, 1, pack->input.height, pack->input.width, &err)) {
+          if (error) {
+            *error = "Open CUDA Virtual Key Light: alpha tensor alloc failed: " + err;
+          }
+          return false;
+        }
+      }
+
+      initialized = true;
+      enabled = true;
+      return true;
+    }
+
+    bool ApplyRgbInPlace(std::uint8_t* rgb,
+                         int width,
+                         int height,
+                         size_t stride,
+                         const studiocast::video::effects::BroadcastCameraEffects& fx,
+                         std::string* error) {
+      if (!fx.virtual_key_light.enabled) {
+        return true;
+      }
+      if (!rgb) {
+        if (error) {
+          *error = "Open CUDA Virtual Key Light: null RGB buffer.";
+        }
+        return false;
+      }
+
+      const float intensity01 = std::clamp(fx.virtual_key_light.intensity / 100.0f, 0.0f, 1.0f);
+      if (intensity01 <= 0.0001f) {
+        return true;
+      }
+
+      std::string err;
+      if (!EnsureInitialized(width, height, fx, &err)) {
+        if (error) {
+          *error = err;
+        }
+        return false;
+      }
+
+      if (!gpu_rgb_in.UploadFromCpuRgb24(&cuda, rgb, stride, stream, &err)) {
+        if (error) {
+          *error = "Open CUDA Virtual Key Light: UploadFromCpu failed: " + err;
+        }
+        return false;
+      }
+
+      if (!session->Run(stream, gpu_rgb_in, &alpha_tensor, &err)) {
+        if (error) {
+          *error = "Open CUDA Virtual Key Light: Matting inference failed: " + err;
+        }
+        return false;
+      }
+
+      if (!alpha_tensor.DownloadToCpuF32(&cuda, &alpha_cpu, stream, &err)) {
+        if (error) {
+          *error = "Open CUDA Virtual Key Light: alpha download failed: " + err;
+        }
+        return false;
+      }
+      if (!cuda.StreamSynchronize(stream, &err)) {
+        if (error) {
+          *error = "Open CUDA Virtual Key Light: StreamSynchronize failed: " + err;
+        }
+        return false;
+      }
+
+      // Compute a matte bounding box so we only process pixels near the subject.
+      studiocast::maxine::effects::RectF box_px;
+      const bool found = OpenCudaAutoFrameContext::ComputeMatteBoxPxFromAlpha(alpha_cpu,
+                                                                              pack->input.width,
+                                                                              pack->input.height,
+                                                                              width,
+                                                                              height,
+                                                                              &box_px);
+      if (!found) {
+        return true;  // no subject detected
+      }
+
+      // Expand ROI slightly.
+      const float margin_x = std::max(16.0f, box_px.w * 0.15f);
+      const float margin_y = std::max(16.0f, box_px.h * 0.15f);
+      float x0f = std::clamp(box_px.x - margin_x, 0.0f, static_cast<float>(width));
+      float y0f = std::clamp(box_px.y - margin_y, 0.0f, static_cast<float>(height));
+      float x1f = std::clamp(box_px.x + box_px.w + margin_x, 0.0f, static_cast<float>(width));
+      float y1f = std::clamp(box_px.y + box_px.h + margin_y, 0.0f, static_cast<float>(height));
+      const int x0 = static_cast<int>(std::floor(x0f));
+      const int y0 = static_cast<int>(std::floor(y0f));
+      const int x1 = static_cast<int>(std::ceil(x1f));
+      const int y1 = static_cast<int>(std::ceil(y1f));
+
+      // Directional weighting (left/right).
+      const float pan = std::clamp(fx.virtual_key_light.direction_pan_degrees, -90.0f, 90.0f);
+      const float dir = std::clamp(pan / 90.0f, -1.0f, 1.0f);
+      const float cx = static_cast<float>(width) * 0.5f;
+      const float inv_cx = (cx > 1.0f) ? (1.0f / cx) : 0.0f;
+
+      float target_r = 255.0f, target_g = 255.0f, target_b = 255.0f;
+      ResolveTargetColorFromTemperaturePreset(fx.virtual_key_light.temperature_preset, &target_r, &target_g, &target_b);
+
+      // Nearest-neighbor matte sampling using fixed-point mapping.
+      const int alpha_w = pack->input.width;
+      const int alpha_h = pack->input.height;
+      if (alpha_w <= 0 || alpha_h <= 0 || alpha_cpu.empty()) {
+        return true;
+      }
+
+      const int step_x_fp = (alpha_w << 16) / std::max(1, width);
+      const int step_y_fp = (alpha_h << 16) / std::max(1, height);
+      int ay_fp = y0 * step_y_fp;
+      for (int y = y0; y < y1; ++y) {
+        const int ay = std::clamp(ay_fp >> 16, 0, alpha_h - 1);
+        const float* alpha_row = alpha_cpu.data() + static_cast<size_t>(ay) * static_cast<size_t>(alpha_w);
+        std::uint8_t* row = rgb + static_cast<size_t>(y) * stride;
+        int ax_fp = x0 * step_x_fp;
+        for (int x = x0; x < x1; ++x) {
+          const int ax = std::clamp(ax_fp >> 16, 0, alpha_w - 1);
+          const float a = std::clamp(alpha_row[ax], 0.0f, 1.0f);
+          if (a > 0.02f) {
+            // Compute per-pixel blend factor.
+            const float x_norm = (static_cast<float>(x) - cx) * inv_cx;  // [-1..1]
+            float field = 1.0f + dir * x_norm * 0.35f;
+            field = std::clamp(field, 0.65f, 1.35f);
+
+            float t = intensity01 * a * field;
+            t = std::clamp(t, 0.0f, 1.0f);
+
+            std::uint8_t* px = row + x * 3;
+            const float in_r = static_cast<float>(px[0]);
+            const float in_g = static_cast<float>(px[1]);
+            const float in_b = static_cast<float>(px[2]);
+
+            const float out_r = in_r + (target_r - in_r) * t;
+            const float out_g = in_g + (target_g - in_g) * t;
+            const float out_b = in_b + (target_b - in_b) * t;
+
+            px[0] = static_cast<std::uint8_t>(std::clamp(out_r, 0.0f, 255.0f));
+            px[1] = static_cast<std::uint8_t>(std::clamp(out_g, 0.0f, 255.0f));
+            px[2] = static_cast<std::uint8_t>(std::clamp(out_b, 0.0f, 255.0f));
+          }
+          ax_fp += step_x_fp;
+        }
+        ay_fp += step_y_fp;
+      }
+
+      return true;
+    }
+  } open_cuda_key_light;
 
   struct MaxineRelightingContext {
     bool initialized = false;
@@ -4127,6 +4441,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   bool want_open_cuda_auto_frame = false;
   bool have_open_cuda_auto_frame = false;
 
+  bool want_open_cuda_key_light = false;
+  bool have_open_cuda_key_light = false;
+
   bool want_maxine_vignette_only = false;
   bool have_maxine_vignette_only = false;
 
@@ -4173,6 +4490,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     want_open_cuda_auto_frame = false;
     have_open_cuda_auto_frame = false;
+
+    want_open_cuda_key_light = false;
+    have_open_cuda_key_light = false;
 
     want_maxine_auto_frame = false;
     have_maxine_auto_frame = false;
@@ -4457,28 +4777,82 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
     }
 
-    // Virtual Key Light (Maxine-only).
+    // Virtual Key Light.
     if (has(studiocast::video::effects::contract::kEffectIdVirtualKeyLight)) {
+      const std::string stage_id = std::string(studiocast::video::effects::contract::kEffectIdVirtualKeyLight);
+
+      // Vignette attachment is only supported on the Maxine GPU paths. If we end up using the
+      // Open CUDA key light path (or key light is unavailable), run vignette as a standalone stage
+      // by clearing the attachment.
+      const auto detach_vignette_from_key_light = [&]() {
+        if (has(studiocast::video::effects::contract::kEffectIdVignette) &&
+            plan.vignette_attach_to_effect_id == stage_id) {
+          plan.vignette_attach_to_effect_id.clear();
+        }
+      };
+
       if (engine_open_cuda) {
-        if (!note.empty()) note += "\n";
-        note += "Virtual Key Light unavailable: requires Maxine backend.";
+        // Open CUDA: key light via matting + masked CPU lift.
+        want_open_cuda_key_light = true;
+        std::string oc_err;
+        if (open_cuda_key_light.EnsureInitialized(capA.width, capA.height, fx, &oc_err)) {
+          have_open_cuda_key_light = true;
+          set_backend(stage_id, "open_cuda");
+          if (!note.empty()) {
+            note += "\n";
+          }
+          note += "Open CUDA: Virtual Key Light (foreground matte + CPU relight).";
+          detach_vignette_from_key_light();
+        } else {
+          if (!note.empty()) {
+            note += "\n";
+          }
+          note += oc_err;
+          remove_stage_from_plan(stage_id);
+          detach_vignette_from_key_light();
+        }
       } else if (!maxine_strict_blocked) {
+        // Maxine VFX preferred; Open CUDA fallback when engine_preference=AUTO.
         want_maxine_relight = true;
         std::string mx_err;
         if (maxine_relight.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
           have_maxine_relight = true;
-          set_backend(studiocast::video::effects::contract::kEffectIdVirtualKeyLight, "maxine");
+          set_backend(stage_id, "maxine");
           if (!note.empty()) note += " ";
           note += "Maxine VFX: Video Relighting (Virtual Key Light).";
+        } else if (engine_maxine) {
+          append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::vfx);
+          maxine_strict_blocked = true;
+          detach_vignette_from_key_light();
         } else {
-          if (engine_maxine) {
-            append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::vfx);
-            maxine_strict_blocked = true;
+          // AUTO: fall back to Open CUDA.
+          want_open_cuda_key_light = true;
+          std::string oc_err;
+          if (open_cuda_key_light.EnsureInitialized(capA.width, capA.height, fx, &oc_err)) {
+            have_open_cuda_key_light = true;
+            set_backend(stage_id, "open_cuda");
+            if (!note.empty()) {
+              note += "\n";
+            }
+            note += "Open CUDA: Virtual Key Light (foreground matte + CPU relight).";
+            detach_vignette_from_key_light();
           } else {
             if (!note.empty()) note += " ";
             note += mx_err;
+            if (!note.empty()) {
+              note += "\n";
+            }
+            note += oc_err;
+
+            remove_stage_from_plan(stage_id);
+            detach_vignette_from_key_light();
           }
         }
+      }
+
+      // If key light couldn't be initialized on any backend, make sure vignette isn't left attached.
+      if (!have_maxine_relight && !have_open_cuda_key_light) {
+        detach_vignette_from_key_light();
       }
     }
 
@@ -4843,26 +5217,44 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
 
         if (stage_id == studiocast::video::effects::contract::kEffectIdVirtualKeyLight) {
-          if (!have_maxine_relight) return;
-          std::string mx_err;
-          if (!maxine_relight.ApplyRgbInPlace(rgb.data(),
-                                              capA.width,
-                                              capA.height,
-                                              rgbStride,
-                                              fx,
-                                              apply_vignette_on_relight,
-                                              vignette_center_x_px,
-                                              vignette_center_y_px,
-                                              &mx_err,
-                                              defer_readback,
-                                              &deferred_gpu_out)) {
-            {
-              std::lock_guard<std::mutex> lock(mu_);
-              last_error_ = "Maxine relighting failed: " + mx_err;
+          if (have_maxine_relight) {
+            std::string mx_err;
+            if (!maxine_relight.ApplyRgbInPlace(rgb.data(),
+                                                capA.width,
+                                                capA.height,
+                                                rgbStride,
+                                                fx,
+                                                apply_vignette_on_relight,
+                                                vignette_center_x_px,
+                                                vignette_center_y_px,
+                                                &mx_err,
+                                                defer_readback,
+                                                &deferred_gpu_out)) {
+              {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = "Maxine relighting failed: " + mx_err;
+              }
+              fx_failed = true;
             }
-            fx_failed = true;
+            if (defer_readback && deferred_gpu_out.kind != DeferredGpuKind::none) have_deferred_gpu_out = true;
+            return;
           }
-          if (defer_readback && deferred_gpu_out.kind != DeferredGpuKind::none) have_deferred_gpu_out = true;
+
+          if (have_open_cuda_key_light) {
+            std::string oc_err;
+            if (!open_cuda_key_light.ApplyRgbInPlace(
+                    rgb.data(), capA.width, capA.height, rgbStride, fx, &oc_err)) {
+              {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = "Open CUDA virtual key light failed: " + oc_err;
+              }
+
+              // Keep the pipeline alive; bypass on failures.
+              if (studiocast::video::effects::ShouldAbortPipelineOnOpenCudaVbApplyFailure()) {
+                fx_failed = true;
+              }
+            }
+          }
           return;
         }
 

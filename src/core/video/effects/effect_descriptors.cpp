@@ -271,7 +271,8 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     VideoEffectDescriptor d;
     d.id = std::string(contract::kEffectIdVirtualKeyLight);
     d.display_name = "Virtual Key Light";
-    d.required_components = {RequiredComponent::maxine_vfx};
+    // Open-source (Open CUDA) fallback exists; keep this available when Maxine is missing.
+    d.required_components = {RequiredComponent::gpu_utility};
     d.pipeline_order = 60;
     d.params = {
         ParamDescriptor{.id = std::string(contract::param::kEnabled),

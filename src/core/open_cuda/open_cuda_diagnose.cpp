@@ -40,6 +40,7 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
     od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace)] =
         reason_code;
     od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdAutoFrame)] = reason_code;
+    od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualKeyLight)] = reason_code;
   };
 
 #if !STUDIOCAST_ENABLE_OPEN_CUDA
@@ -83,6 +84,7 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
     od.available_effects.push_back(
         std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace));
     od.available_effects.push_back(std::string(studiocast::video::effects::contract::kEffectIdAutoFrame));
+    od.available_effects.push_back(std::string(studiocast::video::effects::contract::kEffectIdVirtualKeyLight));
   }
 #else
   od.ok = false;
