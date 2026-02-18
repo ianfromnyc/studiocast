@@ -142,3 +142,21 @@ Each pack directory **must** include `LICENSE.txt` summarizing:
 - any notable restrictions (e.g. non-commercial, attribution)
 
 StudioCast is non-commercial, but **you are still responsible** for complying with third‑party license terms.
+
+## Discovery and debugging
+
+Model packs are discovered from the user-local models root:
+
+```bash
+./<build-dir>/studiocast-open video-paths
+./<build-dir>/studiocast-open video-list-models
+./<build-dir>/studiocast-open video-list-models --task face_detection
+```
+
+## Shared inference
+
+Many effects share the same underlying analysis (face detections, landmarks, matte). StudioCast keeps a per-frame cache to avoid running the same ML model multiple times in one frame.
+
+See:
+
+- `docs/open_video_shared_inference.md`

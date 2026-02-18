@@ -14,6 +14,7 @@
 #include "core/open_audio/open_audio_audio_processor.h"
 #include "core/open_audio/open_audio_onnx_session.h"
 #include "core/open_cuda/model_pack_registry.h"
+#include "core/open_video/model_pack_registry.h"
 #include "core/util/xdg.h"
 
 namespace fs = std::filesystem;
@@ -56,6 +57,10 @@ static void Usage(const char* argv0) {
             << "  " << argv0 << " paths\n"
             << "  " << argv0 << " list-models\n"
             << "  " << argv0 << " install-hints\n"
+            << "\n"
+            << "  " << argv0 << " video-paths\n"
+            << "  " << argv0 << " video-list-models [--task <task>]\n"
+            << "  " << argv0 << " video-install-hints\n"
             << "\n"
             << "  " << argv0 << " audio-paths\n"
             << "  " << argv0 << " audio-list-models\n"
@@ -150,6 +155,103 @@ static int CmdInstallHints(const char* argv0) {
 
   std::cout << "Validate discovery:\n";
   std::cout << "  " << argv0 << " list-models\n";
+
+  return 0;
+}
+
+static int CmdVideoPaths() {
+  std::cout << "StudioCast Paths (Open Video model packs)\n";
+  std::cout << "  Open Video models root: " << OpenCudaRootForDisplay() << "\n";
+  std::cout << "\nExpected model pack layout:\n";
+  std::cout << "  " << OpenCudaRootForDisplay() << "/<subject>/<pack_dir>/model.json\n";
+  std::cout << "  " << OpenCudaRootForDisplay() << "/<subject>/<pack_dir>/<model files>\n";
+  std::cout << "  " << OpenCudaRootForDisplay() << "/<subject>/<pack_dir>/LICENSE.txt\n";
+  std::cout << "\nNotes:\n";
+  std::cout << "  - Segmentation/matting packs (task=matting) are consumed by the Open CUDA backend.\n";
+  std::cout << "  - Other tasks (face_detection, eye_contact, video_denoise, etc.) are tracked here\n";
+  std::cout << "    for future open-source video effects.\n";
+  return 0;
+}
+
+static int CmdVideoListModels(int argc, char** argv) {
+  std::cout << "StudioCast Open Video Model Packs\n\n";
+  std::cout << "Scan root:\n  " << OpenCudaRootForDisplay() << "\n\n";
+
+  const std::string task_filter = GetArgValue(argc, argv, "--task");
+  const auto reg = studiocast::open_video::ModelPackRegistry::ScanDefault();
+  const auto& models = reg.ListModels();
+  const auto& problems = reg.Problems();
+
+  if (models.empty()) {
+    std::cout << "Valid model packs: (none)\n";
+  } else {
+    std::cout << "Valid model packs:\n";
+    std::string current_task;
+    for (const auto& m : models) {
+      if (!task_filter.empty() && m.task != task_filter) continue;
+      if (m.task != current_task) {
+        current_task = m.task;
+        std::cout << "\n  [" << (current_task.empty() ? "(unknown task)" : current_task) << "]\n";
+      }
+      std::cout << "  - " << m.id;
+      if (!m.display_name.empty()) std::cout << " (" << m.display_name << ")";
+      std::cout << " schema=v" << m.schema_version;
+      std::cout << "\n";
+      std::cout << "      manifest: " << m.manifest_path.string() << "\n";
+      if (m.license_path) std::cout << "      license : " << m.license_path->string() << "\n";
+      if (!m.depends_on.empty()) {
+        std::cout << "      depends : ";
+        for (std::size_t i = 0; i < m.depends_on.size(); ++i) {
+          if (i) std::cout << ", ";
+          std::cout << m.depends_on[i];
+        }
+        std::cout << "\n";
+      }
+      for (const auto& f : m.files) {
+        std::cout << "      file    : ";
+        if (!f.role.empty()) std::cout << f.role << " ";
+        std::cout << f.kind << " " << f.path.string() << "\n";
+      }
+    }
+  }
+
+  std::cout << "\n";
+
+  if (problems.empty()) {
+    std::cout << "Problems: (none)\n";
+  } else {
+    std::cout << "Problems:\n";
+    for (const auto& [key, reason] : problems) {
+      if (!task_filter.empty()) {
+        // Best-effort filter: keep entries that mention the requested task.
+        if (key.find(task_filter) == std::string::npos && reason.find(task_filter) == std::string::npos) {
+          continue;
+        }
+      }
+      std::cout << "  - " << key << ": " << reason << "\n";
+    }
+  }
+
+  return 0;
+}
+
+static int CmdVideoInstallHints(const char* argv0) {
+  std::cout << "StudioCast Open Video Install Hints\n\n";
+  std::cout << "Model packs root:\n  " << OpenCudaRootForDisplay() << "\n\n";
+
+  std::cout << "A model pack is a directory containing model.json + model assets + LICENSE.txt.\n";
+  std::cout << "The directory name does NOT need to match model.json:id (human-friendly names are OK).\n\n";
+
+  std::cout << "Recommended layout (mirrors scripts/model_packs/open_video):\n";
+  std::cout << "  " << OpenCudaRootForDisplay() << "/<subject>/<pack_dir>/model.json\n";
+  std::cout << "  " << OpenCudaRootForDisplay() << "/<subject>/<pack_dir>/LICENSE.txt\n";
+  std::cout << "  " << OpenCudaRootForDisplay() << "/<subject>/<pack_dir>/<model files>\n\n";
+
+  std::cout << "Validate discovery:\n";
+  std::cout << "  " << argv0 << " video-list-models\n\n";
+
+  std::cout << "Tip: filter by task (e.g. face_detection):\n";
+  std::cout << "  " << argv0 << " video-list-models --task face_detection\n";
 
   return 0;
 }
