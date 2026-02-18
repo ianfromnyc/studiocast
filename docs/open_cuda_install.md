@@ -80,6 +80,10 @@ For a general overview of the open-source video model pack taxonomy (face detect
 
 - `docs/open_video_model_packs.md`
 
+For sourcing/conversion/hosting of the actual model binaries (ONNX / dlib files), see:
+
+- `docs/open_video_model_conversion.md`
+
 ### Model pack layout
 
 Open CUDA currently consumes only the **segmentation/matting** packs (`task = "matting"`).

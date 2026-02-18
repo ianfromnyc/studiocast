@@ -8,6 +8,10 @@ Installed model packs live at:
 
 - `${XDG_DATA_HOME:-$HOME/.local/share}/studiocast/models/open_video/`
 
+For sourcing, conversion, and hosting of the actual model binaries (ONNX / dlib data files), see:
+
+- `docs/open_video_model_conversion.md`
+
 ## Subject areas
 
 - `segmentation/` — matte/alpha models (`task = "matting"`)

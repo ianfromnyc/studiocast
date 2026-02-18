@@ -8,6 +8,10 @@ Instead, model packs are defined as **metadata + licensing** in `./scripts/model
 
 At runtime, StudioCast discovers installed packs by scanning that directory.
 
+For sourcing, conversion, and hosting of the actual model binaries (ONNX / dlib data files), see:
+
+- `docs/open_video_model_conversion.md`
+
 ## Directory taxonomy
 
 Packs are organized by **subject area**, then by **model pack**:
