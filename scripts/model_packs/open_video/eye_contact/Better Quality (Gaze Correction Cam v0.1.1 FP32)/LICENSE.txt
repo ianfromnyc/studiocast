@@ -1,0 +1,13 @@
+Gaze Correction Camera (Eye Contact)
+
+Upstream source:
+- https://github.com/WangWilly/gaze-correction-cam
+
+License:
+- BSD-3-Clause (see upstream LICENSE)
+
+Notes:
+- This pack represents an FP32 ONNX export of the upstream FLX v0.1.1 left/right warping models.
+- FP32 is the most compatible precision (CPU EP and GPU EP).
+- This pack depends on the dlib 68-point landmark predictor pack (trained on iBUG 300-W).
+- StudioCast does not ship the model binaries in git.

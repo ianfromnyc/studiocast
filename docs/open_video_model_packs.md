@@ -64,6 +64,15 @@ Similarly, `video_denoise/` includes FastDVDnet sigma preset packs:
 - **Best Quality (FastDVDnet sigma50)** — strongest denoise (best for extreme low-light noise; may soften fine detail)
 
 
+
+And `eye_contact/` includes gaze-correction-cam packs in Good/Better/Best variants:
+
+- **Good Quality (Gaze Correction Cam v0.1.1 FP16)** — fastest on GPU; intended for CUDA/TensorRT (CPU EP may not support FP16).
+- **Better Quality (Gaze Correction Cam v0.1.1 FP32)** — reference fp32 export; best compatibility (CPU EP and GPU EP).
+- **Best Quality (Gaze Correction Cam v3 Placeholder)** — placeholder for upstream “v3” model updates; installer drops in the new ONNX files when available.
+
+Eye contact packs typically depend on `face_landmarks/` (e.g. `dlib_68_ibug_300w`) to locate and crop eye regions.
+
 ## Tasks
 
 `model.json` uses a `task` field to declare what the model is used for.

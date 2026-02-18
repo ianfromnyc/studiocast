@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "id": "gaze_correction_cam_flx_v0_1_1",
-  "display_name": "Eye Contact (gaze-correction-cam, FLX v0.1.1)",
+  "display_name": "Eye Contact (gaze-correction-cam, FLX v0.1.1, FP32)",
   "task": "eye_contact",
   "depends_on": [
     "face_landmarks:dlib_68_ibug_300w"
@@ -64,10 +64,14 @@
       }
     ]
   },
+  "runtime_hints": {
+    "preferred_execution_provider": "auto",
+    "note": "FP32 pack; compatible with CPU EP and GPU EP."
+  },
   "origin": {
     "upstream_repo": "https://github.com/WangWilly/gaze-correction-cam",
     "upstream_tag": "v0.1.1",
     "license": "BSD-3-Clause",
-    "notes": "Upstream ships TensorFlow checkpoints (L/R eye). StudioCast expects C++-friendly ONNX exports hosted separately.\nThis pack is a template (no binaries are committed)."
+    "notes": "Upstream ships TensorFlow checkpoints (L/R eye). StudioCast expects C++-friendly ONNX exports hosted separately.\nThis pack is the reference FP32 template (no binaries are committed)."
   }
 }

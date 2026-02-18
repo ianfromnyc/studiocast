@@ -17,6 +17,7 @@ Installed model packs live at:
 - `video_denoise/` — video denoising models
   - Templates include FastDVDnet sigma presets in Good/Better/Best variants (sigma15 / sigma25 / sigma50).
 - `eye_contact/` — gaze/eye contact models
+  - Templates include gaze-correction-cam in Good/Better/Best variants (FP16 / FP32 / v3 placeholder).
 
 ## What’s in a pack?
 

@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "id": "gaze_correction_cam_v3_placeholder",
+  "display_name": "Eye Contact (gaze-correction-cam, v3 placeholder)",
+  "task": "eye_contact",
+  "depends_on": [
+    "face_landmarks:dlib_68_ibug_300w"
+  ],
+  "files": [
+    {
+      "name": "gaze_v3_left.onnx",
+      "kind": "onnx",
+      "role": "left",
+      "sha256": ""
+    },
+    {
+      "name": "gaze_v3_right.onnx",
+      "kind": "onnx",
+      "role": "right",
+      "sha256": ""
+    }
+  ],
+  "onnx": {
+    "models": [
+      { "role": "left", "file": "gaze_v3_left.onnx" },
+      { "role": "right", "file": "gaze_v3_right.onnx" }
+    ],
+    "inputs": [
+      {
+        "name": "eye_rgb",
+        "layout": "nchw",
+        "dtype": "float32",
+        "width": 64,
+        "height": 48,
+        "channels": 3,
+        "note": "Placeholder: expected eye crop (48x64). Update this interface when upstream v3 details are published."
+      }
+    ],
+    "outputs": [
+      {
+        "name": "flow",
+        "kind": "flow_field",
+        "dtype": "float32",
+        "width": 64,
+        "height": 48,
+        "channels": 2,
+        "note": "Placeholder: expected dense flow field output. Update this interface when upstream v3 details are published."
+      }
+    ]
+  },
+  "origin": {
+    "upstream_repo": "https://github.com/WangWilly/gaze-correction-cam",
+    "upstream_tag": "v3 (TBD)",
+    "license": "BSD-3-Clause",
+    "notes": "Placeholder pack intended for upcoming upstream v3 model releases. StudioCast installers should populate this directory with the appropriate ONNX exports once available."
+  }
+}
