@@ -1503,6 +1503,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     studiocast::cuda::CudaTensor alpha_tensor;          // 1x1xH_inxW_in (contiguous)
     studiocast::cuda::CudaImage alpha_model_view;       // f32_1 view over alpha_tensor (no ownership)
+
+    // Matting inference cache. Multiple effects (VB, Auto Frame, Key Light) can consume the
+    // same foreground matte in a single frame. Cache the model output keyed by capture
+    // sequence so we don't re-run the ONNX model when multiple effects are enabled.
+    std::uint64_t cached_matte_sequence = 0;
+    bool cached_matte_valid = false;
+
+    // Optional CPU-side cache of the alpha tensor (downloaded once per frame when needed).
+    std::uint64_t cached_alpha_cpu_sequence = 0;
+    bool cached_alpha_cpu_valid = false;
+    std::vector<float> alpha_cpu;
     studiocast::cuda::CudaImage alpha_resized;          // f32_1, WxH
     studiocast::cuda::CudaImage alpha_tmp;              // f32_1, WxH
     studiocast::cuda::CudaImage alpha_feather;          // f32_1, WxH
@@ -1562,6 +1573,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       pack.reset();
       active_model_id.clear();
 
+      cached_matte_sequence = 0;
+      cached_matte_valid = false;
+      cached_alpha_cpu_sequence = 0;
+      cached_alpha_cpu_valid = false;
+      alpha_cpu.clear();
+
       cached_bg_src_path.clear();
       cached_bg_src_mtime = {};
       cached_bg_src_w = 0;
@@ -1583,7 +1600,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     bool EnsureInitialized(int frame_w,
                            int frame_h,
                            const studiocast::video::effects::BroadcastCameraEffects& fx,
-                           std::string* error) {
+                           std::string* error,
+                           bool require_vb_buffers = true) {
       if (error) error->clear();
       if (frame_w <= 0 || frame_h <= 0) {
         last_error = "Open CUDA: invalid frame size.";
@@ -1653,6 +1671,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         pack.reset();
         (void)alpha_tensor.Free(&cuda, nullptr);
         alpha_model_view = studiocast::cuda::CudaImage{};
+
+        cached_matte_sequence = 0;
+        cached_matte_valid = false;
+        cached_alpha_cpu_sequence = 0;
+        cached_alpha_cpu_valid = false;
+        alpha_cpu.clear();
       }
 
       if (!pack.has_value()) {
@@ -1665,6 +1689,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
         pack = *p;
         active_model_id = requested_model_id;
+
+        if (pack->task != "matting") {
+          last_error = "Open CUDA: selected model_id '" + requested_model_id + "' has task '" + pack->task +
+                       "' (expected 'matting').";
+          if (error) *error = last_error;
+          return false;
+        }
       }
 
       if (!session) {
@@ -1693,15 +1724,24 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       {
         std::string berr;
         if (!frame_rgb.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr) ||
-            !out_rgb.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr) ||
-            !alpha_resized.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::f32_1, &berr) ||
-            !alpha_tmp.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::f32_1, &berr) ||
-            !alpha_feather.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::f32_1, &berr) ||
-            !blur_tmp.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr) ||
-            !blurred.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr)) {
+            !out_rgb.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr)) {
           last_error = "Open CUDA: failed to allocate GPU buffers: " + berr;
           if (error) *error = last_error;
           return false;
+        }
+
+        // Only allocate VB-specific buffers when the caller is actually going to run the
+        // virtual background stage. Auto Frame / Key Light use the matte only.
+        if (require_vb_buffers) {
+          if (!alpha_resized.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::f32_1, &berr) ||
+              !alpha_tmp.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::f32_1, &berr) ||
+              !alpha_feather.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::f32_1, &berr) ||
+              !blur_tmp.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr) ||
+              !blurred.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &berr)) {
+            last_error = "Open CUDA: failed to allocate GPU buffers: " + berr;
+            if (error) *error = last_error;
+            return false;
+          }
         }
       }
 
@@ -1807,6 +1847,143 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return true;
     }
 
+    void InvalidateMatteCache() {
+      cached_matte_sequence = 0;
+      cached_matte_valid = false;
+      cached_alpha_cpu_sequence = 0;
+      cached_alpha_cpu_valid = false;
+      alpha_cpu.clear();
+    }
+
+    // Ensure matting inference has been run for this frame, using a GPU input frame.
+    // If matting was already computed for the same capture sequence, this is a no-op.
+    bool EnsureMatteForFrameGpu(const studiocast::cuda::CudaImage& in_rgb,
+                               std::uint64_t capture_sequence,
+                               int width,
+                               int height,
+                               const studiocast::video::effects::BroadcastCameraEffects& fx,
+                               std::string* error) {
+      if (error) error->clear();
+
+      std::string init_err;
+      if (!EnsureInitialized(width, height, fx, &init_err, /*require_vb_buffers=*/true)) {
+        if (error) *error = init_err;
+        return false;
+      }
+
+      if (cached_matte_valid && cached_matte_sequence == capture_sequence) {
+        return true;
+      }
+
+      std::string matte_err;
+      if (!session->Run(vb_stream, in_rgb, &alpha_tensor, &matte_err)) {
+        if (error) *error = matte_err;
+        return false;
+      }
+
+      cached_matte_valid = true;
+      cached_matte_sequence = capture_sequence;
+      cached_alpha_cpu_valid = false;
+      return true;
+    }
+
+    // Ensure matting inference has been run for this frame, using a CPU RGB input frame.
+    // If matting was already computed for the same capture sequence, this is a no-op.
+    bool EnsureMatteForFrameCpu(const std::uint8_t* rgb,
+                               std::size_t rgb_stride,
+                               std::uint64_t capture_sequence,
+                               int width,
+                               int height,
+                               const studiocast::video::effects::BroadcastCameraEffects& fx,
+                               std::string* error) {
+      if (error) error->clear();
+      if (!rgb || rgb_stride == 0) {
+        if (error) *error = "Open CUDA: invalid RGB buffer.";
+        return false;
+      }
+
+      std::string init_err;
+      if (!EnsureInitialized(width, height, fx, &init_err, /*require_vb_buffers=*/false)) {
+        if (error) *error = init_err;
+        return false;
+      }
+
+      if (cached_matte_valid && cached_matte_sequence == capture_sequence) {
+        return true;
+      }
+
+      std::string up_err;
+      if (!frame_rgb.UploadFromCpuRgb24(&cuda, rgb, rgb_stride, vb_stream, &up_err)) {
+        if (error) *error = "Open CUDA: frame upload failed: " + up_err;
+        return false;
+      }
+
+      std::string matte_err;
+      if (!session->Run(vb_stream, frame_rgb, &alpha_tensor, &matte_err)) {
+        if (error) *error = matte_err;
+        return false;
+      }
+
+      cached_matte_valid = true;
+      cached_matte_sequence = capture_sequence;
+      cached_alpha_cpu_valid = false;
+      return true;
+    }
+
+    // Download the alpha tensor (once per frame) for CPU-side consumers (Auto Frame / Key Light).
+    bool GetAlphaCpuForFrame(const std::uint8_t* rgb,
+                             std::size_t rgb_stride,
+                             std::uint64_t capture_sequence,
+                             int width,
+                             int height,
+                             const studiocast::video::effects::BroadcastCameraEffects& fx,
+                             const std::vector<float>** out_alpha,
+                             int* out_alpha_w,
+                             int* out_alpha_h,
+                             std::string* error) {
+      if (error) error->clear();
+      if (out_alpha) *out_alpha = nullptr;
+      if (out_alpha_w) *out_alpha_w = 0;
+      if (out_alpha_h) *out_alpha_h = 0;
+
+      if (cached_alpha_cpu_valid && cached_alpha_cpu_sequence == capture_sequence) {
+        if (out_alpha) *out_alpha = &alpha_cpu;
+        if (pack.has_value()) {
+          if (out_alpha_w) *out_alpha_w = pack->input.width;
+          if (out_alpha_h) *out_alpha_h = pack->input.height;
+        }
+        return true;
+      }
+
+      // If we don't have a matte yet for this frame, compute it from the CPU input.
+      if (!cached_matte_valid || cached_matte_sequence != capture_sequence) {
+        std::string matte_err;
+        if (!EnsureMatteForFrameCpu(rgb, rgb_stride, capture_sequence, width, height, fx, &matte_err)) {
+          if (error) *error = matte_err;
+          return false;
+        }
+      }
+
+      if (!pack.has_value()) {
+        if (error) *error = "Open CUDA: matting model pack not initialized.";
+        return false;
+      }
+
+      std::string derr;
+      if (!alpha_tensor.DownloadToCpuF32(&cuda, &alpha_cpu, vb_stream, &derr) ||
+          !cuda.StreamSynchronize(vb_stream, &derr)) {
+        if (error) *error = "Open CUDA: failed to download alpha tensor: " + derr;
+        return false;
+      }
+
+      cached_alpha_cpu_valid = true;
+      cached_alpha_cpu_sequence = capture_sequence;
+      if (out_alpha) *out_alpha = &alpha_cpu;
+      if (out_alpha_w) *out_alpha_w = pack->input.width;
+      if (out_alpha_h) *out_alpha_h = pack->input.height;
+      return true;
+    }
+
     // GPU-only Open CUDA stage.
     //
     // - Expects input/output as GPU RGB images.
@@ -1815,6 +1992,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                        studiocast::cuda::CudaImage* out_rgb_img,
                        int width,
                        int height,
+                       std::uint64_t capture_sequence,
                        const studiocast::video::effects::BroadcastCameraEffects& fx,
                        std::string* error) {
       if (error) error->clear();
@@ -1832,9 +2010,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      std::string init_err;
-      if (!EnsureInitialized(width, height, fx, &init_err)) {
-        if (error) *error = init_err;
+      std::string matte_err;
+      if (!EnsureMatteForFrameGpu(in_rgb, capture_sequence, width, height, fx, &matte_err)) {
+        if (error) *error = matte_err;
         return false;
       }
 
@@ -1847,13 +2025,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       const int strength = std::max(studiocast::video::effects::contract::kVbStrengthMin,
                                     std::min(studiocast::video::effects::contract::kVbStrengthMax,
                                              fx.virtual_background.strength));
-
-      // Run matting inference at model resolution.
-      std::string matte_err;
-      if (!session->Run(vb_stream, in_rgb, &alpha_tensor, &matte_err)) {
-        if (error) *error = matte_err;
-        return false;
-      }
 
       // Resize alpha to frame size.
       std::string kerr;
@@ -1923,6 +2094,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     bool ApplyCudaRgb(const studiocast::cuda::CudaImage& in_rgb,
                       studiocast::cuda::CudaImage* out_rgb_img,
                       const studiocast::video::effects::BroadcastCameraEffects& fx,
+                      std::uint64_t capture_sequence,
                       std::string* error,
                       DeferredGpuOut* deferred_out) {
       if (error) error->clear();
@@ -1946,7 +2118,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       std::string stage_err;
-      if (!ApplyGpuStage(in_rgb, out_rgb_img, in_rgb.w, in_rgb.h, fx, &stage_err)) {
+      if (!ApplyGpuStage(in_rgb, out_rgb_img, in_rgb.w, in_rgb.h, capture_sequence, fx, &stage_err)) {
         if (error) *error = stage_err;
         return false;
       }
@@ -1998,7 +2170,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       std::string stage_err;
-      if (!ApplyCudaRgb(frame_rgb, &out_rgb, fx, &stage_err, use_deferred_out)) {
+      if (!ApplyCudaRgb(frame_rgb, &out_rgb, fx, /*capture_sequence=*/0, &stage_err, use_deferred_out)) {
         if (error) *error = stage_err;
         return false;
       }
@@ -2028,16 +2200,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     std::string last_error;
     std::string active_model_id;
 
-    std::optional<studiocast::open_cuda::ModelPack> pack;
-    std::unique_ptr<studiocast::open_cuda::OpenCudaMattingSession> session;
+    // Shared foreground matte provider (Open CUDA matting). We reuse the same matting
+    // model pack and inference output as virtual background/key light when possible.
+    OpenCudaVirtualBackgroundContext* matte = nullptr;
+    int last_frame_w = 0;
+    int last_frame_h = 0;
 
-    studiocast::maxine::CudaDriverApi cuda;
-    studiocast::maxine::CUstream stream = nullptr;
-
-    studiocast::cuda::CudaImage gpu_rgb_in;
-    studiocast::cuda::CudaTensor alpha_tensor;
-
-    std::vector<float> alpha_cpu;
     std::vector<std::uint8_t> tmp_rgb;
 
     bool have_smoothed_crop = false;
@@ -2051,21 +2219,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       enabled = false;
       last_error.clear();
       active_model_id.clear();
-      pack.reset();
-      session.reset();
       have_smoothed_crop = false;
       last_had_detection = false;
-
-      std::string err;
-      if (cuda.IsInitialized()) {
-        if (stream) {
-          cuda.StreamSynchronize(stream, &err);
-          cuda.DestroyStream(stream, &err);
-          stream = nullptr;
-        }
-        gpu_rgb_in.Free(&cuda, &err);
-        alpha_tensor.Free(&cuda, &err);
-      }
+      last_frame_w = 0;
+      last_frame_h = 0;
     }
 
     static bool ComputeMatteBoxPxFromAlpha(const std::vector<float>& alpha,
@@ -2189,117 +2346,47 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                            int frame_h,
                            const studiocast::video::effects::BroadcastCameraEffects& fx,
                            std::string* error) {
+      if (error) error->clear();
+
       if (frame_w <= 0 || frame_h <= 0) {
-        if (error) {
-          *error = "Open CUDA Auto Frame: invalid frame size.";
-        }
+        last_error = "Open CUDA Auto Frame: invalid frame size.";
+        if (error) *error = last_error;
+        return false;
+      }
+      if (!matte) {
+        last_error = "Open CUDA Auto Frame: matte provider not set.";
+        if (error) *error = last_error;
         return false;
       }
 
-      // We reuse the Open CUDA matting model packs for auto-frame (foreground -> crop).
-      const auto reg = studiocast::open_cuda::ModelPackRegistry::ScanDefault();
-      if (reg.ListModels().empty()) {
-        if (error) {
-          *error = "Open CUDA Auto Frame: No Open CUDA model packs installed.";
-        }
+      // Ensure the shared matting model/session exists, but don't allocate the heavy
+      // virtual-background buffers if the VB stage isn't scheduled.
+      std::string matte_init_err;
+      if (!matte->EnsureInitialized(frame_w, frame_h, fx, &matte_init_err, /*require_vb_buffers=*/false)) {
+        last_error = "Open CUDA Auto Frame: " + matte_init_err;
+        if (error) *error = last_error;
         return false;
       }
 
-      std::string requested_model_id = fx.virtual_background.model_id;
-      if (requested_model_id.empty()) {
-        requested_model_id = reg.DefaultModelId();
-      }
-
-      std::optional<studiocast::open_cuda::ModelPack> resolved = reg.ResolveModel(requested_model_id);
-      if (!resolved.has_value()) {
-        if (error) {
-          *error = "Open CUDA Auto Frame: Unknown model id '" + requested_model_id + "'.";
-        }
-        return false;
-      }
-      if (resolved->task != "matting") {
-        if (error) {
-          *error = "Open CUDA Auto Frame: model '" + requested_model_id + "' task must be 'matting'.";
-        }
-        return false;
-      }
-
-      // If we're already initialized with the same model and frame size, keep the context.
-      if (initialized && enabled && active_model_id == requested_model_id && gpu_rgb_in.w == frame_w &&
-          gpu_rgb_in.h == frame_h && pack.has_value() && pack->onnx_path == resolved->onnx_path) {
+      // Track model/frame changes to reset smoothing state.
+      const std::string current_model_id = matte->active_model_id;
+      if (initialized && enabled && current_model_id == active_model_id && last_frame_w == frame_w && last_frame_h == frame_h) {
         return true;
-      }
-
-      Destroy();
-      active_model_id = requested_model_id;
-      pack = resolved;
-
-      if (!cuda.IsInitialized()) {
-        std::string err;
-        if (!cuda.Initialize(&err)) {
-          if (error) {
-            *error = "Open CUDA Auto Frame: CUDA init failed: " + err;
-          }
-          return false;
-        }
-        if (!cuda.EnsureContext(&err)) {
-          if (error) {
-            *error = "Open CUDA Auto Frame: CUDA context failed: " + err;
-          }
-          return false;
-        }
-      }
-
-      {
-        std::string err;
-        if (!cuda.CreateStream(&stream, &err)) {
-          if (error) {
-            *error = "Open CUDA Auto Frame: CreateStream failed: " + err;
-          }
-          return false;
-        }
-      }
-
-      session = std::make_unique<studiocast::open_cuda::OpenCudaMattingSession>(&cuda, *pack);
-      {
-        std::string err;
-        if (!session->EnsureInitialized(frame_w, frame_h, &err)) {
-          if (error) {
-            *error = "Open CUDA Auto Frame: Session init failed: " + err;
-          }
-          session.reset();
-          return false;
-        }
-      }
-
-      {
-        std::string err;
-        if (!gpu_rgb_in.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &err)) {
-          if (error) {
-            *error = "Open CUDA Auto Frame: GPU RGB alloc failed: " + err;
-          }
-          return false;
-        }
-      }
-      {
-        std::string err;
-        if (!alpha_tensor.ReallocIfNeededNchwF32(&cuda, 1, 1, pack->input.height, pack->input.width, &err)) {
-          if (error) {
-            *error = "Open CUDA Auto Frame: alpha tensor alloc failed: " + err;
-          }
-          return false;
-        }
       }
 
       have_smoothed_crop = false;
       last_had_detection = false;
+      active_model_id = current_model_id;
+      last_frame_w = frame_w;
+      last_frame_h = frame_h;
 
       initialized = true;
       enabled = true;
       return true;
     }
 
-    bool ApplyRgbInPlace(std::uint8_t* rgb,
+    bool ApplyRgbInPlace(std::uint64_t capture_sequence,
+                         std::uint8_t* rgb,
                          int width,
                          int height,
                          size_t stride,
@@ -2315,6 +2402,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
+      if (!matte) {
+        if (error) {
+          *error = "Open CUDA Auto Frame: matte provider not set.";
+        }
+        return false;
+      }
+
       std::string err;
       if (!EnsureInitialized(width, height, fx, &err)) {
         if (error) {
@@ -2323,37 +2417,36 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      if (!gpu_rgb_in.UploadFromCpuRgb24(&cuda, rgb, stride, stream, &err)) {
+      const std::vector<float>* alpha_cpu = nullptr;
+      int alpha_w = 0;
+      int alpha_h = 0;
+      std::string alpha_err;
+      if (!matte->GetAlphaCpuForFrame(rgb,
+                                     stride,
+                                     capture_sequence,
+                                     width,
+                                     height,
+                                     fx,
+                                     &alpha_cpu,
+                                     &alpha_w,
+                                     &alpha_h,
+                                     &alpha_err)) {
         if (error) {
-          *error = "Open CUDA Auto Frame: UploadFromCpu failed: " + err;
+          *error = "Open CUDA Auto Frame: " + alpha_err;
         }
         return false;
       }
-
-      if (!session->Run(stream, gpu_rgb_in, &alpha_tensor, &err)) {
+      if (!alpha_cpu) {
         if (error) {
-          *error = "Open CUDA Auto Frame: Matting inference failed: " + err;
-        }
-        return false;
-      }
-
-      if (!alpha_tensor.DownloadToCpuF32(&cuda, &alpha_cpu, stream, &err)) {
-        if (error) {
-          *error = "Open CUDA Auto Frame: alpha download failed: " + err;
-        }
-        return false;
-      }
-      if (!cuda.StreamSynchronize(stream, &err)) {
-        if (error) {
-          *error = "Open CUDA Auto Frame: StreamSynchronize failed: " + err;
+          *error = "Open CUDA Auto Frame: alpha CPU buffer is null.";
         }
         return false;
       }
 
       studiocast::maxine::effects::RectF box_px;
-      const bool found = ComputeMatteBoxPxFromAlpha(alpha_cpu,
-                                                    pack->input.width,
-                                                    pack->input.height,
+      const bool found = ComputeMatteBoxPxFromAlpha(*alpha_cpu,
+                                                    alpha_w,
+                                                    alpha_h,
                                                     width,
                                                     height,
                                                     &box_px);
@@ -2448,36 +2541,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     bool enabled = false;
     std::string last_error;
     std::string active_model_id;
-    std::optional<studiocast::open_cuda::ModelPack> pack;
-    std::unique_ptr<studiocast::open_cuda::OpenCudaMattingSession> session;
-
-    studiocast::maxine::CudaDriverApi cuda;
-    studiocast::maxine::CUstream stream = nullptr;
-
-    studiocast::cuda::CudaImage gpu_rgb_in;
-    studiocast::cuda::CudaTensor alpha_tensor;
-    std::vector<float> alpha_cpu;
-
-    ~OpenCudaKeyLightContext() { Destroy(); }
+    OpenCudaVirtualBackgroundContext* matte = nullptr;  // shared Open CUDA matting + cache
+    int last_frame_w = 0;
+    int last_frame_h = 0;
 
     void Destroy() {
       initialized = false;
       enabled = false;
       last_error.clear();
       active_model_id.clear();
-      pack.reset();
-      session.reset();
-
-      std::string err;
-      if (cuda.IsInitialized()) {
-        if (stream) {
-          cuda.StreamSynchronize(stream, &err);
-          cuda.DestroyStream(stream, &err);
-          stream = nullptr;
-        }
-        gpu_rgb_in.Free(&cuda, &err);
-        alpha_tensor.Free(&cuda, &err);
-      }
+      last_frame_w = 0;
+      last_frame_h = 0;
     }
 
     static void ResolveTargetColorFromTemperaturePreset(int preset,
@@ -2510,114 +2584,43 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                            int frame_h,
                            const studiocast::video::effects::BroadcastCameraEffects& fx,
                            std::string* error) {
+      if (error) error->clear();
+
       if (frame_w <= 0 || frame_h <= 0) {
-        if (error) {
-          *error = "Open CUDA Virtual Key Light: invalid frame size.";
-        }
+        last_error = "Open CUDA Virtual Key Light: invalid frame size.";
+        if (error) *error = last_error;
+        return false;
+      }
+      if (!matte) {
+        last_error = "Open CUDA Virtual Key Light: matte provider not set.";
+        if (error) *error = last_error;
         return false;
       }
 
-      // We reuse the Open CUDA matting model packs (foreground matte).
-      const auto reg = studiocast::open_cuda::ModelPackRegistry::ScanDefault();
-      if (reg.ListModels().empty()) {
-        if (error) {
-          *error = "Open CUDA Virtual Key Light: No Open CUDA model packs installed.";
-        }
+      // Ensure the shared matting model/session exists, but don't allocate the heavy
+      // virtual-background buffers if the VB stage isn't scheduled.
+      std::string matte_init_err;
+      if (!matte->EnsureInitialized(frame_w, frame_h, fx, &matte_init_err, /*require_vb_buffers=*/false)) {
+        last_error = "Open CUDA Virtual Key Light: " + matte_init_err;
+        if (error) *error = last_error;
         return false;
       }
 
-      std::string requested_model_id = fx.virtual_background.model_id;
-      if (requested_model_id.empty()) {
-        requested_model_id = reg.DefaultModelId();
-      }
-
-      std::optional<studiocast::open_cuda::ModelPack> resolved = reg.ResolveModel(requested_model_id);
-      if (!resolved.has_value()) {
-        if (error) {
-          *error = "Open CUDA Virtual Key Light: Unknown model id '" + requested_model_id + "'.";
-        }
-        return false;
-      }
-      if (resolved->task != "matting") {
-        if (error) {
-          *error = "Open CUDA Virtual Key Light: model '" + requested_model_id + "' task must be 'matting'.";
-        }
-        return false;
-      }
-
-      // If already initialized with same model and frame size, keep the context.
-      if (initialized && enabled && active_model_id == requested_model_id && gpu_rgb_in.w == frame_w &&
-          gpu_rgb_in.h == frame_h && pack.has_value() && pack->onnx_path == resolved->onnx_path) {
+      const std::string current_model_id = matte->active_model_id;
+      if (initialized && enabled && current_model_id == active_model_id && last_frame_w == frame_w && last_frame_h == frame_h) {
         return true;
       }
 
-      Destroy();
-      active_model_id = requested_model_id;
-      pack = resolved;
-
-      if (!cuda.IsInitialized()) {
-        std::string err;
-        if (!cuda.Initialize(&err)) {
-          if (error) {
-            *error = "Open CUDA Virtual Key Light: CUDA init failed: " + err;
-          }
-          return false;
-        }
-        if (!cuda.EnsureContext(&err)) {
-          if (error) {
-            *error = "Open CUDA Virtual Key Light: CUDA context failed: " + err;
-          }
-          return false;
-        }
-      }
-
-      {
-        std::string err;
-        if (!cuda.CreateStream(&stream, &err)) {
-          if (error) {
-            *error = "Open CUDA Virtual Key Light: CreateStream failed: " + err;
-          }
-          return false;
-        }
-      }
-
-      session = std::make_unique<studiocast::open_cuda::OpenCudaMattingSession>(&cuda, *pack);
-      {
-        std::string err;
-        if (!session->EnsureInitialized(frame_w, frame_h, &err)) {
-          if (error) {
-            *error = "Open CUDA Virtual Key Light: Session init failed: " + err;
-          }
-          session.reset();
-          return false;
-        }
-      }
-
-      {
-        std::string err;
-        if (!gpu_rgb_in.ReallocIfNeeded(&cuda, frame_w, frame_h, studiocast::cuda::PixelFormatGpu::rgb_u8, &err)) {
-          if (error) {
-            *error = "Open CUDA Virtual Key Light: GPU RGB alloc failed: " + err;
-          }
-          return false;
-        }
-      }
-      {
-        std::string err;
-        if (!alpha_tensor.ReallocIfNeededNchwF32(&cuda, 1, 1, pack->input.height, pack->input.width, &err)) {
-          if (error) {
-            *error = "Open CUDA Virtual Key Light: alpha tensor alloc failed: " + err;
-          }
-          return false;
-        }
-      }
-
+      active_model_id = current_model_id;
+      last_frame_w = frame_w;
+      last_frame_h = frame_h;
       initialized = true;
       enabled = true;
       return true;
     }
 
-    bool ApplyRgbInPlace(std::uint8_t* rgb,
+    bool ApplyRgbInPlace(std::uint64_t capture_sequence,
+                         std::uint8_t* rgb,
                          int width,
                          int height,
                          size_t stride,
@@ -2640,44 +2643,45 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       std::string err;
       if (!EnsureInitialized(width, height, fx, &err)) {
-        if (error) {
-          *error = err;
-        }
+        if (error) *error = err;
+        return false;
+      }
+      if (!matte) {
+        if (error) *error = "Open CUDA Virtual Key Light: matte provider not set.";
         return false;
       }
 
-      if (!gpu_rgb_in.UploadFromCpuRgb24(&cuda, rgb, stride, stream, &err)) {
+      const std::vector<float>* alpha_cpu = nullptr;
+      int alpha_w = 0;
+      int alpha_h = 0;
+      std::string alpha_err;
+      if (!matte->GetAlphaCpuForFrame(rgb,
+                                      stride,
+                                      capture_sequence,
+                                      width,
+                                      height,
+                                      fx,
+                                      &alpha_cpu,
+                                      &alpha_w,
+                                      &alpha_h,
+                                      &alpha_err)) {
         if (error) {
-          *error = "Open CUDA Virtual Key Light: UploadFromCpu failed: " + err;
+          *error = "Open CUDA Virtual Key Light: " + alpha_err;
         }
         return false;
       }
-
-      if (!session->Run(stream, gpu_rgb_in, &alpha_tensor, &err)) {
+      if (!alpha_cpu) {
         if (error) {
-          *error = "Open CUDA Virtual Key Light: Matting inference failed: " + err;
-        }
-        return false;
-      }
-
-      if (!alpha_tensor.DownloadToCpuF32(&cuda, &alpha_cpu, stream, &err)) {
-        if (error) {
-          *error = "Open CUDA Virtual Key Light: alpha download failed: " + err;
-        }
-        return false;
-      }
-      if (!cuda.StreamSynchronize(stream, &err)) {
-        if (error) {
-          *error = "Open CUDA Virtual Key Light: StreamSynchronize failed: " + err;
+          *error = "Open CUDA Virtual Key Light: alpha CPU buffer is null.";
         }
         return false;
       }
 
       // Compute a matte bounding box so we only process pixels near the subject.
       studiocast::maxine::effects::RectF box_px;
-      const bool found = OpenCudaAutoFrameContext::ComputeMatteBoxPxFromAlpha(alpha_cpu,
-                                                                              pack->input.width,
-                                                                              pack->input.height,
+      const bool found = OpenCudaAutoFrameContext::ComputeMatteBoxPxFromAlpha(*alpha_cpu,
+                                                                              alpha_w,
+                                                                              alpha_h,
                                                                               width,
                                                                               height,
                                                                               &box_px);
@@ -2707,9 +2711,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       ResolveTargetColorFromTemperaturePreset(fx.virtual_key_light.temperature_preset, &target_r, &target_g, &target_b);
 
       // Nearest-neighbor matte sampling using fixed-point mapping.
-      const int alpha_w = pack->input.width;
-      const int alpha_h = pack->input.height;
-      if (alpha_w <= 0 || alpha_h <= 0 || alpha_cpu.empty()) {
+      if (alpha_w <= 0 || alpha_h <= 0 || alpha_cpu->empty()) {
         return true;
       }
 
@@ -2718,7 +2720,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       int ay_fp = y0 * step_y_fp;
       for (int y = y0; y < y1; ++y) {
         const int ay = std::clamp(ay_fp >> 16, 0, alpha_h - 1);
-        const float* alpha_row = alpha_cpu.data() + static_cast<size_t>(ay) * static_cast<size_t>(alpha_w);
+        const float* alpha_row = alpha_cpu->data() + static_cast<size_t>(ay) * static_cast<size_t>(alpha_w);
         std::uint8_t* row = rgb + static_cast<size_t>(y) * stride;
         int ax_fp = x0 * step_x_fp;
         for (int x = x0; x < x1; ++x) {
@@ -2754,6 +2756,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return true;
     }
   } open_cuda_key_light;
+
+  // Share the same Open CUDA matting model/session (and per-frame matte cache) across
+  // all open-source video effects that need a foreground matte.
+  // This avoids re-running the matting network multiple times per frame.
+  //
+  // NOTE: The provider lives in open_cuda_vb even if the virtual background stage is not
+  // scheduled; other effects request matte-only initialization.
+  open_cuda_auto_frame.matte = &open_cuda_vb;
+  open_cuda_key_light.matte = &open_cuda_vb;
 
   // Open-source Video Noise Removal (Open CUDA backend). This implementation is a lightweight
   // temporal denoiser intended to be real-time and dependency-free. It does not require model packs.
@@ -5270,7 +5281,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           scaling_needed && (gpu_backend != GpuResizeBackend::none) && !last_stage_for_defer.empty();
 
       // Define whether any Open CUDA stage is enabled for this frame.
-      // When true, Open CUDA stages must always follow the deferred strategy (no internal readback).
+      // Open CUDA stages can optionally use the deferred strategy (no internal readback) when
+      // the pipeline can carry a GPU output to final scaling/output without CPU-side continuation.
       const bool open_cuda_any_stage_enabled =
           have_open_cuda_vb &&
           (has_stage(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) ||
@@ -5297,9 +5309,21 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       const bool apply_vignette_on_auto_frame =
           vignette_requested && (vig_attach == studiocast::video::effects::contract::kEffectIdAutoFrame);
 
+      const std::uint64_t capture_sequence = f.sequence;
+
+      // Open CUDA optimization: When both Virtual Key Light and Open CUDA Virtual Background
+      // are enabled, the key light stage (CPU) would normally run first and trigger an extra
+      // CPU->GPU upload for matting. We can avoid that duplicate upload by deferring the key
+      // light stage until after the Open CUDA VB stage has already uploaded and computed the matte.
+      bool pending_open_cuda_key_light = false;
+
       auto apply_stage = [&](const std::string& stage_id) {
-        const bool defer_readback = is_open_cuda_stage_id(stage_id) ? true
-                                                                    : (allow_defer_readback && (stage_id == last_stage_for_defer));
+        bool defer_readback = allow_defer_readback && (stage_id == last_stage_for_defer);
+        if (is_open_cuda_stage_id(stage_id) && pending_open_cuda_key_light) {
+          // Force immediate readback when we know a CPU stage (key light) must run after this
+          // Open CUDA stage.
+          defer_readback = false;
+        }
 
         if (stage_id == studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) {
           if (have_maxine_denoise) {
@@ -5381,9 +5405,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           }
 
           if (have_open_cuda_key_light) {
+            // If Open CUDA VB is also enabled, defer key light until after VB so the VB upload
+            // can be reused for matte computation (avoids a redundant upload in key light).
+            if (open_cuda_any_stage_enabled) {
+              pending_open_cuda_key_light = true;
+              return;
+            }
+
             std::string oc_err;
             if (!open_cuda_key_light.ApplyRgbInPlace(
-                    rgb.data(), capA.width, capA.height, rgbStride, fx, &oc_err)) {
+                    capture_sequence, rgb.data(), capA.width, capA.height, rgbStride, fx, &oc_err)) {
               {
                 std::lock_guard<std::mutex> lock(mu_);
                 last_error_ = "Open CUDA virtual key light failed: " + oc_err;
@@ -5425,12 +5456,36 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           }
 
           if (have_open_cuda_vb) {
+            // If the Open CUDA key light stage was deferred earlier in the chain (to avoid a
+            // redundant CPU->GPU upload for matting), apply it here immediately after the Open CUDA
+            // VB stage finishes (or is bypassed) so downstream stage ordering is preserved.
+            const auto apply_deferred_open_cuda_key_light = [&]() {
+              if (!pending_open_cuda_key_light) return;
+              pending_open_cuda_key_light = false;
+              if (!have_open_cuda_key_light) return;
+
+              std::string kl_err;
+              if (!open_cuda_key_light.ApplyRgbInPlace(
+                      capture_sequence, rgb.data(), capA.width, capA.height, rgbStride, fx, &kl_err)) {
+                {
+                  std::lock_guard<std::mutex> lock(mu_);
+                  last_error_ = "Open CUDA virtual key light failed: " + kl_err;
+                }
+
+                // Keep the pipeline alive; bypass on failures.
+                if (studiocast::video::effects::ShouldAbortPipelineOnOpenCudaVbApplyFailure()) {
+                  fx_failed = true;
+                }
+              }
+            };
+
             // Open CUDA VB does not support vignette attachment yet.
             if (apply_vignette_on_bg) {
               {
                 std::lock_guard<std::mutex> lock(mu_);
                 last_error_ = "Open CUDA virtual background does not support vignette yet.";
               }
+              apply_deferred_open_cuda_key_light();
               return;
             }
 
@@ -5493,11 +5548,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                   fx_failed = true;
                 }
 
+                apply_deferred_open_cuda_key_light();
                 return;
               }
             }
 
-            if (!open_cuda_vb.ApplyCudaRgb(*open_cuda_curr, open_cuda_next, fx, &oc_err, &deferred_gpu_out)) {
+            if (!open_cuda_vb.ApplyCudaRgb(
+                    *open_cuda_curr, open_cuda_next, fx, capture_sequence, &oc_err, &deferred_gpu_out)) {
               {
                 std::lock_guard<std::mutex> lock(mu_);
                 last_error_ = "Open CUDA virtual background failed: " + oc_err;
@@ -5509,6 +5566,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                 fx_failed = true;
               }
 
+              apply_deferred_open_cuda_key_light();
               return;
             }
 
@@ -5537,12 +5595,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                 fx_failed = true;
               }
 
+              apply_deferred_open_cuda_key_light();
               return;
             }
 
             if (debug_open_cuda_transfers) {
               ++pipeline_open_cuda_download_calls;
             }
+
+            apply_deferred_open_cuda_key_light();
             return;
           }
 
@@ -5576,7 +5637,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (have_open_cuda_auto_frame) {
             std::string oc_err;
             if (!open_cuda_auto_frame.ApplyRgbInPlace(
-                    rgb.data(), capA.width, capA.height, rgbStride, fx, &oc_err)) {
+                    capture_sequence, rgb.data(), capA.width, capA.height, rgbStride, fx, &oc_err)) {
               {
                 std::lock_guard<std::mutex> lock(mu_);
                 last_error_ = "Open CUDA auto frame failed: " + oc_err;
@@ -5614,6 +5675,23 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       for (const auto& stage_id : plan.ordered_effect_ids) {
         apply_stage(stage_id);
         if (fx_failed) break;
+      }
+
+      // Safety net: if key light was deferred but VB did not run (or bailed early), apply it now
+      // so it isn't silently skipped.
+      if (!fx_failed && pending_open_cuda_key_light && have_open_cuda_key_light) {
+        pending_open_cuda_key_light = false;
+        std::string kl_err;
+        if (!open_cuda_key_light.ApplyRgbInPlace(
+                capture_sequence, rgb.data(), capA.width, capA.height, rgbStride, fx, &kl_err)) {
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            last_error_ = "Open CUDA virtual key light failed: " + kl_err;
+          }
+          if (studiocast::video::effects::ShouldAbortPipelineOnOpenCudaVbApplyFailure()) {
+            fx_failed = true;
+          }
+        }
       }
 
       // CPU-only tail effects run last.
