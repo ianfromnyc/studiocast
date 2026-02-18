@@ -10,5 +10,6 @@ License:
 - MIT (see upstream LICENSE in the directory above)
 
 Notes:
+- This is the reference fp32 YuNet model.
 - StudioCast does not ship the model binary in git.
 - This directory only contains metadata used by StudioCast's model installer/runtime.

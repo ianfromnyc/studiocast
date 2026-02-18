@@ -47,6 +47,17 @@ Notes:
 - Installed packs live under `~/.local/share/studiocast/models/open_video/**`.
 - Multiple quality/latency variants are represented as multiple packs within the same subject.
 
+### Curated quality tiers
+
+StudioCast templates typically provide **Good / Better / Best** tiers within a subject.
+
+For example, `face_detection/` includes YuNet in three tiers:
+
+- **Good Quality (YuNet INT8)** — fastest; slightly reduced accuracy / compatibility depends on int8 kernel support
+- **Better Quality (YuNet INT8 BQ)** — blockwise-quantized int8 variant (good accuracy, still fast)
+- **Best Quality (YuNet FP32)** — reference fp32 model (highest compatibility)
+
+
 ## Tasks
 
 `model.json` uses a `task` field to declare what the model is used for.

@@ -1,18 +1,18 @@
 {
   "schema_version": 2,
-  "id": "yunet_opencv_zoo_2023mar",
-  "display_name": "YuNet Face Detection (OpenCV Zoo, 2023mar)",
+  "id": "yunet_opencv_zoo_2023mar_int8bq",
+  "display_name": "YuNet Face Detection (OpenCV Zoo, 2023mar, int8 block-quantized)",
   "task": "face_detection",
   "files": [
     {
-      "name": "face_detection_yunet_2023mar.onnx",
+      "name": "face_detection_yunet_2023mar_int8bq.onnx",
       "kind": "onnx",
       "role": "main",
       "sha256": ""
     }
   ],
   "onnx": {
-    "main": "face_detection_yunet_2023mar.onnx",
+    "main": "face_detection_yunet_2023mar_int8bq.onnx",
     "inputs": [
       {
         "name": "input",
@@ -42,7 +42,7 @@
     ],
     "preprocess": {
       "kind": "opencv_yunet",
-      "note": "The upstream YuNet ONNX has a fixed 320x320 input; OpenCV FaceDetectorYN handles resizing/scaling. StudioCast will match OpenCV's preprocessing when implementing this task."
+      "note": "Block-quantized int8 YuNet variant. StudioCast will follow OpenCV's YuNet preprocessing and decode logic when implementing task=face_detection."
     },
     "postprocess": {
       "decoder": "yunet_opencv",
@@ -53,8 +53,8 @@
   },
   "origin": {
     "upstream_repo": "https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet",
-    "upstream_model": "face_detection_yunet_2023mar.onnx",
+    "upstream_model": "face_detection_yunet_2023mar_int8bq.onnx",
     "license": "MIT",
-    "notes": "Outputs are the 12 multi-stride blobs used by OpenCV's YuNet post-process (cls/obj/bbox/kps at strides 8/16/32)."
+    "notes": "This is the blockwise-quantized int8 YuNet variant (\"YuNet block\" in the upstream README accuracy table; generated with block_size=64)."
   }
 }

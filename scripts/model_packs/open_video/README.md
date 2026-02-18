@@ -12,6 +12,7 @@ Installed model packs live at:
 
 - `segmentation/` — matte/alpha models (`task = "matting"`)
 - `face_detection/` — face detection models
+  - Templates include YuNet in Good/Better/Best variants (int8 / int8bq / fp32).
 - `face_landmarks/` — facial landmark detectors
 - `video_denoise/` — video denoising models
 - `eye_contact/` — gaze/eye contact models

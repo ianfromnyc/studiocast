@@ -1,0 +1,60 @@
+{
+  "schema_version": 2,
+  "id": "yunet_opencv_zoo_2023mar_fp32",
+  "display_name": "YuNet Face Detection (OpenCV Zoo, 2023mar, fp32)",
+  "task": "face_detection",
+  "files": [
+    {
+      "name": "face_detection_yunet_2023mar.onnx",
+      "kind": "onnx",
+      "role": "main",
+      "sha256": ""
+    }
+  ],
+  "onnx": {
+    "main": "face_detection_yunet_2023mar.onnx",
+    "inputs": [
+      {
+        "name": "input",
+        "layout": "nchw",
+        "dtype": "float32",
+        "width": 320,
+        "height": 320,
+        "channels": 3
+      }
+    ],
+    "outputs": [
+      { "name": "cls_8", "kind": "scores", "dtype": "float32" },
+      { "name": "cls_16", "kind": "scores", "dtype": "float32" },
+      { "name": "cls_32", "kind": "scores", "dtype": "float32" },
+
+      { "name": "obj_8", "kind": "objectness", "dtype": "float32" },
+      { "name": "obj_16", "kind": "objectness", "dtype": "float32" },
+      { "name": "obj_32", "kind": "objectness", "dtype": "float32" },
+
+      { "name": "bbox_8", "kind": "boxes", "dtype": "float32" },
+      { "name": "bbox_16", "kind": "boxes", "dtype": "float32" },
+      { "name": "bbox_32", "kind": "boxes", "dtype": "float32" },
+
+      { "name": "kps_8", "kind": "keypoints", "dtype": "float32" },
+      { "name": "kps_16", "kind": "keypoints", "dtype": "float32" },
+      { "name": "kps_32", "kind": "keypoints", "dtype": "float32" }
+    ],
+    "preprocess": {
+      "kind": "opencv_yunet",
+      "note": "FP32 YuNet reference model. StudioCast will follow OpenCV's YuNet preprocessing and decode logic when implementing task=face_detection."
+    },
+    "postprocess": {
+      "decoder": "yunet_opencv",
+      "score_threshold": 0.9,
+      "nms_threshold": 0.3,
+      "top_k": 5000
+    }
+  },
+  "origin": {
+    "upstream_repo": "https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet",
+    "upstream_model": "face_detection_yunet_2023mar.onnx",
+    "license": "MIT",
+    "notes": "Reference fp32 YuNet model (highest compatibility / quality preset)."
+  }
+}
