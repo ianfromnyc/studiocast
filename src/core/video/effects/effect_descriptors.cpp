@@ -248,7 +248,8 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     VideoEffectDescriptor d;
     d.id = std::string(contract::kEffectIdVideoNoiseRemoval);
     d.display_name = "Video Noise Removal";
-    d.required_components = {RequiredComponent::maxine_vfx};
+    // Open-source (Open CUDA) fallback exists; keep this available when Maxine is missing.
+    d.required_components = {RequiredComponent::gpu_utility};
     d.pipeline_order = 50;
     d.params = {
         ParamDescriptor{.id = std::string(contract::param::kEnabled),

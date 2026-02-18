@@ -36,6 +36,7 @@ inline bool WantsOpenCudaForPlannedEffects(const BroadcastCameraEffects& fx) {
   return has(contract::kEffectIdVirtualBackgroundBlur) ||
          has(contract::kEffectIdVirtualBackgroundRemove) ||
          has(contract::kEffectIdVirtualBackgroundReplace) ||
+         has(contract::kEffectIdVideoNoiseRemoval) ||
          has(contract::kEffectIdAutoFrame) ||
          has(contract::kEffectIdVirtualKeyLight);
 }
@@ -59,6 +60,7 @@ inline OpenCudaGateDecision EvaluateOpenCudaGate(const BroadcastCameraEffects& f
       has(contract::kEffectIdVirtualBackgroundBlur) ||
       has(contract::kEffectIdVirtualBackgroundRemove) ||
       has(contract::kEffectIdVirtualBackgroundReplace) ||
+      has(contract::kEffectIdVideoNoiseRemoval) ||
       has(contract::kEffectIdAutoFrame) ||
       has(contract::kEffectIdVirtualKeyLight);
   if (!wants_open_cuda) {
@@ -97,6 +99,12 @@ inline OpenCudaGateDecision EvaluateOpenCudaGate(const BroadcastCameraEffects& f
       !avail.count(std::string(contract::kEffectIdVirtualBackgroundReplace))) {
     out.ok = false;
     out.message = format_blocked(contract::kEffectIdVirtualBackgroundReplace);
+    return out;
+  }
+  if (has(contract::kEffectIdVideoNoiseRemoval) &&
+      !avail.count(std::string(contract::kEffectIdVideoNoiseRemoval))) {
+    out.ok = false;
+    out.message = format_blocked(contract::kEffectIdVideoNoiseRemoval);
     return out;
   }
   if (has(contract::kEffectIdAutoFrame) &&

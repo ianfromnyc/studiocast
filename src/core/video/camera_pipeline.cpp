@@ -2755,6 +2755,107 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   } open_cuda_key_light;
 
+  // Open-source Video Noise Removal (Open CUDA backend). This implementation is a lightweight
+  // temporal denoiser intended to be real-time and dependency-free. It does not require model packs.
+  struct OpenCudaVideoNoiseRemovalContext {
+    bool last_enabled = false;
+    int prev_w = 0;
+    int prev_h = 0;
+    size_t prev_stride = 0;
+    std::vector<uint8_t> prev_rgb;
+
+    void Reset() {
+      last_enabled = false;
+      prev_w = 0;
+      prev_h = 0;
+      prev_stride = 0;
+      prev_rgb.clear();
+    }
+
+    bool ApplyRgbInPlace(uint8_t* rgb,
+                         int width,
+                         int height,
+                         size_t stride,
+                         const video::effects::BroadcastCameraEffects& fx,
+                         std::string* error_out) {
+      (void)error_out;
+
+      const bool enabled = fx.video_noise_removal.enabled;
+      const int strength = std::clamp(fx.video_noise_removal.strength, 0, 100);
+
+      if (!enabled || strength <= 0) {
+        // When toggled off, don't keep stale temporal state.
+        last_enabled = false;
+        return true;
+      }
+
+      // (Re)initialize on first frame after enable, or when the image geometry changes.
+      const size_t bytes = static_cast<size_t>(height) * stride;
+      if (!last_enabled || prev_rgb.size() != bytes || width != prev_w || height != prev_h || stride != prev_stride) {
+        prev_w = width;
+        prev_h = height;
+        prev_stride = stride;
+        prev_rgb.assign(rgb, rgb + bytes);
+        last_enabled = true;
+        return true;
+      }
+
+      last_enabled = true;
+
+      // Strength -> smoothing weight and motion threshold.
+      // We use a squared curve for weight so low strengths do something subtle.
+      const float t = static_cast<float>(strength) / 100.0f;
+      const float t2 = t * t;
+      const int w_prev = std::clamp(static_cast<int>(t2 * 220.0f + 0.5f), 0, 255);
+      const int w_curr = 256 - w_prev;
+
+      // Motion threshold: lower threshold at higher strengths to reduce ghosting.
+      const int thr_chan = std::clamp(static_cast<int>(20.0f - t * 12.0f + 0.5f), 6, 24);
+      const int thr_sum = thr_chan * 3;
+
+      uint8_t* prev = prev_rgb.data();
+      for (int y = 0; y < height; ++y) {
+        uint8_t* row = rgb + static_cast<size_t>(y) * stride;
+        uint8_t* prow = prev + static_cast<size_t>(y) * stride;
+        for (int x = 0; x < width; ++x) {
+          const int i = x * 3;
+
+          const int cr = row[i + 0];
+          const int cg = row[i + 1];
+          const int cb = row[i + 2];
+
+          const int pr = prow[i + 0];
+          const int pg = prow[i + 1];
+          const int pb = prow[i + 2];
+
+          const int diff = std::abs(cr - pr) + std::abs(cg - pg) + std::abs(cb - pb);
+          if (diff > thr_sum || w_prev == 0) {
+            // Motion (or effectively disabled smoothing): take current and refresh temporal state.
+            prow[i + 0] = static_cast<uint8_t>(cr);
+            prow[i + 1] = static_cast<uint8_t>(cg);
+            prow[i + 2] = static_cast<uint8_t>(cb);
+            continue;
+          }
+
+          const int or_ = (cr * w_curr + pr * w_prev + 128) >> 8;
+          const int og_ = (cg * w_curr + pg * w_prev + 128) >> 8;
+          const int ob_ = (cb * w_curr + pb * w_prev + 128) >> 8;
+
+          row[i + 0] = static_cast<uint8_t>(or_);
+          row[i + 1] = static_cast<uint8_t>(og_);
+          row[i + 2] = static_cast<uint8_t>(ob_);
+
+          // Store filtered output as the next frame's reference.
+          prow[i + 0] = row[i + 0];
+          prow[i + 1] = row[i + 1];
+          prow[i + 2] = row[i + 2];
+        }
+      }
+
+      return true;
+    }
+  } open_cuda_video_denoise;
+
   struct MaxineRelightingContext {
     bool initialized = false;
     std::string last_error;
@@ -4432,6 +4533,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   bool want_maxine_denoise = false;
   bool have_maxine_denoise = false;
 
+  bool want_open_cuda_video_denoise = false;
+  bool have_open_cuda_video_denoise = false;
+
   bool want_maxine_bg_blur = false;
   bool have_maxine_bg_blur = false;
 
@@ -4506,6 +4610,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     want_maxine_denoise = false;
     have_maxine_denoise = false;
 
+    want_open_cuda_video_denoise = false;
+    have_open_cuda_video_denoise = false;
+
     want_maxine_vignette_only = false;
     have_maxine_vignette_only = false;
 
@@ -4547,16 +4654,23 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     // Video Noise Removal (Maxine VFX).
     if (has(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval)) {
+      const std::string stage_id = std::string(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval);
+
       if (engine_open_cuda) {
+        // Open-source fallback: lightweight temporal denoise.
+        want_open_cuda_video_denoise = true;
+        have_open_cuda_video_denoise = true;
+        set_backend(stage_id, "open_cuda");
         if (!note.empty()) note += "\n";
-        note += "Video Noise Removal unavailable: requires Maxine backend.";
+        note += "Open CUDA: Video Noise Removal (temporal denoise).";
       } else if (!maxine_strict_blocked) {
+        // AUTO / MAXINE: prefer Maxine VFX when available.
         want_maxine_denoise = true;
 
         std::string mx_err;
         if (maxine_denoise.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
           have_maxine_denoise = true;
-          set_backend(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval, "maxine");
+          set_backend(stage_id, "maxine");
           if (!note.empty()) note += "\n";
           note += "Maxine VFX: Video Noise Removal.";
         } else {
@@ -4564,11 +4678,25 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::vfx);
             maxine_strict_blocked = true;
           } else {
+            // AUTO: fall back to Open CUDA (when present).
+            want_open_cuda_video_denoise = true;
+            have_open_cuda_video_denoise = true;
+            set_backend(stage_id, "open_cuda");
             if (!note.empty()) note += "\n";
-            note += mx_err;
+            note += "Open CUDA: Video Noise Removal (temporal denoise) — Maxine VFX unavailable.";
+            if (!mx_err.empty()) {
+              note += "\n";
+              note += mx_err;
+            }
           }
         }
       }
+    }
+
+    // If Open CUDA denoise isn't active, reset the temporal state so a future enable/fallback
+    // doesn't blend against stale frames.
+    if (!have_open_cuda_video_denoise) {
+      open_cuda_video_denoise.last_enabled = false;
     }
 
     // Eye Contact (AR)
@@ -5174,20 +5302,32 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                                                     : (allow_defer_readback && (stage_id == last_stage_for_defer));
 
         if (stage_id == studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) {
-          if (!have_maxine_denoise) return;
-
-          std::string mx_err;
-          if (!maxine_denoise.ApplyRgbInPlace(rgb.data(),
-                                              capA.width,
-                                              capA.height,
-                                              rgbStride,
-                                              fx,
-                                              &mx_err)) {
-            {
-              std::lock_guard<std::mutex> lock(mu_);
-              last_error_ = "Maxine video noise removal failed: " + mx_err;
+          if (have_maxine_denoise) {
+            std::string mx_err;
+            if (!maxine_denoise.ApplyRgbInPlace(rgb.data(),
+                                                capA.width,
+                                                capA.height,
+                                                rgbStride,
+                                                fx,
+                                                &mx_err)) {
+              {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = "Maxine video noise removal failed: " + mx_err;
+              }
+              fx_failed = true;
             }
-            fx_failed = true;
+            return;
+          }
+
+          if (have_open_cuda_video_denoise) {
+            std::string oc_err;
+            if (!open_cuda_video_denoise.ApplyRgbInPlace(rgb.data(), capA.width, capA.height, rgbStride, fx, &oc_err)) {
+              // Best-effort: keep the pipeline running and simply bypass this stage.
+              if (!oc_err.empty()) {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = "Open CUDA video noise removal failed: " + oc_err;
+              }
+            }
           }
           return;
         }

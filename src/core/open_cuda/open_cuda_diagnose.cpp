@@ -33,6 +33,18 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
   od.install_hints.push_back("Each pack must contain: model.json, model.onnx, LICENSE.txt");
 
   const auto block_open_cuda_effects = [&](const char* reason_code) {
+    od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval)] = reason_code;
+    od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur)] =
+        reason_code;
+    od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove)] =
+        reason_code;
+    od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace)] =
+        reason_code;
+    od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdAutoFrame)] = reason_code;
+    od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualKeyLight)] = reason_code;
+  };
+
+  const auto block_open_cuda_matting_effects = [&](const char* reason_code) {
     od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur)] =
         reason_code;
     od.blocked_effects[std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove)] =
@@ -71,20 +83,27 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
     od.ok = false;
     block_open_cuda_effects("cuda_unavailable");
     od.install_hints.push_back(std::string("CUDA not available: ") + cuda_err);
-  } else if (od.installed_models.empty()) {
-    od.ok = false;
-    block_open_cuda_effects("missing_model_packs");
-    od.install_hints.push_back("No usable Open CUDA model packs were found.");
   } else {
     od.ok = true;
-    od.available_effects.push_back(
-        std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur));
-    od.available_effects.push_back(
-        std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove));
-    od.available_effects.push_back(
-        std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace));
-    od.available_effects.push_back(std::string(studiocast::video::effects::contract::kEffectIdAutoFrame));
-    od.available_effects.push_back(std::string(studiocast::video::effects::contract::kEffectIdVirtualKeyLight));
+
+    // Open CUDA Video Noise Removal is implemented without model packs.
+    od.available_effects.push_back(std::string(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval));
+
+    if (od.installed_models.empty()) {
+      // Segmentation/matting-based effects require at least one usable model pack.
+      block_open_cuda_matting_effects("missing_model_packs");
+      od.install_hints.push_back(
+          "No usable Open CUDA model packs were found (required for segmentation-based effects). Video Noise Removal can still run without packs.");
+    } else {
+      od.available_effects.push_back(
+          std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur));
+      od.available_effects.push_back(
+          std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove));
+      od.available_effects.push_back(
+          std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace));
+      od.available_effects.push_back(std::string(studiocast::video::effects::contract::kEffectIdAutoFrame));
+      od.available_effects.push_back(std::string(studiocast::video::effects::contract::kEffectIdVirtualKeyLight));
+    }
   }
 #else
   od.ok = false;
