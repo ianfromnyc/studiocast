@@ -1,0 +1,12 @@
+Gaze Correction Camera (Eye Contact)
+
+Upstream source:
+- https://github.com/WangWilly/gaze-correction-cam
+
+License:
+- BSD-3-Clause (see upstream LICENSE)
+
+Notes:
+- Upstream distributes TensorFlow checkpoint files for separate left/right eye models.
+- StudioCast will use hosted ONNX exports of those models for C++ integration.
+- StudioCast does not ship the model binaries in git.

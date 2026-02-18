@@ -1,0 +1,60 @@
+{
+  "schema_version": 2,
+  "id": "yunet_opencv_zoo_2023mar",
+  "display_name": "YuNet Face Detection (OpenCV Zoo, 2023mar)",
+  "task": "face_detection",
+  "files": [
+    {
+      "name": "face_detection_yunet_2023mar.onnx",
+      "kind": "onnx",
+      "role": "main",
+      "sha256": ""
+    }
+  ],
+  "onnx": {
+    "main": "face_detection_yunet_2023mar.onnx",
+    "inputs": [
+      {
+        "name": "input",
+        "layout": "nchw",
+        "dtype": "float32",
+        "width": 320,
+        "height": 320,
+        "channels": 3
+      }
+    ],
+    "outputs": [
+      { "name": "cls_8", "kind": "scores", "dtype": "float32" },
+      { "name": "cls_16", "kind": "scores", "dtype": "float32" },
+      { "name": "cls_32", "kind": "scores", "dtype": "float32" },
+
+      { "name": "obj_8", "kind": "objectness", "dtype": "float32" },
+      { "name": "obj_16", "kind": "objectness", "dtype": "float32" },
+      { "name": "obj_32", "kind": "objectness", "dtype": "float32" },
+
+      { "name": "bbox_8", "kind": "boxes", "dtype": "float32" },
+      { "name": "bbox_16", "kind": "boxes", "dtype": "float32" },
+      { "name": "bbox_32", "kind": "boxes", "dtype": "float32" },
+
+      { "name": "kps_8", "kind": "keypoints", "dtype": "float32" },
+      { "name": "kps_16", "kind": "keypoints", "dtype": "float32" },
+      { "name": "kps_32", "kind": "keypoints", "dtype": "float32" }
+    ],
+    "preprocess": {
+      "kind": "opencv_yunet",
+      "note": "The upstream YuNet ONNX has a fixed 320x320 input; OpenCV FaceDetectorYN handles resizing/scaling. StudioCast will match OpenCV's preprocessing when implementing this task."
+    },
+    "postprocess": {
+      "decoder": "yunet_opencv",
+      "score_threshold": 0.9,
+      "nms_threshold": 0.3,
+      "top_k": 5000
+    }
+  },
+  "origin": {
+    "upstream_repo": "https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet",
+    "upstream_model": "face_detection_yunet_2023mar.onnx",
+    "license": "MIT",
+    "notes": "Outputs are the 12 multi-stride blobs used by OpenCV's YuNet post-process (cls/obj/bbox/kps at strides 8/16/32)."
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "schema_version": 2,
+  "id": "dlib_68_ibug_300w",
+  "display_name": "dlib 68-point Face Landmarks (iBUG 300-W)",
+  "task": "face_landmarks",
+  "files": [
+    {
+      "name": "shape_predictor_68_face_landmarks.dat",
+      "kind": "dlib_shape_predictor",
+      "role": "main",
+      "sha256": ""
+    }
+  ],
+  "dlib": {
+    "predictor_kind": "shape_predictor_68_face_landmarks",
+    "num_landmarks": 68
+  },
+  "origin": {
+    "upstream_download": "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2",
+    "license": "See LICENSE.txt (non-commercial restrictions apply)",
+    "notes": "This predictor is trained on the iBUG 300-W dataset and is commonly used for 68-point facial landmarking.\nStudioCast is non-commercial, but downstream users must still comply with upstream terms.\nThis pack is a template (no binaries are committed)."
+  }
+}

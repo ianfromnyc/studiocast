@@ -1,0 +1,73 @@
+{
+  "schema_version": 2,
+  "id": "gaze_correction_cam_flx_v0_1_1",
+  "display_name": "Eye Contact (gaze-correction-cam, FLX v0.1.1)",
+  "task": "eye_contact",
+  "depends_on": [
+    "face_landmarks:dlib_68_ibug_300w"
+  ],
+  "files": [
+    {
+      "name": "gaze_flx_left.onnx",
+      "kind": "onnx",
+      "role": "left",
+      "sha256": ""
+    },
+    {
+      "name": "gaze_flx_right.onnx",
+      "kind": "onnx",
+      "role": "right",
+      "sha256": ""
+    }
+  ],
+  "onnx": {
+    "models": [
+      { "role": "left", "file": "gaze_flx_left.onnx" },
+      { "role": "right", "file": "gaze_flx_right.onnx" }
+    ],
+    "inputs": [
+      {
+        "name": "eye_rgb",
+        "layout": "nchw",
+        "dtype": "float32",
+        "width": 64,
+        "height": 48,
+        "channels": 3,
+        "note": "Normalized eye crop (48x64)."
+      },
+      {
+        "name": "anchors",
+        "layout": "nchw",
+        "dtype": "float32",
+        "width": 64,
+        "height": 48,
+        "channels": 1,
+        "note": "Anchor map / pictorial guidance (see upstream FacePredictor)."
+      },
+      {
+        "name": "angles",
+        "layout": "nc",
+        "dtype": "float32",
+        "dim": 2,
+        "note": "Yaw/pitch target delta. Exact convention matches the upstream FLX model conversion."
+      }
+    ],
+    "outputs": [
+      {
+        "name": "flow",
+        "kind": "flow_field",
+        "dtype": "float32",
+        "width": 64,
+        "height": 48,
+        "channels": 2,
+        "note": "Dense 2D flow used to warp the eye crop. Warping/compositing happens in StudioCast."
+      }
+    ]
+  },
+  "origin": {
+    "upstream_repo": "https://github.com/WangWilly/gaze-correction-cam",
+    "upstream_tag": "v0.1.1",
+    "license": "BSD-3-Clause",
+    "notes": "Upstream ships TensorFlow checkpoints (L/R eye). StudioCast expects C++-friendly ONNX exports hosted separately.\nThis pack is a template (no binaries are committed)."
+  }
+}

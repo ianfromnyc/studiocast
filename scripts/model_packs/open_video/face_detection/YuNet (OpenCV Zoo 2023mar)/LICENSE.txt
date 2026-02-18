@@ -1,0 +1,14 @@
+YuNet Face Detection Model (OpenCV Zoo)
+
+Upstream source:
+- https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
+
+Upstream model file:
+- face_detection_yunet_2023mar.onnx
+
+License:
+- MIT (see upstream LICENSE in the directory above)
+
+Notes:
+- StudioCast does not ship the model binary in git.
+- This directory only contains metadata used by StudioCast's model installer/runtime.

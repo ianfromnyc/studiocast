@@ -76,15 +76,21 @@ To print the authoritative path on your machine:
 ./<build-dir>/studiocast-open paths
 ```
 
+For a general overview of the open-source video model pack taxonomy (face detection, eye contact, etc.), see:
+
+- `docs/open_video_model_packs.md`
+
 ### Model pack layout
 
-Each model pack is a directory containing `model.json`, `model.onnx`, and `LICENSE.txt`.
+Open CUDA currently consumes only the **segmentation/matting** packs (`task = "matting"`).
+
+Each Open CUDA matting pack is a directory containing `model.json`, `model.onnx`, and `LICENSE.txt`.
 The directory name does **not** need to match `model.json:id` (human-friendly names are OK).
 
 Recommended layout (mirrors `scripts/model_packs/open_video`):
 
 ```text
-~/.local/share/studiocast/models/open_video/<subject>/<pack_dir>/
+~/.local/share/studiocast/models/open_video/segmentation/<pack_dir>/
   model.onnx
   model.json
   LICENSE.txt

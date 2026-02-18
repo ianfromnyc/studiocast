@@ -313,7 +313,10 @@ ModelPackRegistry ModelPackRegistry::Scan(const fs::path& open_cuda_models_dir) 
 ModelPackRegistry ModelPackRegistry::ScanDefault() {
   const auto modelsRoot = util::StudioCastModelsDir();
   if (modelsRoot.empty()) return {};
-  return Scan(modelsRoot / "open_video");
+  // Open CUDA currently consumes only the matting/segmentation packs.
+  // Other open-source video models (face detection, video denoise, eye contact, etc.)
+  // live alongside these under open_video/, but are consumed by their own effect paths.
+  return Scan(modelsRoot / "open_video" / "segmentation");
 }
 
 std::optional<ModelPack> ModelPackRegistry::ResolveModel(const std::string& id) const {
