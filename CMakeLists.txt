@@ -108,6 +108,8 @@ studiocast_generate_version_header(
 add_library(studiocast_core
         src/core/probe/probe.h
         src/core/probe/probe.cpp
+        src/core/onnx/ort_session.h
+        src/core/onnx/ort_session.cpp
         src/core/open_video/model_pack_registry.h
         src/core/open_video/model_pack_registry.cpp
         src/core/open_video/frame_analysis_cache.h

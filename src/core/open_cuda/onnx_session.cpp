@@ -1,19 +1,16 @@
 #include "core/open_cuda/onnx_session.h"
 
 #include <cmath>
+#include <array>
 #include <cstdint>
 #include <iostream>
 #include <filesystem>
-#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "core/cuda/kernels/preprocess_to_nchw.h"
-
-#if STUDIOCAST_HAVE_ONNXRUNTIME
-#include <onnxruntime_cxx_api.h>
-#endif
+#include "core/onnx/ort_session.h"
 
 namespace studiocast::open_cuda {
 
@@ -27,38 +24,6 @@ bool FileExists(const std::filesystem::path& p) {
 bool IsFinite3(const std::array<double, 3>& v) {
   return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
 }
-
-#if STUDIOCAST_HAVE_ONNXRUNTIME
-bool OrtErrorLooksLikeVramOom(const std::string& ort_msg) {
-  // Common failure strings seen from ORT CUDA EP when VRAM is exhausted or cuDNN can't
-  // find a viable algorithm/workspace due to memory pressure.
-  return ort_msg.find("CUDA failure 2") != std::string::npos ||
-         ort_msg.find("out of memory") != std::string::npos ||
-         ort_msg.find("cudaErrorMemoryAllocation") != std::string::npos ||
-         ort_msg.find("CUDNN_STATUS_ALLOC_FAILED") != std::string::npos ||
-         // Often appears after OOM / workspace allocation failures when cuDNN can't run the chosen kernel.
-         ort_msg.find("CUDNN_STATUS_NOT_SUPPORTED") != std::string::npos;
-}
-
-std::string HumanizeOrtError(const std::string& ort_msg, const std::filesystem::path& model_path) {
-  if (OrtErrorLooksLikeVramOom(ort_msg)) {
-    std::string out = "GPU is likely out of VRAM for this model";
-    if (!model_path.empty()) {
-      out += " (" + model_path.filename().string() + ")";
-    }
-    out +=
-        ". The model is probably too large for the available GPU memory. "
-        "Try a smaller model (e.g., modnet-webnn-256), lower input resolution, or close other GPU-heavy apps. "
-        "Underlying ONNX Runtime error: ";
-    out += ort_msg;
-    return out;
-  }
-
-  std::string out = "ONNX Runtime error: ";
-  out += ort_msg;
-  return out;
-}
-#endif
 
 }  // namespace
 
@@ -81,16 +46,12 @@ struct OpenCudaMattingSession::Impl {
 
   bool ort_needs_stream_sync = false;
 
-#if STUDIOCAST_HAVE_ONNXRUNTIME
-  std::optional<Ort::Env> env;
-  std::unique_ptr<Ort::Session> session;
-  std::unique_ptr<Ort::IoBinding> binding;
+  std::unique_ptr<studiocast::onnx::OrtSession> ort_session;
+  studiocast::onnx::OrtSessionInfo ort_info;
   std::string input_name;
   std::string output_name;
   std::vector<int64_t> input_shape;
   std::vector<int64_t> output_shape;
-  std::optional<Ort::MemoryInfo> cuda_mem_info;
-  std::optional<Ort::Value> input_value;
 
   // When the GPU runs out of memory, ORT can spam errors every frame.
   // Latch the first failure so we can return a clear, human-friendly message
@@ -101,187 +62,133 @@ struct OpenCudaMattingSession::Impl {
   bool CreateOrtSession(studiocast::maxine::CUstream stream, std::string* error_out) {
     if (error_out) error_out->clear();
 
-    try {
-      if (!env.has_value()) {
-        env.emplace(ORT_LOGGING_LEVEL_ERROR, "studiocast_open_cuda");
-      }
+#if !STUDIOCAST_HAVE_ONNXRUNTIME
+    (void)stream;
+    if (error_out) *error_out = "OpenCudaMattingSession: built without ONNX Runtime support.";
+    return false;
+#else
+    studiocast::onnx::OrtSessionOptions ort_opts;
+    ort_opts.prefer_cuda = true;
+    ort_opts.cuda_device_id = opts.device_id;
+    if (stream != nullptr) {
+      // Treat CUstream as an opaque handle and pass it as void* to ORT.
+      ort_opts.user_compute_stream = reinterpret_cast<void*>(stream);
+    }
 
-      Ort::SessionOptions so;
-      so.SetIntraOpNumThreads(1);
-      so.SetInterOpNumThreads(1);
-      so.SetGraphOptimizationLevel(ORT_ENABLE_EXTENDED);
-
-      if (opts.enable_tensorrt) {
-        // Reserved for future work; keeping API stable for config wiring.
-        // TensorRT EP availability is packaging-dependent.
-      }
-
-      // Configure CUDA EP.
-      // Prefer CUDA EP V2 provider options with user_compute_stream so ORT enqueues its work
-      // on our explicit stream (when headers expose the API). Fall back to legacy options
-      // otherwise.
-#if STUDIOCAST_ORT_HAS_CUDA_EP_V2
-      if (stream != nullptr) {
-        const auto& api = Ort::GetApi();
-
-        OrtCUDAProviderOptionsV2* cuda_opts_v2 = nullptr;
-        Ort::ThrowOnError(api.CreateCUDAProviderOptions(&cuda_opts_v2));
-        struct CudaOptsV2Guard {
-          const OrtApi* api = nullptr;
-          OrtCUDAProviderOptionsV2* opts = nullptr;
-          ~CudaOptsV2Guard() {
-            if (api && opts) {
-              api->ReleaseCUDAProviderOptions(opts);
-            }
-          }
-        } guard{&api, cuda_opts_v2};
-
-        const char* keys[] = {"device_id"};
-        const std::string dev = std::to_string(opts.device_id);
-        const char* values[] = {dev.c_str()};
-        Ort::ThrowOnError(api.UpdateCUDAProviderOptions(cuda_opts_v2, keys, values, 1));
-
-        // Treat CUstream as an opaque handle and pass it as void* to ORT.
-        Ort::ThrowOnError(api.UpdateCUDAProviderOptionsWithValue(cuda_opts_v2,
-                                                                 "user_compute_stream",
-                                                                 reinterpret_cast<void*>(stream)));
-
-        Ort::ThrowOnError(api.SessionOptionsAppendExecutionProvider_CUDA_V2(so, cuda_opts_v2));
-
-        ort_stream = stream;
-        ort_needs_stream_sync = false;
-      } else
-#endif
-      {
-        // Legacy path (no user_compute_stream).
-        OrtCUDAProviderOptions cuda_opts{};
-        cuda_opts.device_id = opts.device_id;
-
-        // If this throws/returns error, it typically means a CPU-only ORT build.
-        so.AppendExecutionProvider_CUDA(cuda_opts);
-
-        // Without user_compute_stream, ensure correctness by synchronizing the caller stream
-        // before running inference, and synchronizing outputs after Run.
-        ort_needs_stream_sync = true;
-        ort_stream = nullptr;
-      }
-
-      session = std::make_unique<Ort::Session>(*env, pack.onnx_path.c_str(), so);
-      binding = std::make_unique<Ort::IoBinding>(*session);
-
-      // Validate the model IO names against manifest (actionable errors when mismatched).
-      {
-        Ort::AllocatorWithDefaultOptions alloc;
-        auto model_in = session->GetInputNameAllocated(0, alloc);
-        auto model_out = session->GetOutputNameAllocated(0, alloc);
-        input_name = model_in.get();
-        output_name = model_out.get();
-
-        if (!pack.input.name.empty() && input_name != pack.input.name) {
-          if (error_out) {
-            *error_out = "Model input name mismatch: model='" + input_name + "' manifest='" + pack.input.name + "'";
-          }
-          return false;
-        }
-        if (!pack.output.name.empty() && output_name != pack.output.name) {
-          if (error_out) {
-            *error_out =
-                "Model output name mismatch: model='" + output_name + "' manifest='" + pack.output.name + "'";
-          }
-          return false;
-        }
-      }
-
-      // Cache a CUDA memory info instance for tensor creation.
-      cuda_mem_info.emplace("Cuda", OrtDeviceAllocator, opts.device_id, OrtMemTypeDefault);
-
-      // Validate model input/output shapes (best-effort; allow dynamic dims).
-      {
-        // NOTE: Do not bind references to temporaries here (lifetime bug).
-        auto in_ti = session->GetInputTypeInfo(0);
-        auto out_ti = session->GetOutputTypeInfo(0);
-        auto in_info = in_ti.GetTensorTypeAndShapeInfo();
-        auto out_info = out_ti.GetTensorTypeAndShapeInfo();
-
-        if (in_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-          if (error_out) *error_out = "Model input dtype must be float32.";
-          return false;
-        }
-        if (out_info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-          if (error_out) *error_out = "Model output dtype must be float32.";
-          return false;
-        }
-
-        input_shape = in_info.GetShape();
-        output_shape = out_info.GetShape();
-        if (input_shape.size() != 4) {
-          if (error_out) *error_out = "Model input must be rank-4 (NCHW).";
-          return false;
-        }
-        if (output_shape.size() != 4) {
-          if (error_out) *error_out = "Model output must be rank-4.";
-          return false;
-        }
-
-        const int64_t want_n = 1;
-        const int64_t want_c = 3;
-        const int64_t want_h = pack.input.height;
-        const int64_t want_w = pack.input.width;
-
-        auto matches_or_dynamic = [](int64_t got, int64_t want) { return got == want || got == -1; };
-        if (!matches_or_dynamic(input_shape[0], want_n) || !matches_or_dynamic(input_shape[1], want_c) ||
-            !matches_or_dynamic(input_shape[2], want_h) || !matches_or_dynamic(input_shape[3], want_w)) {
-          if (error_out) {
-            *error_out = "Model input shape does not match manifest (expected 1x3x" + std::to_string(want_h) + "x" +
-                         std::to_string(want_w) + ")";
-          }
-          return false;
-        }
-
-        // Normalize dynamic dims to concrete shapes for tensor creation.
-        input_shape = {1, 3, want_h, want_w};
-
-        // Expected alpha shape: 1x1xH xW.
-        const int64_t want_out_n = 1;
-        const int64_t want_out_c = 1;
-        const int64_t want_out_h = pack.input.height;
-        const int64_t want_out_w = pack.input.width;
-        if (!matches_or_dynamic(output_shape[0], want_out_n) || !matches_or_dynamic(output_shape[1], want_out_c) ||
-            !matches_or_dynamic(output_shape[2], want_out_h) || !matches_or_dynamic(output_shape[3], want_out_w)) {
-          if (error_out) {
-            *error_out = "Model output shape does not match expected alpha tensor (expected 1x1x" +
-                         std::to_string(want_out_h) + "x" + std::to_string(want_out_w) + ")";
-          }
-          return false;
-        }
-        output_shape = {1, 1, want_out_h, want_out_w};
-      }
-
-      return true;
-    } catch (const Ort::Exception& e) {
-      const std::string msg = e.what();
-      const std::string human = HumanizeOrtError(msg, pack.onnx_path);
-
+    std::string ort_err;
+    ort_session = studiocast::onnx::OrtSession::Create(pack.onnx_path, ort_opts, &ort_info, &ort_err);
+    if (!ort_session) {
       // If this looks like VRAM exhaustion, latch so we don't retry every frame and spam logs.
-      if (OrtErrorLooksLikeVramOom(msg)) {
+      if (studiocast::onnx::OrtErrorLooksLikeVramOom(ort_err) ||
+          ort_err.find("out of VRAM") != std::string::npos) {
         ort_latched_failure = true;
-        ort_latched_error = human;
-
-        // Best-effort cleanup to release GPU allocations held by this session.
-        binding.reset();
-        session.reset();
-        input_value.reset();
-        cuda_mem_info.reset();
+        ort_latched_error = ort_err;
       }
 
-      if (error_out) *error_out = human;
-      return false;
-    } catch (const std::exception& e) {
-      if (error_out) *error_out = std::string("OpenCudaMattingSession error: ") + e.what();
+      if (error_out) *error_out = std::move(ort_err);
       return false;
     }
-  }
+
+    if (!ort_info.using_cuda) {
+      // Open CUDA backend requires CUDA EP.
+      std::string msg =
+          "OpenCudaMattingSession: ONNX Runtime CUDA EP is unavailable (CPU-only build?).";
+      if (!ort_info.warnings.empty()) {
+        msg += " " + ort_info.warnings[0];
+      }
+      if (error_out) *error_out = msg;
+      return false;
+    }
+
+    if (ort_info.input_names.empty() || ort_info.output_names.empty()) {
+      if (error_out) *error_out = "OpenCudaMattingSession: model must expose at least 1 input and 1 output.";
+      return false;
+    }
+
+    input_name = ort_info.input_names[0];
+    output_name = ort_info.output_names[0];
+
+    if (!pack.input.name.empty() && input_name != pack.input.name) {
+      if (error_out) {
+        *error_out = "Model input name mismatch: model='" + input_name + "' manifest='" + pack.input.name + "'";
+      }
+      return false;
+    }
+    if (!pack.output.name.empty() && output_name != pack.output.name) {
+      if (error_out) {
+        *error_out =
+            "Model output name mismatch: model='" + output_name + "' manifest='" + pack.output.name + "'";
+      }
+      return false;
+    }
+
+    ort_needs_stream_sync = ort_info.cuda_needs_stream_sync;
+    ort_stream = (!ort_needs_stream_sync && stream != nullptr) ? stream : nullptr;
+
+    // Validate model input/output shapes (best-effort; allow dynamic dims).
+    // NOTE: OrtSessionInfo stores element types using the ONNX enum numeric values.
+    //       ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT == 1.
+    if (ort_info.input_elem_types.empty() || ort_info.output_elem_types.empty()) {
+      if (error_out) *error_out = "OpenCudaMattingSession: model must expose tensor element types.";
+      return false;
+    }
+    if (ort_info.input_elem_types[0] != 1) {
+      if (error_out) *error_out = "Model input dtype must be float32.";
+      return false;
+    }
+    if (ort_info.output_elem_types[0] != 1) {
+      if (error_out) *error_out = "Model output dtype must be float32.";
+      return false;
+    }
+
+    input_shape = ort_info.input_shapes.empty() ? std::vector<int64_t>{} : ort_info.input_shapes[0];
+    output_shape = ort_info.output_shapes.empty() ? std::vector<int64_t>{} : ort_info.output_shapes[0];
+
+    if (input_shape.size() != 4) {
+      if (error_out) *error_out = "Model input must be rank-4 (NCHW).";
+      return false;
+    }
+    if (output_shape.size() != 4) {
+      if (error_out) *error_out = "Model output must be rank-4.";
+      return false;
+    }
+
+    const int64_t want_n = 1;
+    const int64_t want_c = 3;
+    const int64_t want_h = pack.input.height;
+    const int64_t want_w = pack.input.width;
+
+    auto matches_or_dynamic = [](int64_t got, int64_t want) { return got == want || got == -1; };
+    if (!matches_or_dynamic(input_shape[0], want_n) || !matches_or_dynamic(input_shape[1], want_c) ||
+        !matches_or_dynamic(input_shape[2], want_h) || !matches_or_dynamic(input_shape[3], want_w)) {
+      if (error_out) {
+        *error_out = "Model input shape does not match manifest (expected 1x3x" + std::to_string(want_h) + "x" +
+                     std::to_string(want_w) + ")";
+      }
+      return false;
+    }
+
+    // Normalize dynamic dims to concrete shapes for tensor creation.
+    input_shape = {1, 3, want_h, want_w};
+
+    // Expected alpha shape: 1x1xH xW.
+    const int64_t want_out_n = 1;
+    const int64_t want_out_c = 1;
+    const int64_t want_out_h = pack.input.height;
+    const int64_t want_out_w = pack.input.width;
+    if (!matches_or_dynamic(output_shape[0], want_out_n) || !matches_or_dynamic(output_shape[1], want_out_c) ||
+        !matches_or_dynamic(output_shape[2], want_out_h) || !matches_or_dynamic(output_shape[3], want_out_w)) {
+      if (error_out) {
+        *error_out = "Model output shape does not match expected alpha tensor (expected 1x1x" +
+                     std::to_string(want_out_h) + "x" + std::to_string(want_out_w) + ")";
+      }
+      return false;
+    }
+    output_shape = {1, 1, want_out_h, want_out_w};
+
+    return true;
 #endif
+  }
 };
 
 OpenCudaMattingSession::OpenCudaMattingSession(studiocast::maxine::CudaDriverApi* cuda, ModelPack pack, Options opts)
@@ -450,7 +357,7 @@ bool OpenCudaMattingSession::Run(studiocast::maxine::CUstream stream,
     return false;
   }
 
-  if (!impl_->session) {
+  if (!impl_->ort_session) {
     std::string ort_err;
     if (!impl_->CreateOrtSession(stream, &ort_err)) {
       if (error_out) *error_out = std::move(ort_err);
@@ -476,57 +383,27 @@ bool OpenCudaMattingSession::Run(studiocast::maxine::CUstream stream,
     }
   }
 
-  try {
-    // Create (or reuse) the input Ort::Value.
-    if (!impl_->input_value.has_value()) {
-      auto* in_ptr = reinterpret_cast<float*>(static_cast<std::uintptr_t>(impl_->input_tensor.ptr));
-      impl_->input_value.emplace(Ort::Value::CreateTensor<float>(*impl_->cuda_mem_info,
-                                                                 in_ptr,
-                                                                 impl_->input_tensor.ElementCount(),
-                                                                 impl_->input_shape.data(),
-                                                                 impl_->input_shape.size()));
-    }
+  studiocast::onnx::OrtSession::CudaBindingInput in;
+  in.name = impl_->input_name.c_str();
+  in.device_ptr = reinterpret_cast<float*>(static_cast<std::uintptr_t>(impl_->input_tensor.ptr));
+  in.num_floats = impl_->input_tensor.ElementCount();
+  in.shape = impl_->input_shape.data();
+  in.shape_rank = impl_->input_shape.size();
 
-    // Create an output Ort::Value over the provided GPU buffer.
-    auto* out_ptr = reinterpret_cast<float*>(static_cast<std::uintptr_t>(output_alpha_gpu->ptr));
-    Ort::Value out_value = Ort::Value::CreateTensor<float>(*impl_->cuda_mem_info,
-                                                           out_ptr,
-                                                           output_alpha_gpu->ElementCount(),
-                                                           impl_->output_shape.data(),
-                                                           impl_->output_shape.size());
+  studiocast::onnx::OrtSession::CudaBindingOutput out;
+  out.name = impl_->output_name.c_str();
+  out.device_ptr = reinterpret_cast<float*>(static_cast<std::uintptr_t>(output_alpha_gpu->ptr));
+  out.num_floats = output_alpha_gpu->ElementCount();
+  out.shape = impl_->output_shape.data();
+  out.shape_rank = impl_->output_shape.size();
 
-    impl_->binding->ClearBoundInputs();
-    impl_->binding->ClearBoundOutputs();
-    impl_->binding->BindInput(impl_->input_name.c_str(), *impl_->input_value);
-    impl_->binding->BindOutput(impl_->output_name.c_str(), out_value);
-
-    Ort::RunOptions ro;
-    impl_->session->Run(ro, *impl_->binding);
-
-    // Legacy fallback path: ensure outputs are fully produced before downstream kernels on the
-    // caller stream consume them.
-    if (impl_->ort_needs_stream_sync) {
-      impl_->binding->SynchronizeOutputs();
-    }
-    return true;
-  } catch (const Ort::Exception& e) {
-    const std::string msg = e.what();
-    const std::string human = HumanizeOrtError(msg, impl_->pack.onnx_path);
-
-    if (OrtErrorLooksLikeVramOom(msg)) {
-      impl_->ort_latched_failure = true;
-      impl_->ort_latched_error = human;
-
-      // Best-effort cleanup to release GPU allocations held by this session.
-      impl_->binding.reset();
-      impl_->session.reset();
-      impl_->input_value.reset();
-      impl_->cuda_mem_info.reset();
-    }
-
-    if (error_out) *error_out = human;
+  std::string ort_err;
+  if (!impl_->ort_session->RunCudaIoBinding(&in, 1, &out, 1, &ort_err)) {
+    if (error_out) *error_out = std::move(ort_err);
     return false;
   }
+
+  return true;
 #endif
 }
 
