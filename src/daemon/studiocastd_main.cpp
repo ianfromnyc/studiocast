@@ -23,7 +23,6 @@
 #include "core/maxine/maxine_manager.h"
 #include "../core/open_video/diagnose.h"
 #include "core/open_audio/open_audio_diagnose.h"
-#include "core/open_cuda/model_pack_registry.h"
 #include "core/util/json.h"
 #include "core/util/ttl_cache.h"
 #include "core/util/xdg.h"

@@ -13,7 +13,6 @@
 #include "core/open_audio/model_pack_registry.h"
 #include "core/open_audio/open_audio_audio_processor.h"
 #include "core/open_audio/open_audio_onnx_session.h"
-#include "core/open_cuda/model_pack_registry.h"
 #include "core/open_video/model_pack_registry.h"
 #include "core/onnx/ort_session.h"
 #include "core/util/xdg.h"
@@ -21,6 +20,16 @@
 namespace fs = std::filesystem;
 
 namespace {
+
+const studiocast::open_video::ModelFile* FindMainOnnxFile(const studiocast::open_video::ModelPack& p) {
+  for (const auto& f : p.files) {
+    if (f.kind == "onnx" && (f.role.empty() || f.role == "main")) return &f;
+  }
+  for (const auto& f : p.files) {
+    if (f.kind == "onnx") return &f;
+  }
+  return nullptr;
+}
 
 std::string DefaultOpenCudaRootHint() {
   return "~/.local/share/studiocast/models/open_video";
@@ -106,7 +115,7 @@ static int CmdListModels() {
   std::cout << "StudioCast Open CUDA Model Packs\n\n";
   std::cout << "Scan root:\n  " << OpenCudaRootForDisplay() << "\n\n";
 
-  const auto reg = studiocast::open_cuda::ModelPackRegistry::ScanDefault();
+  const auto reg = studiocast::open_video::ModelPackRegistry::ScanDefault();
   const auto& models = reg.ListModels();
   const auto& problems = reg.Problems();
 
@@ -115,12 +124,14 @@ static int CmdListModels() {
   } else {
     std::cout << "Valid model packs:\n";
     for (const auto& m : models) {
+      if (m.task != "matting") continue;
       std::cout << "  - " << m.id;
       if (!m.display_name.empty()) std::cout << " (" << m.display_name << ")";
       if (!m.task.empty()) std::cout << " task=" << m.task;
       std::cout << "\n";
       std::cout << "      manifest: " << m.manifest_path.string() << "\n";
-      std::cout << "      onnx    : " << m.onnx_path.string() << "\n";
+      const auto* onnx = FindMainOnnxFile(m);
+      if (onnx) std::cout << "      onnx    : " << onnx->path.string() << "\n";
       if (m.license_path) std::cout << "      license : " << m.license_path->string() << "\n";
     }
   }
@@ -151,10 +162,10 @@ static int CmdInstallHints(const char* argv0) {
   std::cout << "  - LICENSE.txt  (model license text)\n\n";
 
   std::cout << "Create a new pack (example):\n";
-  std::cout << "  mkdir -p \"" << OpenCudaRootForDisplay() << "/segmentation/Good Quality\"\n";
-  std::cout << "  cp /path/to/model.onnx \"" << OpenCudaRootForDisplay() << "/segmentation/Good Quality/model.onnx\"\n";
-  std::cout << "  cp /path/to/model.json \"" << OpenCudaRootForDisplay() << "/segmentation/Good Quality/model.json\"\n";
-  std::cout << "  cp /path/to/LICENSE.txt \"" << OpenCudaRootForDisplay() << "/segmentation/Good Quality/LICENSE.txt\"\n\n";
+  std::cout << "  mkdir -p \"" << OpenCudaRootForDisplay() << "/matting/Good Quality\"\n";
+  std::cout << "  cp /path/to/model.onnx \"" << OpenCudaRootForDisplay() << "/matting/Good Quality/model.onnx\"\n";
+  std::cout << "  cp /path/to/model.json \"" << OpenCudaRootForDisplay() << "/matting/Good Quality/model.json\"\n";
+  std::cout << "  cp /path/to/LICENSE.txt \"" << OpenCudaRootForDisplay() << "/matting/Good Quality/LICENSE.txt\"\n\n";
 
   std::cout << "Validate discovery:\n";
   std::cout << "  " << argv0 << " list-models\n";
@@ -191,6 +202,7 @@ static int CmdVideoListModels(int argc, char** argv) {
     std::cout << "Valid model packs:\n";
     std::string current_task;
     for (const auto& m : models) {
+      if (m.task != "matting") continue;
       if (!task_filter.empty() && m.task != task_filter) continue;
       if (m.task != current_task) {
         current_task = m.task;
@@ -416,6 +428,7 @@ static int CmdAudioListModels() {
   } else {
     std::cout << "Valid model packs:\n";
     for (const auto& m : models) {
+      if (m.task != "matting") continue;
       std::cout << "  - " << m.id;
       if (!m.display_name.empty()) std::cout << " (" << m.display_name << ")";
       if (!m.effects.empty()) {
@@ -427,7 +440,8 @@ static int CmdAudioListModels() {
       }
       std::cout << " sr=" << m.sample_rate << " ch=" << m.channels << "\n";
       std::cout << "      manifest: " << m.manifest_path.string() << "\n";
-      std::cout << "      onnx    : " << m.onnx_path.string() << "\n";
+      const auto* onnx = FindMainOnnxFile(m);
+      if (onnx) std::cout << "      onnx    : " << onnx->path.string() << "\n";
       if (m.license_path) std::cout << "      license : " << m.license_path->string() << "\n";
     }
   }

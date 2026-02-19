@@ -1,7 +1,7 @@
-#include "core/open_cuda/open_cuda_diagnose.h"
+#include "core/open_video/diagnose.h"
 
 #include "core/maxine/cuda_driver_api.h"
-#include "core/open_cuda/model_pack_registry.h"
+#include "core/open_video/model_pack_registry.h"
 #include "core/util/xdg.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 
@@ -10,16 +10,19 @@ namespace studiocast::open_cuda {
 OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
   OpenCudaDiagnostics od;
 
-  const auto reg = ModelPackRegistry::ScanDefault();
-  od.default_model_id = reg.DefaultModelId();
+  const auto reg = studiocast::open_video::ModelPackRegistry::ScanDefault();
+  od.default_model_id = reg.DefaultModelIdForTask("matting");
   for (const auto& m : reg.ListModels()) {
+    if (m.task != "matting") continue;
     od.installed_models.push_back(m.id);
     OpenCudaDiagnostics::ModelInfo mi;
     mi.id = m.id;
     mi.display_name = m.display_name;
     mi.task = m.task;
-    mi.width = m.input.width;
-    mi.height = m.input.height;
+    if (m.matting) {
+      mi.width = m.matting->input.width;
+      mi.height = m.matting->input.height;
+    }
     od.models.push_back(std::move(mi));
   }
   od.missing_models = reg.Problems();
@@ -29,7 +32,7 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
                                                : (modelsRoot / "open_video").string();
 
   od.install_hints.push_back(std::string("Model packs: ") + openVideoRoot + "/<subject>/<pack_dir>/");
-  od.install_hints.push_back("Example: " + openVideoRoot + "/segmentation/Good Quality/model.json");
+  od.install_hints.push_back("Example: " + openVideoRoot + "/matting/Good Quality/model.json");
   od.install_hints.push_back("Each pack must contain: model.json, model.onnx, LICENSE.txt");
 
   const auto block_open_cuda_effects = [&](const char* reason_code) {

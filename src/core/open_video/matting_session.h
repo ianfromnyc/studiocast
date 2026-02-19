@@ -6,7 +6,7 @@
 #include "core/cuda/cuda_image.h"
 #include "core/cuda/cuda_tensor.h"
 #include "core/maxine/cuda_driver_api.h"
-#include "core/open_cuda/model_pack_registry.h"
+#include "core/open_video/model_pack_registry.h"
 
 namespace studiocast::open_cuda {
 
@@ -22,8 +22,8 @@ class OpenCudaMattingSession {
     bool enable_tensorrt = false;
   };
 
-  OpenCudaMattingSession(studiocast::maxine::CudaDriverApi* cuda, ModelPack pack);
-  OpenCudaMattingSession(studiocast::maxine::CudaDriverApi* cuda, ModelPack pack, Options opts);
+  OpenCudaMattingSession(studiocast::maxine::CudaDriverApi* cuda, studiocast::open_video::ModelPack pack);
+  OpenCudaMattingSession(studiocast::maxine::CudaDriverApi* cuda, studiocast::open_video::ModelPack pack, Options opts);
   ~OpenCudaMattingSession();
 
   OpenCudaMattingSession(const OpenCudaMattingSession&) = delete;
@@ -47,7 +47,7 @@ class OpenCudaMattingSession {
            studiocast::cuda::CudaTensor* output_alpha_gpu,
            std::string* error_out);
 
-  const ModelPack& pack() const;
+  const studiocast::open_video::ModelPack& pack() const;
 
  private:
   struct Impl;

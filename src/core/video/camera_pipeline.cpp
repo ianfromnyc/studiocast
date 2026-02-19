@@ -31,7 +31,7 @@
 #include "core/maxine/cuda_vignette.h"
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
-#include "core/open_cuda/model_pack_registry.h"
+#include "core/open_video/model_pack_registry.h"
 #include "../open_video/matting_session.h"
 #include "core/open_video/frame_analysis_cache.h"
 #include "core/open_video/fastdvdnet_denoiser.h"
@@ -1498,7 +1498,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     // run on the same explicit stream via user_compute_stream.
     studiocast::maxine::CUstream vb_stream = nullptr;
 
-    std::optional<studiocast::open_cuda::ModelPack> pack;
+    std::optional<studiocast::open_video::ModelPack> pack;
     std::unique_ptr<studiocast::open_cuda::OpenCudaMattingSession> session;
 
     // GPU buffers.
@@ -1639,10 +1639,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       // Resolve model pack.
       // Open CUDA models are selected per-effect, but remain an Open CUDA-only concern.
       // If fx.virtual_background.model_id is empty, preserve the existing deterministic default.
-      const auto reg = studiocast::open_cuda::ModelPackRegistry::ScanDefault();
+      const auto reg = studiocast::open_video::ModelPackRegistry::ScanDefault();
       std::string requested_model_id = fx.virtual_background.model_id;
       if (requested_model_id.empty()) {
-        requested_model_id = reg.DefaultModelId();
+        requested_model_id = reg.DefaultModelIdForTask("matting");
       }
 
       if (requested_model_id.empty()) {
@@ -1654,16 +1654,20 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       auto DescribeInstalledModelIds = [&reg]() -> std::string {
         std::ostringstream oss;
-        const auto& models = reg.ListModels();
-        if (models.empty()) {
+        std::vector<std::string> ids;
+        for (const auto& m : reg.ListModels()) {
+          if (m.task != "matting") continue;
+          ids.push_back(m.id);
+        }
+        if (ids.empty()) {
           oss << "<none>";
           return oss.str();
         }
         bool first = true;
-        for (const auto& m : models) {
+        for (const auto& id : ids) {
           if (!first) oss << ", ";
           first = false;
-          oss << m.id;
+          oss << id;
         }
         return oss.str();
       };
@@ -1684,7 +1688,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       if (!pack.has_value()) {
-        const auto p = reg.ResolveModel(requested_model_id);
+        const auto p = reg.Find("matting", requested_model_id);
         if (!p.has_value()) {
           last_error = "Open CUDA: selected model_id '" + requested_model_id + "' not found. Installed: " +
                        DescribeInstalledModelIds();
@@ -1700,6 +1704,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (error) *error = last_error;
           return false;
         }
+        if (!pack->matting.has_value()) {
+          last_error = "Open CUDA: selected model_id '" + requested_model_id + "' is missing matting metadata.";
+          if (error) *error = last_error;
+          return false;
+        }
       }
 
       if (!session) {
@@ -1709,7 +1718,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       // Allocate alpha tensor at model resolution.
       {
         std::string aerr;
-        if (!alpha_tensor.ReallocIfNeededNchwF32(&cuda, 1, 1, pack->input.height, pack->input.width, &aerr)) {
+        if (!alpha_tensor.ReallocIfNeededNchwF32(&cuda, 1, 1, pack->matting->input.height, pack->matting->input.width, &aerr)) {
           last_error = "Open CUDA: failed to allocate alpha tensor: " + aerr;
           if (error) *error = last_error;
           return false;
@@ -1717,9 +1726,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
         // View alpha tensor as a 2D f32 image.
         alpha_model_view.ptr = alpha_tensor.ptr;
-        alpha_model_view.pitch = static_cast<std::size_t>(pack->input.width) * 4u;
-        alpha_model_view.w = pack->input.width;
-        alpha_model_view.h = pack->input.height;
+        alpha_model_view.pitch = static_cast<std::size_t>(pack->matting->input.width) * 4u;
+        alpha_model_view.w = pack->matting->input.width;
+        alpha_model_view.h = pack->matting->input.height;
         alpha_model_view.format = studiocast::cuda::PixelFormatGpu::f32_1;
         alpha_model_view.owns_memory = false;
       }
@@ -1953,8 +1962,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (cached_alpha_cpu_valid && cached_alpha_cpu_sequence == capture_sequence) {
         if (out_alpha) *out_alpha = &alpha_cpu;
         if (pack.has_value()) {
-          if (out_alpha_w) *out_alpha_w = pack->input.width;
-          if (out_alpha_h) *out_alpha_h = pack->input.height;
+          if (out_alpha_w) *out_alpha_w = pack->matting->input.width;
+          if (out_alpha_h) *out_alpha_h = pack->matting->input.height;
         }
         return true;
       }
@@ -1983,8 +1992,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       cached_alpha_cpu_valid = true;
       cached_alpha_cpu_sequence = capture_sequence;
       if (out_alpha) *out_alpha = &alpha_cpu;
-      if (out_alpha_w) *out_alpha_w = pack->input.width;
-      if (out_alpha_h) *out_alpha_h = pack->input.height;
+      if (out_alpha_w) *out_alpha_w = pack->matting->input.width;
+      if (out_alpha_h) *out_alpha_h = pack->matting->input.height;
       return true;
     }
 

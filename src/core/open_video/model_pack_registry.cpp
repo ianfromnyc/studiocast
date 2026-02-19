@@ -339,7 +339,7 @@ std::string PackDirKey(const fs::path& root, const fs::path& pack_dir) {
   // Use a stable, human-readable key for error reporting.
   // Prefer the relative path from the scan root, prefixed with the root directory name.
   // Example (when scanning ~/.local/share/studiocast/models/open_video):
-  //   open_video/segmentation/Better Quality
+  //   open_video/matting/Better Quality
   std::error_code ec;
   fs::path rel = fs::relative(pack_dir, root, ec);
   std::string rels;
@@ -424,6 +424,24 @@ ModelPackRegistry ModelPackRegistry::Scan(const std::filesystem::path& open_vide
     const fs::path lic = pack_dir / "LICENSE.txt";
     if (fs::exists(lic)) {
       pack.license_path = lic;
+    }
+
+    // Task-specific validation.
+    // Matting packs must include at least one ONNX file, since the runtime expects an ONNX model.
+    if (pack.task == "matting") {
+      bool has_onnx = false;
+      for (const auto& f : pack.files) {
+        if (f.kind == "onnx") {
+          has_onnx = true;
+          break;
+        }
+      }
+      if (!has_onnx) {
+        const std::string dirKey = PackDirKey(open_video_models_dir, pack_dir);
+        const std::string key = pack.id.empty() ? dirKey : pack.id;
+        reg.problems_[key] = "missing ONNX file (kind=onnx)";
+        continue;
+      }
     }
 
     reg.models_.push_back(std::move(pack));

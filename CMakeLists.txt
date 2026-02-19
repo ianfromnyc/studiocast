@@ -125,8 +125,6 @@ add_library(studiocast_core
         src/core/open_video/diagnostics.cpp
         src/core/open_video/diagnose.h
         src/core/open_video/diagnose.cpp
-        src/core/open_cuda/model_pack_registry.h
-        src/core/open_cuda/model_pack_registry.cpp
         src/core/open_video/matting_session.h
         src/core/open_video/matting_session.cpp
         src/core/open_audio/open_audio_diagnostics.h

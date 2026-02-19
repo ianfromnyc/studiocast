@@ -1,4 +1,4 @@
-#include "core/open_cuda/open_cuda_diagnostics.h"
+#include "core/open_video/diagnostics.h"
 
 #include <sstream>
 

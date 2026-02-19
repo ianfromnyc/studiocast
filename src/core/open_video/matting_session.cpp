@@ -1,4 +1,4 @@
-#include "core/open_cuda/matting_session.h"
+#include "core/open_video/matting_session.h"
 
 #include <cmath>
 #include <array>
@@ -25,11 +25,23 @@ bool IsFinite3(const std::array<double, 3>& v) {
   return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
 }
 
+const studiocast::open_video::ModelFile* FindMainOnnxFile(const studiocast::open_video::ModelPack& p) {
+  // Prefer (kind=onnx, role=main|empty), then fall back to the first ONNX.
+  for (const auto& f : p.files) {
+    if (f.kind == "onnx" && (f.role.empty() || f.role == "main")) return &f;
+  }
+  for (const auto& f : p.files) {
+    if (f.kind == "onnx") return &f;
+  }
+  return nullptr;
+}
+
 }  // namespace
 
 struct OpenCudaMattingSession::Impl {
   studiocast::maxine::CudaDriverApi* cuda = nullptr;
-  ModelPack pack;
+  studiocast::open_video::ModelPack pack;
+  std::filesystem::path onnx_path;
   Options opts;
 
   bool validated_pack = false;
@@ -76,7 +88,18 @@ struct OpenCudaMattingSession::Impl {
     }
 
     std::string ort_err;
-    ort_session = studiocast::onnx::OrtSession::Create(pack.onnx_path, ort_opts, &ort_info, &ort_err);
+    if (onnx_path.empty()) {
+      if (error_out) *error_out = "OpenCudaMattingSession: missing ONNX file path in model pack.";
+      return false;
+    }
+
+    const auto* spec = pack.matting ? &*pack.matting : nullptr;
+    if (!spec) {
+      if (error_out) *error_out = "OpenCudaMattingSession: matting model pack is missing required metadata.";
+      return false;
+    }
+
+    ort_session = studiocast::onnx::OrtSession::Create(onnx_path, ort_opts, &ort_info, &ort_err);
     if (!ort_session) {
       // If this looks like VRAM exhaustion, latch so we don't retry every frame and spam logs.
       if (studiocast::onnx::OrtErrorLooksLikeVramOom(ort_err) ||
@@ -108,16 +131,16 @@ struct OpenCudaMattingSession::Impl {
     input_name = ort_info.input_names[0];
     output_name = ort_info.output_names[0];
 
-    if (!pack.input.name.empty() && input_name != pack.input.name) {
+    if (!spec->input.name.empty() && input_name != spec->input.name) {
       if (error_out) {
-        *error_out = "Model input name mismatch: model='" + input_name + "' manifest='" + pack.input.name + "'";
+        *error_out = "Model input name mismatch: model='" + input_name + "' manifest='" + spec->input.name + "'";
       }
       return false;
     }
-    if (!pack.output.name.empty() && output_name != pack.output.name) {
+    if (!spec->output.name.empty() && output_name != spec->output.name) {
       if (error_out) {
         *error_out =
-            "Model output name mismatch: model='" + output_name + "' manifest='" + pack.output.name + "'";
+            "Model output name mismatch: model='" + output_name + "' manifest='" + spec->output.name + "'";
       }
       return false;
     }
@@ -155,8 +178,8 @@ struct OpenCudaMattingSession::Impl {
 
     const int64_t want_n = 1;
     const int64_t want_c = 3;
-    const int64_t want_h = pack.input.height;
-    const int64_t want_w = pack.input.width;
+    const int64_t want_h = spec->input.height;
+    const int64_t want_w = spec->input.width;
 
     auto matches_or_dynamic = [](int64_t got, int64_t want) { return got == want || got == -1; };
     if (!matches_or_dynamic(input_shape[0], want_n) || !matches_or_dynamic(input_shape[1], want_c) ||
@@ -174,8 +197,8 @@ struct OpenCudaMattingSession::Impl {
     // Expected alpha shape: 1x1xH xW.
     const int64_t want_out_n = 1;
     const int64_t want_out_c = 1;
-    const int64_t want_out_h = pack.input.height;
-    const int64_t want_out_w = pack.input.width;
+    const int64_t want_out_h = spec->input.height;
+    const int64_t want_out_w = spec->input.width;
     if (!matches_or_dynamic(output_shape[0], want_out_n) || !matches_or_dynamic(output_shape[1], want_out_c) ||
         !matches_or_dynamic(output_shape[2], want_out_h) || !matches_or_dynamic(output_shape[3], want_out_w)) {
       if (error_out) {
@@ -191,19 +214,19 @@ struct OpenCudaMattingSession::Impl {
   }
 };
 
-OpenCudaMattingSession::OpenCudaMattingSession(studiocast::maxine::CudaDriverApi* cuda, ModelPack pack, Options opts)
+OpenCudaMattingSession::OpenCudaMattingSession(studiocast::maxine::CudaDriverApi* cuda, studiocast::open_video::ModelPack pack, Options opts)
     : impl_(std::make_unique<Impl>()) {
   impl_->cuda = cuda;
   impl_->pack = std::move(pack);
   impl_->opts = opts;
 }
 
-OpenCudaMattingSession::OpenCudaMattingSession(studiocast::maxine::CudaDriverApi* cuda, ModelPack pack)
+OpenCudaMattingSession::OpenCudaMattingSession(studiocast::maxine::CudaDriverApi* cuda, studiocast::open_video::ModelPack pack)
     : OpenCudaMattingSession(cuda, std::move(pack), Options{}) {}
 
 OpenCudaMattingSession::~OpenCudaMattingSession() = default;
 
-const ModelPack& OpenCudaMattingSession::pack() const { return impl_->pack; }
+const studiocast::open_video::ModelPack& OpenCudaMattingSession::pack() const { return impl_->pack; }
 
 bool OpenCudaMattingSession::EnsureInitialized(int frame_w, int frame_h, std::string* error_out) {
   if (error_out) error_out->clear();
@@ -231,48 +254,62 @@ bool OpenCudaMattingSession::EnsureInitialized(int frame_w, int frame_h, std::st
       if (error_out) *error_out = "OpenCudaMattingSession: model pack task must be 'matting'.";
       return false;
     }
-    if (impl_->pack.input.layout != "nchw") {
-      if (error_out) *error_out = "OpenCudaMattingSession: only NCHW models are supported in v1.";
-      return false;
-    }
-    if (impl_->pack.input.dtype != "float32") {
-      if (error_out) *error_out = "OpenCudaMattingSession: only float32 input models are supported in v1.";
-      return false;
-    }
-    if (impl_->pack.output.dtype != "float32") {
-      if (error_out) *error_out = "OpenCudaMattingSession: only float32 output models are supported in v1.";
-      return false;
-    }
-    if (impl_->pack.input.channels != 3) {
-      if (error_out) *error_out = "OpenCudaMattingSession: model input must have 3 channels.";
-      return false;
-    }
-    if (impl_->pack.input.width <= 0 || impl_->pack.input.height <= 0) {
-      if (error_out) *error_out = "OpenCudaMattingSession: invalid model input size.";
-      return false;
-    }
-    if (!IsFinite3(impl_->pack.preprocess.mean) || !IsFinite3(impl_->pack.preprocess.std)) {
-      if (error_out) *error_out = "OpenCudaMattingSession: preprocess mean/std must be finite.";
-      return false;
-    }
-    if (impl_->pack.preprocess.std[0] == 0.0 || impl_->pack.preprocess.std[1] == 0.0 || impl_->pack.preprocess.std[2] == 0.0) {
-      if (error_out) *error_out = "OpenCudaMattingSession: preprocess std must be non-zero.";
-      return false;
-    }
-    if (impl_->pack.preprocess.color != "rgb" || impl_->pack.preprocess.range != "0..1") {
-      if (error_out) *error_out = "OpenCudaMattingSession: unsupported preprocess spec (expected rgb + 0..1).";
-      return false;
-    }
-    if (!FileExists(impl_->pack.onnx_path)) {
-      if (error_out) *error_out = "OpenCudaMattingSession: missing ONNX file at " + impl_->pack.onnx_path.string();
+    if (!impl_->pack.matting.has_value()) {
+      if (error_out) *error_out = "OpenCudaMattingSession: matting model pack is missing required metadata.";
       return false;
     }
 
-    impl_->preprocess.dst_w = impl_->pack.input.width;
-    impl_->preprocess.dst_h = impl_->pack.input.height;
+    const auto& spec = *impl_->pack.matting;
+
+    if (spec.input.layout != "nchw") {
+      if (error_out) *error_out = "OpenCudaMattingSession: only NCHW models are supported in v1.";
+      return false;
+    }
+    if (spec.input.dtype != "float32") {
+      if (error_out) *error_out = "OpenCudaMattingSession: only float32 input models are supported in v1.";
+      return false;
+    }
+    if (spec.output.dtype != "float32") {
+      if (error_out) *error_out = "OpenCudaMattingSession: only float32 output models are supported in v1.";
+      return false;
+    }
+    if (spec.input.channels != 3) {
+      if (error_out) *error_out = "OpenCudaMattingSession: model input must have 3 channels.";
+      return false;
+    }
+    if (spec.input.width <= 0 || spec.input.height <= 0) {
+      if (error_out) *error_out = "OpenCudaMattingSession: invalid model input size.";
+      return false;
+    }
+    if (!IsFinite3(spec.preprocess.mean) || !IsFinite3(spec.preprocess.std)) {
+      if (error_out) *error_out = "OpenCudaMattingSession: preprocess mean/std must be finite.";
+      return false;
+    }
+    if (spec.preprocess.std[0] == 0.0 || spec.preprocess.std[1] == 0.0 || spec.preprocess.std[2] == 0.0) {
+      if (error_out) *error_out = "OpenCudaMattingSession: preprocess std must be non-zero.";
+      return false;
+    }
+    if (spec.preprocess.color != "rgb" || spec.preprocess.range != "0..1") {
+      if (error_out) *error_out = "OpenCudaMattingSession: unsupported preprocess spec (expected rgb + 0..1).";
+      return false;
+    }
+
+    const auto* onnx = FindMainOnnxFile(impl_->pack);
+    if (!onnx) {
+      if (error_out) *error_out = "OpenCudaMattingSession: missing ONNX file (kind=onnx).";
+      return false;
+    }
+    impl_->onnx_path = onnx->path;
+    if (!FileExists(impl_->onnx_path)) {
+      if (error_out) *error_out = "OpenCudaMattingSession: missing ONNX file at " + impl_->onnx_path.string();
+      return false;
+    }
+
+    impl_->preprocess.dst_w = spec.input.width;
+    impl_->preprocess.dst_h = spec.input.height;
     for (std::size_t i = 0; i < 3; ++i) {
-      impl_->preprocess.mean[i] = static_cast<float>(impl_->pack.preprocess.mean[i]);
-      impl_->preprocess.std[i] = static_cast<float>(impl_->pack.preprocess.std[i]);
+      impl_->preprocess.mean[i] = static_cast<float>(spec.preprocess.mean[i]);
+      impl_->preprocess.std[i] = static_cast<float>(spec.preprocess.std[i]);
     }
     impl_->preprocess.dst_order = studiocast::cuda::kernels::ChannelOrder::rgb;
 
@@ -285,8 +322,8 @@ bool OpenCudaMattingSession::EnsureInitialized(int frame_w, int frame_h, std::st
     if (!impl_->input_tensor.ReallocIfNeededNchwF32(impl_->cuda,
                                                     /*n_in=*/1,
                                                     /*c_in=*/3,
-                                                    /*h_in=*/impl_->pack.input.height,
-                                                    /*w_in=*/impl_->pack.input.width,
+                                                    /*h_in=*/impl_->pack.matting->input.height,
+                                                    /*w_in=*/impl_->pack.matting->input.width,
                                                     &alloc_err)) {
       if (error_out) *error_out = std::string("OpenCudaMattingSession: failed to allocate input tensor: ") + alloc_err;
       return false;
@@ -327,11 +364,11 @@ bool OpenCudaMattingSession::Run(studiocast::maxine::CUstream stream,
     if (error_out) *error_out = "OpenCudaMattingSession::Run: output alpha tensor is not allocated/valid.";
     return false;
   }
-  if (output_alpha_gpu->n != 1 || output_alpha_gpu->c != 1 || output_alpha_gpu->h != impl_->pack.input.height ||
-      output_alpha_gpu->w != impl_->pack.input.width) {
+  if (output_alpha_gpu->n != 1 || output_alpha_gpu->c != 1 || output_alpha_gpu->h != impl_->pack.matting->input.height ||
+      output_alpha_gpu->w != impl_->pack.matting->input.width) {
     if (error_out) {
       *error_out = "OpenCudaMattingSession::Run: output alpha tensor shape mismatch (expected 1x1x" +
-                   std::to_string(impl_->pack.input.height) + "x" + std::to_string(impl_->pack.input.width) + ")";
+                   std::to_string(impl_->pack.matting->input.height) + "x" + std::to_string(impl_->pack.matting->input.width) + ")";
     }
     return false;
   }

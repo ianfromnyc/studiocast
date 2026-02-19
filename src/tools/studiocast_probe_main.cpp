@@ -32,7 +32,7 @@
 #include "core/maxine/reason_codes.h"
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
-#include "core/open_cuda/model_pack_registry.h"
+#include "core/open_video/model_pack_registry.h"
 #include "../core/open_video/diagnose.h"
 #include "../core/open_video/matting_session.h"
 #include "core/probe/probe.h"
@@ -354,25 +354,31 @@ namespace {
 
         // Open CUDA model pack registry (pure filesystem + JSON; no GPU/ORT required).
         {
-            const auto reg = studiocast::open_cuda::ModelPackRegistry::Scan(
+            const auto reg = studiocast::open_video::ModelPackRegistry::Scan(
                 std::filesystem::path("tests") / "data" / "models" / "open_cuda");
 
             std::vector<std::string> ids;
-            for (const auto& m : reg.ListModels()) ids.push_back(m.id);
+            for (const auto& m : reg.ListModels()) {
+                if (m.task != "matting") continue;
+                ids.push_back(m.id);
+            }
             expectVecEq("OpenCudaModelRegistry.ListModels", ids, {"mock_model"});
 
-            const auto packOpt = reg.ResolveModel("mock_model");
+            const auto packOpt = reg.Find("matting", "mock_model");
             expectTrue("OpenCudaModelRegistry.ResolveModel(mock_model)", packOpt.has_value());
             if (packOpt) {
                 expectEq("OpenCudaModelRegistry.mock_model.display_name", packOpt->display_name, "Mock Matting Model");
                 expectEq("OpenCudaModelRegistry.mock_model.task", packOpt->task, "matting");
-                expectEq("OpenCudaModelRegistry.mock_model.input.layout", packOpt->input.layout, "nchw");
-                expectIntEq("OpenCudaModelRegistry.mock_model.input.width", packOpt->input.width, 256);
-                expectIntEq("OpenCudaModelRegistry.mock_model.input.height", packOpt->input.height, 256);
-                expectIntEq("OpenCudaModelRegistry.mock_model.input.channels", packOpt->input.channels, 3);
-                expectEq("OpenCudaModelRegistry.mock_model.output.kind", packOpt->output.kind, "alpha");
-                expectEq("OpenCudaModelRegistry.mock_model.preprocess.color", packOpt->preprocess.color, "rgb");
-                expectEq("OpenCudaModelRegistry.mock_model.preprocess.range", packOpt->preprocess.range, "0..1");
+                expectTrue("OpenCudaModelRegistry.mock_model.matting", packOpt->matting.has_value());
+                if (packOpt->matting) {
+                    expectEq("OpenCudaModelRegistry.mock_model.input.layout", packOpt->matting->input.layout, "nchw");
+                    expectIntEq("OpenCudaModelRegistry.mock_model.input.width", packOpt->matting->input.width, 256);
+                    expectIntEq("OpenCudaModelRegistry.mock_model.input.height", packOpt->matting->input.height, 256);
+                    expectIntEq("OpenCudaModelRegistry.mock_model.input.channels", packOpt->matting->input.channels, 3);
+                    expectEq("OpenCudaModelRegistry.mock_model.output.kind", packOpt->matting->output.kind, "alpha");
+                    expectEq("OpenCudaModelRegistry.mock_model.preprocess.color", packOpt->matting->preprocess.color, "rgb");
+                    expectEq("OpenCudaModelRegistry.mock_model.preprocess.range", packOpt->matting->preprocess.range, "0..1");
+                }
             }
 
             const auto& problems = reg.Problems();
@@ -382,30 +388,36 @@ namespace {
                 if (it != problems.end()) {
                     expectContains("OpenCudaModelRegistry.Problems(missing_onnx).reason",
                                    it->second,
-                                   "missing ONNX file");
+                                   "missing model file");
                 }
             }
             {
-                auto it = problems.find("invalid_json");
-                expectTrue("OpenCudaModelRegistry.Problems(invalid_json)", it != problems.end());
-                if (it != problems.end()) {
-                    expectContains("OpenCudaModelRegistry.Problems(invalid_json).reason", it->second, "model.json");
+                bool found = false;
+                for (const auto& [k, v] : problems) {
+                    if (k.find("invalid_json") == std::string::npos) continue;
+                    found = true;
+                    expectContains("OpenCudaModelRegistry.Problems(invalid_json).reason", v, "model.json");
+                    break;
                 }
+                expectTrue("OpenCudaModelRegistry.Problems(invalid_json)", found);
             }
 
             // Open CUDA diagnostics JSON includes model metadata for GUI dropdowns.
             {
                 studiocast::open_cuda::OpenCudaDiagnostics od;
                 od.ok = true;
-                od.default_model_id = reg.DefaultModelId();
+                od.default_model_id = reg.DefaultModelIdForTask("matting");
                 for (const auto& m : reg.ListModels()) {
+                    if (m.task != "matting") continue;
                     od.installed_models.push_back(m.id);
                     studiocast::open_cuda::OpenCudaDiagnostics::ModelInfo mi;
                     mi.id = m.id;
                     mi.display_name = m.display_name;
                     mi.task = m.task;
-                    mi.width = m.input.width;
-                    mi.height = m.input.height;
+                    if (m.matting) {
+                        mi.width = m.matting->input.width;
+                        mi.height = m.matting->input.height;
+                    }
                     od.models.push_back(std::move(mi));
                 }
                 od.missing_models = reg.Problems();
@@ -833,9 +845,9 @@ namespace {
                 if (!cuda.CreateStream(&stream, &err)) {
                     std::printf("[SKIP] OpenCudaMattingSessionSmoke (CreateStream failed): %s\n", err.c_str());
                 } else {
-                    const auto reg = studiocast::open_cuda::ModelPackRegistry::Scan(
+                    const auto reg = studiocast::open_video::ModelPackRegistry::Scan(
                         std::filesystem::path("tests") / "data" / "models" / "open_cuda");
-                    const auto packOpt = reg.ResolveModel("mock_model");
+                    const auto packOpt = reg.Find("matting", "mock_model");
                     if (!packOpt) {
                         ++failures;
                         std::printf("[FAIL] OpenCudaMattingSessionSmoke\n  missing mock_model fixture\n");
@@ -864,7 +876,7 @@ namespace {
                                 std::printf("[FAIL] OpenCudaMattingSessionSmoke\n  UploadFromCpuRgb24 failed: %s\n", err.c_str());
                             } else {
                                 studiocast::cuda::CudaTensor alpha;
-                                if (!alpha.AllocateNchwF32(&cuda, 1, 1, packOpt->input.height, packOpt->input.width, &err)) {
+                                if (!alpha.AllocateNchwF32(&cuda, 1, 1, packOpt->matting->input.height, packOpt->matting->input.width, &err)) {
                                     ++failures;
                                     std::printf("[FAIL] OpenCudaMattingSessionSmoke\n  alpha.AllocateNchwF32 failed: %s\n", err.c_str());
                                 } else {
@@ -895,7 +907,7 @@ namespace {
                                         } else {
                                             expectIntEq("OpenCudaMattingSessionSmoke.alpha.size",
                                                         static_cast<int>(out.size()),
-                                                        packOpt->input.width * packOpt->input.height);
+                                                        packOpt->matting->input.width * packOpt->matting->input.height);
 
                                             bool all_finite = true;
                                             for (float v : out) {
