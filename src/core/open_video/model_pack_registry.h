@@ -63,6 +63,16 @@ class ModelPackRegistry {
   const std::vector<ModelPack>& ListModels() const { return models_; }
   std::optional<ModelPack> ResolveModel(const std::string& id) const;
 
+  // Convenience view of installed model ids by task.
+  //
+  // This is used by effect runtimes to pick a deterministic default and to
+  // surface user-friendly install diagnostics.
+  const std::map<std::string, std::vector<std::string>>& Tasks() const { return tasks_; }
+
+  // Find a model pack by task + id.
+  // Returns std::nullopt if the id is not found or does not match the task.
+  std::optional<ModelPack> Find(const std::string& task, const std::string& id) const;
+
   // Deterministic default selection:
   //  - prefer first model that matches task
   //  - else first installed model
@@ -76,6 +86,7 @@ class ModelPackRegistry {
   std::filesystem::path root_;
   std::vector<ModelPack> models_;                // sorted by task,id
   std::map<std::string, std::string> problems_;  // sorted by key
+  std::map<std::string, std::vector<std::string>> tasks_;  // task -> model ids
 };
 
 }  // namespace studiocast::open_video

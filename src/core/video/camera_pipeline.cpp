@@ -34,6 +34,7 @@
 #include "core/open_cuda/model_pack_registry.h"
 #include "core/open_cuda/onnx_session.h"
 #include "core/open_video/frame_analysis_cache.h"
+#include "core/open_video/fastdvdnet_denoiser.h"
 #include "core/open_video/yunet_face_detector.h"
 #include "core/video/convert.h"
 #include "core/video/capture_error_policy.h"
@@ -2815,6 +2816,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   // frame-level analysis.
   studiocast::open_video::FrameAnalysisCache open_video_cache;
   studiocast::open_video::YunetFaceDetector open_video_yunet;
+  studiocast::open_video::FastDvdnetDenoiser open_video_fastdvdnet;
 
   // Open-source Video Noise Removal (Open CUDA backend). This implementation is a lightweight
   // temporal denoiser intended to be real-time and dependency-free. It does not require model packs.
@@ -4594,6 +4596,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   bool want_maxine_denoise = false;
   bool have_maxine_denoise = false;
 
+  bool want_open_video_video_denoise = false;
+  bool have_open_video_video_denoise = false;
+
   bool want_open_cuda_video_denoise = false;
   bool have_open_cuda_video_denoise = false;
 
@@ -4671,6 +4676,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     want_maxine_denoise = false;
     have_maxine_denoise = false;
 
+    want_open_video_video_denoise = false;
+    have_open_video_video_denoise = false;
+
     want_open_cuda_video_denoise = false;
     have_open_cuda_video_denoise = false;
 
@@ -4718,12 +4726,27 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       const std::string stage_id = std::string(studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval);
 
       if (engine_open_cuda) {
-        // Open-source fallback: lightweight temporal denoise.
-        want_open_cuda_video_denoise = true;
-        have_open_cuda_video_denoise = true;
-        set_backend(stage_id, "open_cuda");
-        if (!note.empty()) note += "\n";
-        note += "Open CUDA: Video Noise Removal (temporal denoise).";
+        // Open-source: prefer Open Video FastDVDnet when installed, otherwise
+        // fall back to the lightweight Open CUDA temporal denoiser.
+        want_open_video_video_denoise = true;
+
+        std::string ov_err;
+        if (open_video_fastdvdnet.EnsureInitialized(capA.width, capA.height, &ov_err)) {
+          have_open_video_video_denoise = true;
+          set_backend(stage_id, "open_video");
+          if (!note.empty()) note += "\n";
+          note += "Open Video: Video Noise Removal (FastDVDnet).";
+        } else {
+          want_open_cuda_video_denoise = true;
+          have_open_cuda_video_denoise = true;
+          set_backend(stage_id, "open_cuda");
+          if (!note.empty()) note += "\n";
+          note += "Open CUDA: Video Noise Removal (temporal denoise).";
+          if (!ov_err.empty()) {
+            note += "\n";
+            note += ov_err;
+          }
+        }
       } else if (!maxine_strict_blocked) {
         // AUTO / MAXINE: prefer Maxine VFX when available.
         want_maxine_denoise = true;
@@ -4739,15 +4762,33 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::vfx);
             maxine_strict_blocked = true;
           } else {
-            // AUTO: fall back to Open CUDA (when present).
-            want_open_cuda_video_denoise = true;
-            have_open_cuda_video_denoise = true;
-            set_backend(stage_id, "open_cuda");
-            if (!note.empty()) note += "\n";
-            note += "Open CUDA: Video Noise Removal (temporal denoise) — Maxine VFX unavailable.";
-            if (!mx_err.empty()) {
-              note += "\n";
-              note += mx_err;
+            // AUTO: prefer Open Video FastDVDnet when installed; fall back to the
+            // lightweight Open CUDA temporal denoiser.
+            want_open_video_video_denoise = true;
+            std::string ov_err;
+            if (open_video_fastdvdnet.EnsureInitialized(capA.width, capA.height, &ov_err)) {
+              have_open_video_video_denoise = true;
+              set_backend(stage_id, "open_video");
+              if (!note.empty()) note += "\n";
+              note += "Open Video: Video Noise Removal (FastDVDnet) — Maxine VFX unavailable.";
+              if (!mx_err.empty()) {
+                note += "\n";
+                note += mx_err;
+              }
+            } else {
+              want_open_cuda_video_denoise = true;
+              have_open_cuda_video_denoise = true;
+              set_backend(stage_id, "open_cuda");
+              if (!note.empty()) note += "\n";
+              note += "Open CUDA: Video Noise Removal (temporal denoise) — Maxine VFX unavailable.";
+              if (!mx_err.empty()) {
+                note += "\n";
+                note += mx_err;
+              }
+              if (!ov_err.empty()) {
+                note += "\n";
+                note += ov_err;
+              }
             }
           }
         }
@@ -4758,6 +4799,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     // doesn't blend against stale frames.
     if (!have_open_cuda_video_denoise) {
       open_cuda_video_denoise.last_enabled = false;
+    }
+
+    // Likewise, if Open Video FastDVDnet isn't active, reset its temporal history.
+    if (!have_open_video_video_denoise) {
+      open_video_fastdvdnet.ResetTemporalState();
     }
 
     // Eye Contact (AR)
@@ -5434,6 +5480,27 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                 last_error_ = "Maxine video noise removal failed: " + mx_err;
               }
               fx_failed = true;
+            }
+            return;
+          }
+
+          if (have_open_video_video_denoise) {
+            std::string ov_err;
+            if (!open_video_fastdvdnet.ApplyRgbInPlace(capture_sequence,
+                                                       rgb.data(),
+                                                       capA.width,
+                                                       capA.height,
+                                                       rgbStride,
+                                                       fx.video_noise_removal.strength,
+                                                       &ov_err)) {
+              if (!ov_err.empty()) {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = "Open Video video noise removal failed: " + ov_err;
+              }
+
+              // Best-effort fallback: run the lightweight Open CUDA temporal denoiser.
+              std::string oc_err;
+              (void)open_cuda_video_denoise.ApplyRgbInPlace(rgb.data(), capA.width, capA.height, rgbStride, fx, &oc_err);
             }
             return;
           }

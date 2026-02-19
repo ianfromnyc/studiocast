@@ -296,6 +296,12 @@ ModelPackRegistry ModelPackRegistry::Scan(const std::filesystem::path& open_vide
   }
   reg.models_.swap(unique);
 
+  // Build task -> model id index (deterministic ordering matches models_).
+  reg.tasks_.clear();
+  for (const auto& m : reg.models_) {
+    reg.tasks_[m.task].push_back(m.id);
+  }
+
   return reg;
 }
 
@@ -312,6 +318,14 @@ std::optional<ModelPack> ModelPackRegistry::ResolveModel(const std::string& id) 
     if (m.id == id) return m;
   }
   return std::nullopt;
+}
+
+std::optional<ModelPack> ModelPackRegistry::Find(const std::string& task, const std::string& id) const {
+  if (id.empty()) return std::nullopt;
+  const auto m = ResolveModel(id);
+  if (!m.has_value()) return std::nullopt;
+  if (!task.empty() && m->task != task) return std::nullopt;
+  return m;
 }
 
 std::string ModelPackRegistry::DefaultModelIdForTask(const std::string& task) const {
