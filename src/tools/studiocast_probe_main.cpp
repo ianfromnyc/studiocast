@@ -34,7 +34,7 @@
 #include "core/maxine/vfx_api.h"
 #include "core/open_cuda/model_pack_registry.h"
 #include "../core/open_video/diagnose.h"
-#include "core/open_cuda/matting_session.h"
+#include "../core/open_video/matting_session.h"
 #include "core/probe/probe.h"
 #include "core/util/json.h"
 #include "core/util/strings.h"
