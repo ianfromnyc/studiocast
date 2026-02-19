@@ -15,7 +15,7 @@
 #include "core/open_audio/open_audio_onnx_session.h"
 #include "core/open_cuda/model_pack_registry.h"
 #include "core/open_video/model_pack_registry.h"
-#include "core/open_video/open_video_onnx_session.h"
+#include "core/onnx/ort_session.h"
 #include "core/util/xdg.h"
 
 namespace fs = std::filesystem;
@@ -279,7 +279,7 @@ static int CmdVideoSelfTest(int argc, char** argv) {
   (void)model_path;
   return 2;
 #else
-  const auto ort = studiocast::open_video::OpenVideoOrtSession::QueryRuntimeInfo();
+  const auto ort = studiocast::onnx::OrtSession::QueryRuntimeInfo();
   std::cout << "ONNX Runtime version: " << (ort.version.empty() ? "(unknown)" : ort.version) << "\n";
   if (ort.providers.empty()) {
     std::cout << "Available providers: (unknown)\n";
@@ -348,15 +348,15 @@ static int CmdVideoSelfTest(int argc, char** argv) {
   if (!task.empty()) std::cout << "Task filter: " << task << "\n";
   std::cout << "CUDA preference: " << (cpu_only ? "CPU-only" : "AUTO (prefer CUDA)") << "\n";
 
-  studiocast::open_video::OrtSessionOptions opts;
+  studiocast::onnx::OrtSessionOptions opts;
   opts.prefer_cuda = !cpu_only;
 
   int failures = 0;
   for (const auto& onnx : onnx_paths) {
     std::cout << "\nModel: " << onnx.string() << "\n";
-    studiocast::open_video::OrtSessionInfo info;
+    studiocast::onnx::OrtSessionInfo info;
     std::string err;
-    auto session = studiocast::open_video::OpenVideoOrtSession::Create(onnx, opts, &info, &err);
+    auto session = studiocast::onnx::OrtSession::Create(onnx, opts, &info, &err);
     if (!session) {
       std::cerr << "ERROR: Failed to create session: " << (err.empty() ? "unknown" : err) << "\n";
       failures++;

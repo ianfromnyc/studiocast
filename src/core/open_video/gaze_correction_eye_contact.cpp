@@ -128,7 +128,7 @@ std::string GazeCorrectionEyeContact::ChoosePreferredModelId(const ModelPackRegi
   return best.empty() ? fallback : best;
 }
 
-bool GazeCorrectionEyeContact::DetectEyeInputsFromSession(const OrtSessionInfo& info,
+bool GazeCorrectionEyeContact::DetectEyeInputsFromSession(const studiocast::onnx::OrtSessionInfo& info,
                                                          std::string* out_eye_name,
                                                          std::vector<int64_t>* out_eye_shape,
                                                          std::string* out_anchors_name,
@@ -188,7 +188,7 @@ bool GazeCorrectionEyeContact::DetectEyeInputsFromSession(const OrtSessionInfo& 
   return true;
 }
 
-bool GazeCorrectionEyeContact::DetectOutputFromSession(const OrtSessionInfo& info,
+bool GazeCorrectionEyeContact::DetectOutputFromSession(const studiocast::onnx::OrtSessionInfo& info,
                                                       std::string* out_name,
                                                       std::vector<int64_t>* out_shape,
                                                       std::string* error) {
@@ -271,17 +271,17 @@ bool GazeCorrectionEyeContact::InitRuntimeForEye(const std::filesystem::path& on
   }
 
   // Create both a CUDA-preferred session and a CPU-only session for fallback.
-  OrtSessionOptions cuda_opts;
+  studiocast::onnx::OrtSessionOptions cuda_opts;
   cuda_opts.prefer_cuda = true;
-  OrtSessionInfo cuda_info;
+  studiocast::onnx::OrtSessionInfo cuda_info;
   std::string cuda_err;
-  rt->session_cuda = OpenVideoOrtSession::Create(onnx_path, cuda_opts, &cuda_info, &cuda_err);
+  rt->session_cuda = studiocast::onnx::OrtSession::Create(onnx_path, cuda_opts, &cuda_info, &cuda_err);
 
-  OrtSessionOptions cpu_opts;
+  studiocast::onnx::OrtSessionOptions cpu_opts;
   cpu_opts.prefer_cuda = false;
-  OrtSessionInfo cpu_info;
+  studiocast::onnx::OrtSessionInfo cpu_info;
   std::string cpu_err;
-  rt->session_cpu = OpenVideoOrtSession::Create(onnx_path, cpu_opts, &cpu_info, &cpu_err);
+  rt->session_cpu = studiocast::onnx::OrtSession::Create(onnx_path, cpu_opts, &cpu_info, &cpu_err);
 
   if (!rt->session_cuda && !rt->session_cpu) {
     if (error) {
@@ -384,24 +384,24 @@ bool GazeCorrectionEyeContact::ConfigureRuntimeIo(EyeRuntime* rt, std::string* e
 
   rt->ort_inputs.clear();
   rt->ort_outputs.clear();
-  rt->ort_inputs.push_back(OpenVideoOrtSession::OrtRunInput{rt->eye_name.c_str(),
+  rt->ort_inputs.push_back(studiocast::onnx::OrtSession::RunInput{rt->eye_name.c_str(),
                                                            rt->eye_tensor.data(),
                                                            rt->eye_tensor.size(),
                                                            rt->eye_shape.data(),
                                                            rt->eye_shape.size()});
-  rt->ort_inputs.push_back(OpenVideoOrtSession::OrtRunInput{rt->anchors_name.c_str(),
+  rt->ort_inputs.push_back(studiocast::onnx::OrtSession::RunInput{rt->anchors_name.c_str(),
                                                            rt->anchors_tensor.data(),
                                                            rt->anchors_tensor.size(),
                                                            rt->anchors_shape.data(),
                                                            rt->anchors_shape.size()});
 
   // Angles: shape rank can be 1 or 2.
-  rt->ort_inputs.push_back(OpenVideoOrtSession::OrtRunInput{rt->angles_name.c_str(),
+  rt->ort_inputs.push_back(studiocast::onnx::OrtSession::RunInput{rt->angles_name.c_str(),
                                                            rt->angles_tensor.data(),
                                                            2,
                                                            rt->angles_shape.data(),
                                                            rt->angles_shape.size()});
-  rt->ort_outputs.push_back(OpenVideoOrtSession::OrtRunOutput{rt->output_name.c_str(),
+  rt->ort_outputs.push_back(studiocast::onnx::OrtSession::RunOutput{rt->output_name.c_str(),
                                                              rt->output_tensor.data(),
                                                              rt->output_tensor.size(),
                                                              rt->output_shape.data(),
@@ -695,7 +695,7 @@ bool GazeCorrectionEyeContact::RunModelForEye(EyeRuntime* rt,
   rt->angles_tensor[1] = pitch;
 
   std::string run_err;
-  if (rt->session_active->Run(rt->ort_inputs.data(),
+  if (rt->session_active->RunCpu(rt->ort_inputs.data(),
                               rt->ort_inputs.size(),
                               rt->ort_outputs.data(),
                               rt->ort_outputs.size(),
@@ -707,7 +707,7 @@ bool GazeCorrectionEyeContact::RunModelForEye(EyeRuntime* rt,
   if (rt->session_active == rt->session_cuda.get() && rt->session_cpu) {
     rt->session_active = rt->session_cpu.get();
     using_cpu_fallback_ = true;
-    if (rt->session_active->Run(rt->ort_inputs.data(),
+    if (rt->session_active->RunCpu(rt->ort_inputs.data(),
                                 rt->ort_inputs.size(),
                                 rt->ort_outputs.data(),
                                 rt->ort_outputs.size(),

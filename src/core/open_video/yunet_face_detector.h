@@ -9,7 +9,7 @@
 
 #include "core/open_video/frame_analysis_cache.h"
 #include "core/open_video/model_pack_registry.h"
-#include "core/open_video/open_video_onnx_session.h"
+#include "core/onnx/ort_session.h"
 
 namespace studiocast::open_video {
 
@@ -76,8 +76,8 @@ class YunetFaceDetector {
   std::filesystem::path active_model_path_;
 
   ModelPackRegistry registry_;
-  std::unique_ptr<OpenVideoOrtSession> session_;
-  OrtSessionInfo session_info_;
+  std::unique_ptr<studiocast::onnx::OrtSession> session_;
+  studiocast::onnx::OrtSessionInfo session_info_;
 
   // Pre-allocated buffers.
   std::vector<float> input_tensor_;

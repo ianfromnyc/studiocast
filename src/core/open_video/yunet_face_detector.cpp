@@ -61,7 +61,7 @@ void YunetFaceDetector::Reset() {
   active_model_id_.clear();
   active_model_path_.clear();
   session_.reset();
-  session_info_ = OrtSessionInfo{};
+  session_info_ = studiocast::onnx::OrtSessionInfo{};
   input_tensor_.clear();
   input_shape_.clear();
   outputs_.clear();
@@ -276,11 +276,11 @@ bool YunetFaceDetector::EnsureInitialized(std::string* error) {
   std::string settings_err;
   (void)LoadSettingsFromManifest(pack->manifest_path, &settings_err);
 
-  OrtSessionOptions opts;
+  studiocast::onnx::OrtSessionOptions opts;
   opts.prefer_cuda = true;
   opts.cuda_device_id = 0;
   std::string ort_err;
-  auto sess = OpenVideoOrtSession::Create(model_path, opts, &session_info_, &ort_err);
+  auto sess = studiocast::onnx::OrtSession::Create(model_path, opts, &session_info_, &ort_err);
   if (!sess) {
     if (error) *error = ort_err.empty() ? ("Failed to create ORT session for " + model_path.string()) : ort_err;
     return false;
@@ -476,7 +476,7 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
   FillInputTensorBgr(rgb, width, height, stride, lb);
 
   // Bind input.
-  OpenVideoOrtSession::OrtRunInput in;
+  studiocast::onnx::OrtSession::RunInput in;
   in.name = session_info_.input_names[0].c_str();
   in.data = input_tensor_.data();
   in.num_floats = input_tensor_.size();
@@ -484,10 +484,10 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
   in.shape_rank = input_shape_.size();
 
   // Bind outputs.
-  std::vector<OpenVideoOrtSession::OrtRunOutput> outs;
+  std::vector<studiocast::onnx::OrtSession::RunOutput> outs;
   outs.reserve(outputs_.size());
   for (auto& ob : outputs_) {
-    OpenVideoOrtSession::OrtRunOutput o;
+    studiocast::onnx::OrtSession::RunOutput o;
     o.name = ob.name.c_str();
     o.data = ob.data.data();
     o.num_floats = ob.data.size();
@@ -497,7 +497,7 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
   }
 
   std::string run_err;
-  if (!session_->Run(&in, 1, outs.data(), outs.size(), &run_err)) {
+  if (!session_->RunCpu(&in, 1, outs.data(), outs.size(), &run_err)) {
     if (error) *error = run_err;
     return false;
   }

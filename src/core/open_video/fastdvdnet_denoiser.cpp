@@ -165,14 +165,14 @@ bool FastDvdnetDenoiser::EnsureSessionForModel(const LoadedModel& model, std::st
   ort_session_cpu_.reset();
   ort_session_active_ = nullptr;
   using_cpu_fallback_ = false;
-  session_info_ = OrtSessionInfo{};
+  session_info_ = studiocast::onnx::OrtSessionInfo{};
 
-  OrtSessionOptions cuda_opts;
+  studiocast::onnx::OrtSessionOptions cuda_opts;
   cuda_opts.prefer_cuda = true;
 
   std::string err;
-  OrtSessionInfo info_cuda;
-  auto cuda = OpenVideoOrtSession::Create(model.onnx, cuda_opts, &info_cuda, &err);
+  studiocast::onnx::OrtSessionInfo info_cuda;
+  auto cuda = studiocast::onnx::OrtSession::Create(model.onnx, cuda_opts, &info_cuda, &err);
   if (!cuda) {
     if (error) {
       *error = "Open Video FastDVDnet: failed to create ORT session: " + (err.empty() ? std::string("unknown") : err);
@@ -180,13 +180,13 @@ bool FastDvdnetDenoiser::EnsureSessionForModel(const LoadedModel& model, std::st
     return false;
   }
 
-  std::unique_ptr<OpenVideoOrtSession> cpu;
-  OrtSessionInfo info_cpu;
+  std::unique_ptr<studiocast::onnx::OrtSession> cpu;
+  studiocast::onnx::OrtSessionInfo info_cpu;
   if (info_cuda.using_cuda) {
-    OrtSessionOptions cpu_opts;
+    studiocast::onnx::OrtSessionOptions cpu_opts;
     cpu_opts.prefer_cuda = false;
     std::string err_cpu;
-    cpu = OpenVideoOrtSession::Create(model.onnx, cpu_opts, &info_cpu, &err_cpu);
+    cpu = studiocast::onnx::OrtSession::Create(model.onnx, cpu_opts, &info_cpu, &err_cpu);
     // CPU fallback is best-effort; if it fails, we can still run CUDA-only.
     if (!cpu && !err_cpu.empty()) {
       if (!info_cuda.warnings.empty()) {
@@ -263,14 +263,14 @@ bool FastDvdnetDenoiser::RefreshGeometry(int src_w, int src_h, std::string* erro
     return false;
   }
 
-  OpenVideoOrtSession::OrtRunInput in_noisy;
+  studiocast::onnx::OrtSession::RunInput in_noisy;
   in_noisy.name = noisy_name_.c_str();
   in_noisy.data = noisy_tensor_.data();
   in_noisy.num_floats = noisy_tensor_.size();
   in_noisy.shape = noisy_shape_.data();
   in_noisy.shape_rank = noisy_shape_.size();
 
-  OpenVideoOrtSession::OrtRunInput in_noise;
+  studiocast::onnx::OrtSession::RunInput in_noise;
   in_noise.name = noise_map_name_.c_str();
   in_noise.data = noise_map_tensor_.data();
   in_noise.num_floats = noise_map_tensor_.size();
@@ -280,7 +280,7 @@ bool FastDvdnetDenoiser::RefreshGeometry(int src_w, int src_h, std::string* erro
   ort_inputs_.push_back(in_noisy);
   ort_inputs_.push_back(in_noise);
 
-  OpenVideoOrtSession::OrtRunOutput out_den;
+  studiocast::onnx::OrtSession::RunOutput out_den;
   out_den.name = denoised_name_.c_str();
   out_den.data = denoised_tensor_.data();
   out_den.num_floats = denoised_tensor_.size();
@@ -599,7 +599,7 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
   ort_outputs_[0].num_floats = denoised_tensor_.size();
 
   std::string ort_err;
-  if (!ort_session_active_->Run(ort_inputs_.data(), ort_inputs_.size(), ort_outputs_.data(), ort_outputs_.size(),
+  if (!ort_session_active_->RunCpu(ort_inputs_.data(), ort_inputs_.size(), ort_outputs_.data(), ort_outputs_.size(),
                                 &ort_err)) {
     std::ostringstream oss;
     oss << "Open Video FastDVDnet ORT run failed: " << (ort_err.empty() ? "unknown" : ort_err);
@@ -612,7 +612,7 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
       runtime_failures_ = 0;
       // Try once on CPU immediately.
       std::string cpu_err;
-      if (!ort_session_active_->Run(ort_inputs_.data(), ort_inputs_.size(), ort_outputs_.data(), ort_outputs_.size(),
+      if (!ort_session_active_->RunCpu(ort_inputs_.data(), ort_inputs_.size(), ort_outputs_.data(), ort_outputs_.size(),
                                     &cpu_err)) {
         oss << " (CPU fallback also failed: " << (cpu_err.empty() ? "unknown" : cpu_err) << ")";
       } else {

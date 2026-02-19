@@ -7,6 +7,9 @@
 
 #include "core/onnx/ort_session.h"
 
+// NOTE: Deprecated compatibility shim.
+// New code should include "core/onnx/ort_session.h" and use studiocast::onnx::OrtSession directly.
+
 namespace studiocast::open_video {
 
 // These types are aliased to the canonical ORT wrapper in core/onnx.

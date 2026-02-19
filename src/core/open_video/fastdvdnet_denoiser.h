@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "core/open_video/model_pack_registry.h"
-#include "core/open_video/open_video_onnx_session.h"
+#include "core/onnx/ort_session.h"
 
 namespace studiocast::open_video {
 
@@ -105,10 +105,10 @@ class FastDvdnetDenoiser {
   std::filesystem::path active_model_path_;
   int model_default_sigma_ = 25;
 
-  OrtSessionInfo session_info_;
-  std::unique_ptr<OpenVideoOrtSession> ort_session_cuda_;
-  std::unique_ptr<OpenVideoOrtSession> ort_session_cpu_;
-  OpenVideoOrtSession* ort_session_active_ = nullptr;
+  studiocast::onnx::OrtSessionInfo session_info_;
+  std::unique_ptr<studiocast::onnx::OrtSession> ort_session_cuda_;
+  std::unique_ptr<studiocast::onnx::OrtSession> ort_session_cpu_;
+  studiocast::onnx::OrtSession* ort_session_active_ = nullptr;
   bool using_cpu_fallback_ = false;
 
   std::string noisy_name_;
@@ -140,8 +140,8 @@ class FastDvdnetDenoiser {
   float last_noise_map_value_ = -1.0f;
 
   // Scratch for ORT bindings.
-  std::vector<OpenVideoOrtSession::OrtRunInput> ort_inputs_;
-  std::vector<OpenVideoOrtSession::OrtRunOutput> ort_outputs_;
+  std::vector<studiocast::onnx::OrtSession::RunInput> ort_inputs_;
+  std::vector<studiocast::onnx::OrtSession::RunOutput> ort_outputs_;
 
   // Sticky warning surfaced through the daemon status (best-effort).
   std::string sticky_warning_;

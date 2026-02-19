@@ -9,7 +9,7 @@
 #include "core/open_video/dlib_face_landmarks.h"
 #include "core/open_video/frame_analysis_cache.h"
 #include "core/open_video/model_pack_registry.h"
-#include "core/open_video/open_video_onnx_session.h"
+#include "core/onnx/ort_session.h"
 #include "core/open_video/yunet_face_detector.h"
 
 namespace studiocast::open_video {
@@ -62,10 +62,10 @@ class GazeCorrectionEyeContact {
 
  private:
   struct EyeRuntime {
-    OrtSessionInfo session_info;
-    std::unique_ptr<OpenVideoOrtSession> session_cuda;
-    std::unique_ptr<OpenVideoOrtSession> session_cpu;
-    OpenVideoOrtSession* session_active = nullptr;
+    studiocast::onnx::OrtSessionInfo session_info;
+    std::unique_ptr<studiocast::onnx::OrtSession> session_cuda;
+    std::unique_ptr<studiocast::onnx::OrtSession> session_cpu;
+    studiocast::onnx::OrtSession* session_active = nullptr;
 
     bool eye_is_nhwc = false;
     bool anchors_is_nhwc = false;
@@ -92,8 +92,8 @@ class GazeCorrectionEyeContact {
     std::vector<float> output_tensor;
 
     // Scratch for ORT bindings.
-    std::vector<OpenVideoOrtSession::OrtRunInput> ort_inputs;
-    std::vector<OpenVideoOrtSession::OrtRunOutput> ort_outputs;
+    std::vector<studiocast::onnx::OrtSession::RunInput> ort_inputs;
+    std::vector<studiocast::onnx::OrtSession::RunOutput> ort_outputs;
   };
 
   struct EyeData {
@@ -115,7 +115,7 @@ class GazeCorrectionEyeContact {
 
   static std::string ChoosePreferredModelId(const ModelPackRegistry& reg);
 
-  static bool DetectEyeInputsFromSession(const OrtSessionInfo& info,
+  static bool DetectEyeInputsFromSession(const studiocast::onnx::OrtSessionInfo& info,
                                          std::string* out_eye_name,
                                          std::vector<int64_t>* out_eye_shape,
                                          std::string* out_anchors_name,
@@ -124,7 +124,7 @@ class GazeCorrectionEyeContact {
                                          std::vector<int64_t>* out_angles_shape,
                                          std::string* error);
 
-  static bool DetectOutputFromSession(const OrtSessionInfo& info,
+  static bool DetectOutputFromSession(const studiocast::onnx::OrtSessionInfo& info,
                                       std::string* out_name,
                                       std::vector<int64_t>* out_shape,
                                       std::string* error);
