@@ -246,8 +246,8 @@ bool YunetFaceDetector::EnsureInitialized(std::string* error) {
   const auto it = registry_.Tasks().find("face_detection");
   if (it == registry_.Tasks().end() || it->second.empty()) {
     if (error) {
-      *error = "No Open Video face_detection models installed. Install a YuNet model pack under "
-               + util::StudioCastModelsDir() + "/open_video/face_detection/.";
+      *error = "No Open Video face_detection models installed. Install a YuNet model pack under " +
+               (util::StudioCastModelsDir().string() + "/open_video/face_detection/.");
     }
     return false;
   }
@@ -425,14 +425,14 @@ void YunetFaceDetector::FillInputTensorBgr(const std::uint8_t* rgb,
 }
 
 float YunetFaceDetector::IoU(const FaceDetection& a, const FaceDetection& b) {
-  const float ax0 = a.bbox.x;
-  const float ay0 = a.bbox.y;
-  const float ax1 = a.bbox.x + a.bbox.w;
-  const float ay1 = a.bbox.y + a.bbox.h;
-  const float bx0 = b.bbox.x;
-  const float by0 = b.bbox.y;
-  const float bx1 = b.bbox.x + b.bbox.w;
-  const float by1 = b.bbox.y + b.bbox.h;
+  const float ax0 = a.x;
+  const float ay0 = a.y;
+  const float ax1 = a.x + a.w;
+  const float ay1 = a.y + a.h;
+  const float bx0 = b.x;
+  const float by0 = b.y;
+  const float bx1 = b.x + b.w;
+  const float by1 = b.y + b.h;
 
   const float ix0 = std::max(ax0, bx0);
   const float iy0 = std::max(ay0, by0);
@@ -554,10 +554,13 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
         (void)kps_nhwc;
         // Keypoints are available but are not currently needed for Auto Frame.
 
-        FaceDetection det;
-        det.score = score;
-        det.bbox = RectF{x1, y1, w, h};
-        faces.push_back(det);
+        faces.push_back(FaceDetection{
+                .x = x1,
+                .y = y1,
+                .w = w,
+                .h = h,
+                .score = score,
+            });
       }
     }
   }
@@ -576,16 +579,16 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
   for (const auto& f : faces) {
     FaceDetection out = f;
     // Undo letterbox.
-    out.bbox.x = (out.bbox.x - static_cast<float>(lb.pad_x)) / lb.scale;
-    out.bbox.y = (out.bbox.y - static_cast<float>(lb.pad_y)) / lb.scale;
-    out.bbox.w = out.bbox.w / lb.scale;
-    out.bbox.h = out.bbox.h / lb.scale;
+    out.x = (out.x - static_cast<float>(lb.pad_x)) / lb.scale;
+    out.y = (out.y - static_cast<float>(lb.pad_y)) / lb.scale;
+    out.w = out.w / lb.scale;
+    out.h = out.h / lb.scale;
 
     // Clip to image bounds (best-effort).
-    out.bbox.x = std::clamp(out.bbox.x, 0.0f, static_cast<float>(width));
-    out.bbox.y = std::clamp(out.bbox.y, 0.0f, static_cast<float>(height));
-    out.bbox.w = std::clamp(out.bbox.w, 0.0f, static_cast<float>(width) - out.bbox.x);
-    out.bbox.h = std::clamp(out.bbox.h, 0.0f, static_cast<float>(height) - out.bbox.y);
+    out.x = std::clamp(out.x, 0.0f, static_cast<float>(width));
+    out.y = std::clamp(out.y, 0.0f, static_cast<float>(height));
+    out.w = std::clamp(out.w, 0.0f, static_cast<float>(width) - out.x);
+    out.h = std::clamp(out.h, 0.0f, static_cast<float>(height) - out.y);
     mapped.push_back(out);
   }
 

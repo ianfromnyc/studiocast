@@ -117,14 +117,14 @@ bool FastDvdnetDenoiser::ResolveModelFromRegistry(const ModelPackRegistry& reg, 
   // Pick the ONNX file marked role=main, else first ONNX.
   std::filesystem::path onnx;
   for (const auto& f : pack->files) {
-    if (f.kind == ModelFileKind::onnx && f.role == "main") {
+    if (f.kind == "onnx" && f.role == "main") {
       onnx = pack->root_dir / f.name;
       break;
     }
   }
   if (onnx.empty()) {
     for (const auto& f : pack->files) {
-      if (f.kind == ModelFileKind::onnx) {
+      if (f.kind == "onnx") {
         onnx = pack->root_dir / f.name;
         break;
       }
