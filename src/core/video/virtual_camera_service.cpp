@@ -12,7 +12,7 @@
 #include <cstring>
 
 #include "core/maxine/maxine_manager.h"
-#include "core/open_cuda/open_cuda_diagnose.h"
+#include "../open_video/diagnose.h"
 #include "core/util/proc.h"
 #include "core/video/effects/broadcast_effect_maxine_gate.h"
 #include "core/video/effects/broadcast_effect_open_cuda_gate.h"

@@ -33,7 +33,7 @@
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
 #include "core/open_cuda/model_pack_registry.h"
-#include "core/open_cuda/open_cuda_diagnose.h"
+#include "../core/open_video/diagnose.h"
 #include "core/open_cuda/onnx_session.h"
 #include "core/probe/probe.h"
 #include "core/util/json.h"

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/open_cuda/open_cuda_diagnostics.h"
+#include "diagnostics.h"
 
 namespace studiocast::open_cuda {
 

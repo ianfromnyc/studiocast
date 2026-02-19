@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 
-#include "core/open_cuda/open_cuda_diagnostics.h"
+#include "../../open_video/diagnostics.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/broadcast_effect_rules.h"
 

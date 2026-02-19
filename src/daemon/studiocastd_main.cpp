@@ -21,7 +21,7 @@
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
 #include "core/maxine/maxine_manager.h"
-#include "core/open_cuda/open_cuda_diagnose.h"
+#include "../core/open_video/diagnose.h"
 #include "core/open_audio/open_audio_diagnose.h"
 #include "core/open_cuda/model_pack_registry.h"
 #include "core/util/json.h"
