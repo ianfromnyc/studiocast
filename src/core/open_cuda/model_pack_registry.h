@@ -77,7 +77,7 @@ class ModelPackRegistry {
 
   // Deterministic default selection (configurable later).
   // Current behavior:
-  //  - Prefer "modnet" when present.
+  //  - Prefer "birefnet_lite" when present.
   //  - Else return first installed model ID (sorted).
   //  - Else return empty string.
   std::string DefaultModelId() const;

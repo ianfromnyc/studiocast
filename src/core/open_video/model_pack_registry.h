@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -25,6 +26,37 @@ struct ModelFile {
   std::filesystem::path path;
 };
 
+// v1-style ONNX tensor metadata.
+// Used by a small subset of Open Video tasks (notably matting) where the runtime
+// needs deterministic IO names and fixed model dimensions.
+struct ModelTensorSpec {
+  std::string name;
+  std::string layout;   // e.g. "nchw" or "nhwc"
+  std::string dtype;    // e.g. "float32"
+  int width = 0;
+  int height = 0;
+  int channels = 0;
+};
+
+struct ModelOutputSpec {
+  std::string name;
+  std::string kind;   // e.g. "alpha"
+  std::string dtype;  // e.g. "float32"
+};
+
+struct ModelPreprocessSpec {
+  std::array<double, 3> mean{0.0, 0.0, 0.0};
+  std::array<double, 3> std{1.0, 1.0, 1.0};
+  std::string color;  // e.g. "rgb"
+  std::string range;  // e.g. "0..1"
+};
+
+struct MattingSpec {
+  ModelTensorSpec input;
+  ModelOutputSpec output;
+  ModelPreprocessSpec preprocess;
+};
+
 struct ModelPack {
   // Schema version (1 for legacy packs using onnx_filename; 2 for v2 packs).
   int schema_version = 1;
@@ -39,6 +71,10 @@ struct ModelPack {
   // Files declared by the pack. For schema v1 packs, this contains a single
   // ONNX file (role=main, kind=onnx).
   std::vector<ModelFile> files;
+
+  // Optional task-specific metadata.
+  // For task == "matting", this captures the v1-style IO/preprocess metadata.
+  std::optional<MattingSpec> matting;
 
   // Derived from install layout.
   std::filesystem::path root_dir;

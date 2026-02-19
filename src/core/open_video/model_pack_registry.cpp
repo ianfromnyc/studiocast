@@ -1,7 +1,7 @@
 #include "core/open_video/model_pack_registry.h"
 
 #include <algorithm>
-#include <set>
+#include <map>
 #include <sstream>
 
 #include "core/util/fs.h"
@@ -30,6 +30,13 @@ bool IsSafeRelativePath(const fs::path& p) {
 bool Fail(std::string* error, std::string msg) {
   if (error) *error = std::move(msg);
   return false;
+}
+
+const util::json::Value::Object* AsObject(const util::json::Value& v, std::string* error, const char* what) {
+  const auto* o = v.AsObject();
+  if (o) return o;
+  if (error) *error = std::string("model.json: expected object for ") + what;
+  return nullptr;
 }
 
 const util::json::Value* Get(const util::json::Value::Object& o, const char* key) {
@@ -73,6 +80,43 @@ bool GetIntOptional(const util::json::Value::Object& o, const char* key, int* ou
   return true;
 }
 
+bool GetIntRequired(const util::json::Value::Object& o, const char* key, int* out, std::string* error) {
+  const auto* v = Get(o, key);
+  if (!v) return Fail(error, std::string("model.json: missing required field '") + key + "'");
+  const auto* n = v->AsNumber();
+  if (!n) return Fail(error, std::string("model.json: field '") + key + "' must be a number");
+  const int i = static_cast<int>(*n);
+  if (static_cast<double>(i) != *n) {
+    return Fail(error, std::string("model.json: field '") + key + "' must be an integer");
+  }
+  *out = i;
+  return true;
+}
+
+bool GetNumberArray3Required(const util::json::Value::Object& o,
+                             const char* key,
+                             std::array<double, 3>* out,
+                             std::string* error) {
+  const auto* v = Get(o, key);
+  if (!v) return Fail(error, std::string("model.json: missing required field '") + key + "'");
+  const auto* a = v->AsArray();
+  if (!a) return Fail(error, std::string("model.json: field '") + key + "' must be an array");
+  if (a->size() != 3) return Fail(error, std::string("model.json: field '") + key + "' must have length 3");
+  for (std::size_t i = 0; i < 3; ++i) {
+    const auto* n = (*a)[i].AsNumber();
+    if (!n) return Fail(error, std::string("model.json: field '") + key + "' must contain only numbers");
+    (*out)[i] = *n;
+  }
+  return true;
+}
+
+bool IsOneOf(const std::string& v, std::initializer_list<const char*> allowed) {
+  for (const char* a : allowed) {
+    if (v == a) return true;
+  }
+  return false;
+}
+
 bool GetStringArrayOptional(const util::json::Value::Object& o,
                             const char* key,
                             std::vector<std::string>* out,
@@ -89,6 +133,65 @@ bool GetStringArrayOptional(const util::json::Value::Object& o,
     if (s->empty()) continue;
     out->push_back(*s);
   }
+  return true;
+}
+
+bool ParseMattingSpecFromV1Fields(const util::json::Value::Object& root, MattingSpec* out, std::string* error) {
+  const auto* inputV = Get(root, "input");
+  if (!inputV) return Fail(error, "model.json: missing required field 'input'");
+  const auto* inputObj = AsObject(*inputV, error, "'input'");
+  if (!inputObj) return false;
+
+  if (!GetStringRequired(*inputObj, "name", &out->input.name, error)) return false;
+  if (!GetStringRequired(*inputObj, "layout", &out->input.layout, error)) return false;
+  if (!GetStringRequired(*inputObj, "dtype", &out->input.dtype, error)) return false;
+  if (!GetIntRequired(*inputObj, "width", &out->input.width, error)) return false;
+  if (!GetIntRequired(*inputObj, "height", &out->input.height, error)) return false;
+  if (!GetIntRequired(*inputObj, "channels", &out->input.channels, error)) return false;
+
+  if (!IsOneOf(out->input.layout, {"nchw", "nhwc"})) {
+    return Fail(error, "model.json: input.layout must be one of: nchw, nhwc");
+  }
+  if (!IsOneOf(out->input.dtype, {"float32", "float16"})) {
+    return Fail(error, "model.json: input.dtype must be one of: float32, float16");
+  }
+  if (out->input.width <= 0 || out->input.height <= 0 || out->input.channels <= 0) {
+    return Fail(error, "model.json: input width/height/channels must be positive");
+  }
+
+  const auto* outputV = Get(root, "output");
+  if (!outputV) return Fail(error, "model.json: missing required field 'output'");
+  const auto* outputObj = AsObject(*outputV, error, "'output'");
+  if (!outputObj) return false;
+
+  if (!GetStringRequired(*outputObj, "name", &out->output.name, error)) return false;
+  if (!GetStringRequired(*outputObj, "kind", &out->output.kind, error)) return false;
+  if (!GetStringRequired(*outputObj, "dtype", &out->output.dtype, error)) return false;
+
+  if (!IsOneOf(out->output.kind, {"alpha"})) {
+    return Fail(error, "model.json: output.kind must be 'alpha'");
+  }
+  if (!IsOneOf(out->output.dtype, {"float32", "float16"})) {
+    return Fail(error, "model.json: output.dtype must be one of: float32, float16");
+  }
+
+  const auto* ppV = Get(root, "preprocess");
+  if (!ppV) return Fail(error, "model.json: missing required field 'preprocess'");
+  const auto* ppObj = AsObject(*ppV, error, "'preprocess'");
+  if (!ppObj) return false;
+
+  if (!GetNumberArray3Required(*ppObj, "mean", &out->preprocess.mean, error)) return false;
+  if (!GetNumberArray3Required(*ppObj, "std", &out->preprocess.std, error)) return false;
+  if (!GetStringRequired(*ppObj, "color", &out->preprocess.color, error)) return false;
+  if (!GetStringRequired(*ppObj, "range", &out->preprocess.range, error)) return false;
+
+  if (!IsOneOf(out->preprocess.color, {"rgb"})) {
+    return Fail(error, "model.json: preprocess.color must be 'rgb'");
+  }
+  if (!IsOneOf(out->preprocess.range, {"0..1"})) {
+    return Fail(error, "model.json: preprocess.range must be '0..1'");
+  }
+
   return true;
 }
 
@@ -131,12 +234,26 @@ bool ParseModelJsonV1(const fs::path& pack_dir, ModelPack* out, std::string* err
   f.sha256 = "";
   f.path = pack_dir / rel;
 
-  if (!fs::exists(f.path)) {
+  std::error_code ec;
+  if (!fs::exists(f.path, ec) || ec) {
     return Fail(error, std::string("missing model file: ") + PathForError(f.path));
+  }
+  if (!fs::is_regular_file(f.path, ec) || ec) {
+    return Fail(error, std::string("model file is not a regular file: ") + PathForError(f.path));
   }
 
   out->files.clear();
   out->files.push_back(std::move(f));
+
+  out->matting.reset();
+  if (out->task == "matting") {
+    MattingSpec spec;
+    std::string perr;
+    if (!ParseMattingSpecFromV1Fields(*obj, &spec, &perr)) {
+      return Fail(error, perr);
+    }
+    out->matting = std::move(spec);
+  }
 
   return true;
 }
@@ -191,17 +308,51 @@ bool ParseModelJsonV2(const fs::path& pack_dir, ModelPack* out, std::string* err
     }
     f.path = pack_dir / rel;
 
-    if (!fs::exists(f.path)) {
+    std::error_code ec;
+    if (!fs::exists(f.path, ec) || ec) {
       std::ostringstream oss;
       oss << "missing model file: " << PathForError(f.path);
       if (!out->task.empty()) oss << " (task=" << out->task << ")";
       return Fail(error, oss.str());
     }
+    if (!fs::is_regular_file(f.path, ec) || ec) {
+      return Fail(error, std::string("model file is not a regular file: ") + PathForError(f.path));
+    }
 
     out->files.push_back(std::move(f));
   }
 
+  out->matting.reset();
+  if (out->task == "matting") {
+    MattingSpec spec;
+    std::string perr;
+    if (!ParseMattingSpecFromV1Fields(*obj, &spec, &perr)) {
+      return Fail(error, perr);
+    }
+    out->matting = std::move(spec);
+  }
+
   return true;
+}
+
+std::string PackDirKey(const fs::path& root, const fs::path& pack_dir) {
+  // Use a stable, human-readable key for error reporting.
+  // Prefer the relative path from the scan root, prefixed with the root directory name.
+  // Example (when scanning ~/.local/share/studiocast/models/open_video):
+  //   open_video/segmentation/Better Quality
+  std::error_code ec;
+  fs::path rel = fs::relative(pack_dir, root, ec);
+  std::string rels;
+  if (!ec && !rel.empty() && rel != ".") {
+    rels = rel.generic_string();
+  } else {
+    rels = pack_dir.filename().string();
+  }
+
+  const std::string rootName = root.filename().string();
+  if (rootName.empty()) return rels;
+  if (rels.empty()) return rootName;
+  return rootName + "/" + rels;
 }
 
 int BestEffortReadSchemaVersion(const fs::path& manifest) {
@@ -264,7 +415,8 @@ ModelPackRegistry ModelPackRegistry::Scan(const std::filesystem::path& open_vide
     }
 
     if (!ok) {
-      const std::string key = pack.id.empty() ? pack_dir.filename().string() : pack.id;
+      const std::string dirKey = PackDirKey(open_video_models_dir, pack_dir);
+      const std::string key = pack.id.empty() ? dirKey : pack.id;
       reg.problems_[key] = err.empty() ? "failed to load model pack" : err;
       continue;
     }
@@ -284,14 +436,17 @@ ModelPackRegistry ModelPackRegistry::Scan(const std::filesystem::path& open_vide
   });
 
   // Deduplicate by id (keep first, record problem for duplicates).
-  std::set<std::string> seen;
+  std::map<std::string, fs::path> seen;
   std::vector<ModelPack> unique;
   unique.reserve(reg.models_.size());
   for (auto& m : reg.models_) {
-    if (!seen.insert(m.id).second) {
-      reg.problems_[m.id] = "duplicate model id";
+    if (auto it2 = seen.find(m.id); it2 != seen.end()) {
+      reg.problems_[m.id] = std::string("duplicate model id '") + m.id + "' in " +
+                           PackDirKey(reg.root_, m.root_dir) + " (already provided by " +
+                           PackDirKey(reg.root_, it2->second) + ")";
       continue;
     }
+    seen[m.id] = m.root_dir;
     unique.push_back(std::move(m));
   }
   reg.models_.swap(unique);
@@ -329,6 +484,11 @@ std::optional<ModelPack> ModelPackRegistry::Find(const std::string& task, const 
 }
 
 std::string ModelPackRegistry::DefaultModelIdForTask(const std::string& task) const {
+  if (task == "matting") {
+    // Middle-of-the-road quality default for foreground matting.
+    if (Find("matting", "birefnet_lite")) return "birefnet_lite";
+  }
+
   if (!task.empty()) {
     for (const auto& m : models_) {
       if (m.task == task) return m.id;

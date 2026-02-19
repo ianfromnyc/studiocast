@@ -48,7 +48,7 @@ struct OrtSessionInfo {
 
 // Thin wrapper around an ONNX Runtime session used by the Open Audio backend.
 //
-// Phase 5: This is primarily used to validate that the selected model can be
+// This is primarily used to validate that the selected model can be
 // loaded by ORT and to expose basic introspection for diagnostics/tools.
 class OpenAudioOrtSession {
  public:

@@ -17,11 +17,6 @@
 namespace studiocast::open_audio {
 
 // Resolved Open Audio model selection for a given effects config.
-//
-// In Phase 4 this is used to validate model selection and provide a stub processor
-// that keeps the end-to-end backend switching logic working.
-//
-// In later phases this will also drive the ONNX Runtime session creation.
 struct ResolvedOpenAudioModel {
   // Stable model pack ID when resolved from the registry.
   // When resolved from a user-provided path, this may be empty.
