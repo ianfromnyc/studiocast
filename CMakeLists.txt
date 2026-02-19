@@ -51,6 +51,27 @@ if (NOT PNG_FOUND)
             "On Ubuntu 22.04: sudo apt install libpng-dev")
 endif ()
 
+# dlib (optional) for face landmark detection used by Open Video Eye Contact.
+set(_studiocast_have_dlib FALSE)
+if (STUDIOCAST_ENABLE_DLIB)
+    # Prefer CMake config packages (common on modern distros), but allow module lookup.
+    find_package(dlib CONFIG QUIET)
+    if (dlib_FOUND)
+        set(_studiocast_have_dlib TRUE)
+    else()
+        find_package(dlib QUIET)
+        if (dlib_FOUND)
+            set(_studiocast_have_dlib TRUE)
+        endif()
+    endif()
+
+    if (_studiocast_have_dlib)
+        message(STATUS "dlib found; Open Video Eye Contact (dlib landmarks) enabled.")
+    else()
+        message(STATUS "dlib not found; Open Video Eye Contact will be unavailable. Install dlib (e.g., libdlib-dev) or set dlib_DIR.")
+    endif()
+endif()
+
 set(_studiocast_onnxruntime_found FALSE)
 set(_studiocast_onnxruntime_target "")
 studiocast_configure_onnxruntime(_studiocast_onnxruntime_found _studiocast_onnxruntime_target)
@@ -96,6 +117,10 @@ add_library(studiocast_core
         src/core/open_video/yunet_face_detector.cpp
         src/core/open_video/fastdvdnet_denoiser.h
         src/core/open_video/fastdvdnet_denoiser.cpp
+        src/core/open_video/dlib_face_landmarks.h
+        src/core/open_video/dlib_face_landmarks.cpp
+        src/core/open_video/gaze_correction_eye_contact.h
+        src/core/open_video/gaze_correction_eye_contact.cpp
         src/core/open_cuda/open_cuda_diagnostics.h
         src/core/open_cuda/open_cuda_diagnostics.cpp
         src/core/open_cuda/open_cuda_diagnose.h
@@ -322,7 +347,18 @@ endif()
 target_compile_definitions(studiocast_core PUBLIC
     STUDIOCAST_ENABLE_OPEN_CUDA=$<BOOL:${STUDIOCAST_ENABLE_OPEN_CUDA}>
     STUDIOCAST_ENABLE_OPEN_AUDIO=$<BOOL:${STUDIOCAST_ENABLE_OPEN_AUDIO}>
+    STUDIOCAST_HAVE_DLIB=$<BOOL:${_studiocast_have_dlib}>
 )
+
+if (_studiocast_have_dlib)
+    if (TARGET dlib::dlib)
+        target_link_libraries(studiocast_core PUBLIC dlib::dlib)
+    elseif (TARGET dlib)
+        target_link_libraries(studiocast_core PUBLIC dlib)
+    else()
+        message(WARNING "dlib found but no CMake target was provided; linking may fail.")
+    endif()
+endif()
 
 if ((_studiocast_onnxruntime_found) AND (STUDIOCAST_ENABLE_OPEN_CUDA OR STUDIOCAST_ENABLE_OPEN_AUDIO))
     target_link_libraries(studiocast_core PUBLIC ${_studiocast_onnxruntime_target})

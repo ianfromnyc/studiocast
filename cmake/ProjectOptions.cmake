@@ -17,6 +17,12 @@ if(UNIX AND NOT APPLE)
 endif()
 option(STUDIOCAST_ENABLE_OPEN_AUDIO "Enable Open Audio backend (requires ONNX Runtime; CPU EP baseline)" ${_studiocast_default_open_audio})
 
+# Optional dependency used for Open Video Eye Contact (face landmarks via dlib).
+#
+# If disabled or dlib is not found, the open-source Eye Contact backend will be
+# unavailable (Maxine AR may still provide Eye Contact when present).
+option(STUDIOCAST_ENABLE_DLIB "Enable dlib support (face landmarks)" ON)
+
 function(studiocast_setup_options)
   # Intentionally light for now; expand later
 endfunction()

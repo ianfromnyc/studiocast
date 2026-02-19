@@ -35,6 +35,7 @@
 #include "core/open_cuda/onnx_session.h"
 #include "core/open_video/frame_analysis_cache.h"
 #include "core/open_video/fastdvdnet_denoiser.h"
+#include "core/open_video/gaze_correction_eye_contact.h"
 #include "core/open_video/yunet_face_detector.h"
 #include "core/video/convert.h"
 #include "core/video/capture_error_policy.h"
@@ -2817,6 +2818,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   studiocast::open_video::FrameAnalysisCache open_video_cache;
   studiocast::open_video::YunetFaceDetector open_video_yunet;
   studiocast::open_video::FastDvdnetDenoiser open_video_fastdvdnet;
+  studiocast::open_video::GazeCorrectionEyeContact open_video_eye_contact;
 
   // Open-source Video Noise Removal (Open CUDA backend). This implementation is a lightweight
   // temporal denoiser intended to be real-time and dependency-free. It does not require model packs.
@@ -4590,6 +4592,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   bool want_maxine_eye_contact = false;
   bool have_maxine_eye_contact = false;
 
+  bool want_open_video_eye_contact = false;
+  bool have_open_video_eye_contact = false;
+
   bool want_maxine_relight = false;
   bool have_maxine_relight = false;
 
@@ -4669,6 +4674,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     want_maxine_eye_contact = false;
     have_maxine_eye_contact = false;
+
+    want_open_video_eye_contact = false;
+    have_open_video_eye_contact = false;
 
     want_maxine_relight = false;
     have_maxine_relight = false;
@@ -4808,26 +4816,78 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     // Eye Contact (AR)
     if (has(studiocast::video::effects::contract::kEffectIdEyeContact)) {
-      if (engine_open_cuda) {
-        if (!note.empty()) note += "\n";
-        note += "Eye Contact unavailable: requires Maxine backend.";
-      } else if (!maxine_strict_blocked) {
-        want_maxine_eye_contact = true;
+      const std::string stage_id = std::string(studiocast::video::effects::contract::kEffectIdEyeContact);
+      const bool engine_auto = !engine_maxine && !engine_open_cuda;
 
+      auto detach_vignette_from_eye_contact = [&] {
+        if (plan.vignette_attach_to_effect_id == stage_id) {
+          plan.vignette_attach_to_effect_id.clear();
+        }
+      };
+
+      auto try_open_video = [&](std::string* out_err) -> bool {
+        want_open_video_eye_contact = true;
+        std::string ov_err;
+        if (open_video_eye_contact.EnsureInitialized(&ov_err)) {
+          have_open_video_eye_contact = true;
+          set_backend(stage_id, "open_video");
+          detach_vignette_from_eye_contact();
+          return true;
+        }
+        if (out_err) *out_err = ov_err;
+        return false;
+      };
+
+      if (engine_open_cuda) {
+        std::string ov_err;
+        if (try_open_video(&ov_err)) {
+          if (!note.empty()) note += "\n";
+          note += "Open Video: Eye Contact (gaze correction).";
+        } else {
+          if (!note.empty()) note += "\n";
+          note += "Open Video: Eye Contact unavailable: " + ov_err;
+          remove_stage_from_plan(stage_id);
+        }
+      } else {
+        // Maxine preferred when allowed; Open Video fallback in AUTO.
         std::string mx_err;
-        if (maxine_eye_contact.EnsureInitialized(capA.width, capA.height, fx, &mx_err)) {
+        bool maxine_ok = false;
+
+        if (!maxine_strict_blocked) {
+          want_maxine_eye_contact = true;
+          maxine_ok = maxine_eye_contact.EnsureInitialized(capA.width, capA.height, fx, &mx_err);
+        }
+
+        if (maxine_ok) {
           have_maxine_eye_contact = true;
-          set_backend(studiocast::video::effects::contract::kEffectIdEyeContact, "maxine_ar");
+          set_backend(stage_id, "maxine_ar");
           if (!note.empty()) note += "\n";
           note += "Maxine AR: Eye Contact.";
-        } else {
-          if (engine_maxine) {
-            append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::ar);
-            maxine_strict_blocked = true;
+        } else if (engine_auto) {
+          std::string ov_err;
+          if (try_open_video(&ov_err)) {
+            if (!note.empty()) note += "\n";
+            note += "Open Video: Eye Contact (gaze correction) — Maxine AR unavailable.";
+            if (!mx_err.empty()) {
+              note += "\n";
+              note += mx_err;
+            }
           } else {
             if (!note.empty()) note += "\n";
-            note += mx_err;
+            if (!mx_err.empty()) {
+              note += mx_err;
+              note += "\n";
+            }
+            note += "Open Video: Eye Contact unavailable: " + ov_err;
+            remove_stage_from_plan(stage_id);
           }
+        } else {
+          // MAXINE engine: no open-source fallback.
+          if (!note.empty()) note += "\n";
+          note += mx_err;
+          append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::ar);
+          maxine_strict_blocked = true;
+          remove_stage_from_plan(stage_id);
         }
       }
     }
@@ -5519,26 +5579,49 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
 
         if (stage_id == studiocast::video::effects::contract::kEffectIdEyeContact) {
-          if (!have_maxine_eye_contact) return;
-          std::string mx_err;
-          if (!maxine_eye_contact.ApplyRgbInPlace(rgb.data(),
-                                                  capA.width,
-                                                  capA.height,
-                                                  rgbStride,
-                                                  fx,
-                                                  apply_vignette_on_eye_contact,
-                                                  vignette_center_x_px,
-                                                  vignette_center_y_px,
-                                                  &mx_err,
-                                                  defer_readback,
-                                                  &deferred_gpu_out)) {
-            {
-              std::lock_guard<std::mutex> lock(mu_);
-              last_error_ = "Maxine eye contact failed: " + mx_err;
+          if (have_maxine_eye_contact) {
+            std::string mx_err;
+            if (!maxine_eye_contact.ApplyRgbInPlace(rgb.data(),
+                                                    capA.width,
+                                                    capA.height,
+                                                    rgbStride,
+                                                    fx,
+                                                    apply_vignette_on_eye_contact,
+                                                    vignette_center_x_px,
+                                                    vignette_center_y_px,
+                                                    &mx_err,
+                                                    defer_readback,
+                                                    &deferred_gpu_out)) {
+              {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = "Maxine eye contact failed: " + mx_err;
+              }
+              fx_failed = true;
             }
-            fx_failed = true;
+            if (defer_readback && deferred_gpu_out.kind != DeferredGpuKind::none) have_deferred_gpu_out = true;
+            return;
           }
-          if (defer_readback && deferred_gpu_out.kind != DeferredGpuKind::none) have_deferred_gpu_out = true;
+
+          if (have_open_video_eye_contact) {
+            std::string ov_err;
+            if (!open_video_eye_contact.ApplyRgbInPlace(capture_sequence,
+                                                        rgb.data(),
+                                                        capA.width,
+                                                        capA.height,
+                                                        rgbStride,
+                                                        fx.eye_contact.strength,
+                                                        fx.eye_contact.look_away_enabled,
+                                                        &open_video_yunet,
+                                                        &open_video_cache,
+                                                        &ov_err)) {
+              // Best-effort: keep the pipeline running and simply bypass this stage.
+              if (!ov_err.empty()) {
+                std::lock_guard<std::mutex> lock(mu_);
+                last_error_ = "Open Video eye contact failed: " + ov_err;
+              }
+            }
+            return;
+          }
           return;
         }
 
