@@ -248,6 +248,7 @@ if [[ "$DO_DEPS" -eq 1 ]]; then
     libpulse-dev libpulse0 pulseaudio-utils \
     clang clang-format clang-tidy \
     v4l-utils \
+    libsqlite3-dev \
     libjpeg-turbo8 libjpeg-turbo8-dev
 fi
 
