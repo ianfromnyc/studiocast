@@ -33,6 +33,8 @@
 #include "core/maxine/vfx_api.h"
 #include "core/open_cuda/model_pack_registry.h"
 #include "core/open_cuda/onnx_session.h"
+#include "core/open_video/frame_analysis_cache.h"
+#include "core/open_video/yunet_face_detector.h"
 #include "core/video/convert.h"
 #include "core/video/capture_error_policy.h"
 #include "core/video/image_ppm.h"
@@ -2211,6 +2213,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     bool have_smoothed_crop = false;
     studiocast::maxine::effects::RectF crop_smoothed_px;
     bool last_had_detection = false;
+    enum class TrackingKind {
+      kNone = 0,
+      kFace = 1,
+      kMatte = 2,
+    };
+    TrackingKind last_tracking_kind = TrackingKind::kNone;
 
     ~OpenCudaAutoFrameContext() { Destroy(); }
 
@@ -2221,6 +2229,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       active_model_id.clear();
       have_smoothed_crop = false;
       last_had_detection = false;
+      last_tracking_kind = TrackingKind::kNone;
       last_frame_w = 0;
       last_frame_h = 0;
     }
@@ -2345,6 +2354,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     bool EnsureInitialized(int frame_w,
                            int frame_h,
                            const studiocast::video::effects::BroadcastCameraEffects& fx,
+                           bool require_matte_tracking,
                            std::string* error) {
       if (error) error->clear();
 
@@ -2353,29 +2363,33 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (error) *error = last_error;
         return false;
       }
-      if (!matte) {
-        last_error = "Open CUDA Auto Frame: matte provider not set.";
-        if (error) *error = last_error;
-        return false;
-      }
+      std::string current_model_id;
+      if (require_matte_tracking) {
+        if (!matte) {
+          last_error = "Open CUDA Auto Frame: matte provider not set.";
+          if (error) *error = last_error;
+          return false;
+        }
 
-      // Ensure the shared matting model/session exists, but don't allocate the heavy
-      // virtual-background buffers if the VB stage isn't scheduled.
-      std::string matte_init_err;
-      if (!matte->EnsureInitialized(frame_w, frame_h, fx, &matte_init_err, /*require_vb_buffers=*/false)) {
-        last_error = "Open CUDA Auto Frame: " + matte_init_err;
-        if (error) *error = last_error;
-        return false;
+        // Ensure the shared matting model/session exists, but don't allocate the heavy
+        // virtual-background buffers if the VB stage isn't scheduled.
+        std::string matte_init_err;
+        if (!matte->EnsureInitialized(frame_w, frame_h, fx, &matte_init_err, /*require_vb_buffers=*/false)) {
+          last_error = "Open CUDA Auto Frame: " + matte_init_err;
+          if (error) *error = last_error;
+          return false;
+        }
+        current_model_id = matte->active_model_id;
       }
 
       // Track model/frame changes to reset smoothing state.
-      const std::string current_model_id = matte->active_model_id;
       if (initialized && enabled && current_model_id == active_model_id && last_frame_w == frame_w && last_frame_h == frame_h) {
         return true;
       }
 
       have_smoothed_crop = false;
       last_had_detection = false;
+      last_tracking_kind = TrackingKind::kNone;
       active_model_id = current_model_id;
       last_frame_w = frame_w;
       last_frame_h = frame_h;
@@ -2391,6 +2405,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                          int height,
                          size_t stride,
                          const studiocast::video::effects::BroadcastCameraEffects& fx,
+                         const std::vector<studiocast::open_video::FaceDetection>* face_detections,
                          std::string* error) {
       if (!fx.auto_frame.enabled) {
         return true;
@@ -2402,54 +2417,82 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      if (!matte) {
-        if (error) {
-          *error = "Open CUDA Auto Frame: matte provider not set.";
-        }
-        return false;
-      }
+      const bool have_faces = (face_detections && !face_detections->empty());
 
       std::string err;
-      if (!EnsureInitialized(width, height, fx, &err)) {
-        if (error) {
+      if (!EnsureInitialized(width, height, fx, /*require_matte_tracking=*/!have_faces, &err)) {
+        // Best-effort: if we can't initialize tracking, just bypass auto frame.
+        if (error && !err.empty()) {
           *error = err;
         }
-        return false;
-      }
-
-      const std::vector<float>* alpha_cpu = nullptr;
-      int alpha_w = 0;
-      int alpha_h = 0;
-      std::string alpha_err;
-      if (!matte->GetAlphaCpuForFrame(rgb,
-                                     stride,
-                                     capture_sequence,
-                                     width,
-                                     height,
-                                     fx,
-                                     &alpha_cpu,
-                                     &alpha_w,
-                                     &alpha_h,
-                                     &alpha_err)) {
-        if (error) {
-          *error = "Open CUDA Auto Frame: " + alpha_err;
-        }
-        return false;
-      }
-      if (!alpha_cpu) {
-        if (error) {
-          *error = "Open CUDA Auto Frame: alpha CPU buffer is null.";
-        }
-        return false;
+        return true;
       }
 
       studiocast::maxine::effects::RectF box_px;
-      const bool found = ComputeMatteBoxPxFromAlpha(*alpha_cpu,
-                                                    alpha_w,
-                                                    alpha_h,
-                                                    width,
-                                                    height,
-                                                    &box_px);
+      bool found = false;
+      TrackingKind kind = TrackingKind::kNone;
+
+      if (have_faces) {
+        // Pick the largest detected face (most stable for framing).
+        const studiocast::open_video::FaceDetection* best = &face_detections->front();
+        float best_area = best->bbox.w * best->bbox.h;
+        for (const auto& f : *face_detections) {
+          const float a = f.bbox.w * f.bbox.h;
+          if (a > best_area) {
+            best = &f;
+            best_area = a;
+          }
+        }
+        // Expand the face box to approximate "upper body" framing.
+        const float fx0 = best->bbox.x;
+        const float fy0 = best->bbox.y;
+        const float fw = best->bbox.w;
+        const float fh = best->bbox.h;
+        const float cx = fx0 + fw * 0.5f;
+
+        const float expand_w = fw * 1.8f;
+        const float expand_h = fh * 2.6f;
+        const float new_x = cx - expand_w * 0.5f;
+        const float new_y = fy0 - fh * 0.4f;  // headroom
+
+        box_px = studiocast::maxine::effects::RectF{new_x, new_y, expand_w, expand_h};
+        found = true;
+        kind = TrackingKind::kFace;
+      } else if (matte) {
+        const std::vector<float>* alpha_cpu = nullptr;
+        int alpha_w = 0;
+        int alpha_h = 0;
+        std::string alpha_err;
+        if (matte->GetAlphaCpuForFrame(rgb,
+                                       stride,
+                                       capture_sequence,
+                                       width,
+                                       height,
+                                       fx,
+                                       &alpha_cpu,
+                                       &alpha_w,
+                                       &alpha_h,
+                                       &alpha_err) &&
+            alpha_cpu) {
+          found = ComputeMatteBoxPxFromAlpha(*alpha_cpu,
+                                             alpha_w,
+                                             alpha_h,
+                                             width,
+                                             height,
+                                             &box_px);
+          kind = found ? TrackingKind::kMatte : TrackingKind::kNone;
+        } else {
+          if (error && !alpha_err.empty()) {
+            *error = "Open CUDA Auto Frame: " + alpha_err;
+          }
+          return true;
+        }
+      }
+
+      if (kind != last_tracking_kind) {
+        have_smoothed_crop = false;
+        last_tracking_kind = kind;
+      }
 
       // Use the same crop math as the Maxine auto-frame tracker for consistency.
       studiocast::maxine::effects::AutoFrameKnobs knobs;
@@ -2765,6 +2808,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   // scheduled; other effects request matte-only initialization.
   open_cuda_auto_frame.matte = &open_cuda_vb;
   open_cuda_key_light.matte = &open_cuda_vb;
+
+  // Open Video analysis cache (per-frame) and face detection (YuNet).
+  //
+  // The cache avoids duplicated ML inference when multiple effects need the same
+  // frame-level analysis.
+  studiocast::open_video::FrameAnalysisCache open_video_cache;
+  studiocast::open_video::YunetFaceDetector open_video_yunet;
 
   // Open-source Video Noise Removal (Open CUDA backend). This implementation is a lightweight
   // temporal denoiser intended to be real-time and dependency-free. It does not require model packs.
@@ -4841,20 +4891,41 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       };
 
       if (engine_open_cuda) {
-        // Open CUDA: auto-frame via matting + crop/scale.
+        // Open source: prefer Open Video (YuNet) face tracking when available, otherwise
+        // fall back to the foreground matte path.
         want_open_cuda_auto_frame = true;
+
+        bool have_open_video_face_detection = false;
+        std::string fd_err;
+        if (open_video_yunet.EnsureInitialized(&fd_err)) {
+          have_open_video_face_detection = true;
+        }
+
         std::string oc_err;
-        if (open_cuda_auto_frame.EnsureInitialized(capA.width, capA.height, fx, &oc_err)) {
+        const bool require_matte_tracking = !have_open_video_face_detection;
+        if (open_cuda_auto_frame.EnsureInitialized(capA.width,
+                                                   capA.height,
+                                                   fx,
+                                                   /*require_matte_tracking=*/require_matte_tracking,
+                                                   &oc_err)) {
           have_open_cuda_auto_frame = true;
           set_backend(stage_id, "open_cuda");
           if (!note.empty()) {
             note += "\n";
           }
-          note += "Open CUDA: Auto Frame (foreground matte + CPU crop/scale).";
+          if (have_open_video_face_detection) {
+            note += "Open Video (YuNet): Auto Frame (face tracking + CPU crop/scale).";
+          } else {
+            note += "Open CUDA: Auto Frame (foreground matte + CPU crop/scale).";
+          }
           detach_vignette_from_auto_frame();
         } else {
           if (!note.empty()) {
             note += "\n";
+          }
+          if (!fd_err.empty() && !have_open_video_face_detection) {
+            note += fd_err;
+            if (!note.empty()) note += "\n";
           }
           note += oc_err;
           remove_stage_from_plan(stage_id);
@@ -4885,20 +4956,40 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         } else {
           // AUTO: fall back to Open CUDA.
           want_open_cuda_auto_frame = true;
+          bool have_open_video_face_detection = false;
+          std::string fd_err;
+          if (open_video_yunet.EnsureInitialized(&fd_err)) {
+            have_open_video_face_detection = true;
+          }
+
           std::string oc_err;
-          if (open_cuda_auto_frame.EnsureInitialized(capA.width, capA.height, fx, &oc_err)) {
+          const bool require_matte_tracking = !have_open_video_face_detection;
+          if (open_cuda_auto_frame.EnsureInitialized(capA.width,
+                                                     capA.height,
+                                                     fx,
+                                                     /*require_matte_tracking=*/require_matte_tracking,
+                                                     &oc_err)) {
             have_open_cuda_auto_frame = true;
             set_backend(stage_id, "open_cuda");
             if (!note.empty()) {
               note += "\n";
             }
-            note += "Open CUDA: Auto Frame (foreground matte + CPU crop/scale).";
+            note += "Maxine AR unavailable; ";
+            if (have_open_video_face_detection) {
+              note += "Open Video (YuNet): Auto Frame (face tracking + CPU crop/scale).";
+            } else {
+              note += "Open CUDA: Auto Frame (foreground matte + CPU crop/scale).";
+            }
             detach_vignette_from_auto_frame();
           } else {
             if (!note.empty()) {
               note += "\n";
             }
             note += mx_err;
+            if (!fd_err.empty() && !have_open_video_face_detection) {
+              if (!note.empty()) note += "\n";
+              note += fd_err;
+            }
             if (!note.empty()) {
               note += "\n";
             }
@@ -5311,6 +5402,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       const std::uint64_t capture_sequence = f.sequence;
 
+      // Reset per-frame analysis cache (Open Video). This allows effects to share ML outputs
+      // without re-running inference multiple times per frame.
+      open_video_cache.BeginFrame(capture_sequence);
+
       // Open CUDA optimization: When both Virtual Key Light and Open CUDA Virtual Background
       // are enabled, the key light stage (CPU) would normally run first and trigger an extra
       // CPU->GPU upload for matting. We can avoid that duplicate upload by deferring the key
@@ -5635,14 +5730,41 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           }
 
           if (have_open_cuda_auto_frame) {
+            // Open Video YuNet face detection is preferred for Auto Frame (cheaper than
+            // foreground matting, and helps avoid running the matting model solely for tracking).
+            const std::vector<studiocast::open_video::FaceDetection>* face_detections = nullptr;
+            if (open_video_yunet.available()) {
+              std::string fd_err;
+              if (open_video_yunet.EnsureDetectionsForFrame(
+                      rgb.data(), capA.width, capA.height, rgbStride, capture_sequence, &open_video_cache, &fd_err)) {
+                if (open_video_cache.face_detections) {
+                  face_detections = &open_video_cache.face_detections->detections;
+                }
+              } else {
+                // Best-effort: if face detection can't run (runtime failure), Auto Frame will
+                // fall back to matte tracking if available.
+                if (!fd_err.empty()) {
+                  std::lock_guard<std::mutex> lock(mu_);
+                  last_error_ = "Open Video YuNet failed: " + fd_err;
+                }
+              }
+            }
+
             std::string oc_err;
             if (!open_cuda_auto_frame.ApplyRgbInPlace(
-                    capture_sequence, rgb.data(), capA.width, capA.height, rgbStride, fx, &oc_err)) {
-              {
+                    capture_sequence,
+                    rgb.data(),
+                    capA.width,
+                    capA.height,
+                    rgbStride,
+                    fx,
+                    face_detections,
+                    &oc_err)) {
+              // Best-effort: Auto Frame failures shouldn't break the entire pipeline.
+              if (!oc_err.empty()) {
                 std::lock_guard<std::mutex> lock(mu_);
                 last_error_ = "Open CUDA auto frame failed: " + oc_err;
               }
-              fx_failed = true;
             }
           }
           return;

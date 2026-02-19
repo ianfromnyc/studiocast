@@ -92,6 +92,8 @@ add_library(studiocast_core
         src/core/open_video/frame_analysis_cache.h
         src/core/open_video/open_video_onnx_session.h
         src/core/open_video/open_video_onnx_session.cpp
+        src/core/open_video/yunet_face_detector.h
+        src/core/open_video/yunet_face_detector.cpp
         src/core/open_cuda/open_cuda_diagnostics.h
         src/core/open_cuda/open_cuda_diagnostics.cpp
         src/core/open_cuda/open_cuda_diagnose.h
