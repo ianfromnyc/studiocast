@@ -32,7 +32,7 @@
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
 #include "core/open_cuda/model_pack_registry.h"
-#include "core/open_cuda/onnx_session.h"
+#include "core/open_cuda/matting_session.h"
 #include "core/open_video/frame_analysis_cache.h"
 #include "core/open_video/fastdvdnet_denoiser.h"
 #include "core/open_video/gaze_correction_eye_contact.h"

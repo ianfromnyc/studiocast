@@ -1,4 +1,4 @@
-#include "core/open_cuda/onnx_session.h"
+#include "core/open_cuda/matting_session.h"
 
 #include <cmath>
 #include <array>
