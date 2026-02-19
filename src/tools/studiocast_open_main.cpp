@@ -428,7 +428,6 @@ static int CmdAudioListModels() {
   } else {
     std::cout << "Valid model packs:\n";
     for (const auto& m : models) {
-      if (m.task != "matting") continue;
       std::cout << "  - " << m.id;
       if (!m.display_name.empty()) std::cout << " (" << m.display_name << ")";
       if (!m.effects.empty()) {
@@ -440,8 +439,7 @@ static int CmdAudioListModels() {
       }
       std::cout << " sr=" << m.sample_rate << " ch=" << m.channels << "\n";
       std::cout << "      manifest: " << m.manifest_path.string() << "\n";
-      const auto* onnx = FindMainOnnxFile(m);
-      if (onnx) std::cout << "      onnx    : " << onnx->path.string() << "\n";
+      std::cout << "      onnx    : " << m.onnx_path.string() << "\n";
       if (m.license_path) std::cout << "      license : " << m.license_path->string() << "\n";
     }
   }

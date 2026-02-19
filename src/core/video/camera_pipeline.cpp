@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <memory>
@@ -2446,19 +2448,19 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (have_faces) {
         // Pick the largest detected face (most stable for framing).
         const studiocast::open_video::FaceDetection* best = &face_detections->front();
-        float best_area = best->bbox.w * best->bbox.h;
+        float best_area = best->w * best->h;
         for (const auto& f : *face_detections) {
-          const float a = f.bbox.w * f.bbox.h;
+          const float a = f.w * f.h;
           if (a > best_area) {
             best = &f;
             best_area = a;
           }
         }
         // Expand the face box to approximate "upper body" framing.
-        const float fx0 = best->bbox.x;
-        const float fy0 = best->bbox.y;
-        const float fw = best->bbox.w;
-        const float fh = best->bbox.h;
+        const float fx0 = best->x;
+        const float fy0 = best->y;
+        const float fw = best->w;
+        const float fh = best->h;
         const float cx = fx0 + fw * 0.5f;
 
         const float expand_w = fw * 1.8f;
@@ -2537,7 +2539,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         have_smoothed_crop = true;
       } else {
         const float a = studiocast::maxine::effects::ArAutoFrameTracker::SmoothingAlpha(knobs.smoothing);
-        crop_smoothed_px = studiocast::maxine::effects::Lerp(crop_smoothed_px, target_crop, a);
+        crop_smoothed_px = studiocast::maxine::effects::ArAutoFrameTracker::Lerp(crop_smoothed_px, target_crop, a);
       }
       clamp_crop(&crop_smoothed_px);
       last_had_detection = found;
@@ -2756,7 +2758,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       const int y1 = static_cast<int>(std::ceil(y1f));
 
       // Directional weighting (left/right).
-      const float pan = std::clamp(fx.virtual_key_light.direction_pan_degrees, -90.0f, 90.0f);
+      const float pan = std::clamp(static_cast<float>(fx.virtual_key_light.direction_pan_degrees), -90.0f, 90.0f);
       const float dir = std::clamp(pan / 90.0f, -1.0f, 1.0f);
       const float cx = static_cast<float>(width) * 0.5f;
       const float inv_cx = (cx > 1.0f) ? (1.0f / cx) : 0.0f;
@@ -5052,7 +5054,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         std::string mx_err;
         if (maxine_auto_frame.EnsureInitialized(capA.width,
                                                 capA.height,
-                                                capA.width / static_cast<float>(capA.height),
                                                 fx,
                                                 &mx_err)) {
           have_maxine_auto_frame = true;
@@ -5063,7 +5064,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           }
           note += mx_err;
           note += "\nMaxine backend required due to engine_preference=maxine.\n";
-          note += maxine_required_canonical_block;
+          append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::ar);
           maxine_strict_blocked = true;
 
           // Auto-frame isn't available; don't leave vignette attached to a non-existent GPU stage.
@@ -5897,7 +5898,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
               if (open_video_yunet.EnsureDetectionsForFrame(
                       rgb.data(), capA.width, capA.height, rgbStride, capture_sequence, &open_video_cache, &fd_err)) {
                 if (open_video_cache.face_detections) {
-                  face_detections = &open_video_cache.face_detections->detections;
+                  face_detections = &(*open_video_cache.face_detections);
                 }
               } else {
                 // Best-effort: if face detection can't run (runtime failure), Auto Frame will

@@ -65,8 +65,8 @@ bool DlibFaceLandmarks::EnsureInitialized(const std::string& model_id_override, 
     return false;
   }
 
-  const ModelPack* pack = registry_.Find("face_landmarks", model_id);
-  if (!pack) {
+  const auto pack = registry_.Find("face_landmarks", model_id);
+  if (!pack.has_value()) {
     if (error) {
       *error = "Requested face_landmarks model pack not found: id='" + model_id + "'";
     }
@@ -205,7 +205,7 @@ bool DlibFaceLandmarks::EnsureLandmarksForFrame(const std::uint8_t* rgb,
     return false;
   }
 
-  FrameAnalysisCache::FaceLandmarks out;
+  FaceLandmarks out;
   const unsigned long n = det.num_parts();
   out.points.reserve(n);
   for (unsigned long i = 0; i < n; ++i) {
