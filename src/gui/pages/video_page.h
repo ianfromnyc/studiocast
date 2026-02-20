@@ -92,8 +92,6 @@ namespace studiocast::gui {
 
         QComboBox* engineCombo_ = nullptr;
 
-        QCheckBox* mirrorCheck_ = nullptr;
-
         QComboBox* backgroundCombo_ = nullptr;
         QSpinBox* backgroundStrengthSpin_ = nullptr;
 

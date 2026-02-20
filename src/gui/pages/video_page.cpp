@@ -584,8 +584,6 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
 
   // Mirror
   auto* fxRow = new QHBoxLayout();
-  mirrorCheck_ = new QCheckBox("Mirror (horizontal flip)", box);
-  fxRow->addWidget(mirrorCheck_);
   fxRow->addStretch(1);
   boxLayout->addLayout(fxRow);
 
@@ -807,7 +805,6 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
   connect(engineCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
           this, &VideoPage::OnEnginePreferenceChanged);
 
-  connect(mirrorCheck_, &QCheckBox::toggled, this, &VideoPage::OnMirrorToggled);
   connect(backgroundCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
           this, &VideoPage::OnBackgroundChanged);
   connect(vbModelCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -1031,10 +1028,6 @@ bool VideoPage::SyncFromDaemonConfig() {
   if (h > 0) heightSpin_->setValue(h);
   if (fps > 0) fpsSpin_->setValue(fps);
 
-  mirrorCheck_->blockSignals(true);
-  mirrorCheck_->setChecked(effects_.mirror);
-  mirrorCheck_->blockSignals(false);
-
   if (backgroundCombo_) {
     backgroundCombo_->blockSignals(true);
     const QString key = vbMode.isEmpty() ? "none" : vbMode;
@@ -1209,7 +1202,6 @@ bool VideoPage::SendDaemonVideoEffects() {
       effects_.engine = ep;
     }
   }
-  effects_.mirror = mirrorCheck_ && mirrorCheck_->isChecked();
 
   const QString bg = backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
   const bool bgIsAutoFrame = (bg == "auto_frame");
@@ -1872,15 +1864,6 @@ void VideoPage::UpdateUiEnabled() {
     w->setEnabled(avail);
     w->setToolTip(avail ? QString() : tooltip);
   };
-
-  // Mirror
-  if (mirrorCheck_) {
-    const QString id = QString::fromUtf8(studiocast::video::effects::contract::kEffectIdMirror.data());
-    const bool on = mirrorCheck_->isChecked();
-    const bool avail = effectAvailable(id);
-    const bool allow = avail || on;
-    setAvail(mirrorCheck_, allow, effectUnavailableTooltip(id));
-  }
 
   // Virtual Background
   const QString vbMode = backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
