@@ -129,6 +129,83 @@ double FpsFromFraction(int num, int den) {
   return static_cast<double>(den) / static_cast<double>(num);
 }
 
+bool DebugV4l2Fps() {
+  static const bool enabled = (std::getenv("STUDIOCAST_DEBUG_V4L2_FPS") != nullptr);
+  return enabled;
+}
+
+void V4l2FpsDbg(const std::string& msg) {
+  if (!DebugV4l2Fps()) return;
+  std::fprintf(stderr, "[v4l2_fps] %s\n", msg.c_str());
+}
+
+struct FpsDecision {
+  int fps = 0;      // frames per second
+  int tpf_num = 0;  // time-per-frame numerator (seconds)
+  int tpf_den = 0;  // time-per-frame denominator (seconds)
+  bool used_fps_fraction = false;
+  double fps_from_tpf = 0.0;
+  double fps_from_fps_fraction = 0.0;
+};
+
+// Some devices (notably certain v4l2loopback configurations) report the V4L2
+// timeperframe fraction inverted (i.e. as FPS rather than seconds-per-frame).
+// Heuristically choose the interpretation that yields a plausible FPS and is
+// closest to the desired value.
+FpsDecision DecideFpsFromFrac(int desired_fps, int num, int den) {
+  FpsDecision d;
+  if (num <= 0 || den <= 0) return d;
+
+  const double fps_tpf = static_cast<double>(den) / static_cast<double>(num);   // spec: 1/fps
+  const double fps_frac = static_cast<double>(num) / static_cast<double>(den);  // inverted
+
+  auto in_range = [](double f) { return f >= 1.0 && f <= 240.0; };
+
+  const bool tpf_ok = in_range(fps_tpf);
+  const bool frac_ok = in_range(fps_frac);
+
+  double chosen = 0.0;
+  bool use_frac = false;
+
+  if (tpf_ok && !frac_ok) {
+    chosen = fps_tpf;
+  } else if (!tpf_ok && frac_ok) {
+    chosen = fps_frac;
+    use_frac = true;
+  } else if (tpf_ok && frac_ok) {
+    if (desired_fps > 0) {
+      const double dt = std::fabs(fps_tpf - static_cast<double>(desired_fps));
+      const double df = std::fabs(fps_frac - static_cast<double>(desired_fps));
+      if (df + 0.01 < dt) {
+        chosen = fps_frac;
+        use_frac = true;
+      } else {
+        chosen = fps_tpf;
+      }
+    } else {
+      chosen = fps_tpf;
+    }
+  } else {
+    chosen = (desired_fps > 0) ? static_cast<double>(desired_fps) : 0.0;
+  }
+
+  int fps_i = (chosen > 0.0) ? static_cast<int>(std::floor(chosen + 0.5)) : 0;
+  if (fps_i < 1) fps_i = 0;
+  if (fps_i > 240) fps_i = 240;
+
+  d.fps = fps_i;
+  if (fps_i > 0) {
+    // Canonicalize to time-per-frame (seconds): 1/fps.
+    d.tpf_num = 1;
+    d.tpf_den = fps_i;
+  }
+  d.used_fps_fraction = use_frac;
+  d.fps_from_tpf = fps_tpf;
+  d.fps_from_fps_fraction = fps_frac;
+  return d;
+}
+
+
 void AppendUnique(std::vector<std::uint32_t>* out, const std::vector<std::uint32_t>& in) {
   if (!out) return;
   for (const auto v : in) {
@@ -610,28 +687,96 @@ bool V4l2Capture::Open(const std::string& device,
     return false;
   }
 
-  // Set FPS (best-effort).
+
+// Set/query FPS (best-effort).
+//
+// V4L2 specifies time-per-frame (numerator/denominator) in seconds, but some devices
+// (notably certain v4l2loopback configurations) appear to interpret/report the fraction
+// as FPS. Try the canonical 1/fps first, then fall back to fps/1 if the driver appears
+// to use the inverted convention.
+auto SetParm = [&](int num, int den) {
   v4l2_streamparm sp{};
   sp.type = buf_type_;
-  sp.parm.capture.timeperframe.numerator = 1;
-  sp.parm.capture.timeperframe.denominator = static_cast<__u32>(fps);
-  (void)IoctlRetry(fd_, VIDIOC_S_PARM, &sp);
+  sp.parm.capture.timeperframe.numerator = static_cast<__u32>(num);
+  sp.parm.capture.timeperframe.denominator = static_cast<__u32>(den);
+  return IoctlRetry(fd_, VIDIOC_S_PARM, &sp) == 0;
+};
 
-  int negotiatedFps = fps;
-  int fpsNum = 1;
-  int fpsDen = fps;
+auto GetParm = [&](int* outNum, int* outDen) -> bool {
   v4l2_streamparm gp{};
   gp.type = buf_type_;
-  if (IoctlRetry(fd_, VIDIOC_G_PARM, &gp) == 0) {
-    const auto num = static_cast<int>(gp.parm.capture.timeperframe.numerator);
-    const auto den = static_cast<int>(gp.parm.capture.timeperframe.denominator);
-    if (num > 0 && den > 0) {
-      fpsNum = num;
-      fpsDen = den;
-      const double f = static_cast<double>(den) / static_cast<double>(num);
-      if (f > 0.0) negotiatedFps = static_cast<int>(std::floor(f + 0.5));
+  if (IoctlRetry(fd_, VIDIOC_G_PARM, &gp) != 0) return false;
+  if (outNum) *outNum = static_cast<int>(gp.parm.capture.timeperframe.numerator);
+  if (outDen) *outDen = static_cast<int>(gp.parm.capture.timeperframe.denominator);
+  return true;
+};
+
+int negotiatedFps = fps;
+int fpsNum = 1;
+int fpsDen = fps;
+
+// Try canonical 1/fps.
+(void)SetParm(1, fps);
+
+int qnum = 0, qden = 0;
+FpsDecision best{};
+bool haveBest = false;
+
+if (GetParm(&qnum, &qden)) {
+  best = DecideFpsFromFrac(fps, qnum, qden);
+  if (best.fps > 0) {
+    negotiatedFps = best.fps;
+    fpsNum = best.tpf_num;
+    fpsDen = best.tpf_den;
+    haveBest = true;
+  }
+
+  if (DebugV4l2Fps()) {
+    std::ostringstream oss;
+    oss << "capture " << device << " G_PARM"
+        << " desired=" << fps
+        << " raw=" << qnum << "/" << qden
+        << " fps(tpf)=" << best.fps_from_tpf
+        << " fps(inv)=" << best.fps_from_fps_fraction
+        << " chosen=" << negotiatedFps
+        << (best.used_fps_fraction ? " (inv)" : " (tpf)");
+    V4l2FpsDbg(oss.str());
+  }
+
+  // If the device appears to be using the inverted convention, try setting fps/1.
+  if (best.used_fps_fraction) {
+    (void)SetParm(fps, 1);
+
+    int qnum2 = 0, qden2 = 0;
+    if (GetParm(&qnum2, &qden2)) {
+      const auto d2 = DecideFpsFromFrac(fps, qnum2, qden2);
+
+      auto diff = [&](const FpsDecision& d) -> int {
+        if (fps <= 0 || d.fps <= 0) return 9999;
+        const int a = d.fps - fps;
+        return (a < 0) ? -a : a;
+      };
+
+      if (!haveBest || diff(d2) < diff(best)) {
+        best = d2;
+        if (best.fps > 0) negotiatedFps = best.fps;
+        if (best.tpf_num > 0) fpsNum = best.tpf_num;
+        if (best.tpf_den > 0) fpsDen = best.tpf_den;
+      }
+
+      if (DebugV4l2Fps()) {
+        std::ostringstream oss;
+        oss << "capture " << device << " G_PARM(after alt set)"
+            << " raw=" << qnum2 << "/" << qden2
+            << " fps(tpf)=" << d2.fps_from_tpf
+            << " fps(inv)=" << d2.fps_from_fps_fraction
+            << " chosen=" << negotiatedFps
+            << (best.used_fps_fraction ? " (inv)" : " (tpf)");
+        V4l2FpsDbg(oss.str());
+      }
     }
   }
+}
 
   // Query the active format (best-effort). Many drivers already return the negotiated
   // format via S_FMT, but G_FMT makes the intent explicit.
