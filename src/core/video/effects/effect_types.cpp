@@ -7,44 +7,46 @@ namespace {
 
 std::string ToLowerAscii(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
-    if (c >= 'A' && c <= 'Z') return static_cast<char>(c - 'A' + 'a');
+    if (c >= 'A' && c <= 'Z')
+      return static_cast<char>(c - 'A' + 'a');
     return static_cast<char>(c);
   });
   return s;
 }
 
-}  // namespace
+} // namespace
 
 std::string ToString(BackgroundEffect v) {
   switch (v) {
-    case BackgroundEffect::none:
-      return "none";
-    case BackgroundEffect::blur:
-      return "blur";
-    case BackgroundEffect::remove:
-      return "remove";
-    case BackgroundEffect::auto_frame:
-      return "auto_frame";
-    case BackgroundEffect::replace:
-      return "replace";
+  case BackgroundEffect::none:
+    return "none";
+  case BackgroundEffect::blur:
+    return "blur";
+  case BackgroundEffect::remove:
+    return "remove";
+  case BackgroundEffect::auto_frame:
+    return "auto_frame";
+  case BackgroundEffect::replace:
+    return "replace";
   }
   return "none";
 }
 
 std::string ToString(EffectBackend v) {
   switch (v) {
-    case EffectBackend::auto_select:
-      return "auto";
-    case EffectBackend::cpu:
-      return "cpu";
-    case EffectBackend::maxine:
-      return "maxine";
+  case EffectBackend::auto_select:
+    return "auto";
+  case EffectBackend::cpu:
+    return "cpu";
+  case EffectBackend::maxine:
+    return "maxine";
   }
   return "auto";
 }
 
-bool ParseBackgroundEffect(const std::string& s, BackgroundEffect* out) {
-  if (!out) return false;
+bool ParseBackgroundEffect(const std::string &s, BackgroundEffect *out) {
+  if (!out)
+    return false;
   const auto v = ToLowerAscii(s);
 
   if (v.empty() || v == "none" || v == "off" || v == "disabled") {
@@ -55,7 +57,8 @@ bool ParseBackgroundEffect(const std::string& s, BackgroundEffect* out) {
     *out = BackgroundEffect::blur;
     return true;
   }
-  if (v == "remove" || v == "removal" || v == "background_remove" || v == "bg_remove") {
+  if (v == "remove" || v == "removal" || v == "background_remove" ||
+      v == "bg_remove") {
     *out = BackgroundEffect::remove;
     return true;
   }
@@ -71,8 +74,9 @@ bool ParseBackgroundEffect(const std::string& s, BackgroundEffect* out) {
   return false;
 }
 
-bool ParseEffectBackend(const std::string& s, EffectBackend* out) {
-  if (!out) return false;
+bool ParseEffectBackend(const std::string &s, EffectBackend *out) {
+  if (!out)
+    return false;
   const auto v = ToLowerAscii(s);
 
   if (v.empty() || v == "auto" || v == "default") {
@@ -91,4 +95,4 @@ bool ParseEffectBackend(const std::string& s, EffectBackend* out) {
   return false;
 }
 
-}  // namespace studiocast::video::effects
+} // namespace studiocast::video::effects

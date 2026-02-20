@@ -28,20 +28,27 @@ namespace studiocast::video::effects::contract {
 // ---- Effect IDs ----
 inline constexpr std::string_view kEffectIdMirror = "mirror";
 
-inline constexpr std::string_view kEffectIdVirtualBackgroundBlur = "virtual_background.blur";
-inline constexpr std::string_view kEffectIdVirtualBackgroundRemove = "virtual_background.remove";
-inline constexpr std::string_view kEffectIdVirtualBackgroundReplace = "virtual_background.replace";
+inline constexpr std::string_view kEffectIdVirtualBackgroundBlur =
+    "virtual_background.blur";
+inline constexpr std::string_view kEffectIdVirtualBackgroundRemove =
+    "virtual_background.remove";
+inline constexpr std::string_view kEffectIdVirtualBackgroundReplace =
+    "virtual_background.replace";
 
 inline constexpr std::string_view kEffectIdAutoFrame = "auto_frame";
 inline constexpr std::string_view kEffectIdEyeContact = "eye_contact";
 
-inline constexpr std::string_view kEffectIdVideoNoiseRemoval = "video_noise_removal";
-inline constexpr std::string_view kEffectIdVirtualKeyLight = "virtual_key_light";
+inline constexpr std::string_view kEffectIdVideoNoiseRemoval =
+    "video_noise_removal";
+inline constexpr std::string_view kEffectIdVirtualKeyLight =
+    "virtual_key_light";
 inline constexpr std::string_view kEffectIdVignette = "vignette";
 
 // ---- Mutex groups (stable) ----
-inline constexpr std::string_view kMutexGroupVirtualBackgroundMode = "virtual_background_mode";
-inline constexpr std::string_view kMutexGroupBackgroundOrAutoFrame = "background_or_auto_frame";
+inline constexpr std::string_view kMutexGroupVirtualBackgroundMode =
+    "virtual_background_mode";
+inline constexpr std::string_view kMutexGroupBackgroundOrAutoFrame =
+    "background_or_auto_frame";
 
 // ---- Parameter IDs (stable) ----
 namespace param {
@@ -50,13 +57,13 @@ inline constexpr std::string_view kEnabled = "enabled";
 // Generic common knobs.
 inline constexpr std::string_view kStrength = "strength";
 inline constexpr std::string_view kSmoothing = "smoothing";
-inline constexpr std::string_view kHeadroom = "headroom";  // float 0..1
+inline constexpr std::string_view kHeadroom = "headroom"; // float 0..1
 
 // Open CUDA model pack selection (where applicable).
 inline constexpr std::string_view kModelId = "model_id";
 
 // Virtual background.
-inline constexpr std::string_view kVbRemoveColor = "remove_color";  // "#RRGGBB"
+inline constexpr std::string_view kVbRemoveColor = "remove_color"; // "#RRGGBB"
 inline constexpr std::string_view kVbReplacePath = "replace_path";
 inline constexpr std::string_view kGreenscreenMode = "greenscreen_mode";
 inline constexpr std::string_view kGreenscreenTemporal = "greenscreen_temporal";
@@ -65,14 +72,18 @@ inline constexpr std::string_view kGreenscreenTemporal = "greenscreen_temporal";
 inline constexpr std::string_view kLookAwayEnabled = "look_away_enabled";
 
 // Virtual key light.
-inline constexpr std::string_view kIntensity = "intensity";  // integer percent 0..100
-inline constexpr std::string_view kTemperaturePreset = "temperature_preset";  // "neutral"|"warm"|"cool"
-inline constexpr std::string_view kDirectionPanDegrees = "direction_pan_degrees";  // degrees -180..180
+inline constexpr std::string_view kIntensity =
+    "intensity"; // integer percent 0..100
+inline constexpr std::string_view kTemperaturePreset =
+    "temperature_preset"; // "neutral"|"warm"|"cool"
+inline constexpr std::string_view kDirectionPanDegrees =
+    "direction_pan_degrees"; // degrees -180..180
 inline constexpr std::string_view kHdriPath = "hdri_path";
 
 // Vignette.
-inline constexpr std::string_view kCenterOnTrackedFace = "center_on_tracked_face";
-}  // namespace param
+inline constexpr std::string_view kCenterOnTrackedFace =
+    "center_on_tracked_face";
+} // namespace param
 
 // ---- Ranges / defaults ----
 // These are the canonical ranges/defaults for IPC/UI and should match
@@ -110,4 +121,4 @@ inline constexpr int kVignetteIntensityDefault = 35;
 inline constexpr int kGreenscreenModeDefault = 0;
 inline constexpr bool kGreenscreenTemporalDefault = true;
 
-}  // namespace studiocast::video::effects::contract
+} // namespace studiocast::video::effects::contract

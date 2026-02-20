@@ -40,4 +40,4 @@ struct OpenCudaDiagnostics {
   std::string ToJson() const;
 };
 
-}  // namespace studiocast::open_cuda
+} // namespace studiocast::open_cuda

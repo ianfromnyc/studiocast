@@ -7,25 +7,25 @@
 namespace studiocast::video::effects {
 namespace {
 
-inline bool VignetteEffective(const BroadcastCameraEffects& fx) {
+inline bool VignetteEffective(const BroadcastCameraEffects &fx) {
   return fx.vignette.enabled && fx.vignette.intensity > 0;
 }
 
-inline std::string VirtualBackgroundEffectId(const BroadcastCameraEffects& fx) {
+inline std::string VirtualBackgroundEffectId(const BroadcastCameraEffects &fx) {
   using contract::kEffectIdVirtualBackgroundBlur;
   using contract::kEffectIdVirtualBackgroundRemove;
   using contract::kEffectIdVirtualBackgroundReplace;
 
   switch (fx.virtual_background.mode) {
-    case VirtualBackgroundMode::blur:
-      return std::string(kEffectIdVirtualBackgroundBlur);
-    case VirtualBackgroundMode::remove:
-      return std::string(kEffectIdVirtualBackgroundRemove);
-    case VirtualBackgroundMode::replace:
-      return std::string(kEffectIdVirtualBackgroundReplace);
-    case VirtualBackgroundMode::none:
-    default:
-      return {};
+  case VirtualBackgroundMode::blur:
+    return std::string(kEffectIdVirtualBackgroundBlur);
+  case VirtualBackgroundMode::remove:
+    return std::string(kEffectIdVirtualBackgroundRemove);
+  case VirtualBackgroundMode::replace:
+    return std::string(kEffectIdVirtualBackgroundReplace);
+  case VirtualBackgroundMode::none:
+  default:
+    return {};
   }
 }
 
@@ -33,18 +33,25 @@ inline bool IsGpuStageEffectId(std::string_view id) {
   // "GPU stage" here means a stage that may host vignette attachment.
   using namespace contract;
 
-  if (id == kEffectIdEyeContact) return true;
-  if (id == kEffectIdVirtualKeyLight) return true;
-  if (id == kEffectIdAutoFrame) return true;
-  if (id == kEffectIdVirtualBackgroundBlur) return true;
-  if (id == kEffectIdVirtualBackgroundRemove) return true;
-  if (id == kEffectIdVirtualBackgroundReplace) return true;
+  if (id == kEffectIdEyeContact)
+    return true;
+  if (id == kEffectIdVirtualKeyLight)
+    return true;
+  if (id == kEffectIdAutoFrame)
+    return true;
+  if (id == kEffectIdVirtualBackgroundBlur)
+    return true;
+  if (id == kEffectIdVirtualBackgroundRemove)
+    return true;
+  if (id == kEffectIdVirtualBackgroundReplace)
+    return true;
   return false;
 }
 
-}  // namespace
+} // namespace
 
-BroadcastEffectsPlan BuildBroadcastEffectsPlan(const BroadcastCameraEffects& fx) {
+BroadcastEffectsPlan
+BuildBroadcastEffectsPlan(const BroadcastCameraEffects &fx) {
   BroadcastEffectsPlan plan;
 
   // ---- Requested flags ----
@@ -65,17 +72,20 @@ BroadcastEffectsPlan BuildBroadcastEffectsPlan(const BroadcastCameraEffects& fx)
       fx.virtual_background.replace_path.empty()) {
     plan.disabled.push_back(DisabledEffectByRule{
         .id = std::string(contract::kEffectIdVirtualBackgroundReplace),
-        .reason = "Disabled: virtual background replace requires `replace_path`."});
+        .reason =
+            "Disabled: virtual background replace requires `replace_path`."});
     enable_virtual_background = false;
     vb_id.clear();
   }
 
   // 2) Auto Frame and Virtual Background are mutually exclusive.
-  // Contract rule: if both are enabled by a patch/config drift, Auto Frame wins.
+  // Contract rule: if both are enabled by a patch/config drift, Auto Frame
+  // wins.
   if (enable_auto_frame && enable_virtual_background) {
     plan.disabled.push_back(DisabledEffectByRule{
         .id = vb_id,
-        .reason = "Disabled: incompatible with `auto_frame` (auto_frame wins)."});
+        .reason =
+            "Disabled: incompatible with `auto_frame` (auto_frame wins)."});
     enable_virtual_background = false;
     vb_id.clear();
   }
@@ -91,21 +101,26 @@ BroadcastEffectsPlan BuildBroadcastEffectsPlan(const BroadcastCameraEffects& fx)
   // ---- Ordering rules ----
   // Rationale (high-level):
   //  - Noise removal early improves subsequent stages.
-  //  - Eye Contact operates on facial features; run before background/key-light composites.
-  //  - Key Light and Virtual Background both depend on segmentation; run before framing.
+  //  - Eye Contact operates on facial features; run before background/key-light
+  //  composites.
+  //  - Key Light and Virtual Background both depend on segmentation; run before
+  //  framing.
   //  - Auto Frame last so it frames the final image.
   //  - Vignette after framing.
 
   if (enable_noise_removal) {
-    plan.ordered_effect_ids.push_back(std::string(contract::kEffectIdVideoNoiseRemoval));
+    plan.ordered_effect_ids.push_back(
+        std::string(contract::kEffectIdVideoNoiseRemoval));
   }
 
   if (enable_eye_contact) {
-    plan.ordered_effect_ids.push_back(std::string(contract::kEffectIdEyeContact));
+    plan.ordered_effect_ids.push_back(
+        std::string(contract::kEffectIdEyeContact));
   }
 
   if (enable_key_light) {
-    plan.ordered_effect_ids.push_back(std::string(contract::kEffectIdVirtualKeyLight));
+    plan.ordered_effect_ids.push_back(
+        std::string(contract::kEffectIdVirtualKeyLight));
   }
 
   if (enable_virtual_background) {
@@ -113,7 +128,8 @@ BroadcastEffectsPlan BuildBroadcastEffectsPlan(const BroadcastCameraEffects& fx)
   }
 
   if (enable_auto_frame) {
-    plan.ordered_effect_ids.push_back(std::string(contract::kEffectIdAutoFrame));
+    plan.ordered_effect_ids.push_back(
+        std::string(contract::kEffectIdAutoFrame));
   }
 
   if (enable_vignette) {
@@ -123,9 +139,11 @@ BroadcastEffectsPlan BuildBroadcastEffectsPlan(const BroadcastCameraEffects& fx)
   // Decide vignette attachment.
   if (enable_vignette) {
     // Attach to the last enabled GPU stage (excluding vignette itself).
-    for (auto it = plan.ordered_effect_ids.rbegin(); it != plan.ordered_effect_ids.rend(); ++it) {
-      const std::string& id = *it;
-      if (id == contract::kEffectIdVignette) continue;
+    for (auto it = plan.ordered_effect_ids.rbegin();
+         it != plan.ordered_effect_ids.rend(); ++it) {
+      const std::string &id = *it;
+      if (id == contract::kEffectIdVignette)
+        continue;
       if (IsGpuStageEffectId(id)) {
         plan.vignette_attach_to_effect_id = id;
         break;
@@ -136,4 +154,4 @@ BroadcastEffectsPlan BuildBroadcastEffectsPlan(const BroadcastCameraEffects& fx)
   return plan;
 }
 
-}  // namespace studiocast::video::effects
+} // namespace studiocast::video::effects

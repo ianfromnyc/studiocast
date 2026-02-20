@@ -7,8 +7,9 @@
 
 namespace studiocast::gui {
 
-void ApplyDarkTheme(QApplication& app) {
-  // Widgets-first theme (Fusion + palette + modest QSS) for deterministic, cross-distro visuals.
+void ApplyDarkTheme(QApplication &app) {
+  // Widgets-first theme (Fusion + palette + modest QSS) for deterministic,
+  // cross-distro visuals.
   app.setStyle(QStyleFactory::create("Fusion"));
 
   // Keep tokens aligned with :/styles/studiocast_dark.qss
@@ -19,7 +20,7 @@ void ApplyDarkTheme(QApplication& app) {
   const QColor kBorder(0x27, 0x32, 0x47);
   const QColor kText1(0xE7, 0xEE, 0xF8);
   const QColor kText2(0xA9, 0xB4, 0xC5);
-  const QColor kAccent(0x2D, 0xD4, 0xFF);  // energetic/futuristic cyan-blue
+  const QColor kAccent(0x2D, 0xD4, 0xFF); // energetic/futuristic cyan-blue
   const QColor kDanger(0xFF, 0x5A, 0x5F);
 
   QPalette p;
@@ -36,7 +37,8 @@ void ApplyDarkTheme(QApplication& app) {
   p.setColor(QPalette::Link, kAccent);
 
   // Slightly translucent highlight makes selection look less "legacy Qt".
-  p.setColor(QPalette::Highlight, QColor(kAccent.red(), kAccent.green(), kAccent.blue(), 90));
+  p.setColor(QPalette::Highlight,
+             QColor(kAccent.red(), kAccent.green(), kAccent.blue(), 90));
   p.setColor(QPalette::HighlightedText, kText1);
 
   // Disabled state.
@@ -62,4 +64,4 @@ void ApplyDarkTheme(QApplication& app) {
   }
 }
 
-}  // namespace studiocast::gui
+} // namespace studiocast::gui

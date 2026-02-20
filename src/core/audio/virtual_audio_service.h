@@ -11,147 +11,153 @@
 namespace studiocast::audio {
 
 struct VirtualAudioServiceConfig {
-    // If false, the service will not run the real-time processing pipeline.
-    // The virtual devices may still be created (see `create_virtual_mic`).
-    bool enabled = false;
+  // If false, the service will not run the real-time processing pipeline.
+  // The virtual devices may still be created (see `create_virtual_mic`).
+  bool enabled = false;
 
-    // Keep the virtual microphone device available even when processing is disabled.
-    // This is the preferred daemon-owned behavior for MVP.
-    bool create_virtual_mic = true;
+  // Keep the virtual microphone device available even when processing is
+  // disabled. This is the preferred daemon-owned behavior for MVP.
+  bool create_virtual_mic = true;
 
-    // Keep the virtual speakers device available even when microphone processing is disabled.
-    // When enabled, StudioCast creates a virtual sink named "studiocast_speakers".
-    bool create_virtual_speakers = false;
+  // Keep the virtual speakers device available even when microphone processing
+  // is disabled. When enabled, StudioCast creates a virtual sink named
+  // "studiocast_speakers".
+  bool create_virtual_speakers = false;
 
-    // When true, StudioCast routes the virtual speakers monitor stream into a physical sink.
-    // Phase 9 uses a Pulse module-loopback pass-through route (no ML processing yet).
-    bool speakers_enabled = false;
+  // When true, StudioCast routes the virtual speakers monitor stream into a
+  // physical sink. Phase 9 uses a Pulse module-loopback pass-through route (no
+  // ML processing yet).
+  bool speakers_enabled = false;
 
-    // Target sink name for speakers routing. Empty = Pulse default sink.
-    // The routing helper will refuse to loop back into StudioCast virtual sinks to avoid feedback.
-    std::string speaker_target_sink;
+  // Target sink name for speakers routing. Empty = Pulse default sink.
+  // The routing helper will refuse to loop back into StudioCast virtual sinks
+  // to avoid feedback.
+  std::string speaker_target_sink;
 
-    // Latency (ms) for module-loopback when speakers_enabled is true.
-    int speaker_latency_ms = 10;
+  // Latency (ms) for module-loopback when speakers_enabled is true.
+  int speaker_latency_ms = 10;
 
-    // Selected input source (Pulse source name). Empty = Pulse default source.
-    std::string source_name;
+  // Selected input source (Pulse source name). Empty = Pulse default source.
+  std::string source_name;
 
-    // Canonical Broadcast-style audio effect settings.
-    studiocast::audio::effects::BroadcastAudioEffects effects{};
+  // Canonical Broadcast-style audio effect settings.
+  studiocast::audio::effects::BroadcastAudioEffects effects{};
 
-    // Supervisor cadence.
-    int poll_ms = 250;
+  // Supervisor cadence.
+  int poll_ms = 250;
 
-    // When a start attempt fails, wait this long before retrying.
-    int start_retry_ms = 2000;
+  // When a start attempt fails, wait this long before retrying.
+  int start_retry_ms = 2000;
 };
 
 struct VirtualAudioServiceStatus {
-    bool service_running = false;
+  bool service_running = false;
 
-    bool mic_present = false;
+  bool mic_present = false;
 
-    bool speakers_present = false;
-    bool speakers_routing_active = false;
-    // "off" (no routing), "loopback" (Pulse module-loopback pass-through),
-    // or "pipeline" (daemon processed pipeline).
-    std::string speakers_route_mode;
-    std::string speaker_target_sink_active;
-    std::string speakers_last_error;
+  bool speakers_present = false;
+  bool speakers_routing_active = false;
+  // "off" (no routing), "loopback" (Pulse module-loopback pass-through),
+  // or "pipeline" (daemon processed pipeline).
+  std::string speakers_route_mode;
+  std::string speaker_target_sink_active;
+  std::string speakers_last_error;
 
-    // When speakers_route_mode == "pipeline", these describe the processed pipeline state.
-    bool speakers_pipeline_running = false;
-    bool speakers_pipeline_starting = false;
-    std::string speakers_backend_active;
-    std::string speakers_effects_note;
-    float speakers_intensity = 0.0f;
-    std::string speakers_pipeline_last_error;
+  // When speakers_route_mode == "pipeline", these describe the processed
+  // pipeline state.
+  bool speakers_pipeline_running = false;
+  bool speakers_pipeline_starting = false;
+  std::string speakers_backend_active;
+  std::string speakers_effects_note;
+  float speakers_intensity = 0.0f;
+  std::string speakers_pipeline_last_error;
 
-    // Speaker pipeline performance (best-effort realtime stats).
-    std::uint64_t speakers_pipeline_frames_processed = 0;
-    std::uint64_t speakers_pipeline_process_time_us_sum = 0;
-    std::uint64_t speakers_pipeline_process_time_us_max = 0;
-    std::uint64_t speakers_pipeline_process_time_us_last = 0;
-    std::uint64_t speakers_pipeline_process_overruns = 0;
+  // Speaker pipeline performance (best-effort realtime stats).
+  std::uint64_t speakers_pipeline_frames_processed = 0;
+  std::uint64_t speakers_pipeline_process_time_us_sum = 0;
+  std::uint64_t speakers_pipeline_process_time_us_max = 0;
+  std::uint64_t speakers_pipeline_process_time_us_last = 0;
+  std::uint64_t speakers_pipeline_process_overruns = 0;
 
-    bool pipeline_running = false;
-    bool pipeline_starting = false;
+  bool pipeline_running = false;
+  bool pipeline_starting = false;
 
-    // Microphone pipeline performance (best-effort realtime stats).
-    std::uint64_t pipeline_frames_processed = 0;
-    std::uint64_t pipeline_process_time_us_sum = 0;
-    std::uint64_t pipeline_process_time_us_max = 0;
-    std::uint64_t pipeline_process_time_us_last = 0;
-    std::uint64_t pipeline_process_overruns = 0;
+  // Microphone pipeline performance (best-effort realtime stats).
+  std::uint64_t pipeline_frames_processed = 0;
+  std::uint64_t pipeline_process_time_us_sum = 0;
+  std::uint64_t pipeline_process_time_us_max = 0;
+  std::uint64_t pipeline_process_time_us_last = 0;
+  std::uint64_t pipeline_process_overruns = 0;
 
-    std::string selected_source;
-    std::string pipeline_sink = "studiocast_sink";
+  std::string selected_source;
+  std::string pipeline_sink = "studiocast_sink";
 
-    // Active effects backend (selected by the runtime resolver).
-    // Common values: "passthrough", "maxine", "open_source".
-    std::string effects_backend_active;
+  // Active effects backend (selected by the runtime resolver).
+  // Common values: "passthrough", "maxine", "open_source".
+  std::string effects_backend_active;
 
-    // Human-friendly backend selection / fallback note.
-    // Intended for GUI banners and daemon status.
-    std::string effects_note;
+  // Human-friendly backend selection / fallback note.
+  // Intended for GUI banners and daemon status.
+  std::string effects_note;
 
-    // What effect is currently active (derived from the Broadcast effect model).
-    std::string effect_selector;
-    std::string feature_id;
-    float intensity = 0.0f;
+  // What effect is currently active (derived from the Broadcast effect model).
+  std::string effect_selector;
+  std::string feature_id;
+  float intensity = 0.0f;
 
-    // Best-effort selected GPU summary (for actual pipeline configuration).
-    int gpu_index = -1;
-    std::string gpu_name;
-    std::string gpu_compute_cap;
+  // Best-effort selected GPU summary (for actual pipeline configuration).
+  int gpu_index = -1;
+  std::string gpu_name;
+  std::string gpu_compute_cap;
 
-    std::string last_error;
+  std::string last_error;
 };
 
-// Minimal daemon-friendly owner of StudioCast virtual audio devices and processing pipelines.
+// Minimal daemon-friendly owner of StudioCast virtual audio devices and
+// processing pipelines.
 //
 // MVP scope:
 //  - Virtual microphone is created via `pactl` modules.
 //  - Real-time processing is Maxine AFX-backed (no CPU fallbacks).
 //  - Virtual speakers are created via `pactl` modules.
-//  - Phase 9 provides a pass-through speakers route via module-loopback (no ML yet).
+//  - Phase 9 provides a pass-through speakers route via module-loopback (no ML
+//  yet).
 class VirtualAudioService final {
 public:
-    VirtualAudioService() = default;
-    ~VirtualAudioService();
+  VirtualAudioService() = default;
+  ~VirtualAudioService();
 
-    VirtualAudioService(const VirtualAudioService&) = delete;
-    VirtualAudioService& operator=(const VirtualAudioService&) = delete;
+  VirtualAudioService(const VirtualAudioService &) = delete;
+  VirtualAudioService &operator=(const VirtualAudioService &) = delete;
 
-    // Starts the supervisor thread.
-    bool Start(const VirtualAudioServiceConfig& cfg, std::string* error);
-    void Stop();
+  // Starts the supervisor thread.
+  bool Start(const VirtualAudioServiceConfig &cfg, std::string *error);
+  void Stop();
 
-    void UpdateConfig(const VirtualAudioServiceConfig& cfg);
+  void UpdateConfig(const VirtualAudioServiceConfig &cfg);
 
-    VirtualAudioServiceConfig Config() const;
-    VirtualAudioServiceStatus Status() const;
+  VirtualAudioServiceConfig Config() const;
+  VirtualAudioServiceStatus Status() const;
 
 private:
-    void ThreadMain();
+  void ThreadMain();
 
-    void SetLastError(std::string msg);
+  void SetLastError(std::string msg);
 
-    mutable std::mutex mu_;
-    std::thread th_;
-    std::atomic_bool stop_{false};
+  mutable std::mutex mu_;
+  std::thread th_;
+  std::atomic_bool stop_{false};
 
-    bool running_ = false;
-    bool mic_created_ = false;
+  bool running_ = false;
+  bool mic_created_ = false;
 
-    bool speakers_created_ = false;
-    bool speakers_loopback_running_ = false;
-    std::string speakers_loopback_target_;
-    int speakers_loopback_latency_ms_ = 0;
+  bool speakers_created_ = false;
+  bool speakers_loopback_running_ = false;
+  std::string speakers_loopback_target_;
+  int speakers_loopback_latency_ms_ = 0;
 
-    VirtualAudioServiceConfig cfg_{};
-    VirtualAudioServiceStatus st_{};
+  VirtualAudioServiceConfig cfg_{};
+  VirtualAudioServiceStatus st_{};
 };
 
-}  // namespace studiocast::audio
+} // namespace studiocast::audio

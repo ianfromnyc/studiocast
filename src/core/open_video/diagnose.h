@@ -11,4 +11,4 @@ namespace studiocast::open_cuda {
 // with caching).
 OpenCudaDiagnostics DiagnoseOpenCudaDefault();
 
-}  // namespace studiocast::open_cuda
+} // namespace studiocast::open_cuda

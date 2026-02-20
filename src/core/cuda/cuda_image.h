@@ -36,35 +36,27 @@ struct CudaImage {
   std::size_t RowBytes() const;
   bool Valid() const;
 
-  bool Allocate(studiocast::maxine::CudaDriverApi* cuda,
-                int width,
-                int height,
-                PixelFormatGpu fmt,
-                std::string* error_out);
+  bool Allocate(studiocast::maxine::CudaDriverApi *cuda, int width, int height,
+                PixelFormatGpu fmt, std::string *error_out);
 
-  bool Free(studiocast::maxine::CudaDriverApi* cuda, std::string* error_out);
+  bool Free(studiocast::maxine::CudaDriverApi *cuda, std::string *error_out);
 
-  bool ReallocIfNeeded(studiocast::maxine::CudaDriverApi* cuda,
-                       int width,
-                       int height,
-                       PixelFormatGpu fmt,
-                       std::string* error_out);
+  bool ReallocIfNeeded(studiocast::maxine::CudaDriverApi *cuda, int width,
+                       int height, PixelFormatGpu fmt, std::string *error_out);
 
   // Upload/download helpers for CPU-side RGB24 interop.
   //
   // These perform 2D copies and keep the operation on the provided stream.
   // The caller decides when to synchronize.
-  bool UploadFromCpuRgb24(studiocast::maxine::CudaDriverApi* cuda,
-                          const std::uint8_t* src,
-                          std::size_t src_stride_bytes,
+  bool UploadFromCpuRgb24(studiocast::maxine::CudaDriverApi *cuda,
+                          const std::uint8_t *src, std::size_t src_stride_bytes,
                           studiocast::maxine::CUstream stream,
-                          std::string* error_out) const;
+                          std::string *error_out) const;
 
-  bool DownloadToCpuRgb24(studiocast::maxine::CudaDriverApi* cuda,
-                          std::uint8_t* dst,
-                          std::size_t dst_stride_bytes,
+  bool DownloadToCpuRgb24(studiocast::maxine::CudaDriverApi *cuda,
+                          std::uint8_t *dst, std::size_t dst_stride_bytes,
                           studiocast::maxine::CUstream stream,
-                          std::string* error_out) const;
+                          std::string *error_out) const;
 };
 
-}  // namespace studiocast::cuda
+} // namespace studiocast::cuda

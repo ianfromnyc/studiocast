@@ -59,7 +59,8 @@ struct VideoEffectDescriptor {
   // Required engine components.
   std::vector<RequiredComponent> required_components;
 
-  // Mutual exclusion groups. Effects in the same group are not intended to be enabled at once.
+  // Mutual exclusion groups. Effects in the same group are not intended to be
+  // enabled at once.
   std::vector<std::string> mutex_groups;
 
   // Suggested ordering in the pipeline (lower runs earlier). A hint only.
@@ -72,4 +73,4 @@ struct VideoEffectDescriptor {
 // Canonical, stable list of known video effects (Qt-free).
 std::vector<VideoEffectDescriptor> VideoEffectDescriptors();
 
-}  // namespace studiocast::video::effects
+} // namespace studiocast::video::effects

@@ -48,8 +48,7 @@ std::string JoinOr(const std::vector<std::string> &items) {
   return oss.str();
 }
 
-fs::path FindCandidateRoot(const std::vector<fs::path> &cands,
-                           const char *leaf,
+fs::path FindCandidateRoot(const std::vector<fs::path> &cands, const char *leaf,
                            const char *must_contain_lower) {
   for (const auto &p : cands) {
     if (p.filename() != leaf)
@@ -64,8 +63,7 @@ fs::path FindCandidateRoot(const std::vector<fs::path> &cands,
   return {};
 }
 
-std::string ExpectedRootsFor(const ComponentDiagnostics &c,
-                             const char *leaf,
+std::string ExpectedRootsFor(const ComponentDiagnostics &c, const char *leaf,
                              const fs::path &system_default) {
   std::vector<std::string> items;
   items.reserve(3);
@@ -76,7 +74,8 @@ std::string ExpectedRootsFor(const ComponentDiagnostics &c,
   }
 
   // Prefer our known XDG default candidate.
-  const auto xdg = FindCandidateRoot(c.candidate_roots, leaf, "/studiocast/maxine/");
+  const auto xdg =
+      FindCandidateRoot(c.candidate_roots, leaf, "/studiocast/maxine/");
   if (!xdg.empty()) {
     items.push_back(PrettyPathForCopy(xdg));
   }
@@ -114,8 +113,8 @@ bool NeedsMaxineAfx(const MaxineDiagnostics &d) {
 
 } // namespace
 
-CanonicalMaxineBlockedCopy BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics &d,
-                                                           MaxineNeed need) {
+CanonicalMaxineBlockedCopy
+BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics &d, MaxineNeed need) {
   CanonicalMaxineBlockedCopy out;
 
   auto add_step = [&](const std::string &s) {
@@ -159,52 +158,66 @@ CanonicalMaxineBlockedCopy BuildCanonicalMaxineBlockedCopy(const MaxineDiagnosti
   }
 
   // Component-specific blocking.
-  if (require_vfx || (need == MaxineNeed::any && !vfx_ready && !ar_ready && !afx_ready)) {
+  if (require_vfx ||
+      (need == MaxineNeed::any && !vfx_ready && !ar_ready && !afx_ready)) {
     if (!d.vfx.root_exists || !d.vfx.library_exists) {
-      const auto expected = ExpectedRootsFor(d.vfx, "VideoFX", fs::path("/usr/local/VideoFX"));
+      const auto expected =
+          ExpectedRootsFor(d.vfx, "VideoFX", fs::path("/usr/local/VideoFX"));
       out.summary =
           "Maxine unavailable: VFX SDK not found (expected: " + expected + ").";
       add_step("Run `studiocast-probe` to verify GPU/driver.");
-      add_step("Run `studiocast-maxine init` then follow `studiocast-maxine install-hints`.");
-      add_step(
-          "Ensure `libnvvfx.so` is under `<VFX_ROOT>/lib/` and feature installs exist under `<VFX_ROOT>/features/`.");
+      add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
+               "install-hints`.");
+      add_step("Ensure `libnvvfx.so` is under `<VFX_ROOT>/lib/` and feature "
+               "installs exist under `<VFX_ROOT>/features/`.");
       return out;
     }
     if (!d.vfx.library_loadable) {
       out.summary =
           "Maxine unavailable: VFX SDK not found (expected: " +
-          ExpectedRootsFor(d.vfx, "VideoFX", fs::path("/usr/local/VideoFX")) + ").";
-      add_step("Run `studiocast-maxine init` then follow `studiocast-maxine install-hints`.");
-      add_step(
-          "Ensure `libnvvfx.so` is under `<VFX_ROOT>/lib/` and feature installs exist under `<VFX_ROOT>/features/`.");
+          ExpectedRootsFor(d.vfx, "VideoFX", fs::path("/usr/local/VideoFX")) +
+          ").";
+      add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
+               "install-hints`.");
+      add_step("Ensure `libnvvfx.so` is under `<VFX_ROOT>/lib/` and feature "
+               "installs exist under `<VFX_ROOT>/features/`.");
       return out;
     }
   }
 
-  if (require_ar || (need == MaxineNeed::any && !ar_ready && !vfx_ready && !afx_ready)) {
+  if (require_ar ||
+      (need == MaxineNeed::any && !ar_ready && !vfx_ready && !afx_ready)) {
     if (!d.ar.root_exists || !d.ar.library_exists || !d.ar.library_loadable) {
-      const auto expected = ExpectedRootsFor(d.ar, "ARSDK", fs::path("/usr/local/ARSDK"));
-      out.summary = "Maxine unavailable: AR SDK not found (needed for Eye Contact / Auto Frame).";
+      const auto expected =
+          ExpectedRootsFor(d.ar, "ARSDK", fs::path("/usr/local/ARSDK"));
+      out.summary = "Maxine unavailable: AR SDK not found (needed for Eye "
+                    "Contact / Auto Frame).";
       add_step("Run `studiocast-probe` to verify GPU/driver.");
-      add_step("Run `studiocast-maxine init` then follow `studiocast-maxine install-hints`.");
+      add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
+               "install-hints`.");
       add_step("Expected AR SDK root: " + expected + ".");
       return out;
     }
   }
 
-  if (require_afx || (need == MaxineNeed::any && !afx_ready && !vfx_ready && !ar_ready)) {
+  if (require_afx ||
+      (need == MaxineNeed::any && !afx_ready && !vfx_ready && !ar_ready)) {
     if (!d.afx.root_exists || !d.afx.library_exists) {
-      const auto expected =
-          ExpectedRootsFor(d.afx, "Audio_Effects_SDK", fs::path("/usr/local/Audio_Effects_SDK"));
-      out.summary = "Maxine unavailable: Audio Effects SDK not found (needed for audio effects).";
+      const auto expected = ExpectedRootsFor(
+          d.afx, "Audio_Effects_SDK", fs::path("/usr/local/Audio_Effects_SDK"));
+      out.summary = "Maxine unavailable: Audio Effects SDK not found (needed "
+                    "for audio effects).";
       add_step("Run `studiocast-probe` to verify GPU/driver.");
-      add_step("Run `studiocast-maxine init` then follow `studiocast-maxine install-hints`.");
+      add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
+               "install-hints`.");
       add_step("Expected AFX SDK root: " + expected + ".");
-      add_step("Ensure `libnv_audiofx.so` is under `<AFX_ROOT>/nvafx/lib/` and feature installs exist under `<AFX_ROOT>/features/`.");
+      add_step("Ensure `libnv_audiofx.so` is under `<AFX_ROOT>/nvafx/lib/` and "
+               "feature installs exist under `<AFX_ROOT>/features/`.");
       return out;
     }
     if (!d.afx.library_loadable) {
-      out.summary = "Maxine unavailable: Audio Effects SDK library could not be loaded.";
+      out.summary =
+          "Maxine unavailable: Audio Effects SDK library could not be loaded.";
       add_step("Run `studiocast-probe` to verify GPU/driver.");
       add_step("Ensure `libnv_audiofx.so` is under `<AFX_ROOT>/nvafx/lib/`.");
       return out;
@@ -213,29 +226,32 @@ CanonicalMaxineBlockedCopy BuildCanonicalMaxineBlockedCopy(const MaxineDiagnosti
 
   // Default: SDK present but effect libraries/features are missing.
   if (require_afx) {
-    out.summary =
-        "Maxine unavailable: Audio Effects features not installed (run download_features.sh).";
+    out.summary = "Maxine unavailable: Audio Effects features not installed "
+                  "(run download_features.sh).";
     add_step("Run `studiocast-probe` to verify GPU/driver.");
-    add_step("Run `studiocast-maxine init` then follow `studiocast-maxine install-hints`.");
+    add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
+             "install-hints`.");
     add_step("Export `NGC_API_KEY` (do not commit it).");
     add_step(
-        "Run: `cd <AFX_ROOT>/features && ./download_features.sh --effects denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k`."
-    );
-    add_step(
-        "Ensure `libnv_audiofx.so` is under `<AFX_ROOT>/nvafx/lib/` and feature installs exist under `<AFX_ROOT>/features/`.");
+        "Run: `cd <AFX_ROOT>/features && ./download_features.sh --effects "
+        "denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k`.");
+    add_step("Ensure `libnv_audiofx.so` is under `<AFX_ROOT>/nvafx/lib/` and "
+             "feature installs exist under `<AFX_ROOT>/features/`.");
     return out;
   }
 
-  out.summary =
-      "Maxine unavailable: feature libraries not installed (run install_feature.sh).";
+  out.summary = "Maxine unavailable: feature libraries not installed (run "
+                "install_feature.sh).";
   add_step("Run `studiocast-probe` to verify GPU/driver.");
-  add_step("Run `studiocast-maxine init` then follow `studiocast-maxine install-hints`.");
-  add_step(
-      "Ensure `libnvvfx.so` is under `<VFX_ROOT>/lib/` and feature installs exist under `<VFX_ROOT>/features/`.");
+  add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
+           "install-hints`.");
+  add_step("Ensure `libnvvfx.so` is under `<VFX_ROOT>/lib/` and feature "
+           "installs exist under `<VFX_ROOT>/features/`.");
   return out;
 }
 
-std::string FormatCanonicalMaxineBlockedCopy(const CanonicalMaxineBlockedCopy &c) {
+std::string
+FormatCanonicalMaxineBlockedCopy(const CanonicalMaxineBlockedCopy &c) {
   if (c.summary.empty() && c.steps.empty()) {
     return {};
   }
@@ -261,7 +277,7 @@ bool BackendBuilt() {
 #endif
 }
 
-bool RuntimeAvailable(std::string* reason) {
+bool RuntimeAvailable(std::string *reason) {
 #ifndef STUDIOCAST_WITH_MAXINE
   if (reason) {
     *reason = "Maxine unavailable: Maxine support not enabled in this build.";
@@ -282,4 +298,4 @@ bool RuntimeAvailable(std::string* reason) {
 #endif
 }
 
-}  // namespace studiocast::maxine
+} // namespace studiocast::maxine

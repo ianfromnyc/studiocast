@@ -11,7 +11,7 @@ namespace {
 // Parameters:
 //   srcPtr, srcPitch, srcW, srcH,
 //   dstPtr, dstPitch, dstW, dstH
-static constexpr const char* kResizeBilinearPtx = R"ptx(
+static constexpr const char *kResizeBilinearPtx = R"ptx(
 .version 6.0
 .target sm_30
 .address_size 64
@@ -203,14 +203,16 @@ struct GlobalCuda {
   std::string err;
 };
 
-GlobalCuda& g() {
+GlobalCuda &g() {
   static GlobalCuda s;
   return s;
 }
 
-bool EnsureCudaReady(studiocast::maxine::CudaDriverApi** out_cuda, std::string* error_out) {
-  if (error_out) error_out->clear();
-  GlobalCuda& st = g();
+bool EnsureCudaReady(studiocast::maxine::CudaDriverApi **out_cuda,
+                     std::string *error_out) {
+  if (error_out)
+    error_out->clear();
+  GlobalCuda &st = g();
   std::call_once(st.once, [&]() {
     std::string e;
     if (!st.cuda.Initialize(&e)) {
@@ -221,12 +223,14 @@ bool EnsureCudaReady(studiocast::maxine::CudaDriverApi** out_cuda, std::string* 
     st.ok = true;
   });
   if (!st.ok) {
-    if (error_out) *error_out = st.err.empty() ? "CUDA unavailable" : st.err;
+    if (error_out)
+      *error_out = st.err.empty() ? "CUDA unavailable" : st.err;
     return false;
   }
   std::string e;
   if (!st.cuda.EnsureContext(&e)) {
-    if (error_out) *error_out = e;
+    if (error_out)
+      *error_out = e;
     return false;
   }
   *out_cuda = &st.cuda;
@@ -239,17 +243,20 @@ struct KernelState {
   studiocast::maxine::CUfunction fn = nullptr;
 };
 
-KernelState& kernel() {
+KernelState &kernel() {
   static KernelState s;
   return s;
 }
 
-bool EnsureKernelLoaded(studiocast::maxine::CudaDriverApi* cuda, std::string* error_out) {
-  if (error_out) error_out->clear();
-  KernelState& k = kernel();
-  if (k.loaded) return true;
+bool EnsureKernelLoaded(studiocast::maxine::CudaDriverApi *cuda,
+                        std::string *error_out) {
+  if (error_out)
+    error_out->clear();
+  KernelState &k = kernel();
+  if (k.loaded)
+    return true;
 
-  const auto& f = cuda->f();
+  const auto &f = cuda->f();
   studiocast::maxine::CUresult st = studiocast::maxine::CUDA_SUCCESS;
   std::string jit_log;
   if (f.cuModuleLoadDataEx) {
@@ -263,76 +270,88 @@ bool EnsureKernelLoaded(studiocast::maxine::CudaDriverApi* cuda, std::string* er
         studiocast::maxine::CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES,
         studiocast::maxine::CU_JIT_LOG_VERBOSE,
     };
-    void* vals[] = {
+    void *vals[] = {
         info,
-        reinterpret_cast<void*>(static_cast<std::size_t>(sizeof(info))),
+        reinterpret_cast<void *>(static_cast<std::size_t>(sizeof(info))),
         err,
-        reinterpret_cast<void*>(static_cast<std::size_t>(sizeof(err))),
-        reinterpret_cast<void*>(static_cast<std::size_t>(1)),
+        reinterpret_cast<void *>(static_cast<std::size_t>(sizeof(err))),
+        reinterpret_cast<void *>(static_cast<std::size_t>(1)),
     };
 
-    st = f.cuModuleLoadDataEx(&k.module,
-                             kResizeBilinearPtx,
-                             static_cast<unsigned int>(sizeof(opts) / sizeof(opts[0])),
-                             opts,
-                             vals);
-    jit_log = std::string("PTX JIT info log:\n") + info + "\nPTX JIT error log:\n" + err;
+    st = f.cuModuleLoadDataEx(
+        &k.module, kResizeBilinearPtx,
+        static_cast<unsigned int>(sizeof(opts) / sizeof(opts[0])), opts, vals);
+    jit_log = std::string("PTX JIT info log:\n") + info +
+              "\nPTX JIT error log:\n" + err;
   } else {
     st = f.cuModuleLoadData(&k.module, kResizeBilinearPtx);
   }
   if (st != studiocast::maxine::CUDA_SUCCESS) {
     if (error_out) {
-      *error_out = "cuModuleLoadData(resize_bilinear_u8x3) failed: " + cuda->StatusToString(st);
-      if (!jit_log.empty()) *error_out += "\n" + jit_log;
+      *error_out = "cuModuleLoadData(resize_bilinear_u8x3) failed: " +
+                   cuda->StatusToString(st);
+      if (!jit_log.empty())
+        *error_out += "\n" + jit_log;
     }
     return false;
   }
   st = f.cuModuleGetFunction(&k.fn, k.module, "resize_bilinear_u8x3");
   if (st != studiocast::maxine::CUDA_SUCCESS) {
-    if (error_out) *error_out = "cuModuleGetFunction(resize_bilinear_u8x3) failed: " + cuda->StatusToString(st);
+    if (error_out)
+      *error_out = "cuModuleGetFunction(resize_bilinear_u8x3) failed: " +
+                   cuda->StatusToString(st);
     return false;
   }
   k.loaded = true;
   return true;
 }
 
-}  // namespace
+} // namespace
 
-bool IsResizeBilinearAvailable(std::string* error_out) {
-  studiocast::maxine::CudaDriverApi* cuda = nullptr;
-  if (!EnsureCudaReady(&cuda, error_out)) return false;
+bool IsResizeBilinearAvailable(std::string *error_out) {
+  studiocast::maxine::CudaDriverApi *cuda = nullptr;
+  if (!EnsureCudaReady(&cuda, error_out))
+    return false;
   return EnsureKernelLoaded(cuda, error_out);
 }
 
-bool ResizeBilinear(const CudaImage& src,
-                    const CudaImage& dst,
+bool ResizeBilinear(const CudaImage &src, const CudaImage &dst,
                     studiocast::maxine::CUstream stream,
-                    std::string* error_out) {
-  if (error_out) error_out->clear();
+                    std::string *error_out) {
+  if (error_out)
+    error_out->clear();
   if (!src.Valid() || !dst.Valid()) {
-    if (error_out) *error_out = "ResizeBilinear: invalid src/dst image.";
+    if (error_out)
+      *error_out = "ResizeBilinear: invalid src/dst image.";
     return false;
   }
   if (src.format != dst.format) {
-    if (error_out) *error_out = "ResizeBilinear: src/dst formats must match.";
+    if (error_out)
+      *error_out = "ResizeBilinear: src/dst formats must match.";
     return false;
   }
-  if (src.format != PixelFormatGpu::rgb_u8 && src.format != PixelFormatGpu::bgr_u8) {
-    if (error_out) *error_out = "ResizeBilinear: unsupported format (expected rgb_u8 or bgr_u8).";
+  if (src.format != PixelFormatGpu::rgb_u8 &&
+      src.format != PixelFormatGpu::bgr_u8) {
+    if (error_out)
+      *error_out =
+          "ResizeBilinear: unsupported format (expected rgb_u8 or bgr_u8).";
     return false;
   }
   if (src.pitch > std::numeric_limits<std::uint32_t>::max() ||
       dst.pitch > std::numeric_limits<std::uint32_t>::max()) {
-    if (error_out) *error_out = "ResizeBilinear: pitch too large for PTX kernel ABI.";
+    if (error_out)
+      *error_out = "ResizeBilinear: pitch too large for PTX kernel ABI.";
     return false;
   }
 
-  studiocast::maxine::CudaDriverApi* cuda = nullptr;
-  if (!EnsureCudaReady(&cuda, error_out)) return false;
-  if (!EnsureKernelLoaded(cuda, error_out)) return false;
+  studiocast::maxine::CudaDriverApi *cuda = nullptr;
+  if (!EnsureCudaReady(&cuda, error_out))
+    return false;
+  if (!EnsureKernelLoaded(cuda, error_out))
+    return false;
 
-  KernelState& k = kernel();
-  const auto& f = cuda->f();
+  KernelState &k = kernel();
+  const auto &f = cuda->f();
 
   const std::uint32_t src_pitch = static_cast<std::uint32_t>(src.pitch);
   const std::uint32_t src_w = static_cast<std::uint32_t>(src.w);
@@ -343,38 +362,33 @@ bool ResizeBilinear(const CudaImage& src,
   const unsigned long long src_ptr = src.ptr;
   const unsigned long long dst_ptr = dst.ptr;
 
-  void* args[] = {
-      const_cast<unsigned long long*>(&src_ptr),
-      const_cast<std::uint32_t*>(&src_pitch),
-      const_cast<std::uint32_t*>(&src_w),
-      const_cast<std::uint32_t*>(&src_h),
-      const_cast<unsigned long long*>(&dst_ptr),
-      const_cast<std::uint32_t*>(&dst_pitch),
-      const_cast<std::uint32_t*>(&dst_w),
-      const_cast<std::uint32_t*>(&dst_h),
+  void *args[] = {
+      const_cast<unsigned long long *>(&src_ptr),
+      const_cast<std::uint32_t *>(&src_pitch),
+      const_cast<std::uint32_t *>(&src_w),
+      const_cast<std::uint32_t *>(&src_h),
+      const_cast<unsigned long long *>(&dst_ptr),
+      const_cast<std::uint32_t *>(&dst_pitch),
+      const_cast<std::uint32_t *>(&dst_w),
+      const_cast<std::uint32_t *>(&dst_h),
   };
 
   constexpr unsigned int block_x = 16;
   constexpr unsigned int block_y = 16;
-  const unsigned int grid_x = (static_cast<unsigned int>(dst.w) + block_x - 1u) / block_x;
-  const unsigned int grid_y = (static_cast<unsigned int>(dst.h) + block_y - 1u) / block_y;
+  const unsigned int grid_x =
+      (static_cast<unsigned int>(dst.w) + block_x - 1u) / block_x;
+  const unsigned int grid_y =
+      (static_cast<unsigned int>(dst.h) + block_y - 1u) / block_y;
 
-  const studiocast::maxine::CUresult st = f.cuLaunchKernel(k.fn,
-                                                          grid_x,
-                                                          grid_y,
-                                                          1,
-                                                          block_x,
-                                                          block_y,
-                                                          1,
-                                                          0,
-                                                          stream,
-                                                          args,
-                                                          nullptr);
+  const studiocast::maxine::CUresult st = f.cuLaunchKernel(
+      k.fn, grid_x, grid_y, 1, block_x, block_y, 1, 0, stream, args, nullptr);
   if (st != studiocast::maxine::CUDA_SUCCESS) {
-    if (error_out) *error_out = "cuLaunchKernel(resize_bilinear_u8x3) failed: " + cuda->StatusToString(st);
+    if (error_out)
+      *error_out = "cuLaunchKernel(resize_bilinear_u8x3) failed: " +
+                   cuda->StatusToString(st);
     return false;
   }
   return true;
 }
 
-}  // namespace studiocast::cuda::kernels
+} // namespace studiocast::cuda::kernels

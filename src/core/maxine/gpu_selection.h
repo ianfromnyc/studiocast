@@ -10,26 +10,26 @@
 namespace studiocast::maxine {
 
 struct SelectedGpu {
-    int index = -1;  // CUDA / nvidia-smi GPU index
-    std::string uuid;
-    std::string name;
-    std::optional<std::pair<int, int>> compute_capability;  // {major, minor}
+  int index = -1; // CUDA / nvidia-smi GPU index
+  std::string uuid;
+  std::string name;
+  std::optional<std::pair<int, int>> compute_capability; // {major, minor}
 
-    bool IsComputeCapKnown() const { return compute_capability.has_value(); }
-    std::string ComputeCapString() const;
+  bool IsComputeCapKnown() const { return compute_capability.has_value(); }
+  std::string ComputeCapString() const;
 };
 
 struct GpuSelectionResult {
-    std::vector<SelectedGpu> all_gpus;
-    std::optional<SelectedGpu> selected;
-    std::string error;
+  std::vector<SelectedGpu> all_gpus;
+  std::optional<SelectedGpu> selected;
+  std::string error;
 
-    bool ok() const { return selected.has_value() && error.empty(); }
+  bool ok() const { return selected.has_value() && error.empty(); }
 };
 
 // Maxine VFX is effectively RTX-class/Turing+ in practice (Tensor cores).
 bool IsComputeCapabilitySupported(int major, int minor);
 
-GpuSelectionResult SelectGpu(const config::GpuSelection& policy);
+GpuSelectionResult SelectGpu(const config::GpuSelection &policy);
 
-}  // namespace studiocast::maxine
+} // namespace studiocast::maxine

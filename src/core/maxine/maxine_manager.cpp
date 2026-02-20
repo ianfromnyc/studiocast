@@ -9,15 +9,15 @@
 #include <string>
 #include <vector>
 
-#include "core/maxine/availability.h"
 #include "core/maxine/ar_api.h"
+#include "core/maxine/availability.h"
 #include "core/maxine/paths.h"
 #include "core/maxine/reason_codes.h"
 #include "core/maxine/vfx_api.h"
 #include "core/probe/probe.h"
 #include "core/util/dynlib.h"
-#include "core/video/effects/effect_descriptors.h"
 #include "core/video/effects/broadcast_effect_contract.h"
+#include "core/video/effects/effect_descriptors.h"
 
 namespace studiocast::maxine {
 namespace {
@@ -160,7 +160,8 @@ FindSelectedGpu(const studiocast::probe::Report &rep) {
   return std::nullopt;
 }
 
-std::string DriverBlockedReason(const studiocast::maxine::MaxineDiagnostics &d) {
+std::string
+DriverBlockedReason(const studiocast::maxine::MaxineDiagnostics &d) {
   using namespace studiocast::maxine::reasons;
   return d.driver.version.empty() ? std::string(kDriverMissing)
                                   : std::string(kDriverTooOld);
@@ -180,10 +181,12 @@ std::string GpuBlockedReason(const studiocast::maxine::MaxineDiagnostics &d) {
   return std::string(kGpuMissing);
 }
 
-std::string ComponentBlockedReason(const studiocast::maxine::ComponentDiagnostics &c,
-                                   const char *component_code) {
+std::string
+ComponentBlockedReason(const studiocast::maxine::ComponentDiagnostics &c,
+                       const char *component_code) {
   using namespace studiocast::maxine::reasons;
-  const std::string comp = component_code ? std::string(component_code) : std::string();
+  const std::string comp =
+      component_code ? std::string(component_code) : std::string();
 
   if (c.component == "VFX") {
     if (!c.root_exists || !c.library_exists) {
@@ -216,7 +219,7 @@ std::string ComponentBlockedReason(const studiocast::maxine::ComponentDiagnostic
     }
 
     const std::string base = looks_like_symbol ? std::string(kSymbolMissing)
-                                                : std::string(kDlopenFailed);
+                                               : std::string(kDlopenFailed);
     return comp.empty() ? base : (base + ":" + comp);
   }
 
@@ -245,7 +248,8 @@ int RankReasonCode(const std::string &code) {
   if (starts_with(kDlopenFailed)) {
     return 50;
   }
-  if (starts_with(kMissingVfxFeaturePrefix) || starts_with(kMissingArFeaturePrefix)) {
+  if (starts_with(kMissingVfxFeaturePrefix) ||
+      starts_with(kMissingArFeaturePrefix)) {
     return 60;
   }
   if (code == kUnknown) {
@@ -378,9 +382,9 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
         lib.Open(d.afx.library, studiocast::util::DynLib::Scope::Local, &err);
     d.afx.library_dlopen_error = d.afx.library_loadable ? "" : err;
     if (!d.afx.library_loadable) {
-      d.afx.problems.push_back(
-          "AFX library exists but could not be loaded: " + d.afx.library.string() +
-          (err.empty() ? "" : " (" + err + ")"));
+      d.afx.problems.push_back("AFX library exists but could not be loaded: " +
+                               d.afx.library.string() +
+                               (err.empty() ? "" : " (" + err + ")"));
     }
   }
 
@@ -525,8 +529,9 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
       if (!out)
         return;
 
-      // For the UI/CLI contract, emit stable reason codes (not English sentences).
-      // Human-actionable details are provided via top-level `blocked_details`.
+      // For the UI/CLI contract, emit stable reason codes (not English
+      // sentences). Human-actionable details are provided via top-level
+      // `blocked_details`.
       if (c.component == "VFX") {
         if (!c.root_exists || !c.library_exists) {
           out->push_back(std::string(reasons::kMissingVfxSdk));
@@ -552,22 +557,24 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
 
       // VFX features are only meaningful when the VFX component is runnable.
       if (vfx_ready) {
-        if (effect_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove ||
-            effect_id == studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace) {
+        if (effect_id == studiocast::video::effects::contract::
+                             kEffectIdVirtualBackgroundRemove ||
+            effect_id == studiocast::video::effects::contract::
+                             kEffectIdVirtualBackgroundReplace) {
           if (!vfx_has("greenscreen"))
             out->push_back(reasons::MissingVfxFeature("greenscreen"));
-        } else if (effect_id ==
-                   studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur) {
+        } else if (effect_id == studiocast::video::effects::contract::
+                                    kEffectIdVirtualBackgroundBlur) {
           if (!vfx_has("greenscreen"))
             out->push_back(reasons::MissingVfxFeature("greenscreen"));
           if (!vfx_has("bgblur"))
             out->push_back(reasons::MissingVfxFeature("bgblur"));
-        } else if (effect_id ==
-                   studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) {
+        } else if (effect_id == studiocast::video::effects::contract::
+                                    kEffectIdVideoNoiseRemoval) {
           if (!vfx_has("denoise"))
             out->push_back(reasons::MissingVfxFeature("denoise"));
-        } else if (effect_id ==
-                   studiocast::video::effects::contract::kEffectIdVirtualKeyLight) {
+        } else if (effect_id == studiocast::video::effects::contract::
+                                    kEffectIdVirtualKeyLight) {
           if (!vfx_has("relighting"))
             out->push_back(reasons::MissingVfxFeature("relighting"));
         }
@@ -575,11 +582,13 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
 
       // AR features are only meaningful when the AR component is runnable.
       if (ar_ready) {
-        if (effect_id == studiocast::video::effects::contract::kEffectIdAutoFrame) {
+        if (effect_id ==
+            studiocast::video::effects::contract::kEffectIdAutoFrame) {
           if (!(ar_has("face_detection") || ar_has("body_detection"))) {
             out->push_back(reasons::MissingArFeature("face_detection"));
           }
-        } else if (effect_id == studiocast::video::effects::contract::kEffectIdEyeContact) {
+        } else if (effect_id ==
+                   studiocast::video::effects::contract::kEffectIdEyeContact) {
           if (!(ar_has("face_detection") || ar_has("body_detection"))) {
             out->push_back(reasons::MissingArFeature("face_detection"));
           }
@@ -645,7 +654,8 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
   if (!d.afx.root_exists) {
     d.hints.push_back(
         "Install/extract the Maxine Audio Effects SDK and set " +
-        d.afx.root_env_var + " to the SDK root (or install under the default XDG path).");
+        d.afx.root_env_var +
+        " to the SDK root (or install under the default XDG path).");
   }
 
   if (d.gpu.maxine_gpu_arg.has_value()) {

@@ -7,15 +7,17 @@
 #include <sstream>
 #include <utility>
 
-#include "core/video/image_ppm.h"  // ResizeRgb24Bilinear
+#include "core/video/image_ppm.h" // ResizeRgb24Bilinear
 
 namespace studiocast::open_video {
 
 namespace {
 
 static int ClampInt(int v, int lo, int hi) {
-  if (v < lo) return lo;
-  if (v > hi) return hi;
+  if (v < lo)
+    return lo;
+  if (v > hi)
+    return hi;
   return v;
 }
 
@@ -23,19 +25,18 @@ static std::size_t ByteOffset(std::size_t stride, int x, int y) {
   return static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 3;
 }
 
-static void BilinearSampleRgbNchw(const float* rgb_nchw,
-                                 int w,
-                                 int h,
-                                 float x,
-                                 float y,
-                                 float* out_r,
-                                 float* out_g,
-                                 float* out_b) {
+static void BilinearSampleRgbNchw(const float *rgb_nchw, int w, int h, float x,
+                                  float y, float *out_r, float *out_g,
+                                  float *out_b) {
   // Clamp to valid range.
-  if (x < 0.f) x = 0.f;
-  if (y < 0.f) y = 0.f;
-  if (x > static_cast<float>(w - 1)) x = static_cast<float>(w - 1);
-  if (y > static_cast<float>(h - 1)) y = static_cast<float>(h - 1);
+  if (x < 0.f)
+    x = 0.f;
+  if (y < 0.f)
+    y = 0.f;
+  if (x > static_cast<float>(w - 1))
+    x = static_cast<float>(w - 1);
+  if (y > static_cast<float>(h - 1))
+    y = static_cast<float>(h - 1);
 
   const int x0 = static_cast<int>(std::floor(x));
   const int y0 = static_cast<int>(std::floor(y));
@@ -77,7 +78,7 @@ static void BilinearSampleRgbNchw(const float* rgb_nchw,
   *out_b = b0 + (b1 - b0) * ty;
 }
 
-}  // namespace
+} // namespace
 
 GazeCorrectionEyeContact::GazeCorrectionEyeContact() = default;
 GazeCorrectionEyeContact::~GazeCorrectionEyeContact() = default;
@@ -98,14 +99,16 @@ void GazeCorrectionEyeContact::Reset() {
   runtime_failures_ = 0;
 }
 
-void GazeCorrectionEyeContact::DisableAfterFailure(const std::string& why) {
+void GazeCorrectionEyeContact::DisableAfterFailure(const std::string &why) {
   disabled_ = true;
   sticky_warning_ = why;
 }
 
 float GazeCorrectionEyeContact::Clamp01(float x) {
-  if (x < 0.f) return 0.f;
-  if (x > 1.f) return 1.f;
+  if (x < 0.f)
+    return 0.f;
+  if (x > 1.f)
+    return 1.f;
   return x;
 }
 
@@ -113,13 +116,16 @@ float GazeCorrectionEyeContact::Lerp(float a, float b, float t) {
   return a + (b - a) * t;
 }
 
-std::string GazeCorrectionEyeContact::ChoosePreferredModelId(const ModelPackRegistry& reg) {
+std::string
+GazeCorrectionEyeContact::ChoosePreferredModelId(const ModelPackRegistry &reg) {
   // Prefer the non-placeholder pack if multiple are installed.
   std::string fallback = reg.DefaultModelIdForTask("eye_contact");
   std::string best;
-  for (const auto& p : reg.ListModels()) {
-    if (p.task != "eye_contact") continue;
-    if (best.empty() && p.id == fallback) best = p.id;
+  for (const auto &p : reg.ListModels()) {
+    if (p.task != "eye_contact")
+      continue;
+    if (best.empty() && p.id == fallback)
+      best = p.id;
     if (p.id.find("placeholder") == std::string::npos) {
       // First non-placeholder wins.
       return p.id;
@@ -128,18 +134,17 @@ std::string GazeCorrectionEyeContact::ChoosePreferredModelId(const ModelPackRegi
   return best.empty() ? fallback : best;
 }
 
-bool GazeCorrectionEyeContact::DetectEyeInputsFromSession(const studiocast::onnx::OrtSessionInfo& info,
-                                                         std::string* out_eye_name,
-                                                         std::vector<int64_t>* out_eye_shape,
-                                                         std::string* out_anchors_name,
-                                                         std::vector<int64_t>* out_anchors_shape,
-                                                         std::string* out_angles_name,
-                                                         std::vector<int64_t>* out_angles_shape,
-                                                         std::string* error) {
-  if (error) error->clear();
-  if (!out_eye_name || !out_eye_shape || !out_anchors_name || !out_anchors_shape || !out_angles_name ||
-      !out_angles_shape) {
-    if (error) *error = "DetectEyeInputsFromSession: null out params";
+bool GazeCorrectionEyeContact::DetectEyeInputsFromSession(
+    const studiocast::onnx::OrtSessionInfo &info, std::string *out_eye_name,
+    std::vector<int64_t> *out_eye_shape, std::string *out_anchors_name,
+    std::vector<int64_t> *out_anchors_shape, std::string *out_angles_name,
+    std::vector<int64_t> *out_angles_shape, std::string *error) {
+  if (error)
+    error->clear();
+  if (!out_eye_name || !out_eye_shape || !out_anchors_name ||
+      !out_anchors_shape || !out_angles_name || !out_angles_shape) {
+    if (error)
+      *error = "DetectEyeInputsFromSession: null out params";
     return false;
   }
 
@@ -148,15 +153,17 @@ bool GazeCorrectionEyeContact::DetectEyeInputsFromSession(const studiocast::onnx
   int angles_idx = -1;
 
   for (std::size_t i = 0; i < info.input_shapes.size(); ++i) {
-    const auto& s = info.input_shapes[i];
+    const auto &s = info.input_shapes[i];
     if (s.size() == 4) {
       const bool has_c3 = (s[1] == 3 || s[3] == 3);
       if (has_c3 && eye_idx < 0) {
         eye_idx = static_cast<int>(i);
         continue;
       }
-      // Anchors are typically 12 channels (6 points * x/y maps), but allow 1 as a fallback.
-      const bool looks_like_anchor = (s[1] == 12 || s[3] == 12 || s[1] == 1 || s[3] == 1 || s[1] == -1 || s[3] == -1);
+      // Anchors are typically 12 channels (6 points * x/y maps), but allow 1 as
+      // a fallback.
+      const bool looks_like_anchor = (s[1] == 12 || s[3] == 12 || s[1] == 1 ||
+                                      s[3] == 1 || s[1] == -1 || s[3] == -1);
       if (looks_like_anchor && anchors_idx < 0) {
         anchors_idx = static_cast<int>(i);
         continue;
@@ -166,14 +173,16 @@ bool GazeCorrectionEyeContact::DetectEyeInputsFromSession(const studiocast::onnx
         angles_idx = static_cast<int>(i);
       }
     } else if (s.size() == 1) {
-      if (s[0] == 2) angles_idx = static_cast<int>(i);
+      if (s[0] == 2)
+        angles_idx = static_cast<int>(i);
     }
   }
 
   if (eye_idx < 0 || anchors_idx < 0 || angles_idx < 0) {
     if (error) {
       std::ostringstream oss;
-      oss << "Unable to infer eye_contact model inputs (need eye_rgb, anchors, angles).";
+      oss << "Unable to infer eye_contact model inputs (need eye_rgb, anchors, "
+             "angles).";
       *error = oss.str();
     }
     return false;
@@ -188,18 +197,19 @@ bool GazeCorrectionEyeContact::DetectEyeInputsFromSession(const studiocast::onnx
   return true;
 }
 
-bool GazeCorrectionEyeContact::DetectOutputFromSession(const studiocast::onnx::OrtSessionInfo& info,
-                                                      std::string* out_name,
-                                                      std::vector<int64_t>* out_shape,
-                                                      std::string* error) {
-  if (error) error->clear();
+bool GazeCorrectionEyeContact::DetectOutputFromSession(
+    const studiocast::onnx::OrtSessionInfo &info, std::string *out_name,
+    std::vector<int64_t> *out_shape, std::string *error) {
+  if (error)
+    error->clear();
   if (!out_name || !out_shape) {
-    if (error) *error = "DetectOutputFromSession: null out params";
+    if (error)
+      *error = "DetectOutputFromSession: null out params";
     return false;
   }
 
   for (std::size_t i = 0; i < info.output_shapes.size(); ++i) {
-    const auto& s = info.output_shapes[i];
+    const auto &s = info.output_shapes[i];
     if (s.size() == 4) {
       const int64_t c = (s[1] > 0) ? s[1] : s[3];
       if (c == 2 || c == 3 || c == 1) {
@@ -210,30 +220,36 @@ bool GazeCorrectionEyeContact::DetectOutputFromSession(const studiocast::onnx::O
     }
   }
 
-  if (error) *error = "Unable to infer eye_contact model output tensor.";
+  if (error)
+    *error = "Unable to infer eye_contact model output tensor.";
   return false;
 }
 
-bool GazeCorrectionEyeContact::LoadModelPack(const std::string& model_id, std::string* error) {
-  if (error) error->clear();
+bool GazeCorrectionEyeContact::LoadModelPack(const std::string &model_id,
+                                             std::string *error) {
+  if (error)
+    error->clear();
 
   if (model_id.empty()) {
-    if (error) *error = "No Open Video eye_contact model packs are installed.";
+    if (error)
+      *error = "No Open Video eye_contact model packs are installed.";
     return false;
   }
 
   const auto pack_opt = registry_.Find("eye_contact", model_id);
   if (!pack_opt.has_value()) {
-    if (error) *error = "Open Video eye_contact model pack not found: id='" + model_id + "'";
+    if (error)
+      *error =
+          "Open Video eye_contact model pack not found: id='" + model_id + "'";
     return false;
   }
-  const ModelPack& pack = *pack_opt;
+  const ModelPack &pack = *pack_opt;
 
   active_model_id_ = pack.id;
 
   // Resolve dependency on a face_landmarks pack (best-effort).
   required_landmarks_id_.clear();
-  for (const auto& dep : pack.depends_on) {
+  for (const auto &dep : pack.depends_on) {
     const std::string prefix = "face_landmarks:";
     if (dep.rfind(prefix, 0) == 0 && dep.size() > prefix.size()) {
       required_landmarks_id_ = dep.substr(prefix.size());
@@ -241,31 +257,38 @@ bool GazeCorrectionEyeContact::LoadModelPack(const std::string& model_id, std::s
     }
   }
 
-  const ModelFile* left = nullptr;
-  const ModelFile* right = nullptr;
-  for (const auto& f : pack.files) {
-    if (f.kind == "onnx" && f.role == "left") left = &f;
-    if (f.kind == "onnx" && f.role == "right") right = &f;
+  const ModelFile *left = nullptr;
+  const ModelFile *right = nullptr;
+  for (const auto &f : pack.files) {
+    if (f.kind == "onnx" && f.role == "left")
+      left = &f;
+    if (f.kind == "onnx" && f.role == "right")
+      right = &f;
   }
   if (!left || !right) {
-    if (error) *error = "eye_contact pack missing ONNX files with roles 'left' and 'right'.";
+    if (error)
+      *error =
+          "eye_contact pack missing ONNX files with roles 'left' and 'right'.";
     return false;
   }
   left_model_path_ = left->path;
   right_model_path_ = right->path;
   if (left_model_path_.empty() || right_model_path_.empty()) {
-    if (error) *error = "eye_contact pack has empty model path(s).";
+    if (error)
+      *error = "eye_contact pack has empty model path(s).";
     return false;
   }
   return true;
 }
 
-bool GazeCorrectionEyeContact::InitRuntimeForEye(const std::filesystem::path& onnx_path,
-                                                EyeRuntime* rt,
-                                                std::string* error) {
-  if (error) error->clear();
+bool GazeCorrectionEyeContact::InitRuntimeForEye(
+    const std::filesystem::path &onnx_path, EyeRuntime *rt,
+    std::string *error) {
+  if (error)
+    error->clear();
   if (!rt) {
-    if (error) *error = "InitRuntimeForEye: rt is null";
+    if (error)
+      *error = "InitRuntimeForEye: rt is null";
     return false;
   }
 
@@ -274,17 +297,20 @@ bool GazeCorrectionEyeContact::InitRuntimeForEye(const std::filesystem::path& on
   cuda_opts.prefer_cuda = true;
   studiocast::onnx::OrtSessionInfo cuda_info;
   std::string cuda_err;
-  rt->session_cuda = studiocast::onnx::OrtSession::Create(onnx_path, cuda_opts, &cuda_info, &cuda_err);
+  rt->session_cuda = studiocast::onnx::OrtSession::Create(
+      onnx_path, cuda_opts, &cuda_info, &cuda_err);
 
   studiocast::onnx::OrtSessionOptions cpu_opts;
   cpu_opts.prefer_cuda = false;
   studiocast::onnx::OrtSessionInfo cpu_info;
   std::string cpu_err;
-  rt->session_cpu = studiocast::onnx::OrtSession::Create(onnx_path, cpu_opts, &cpu_info, &cpu_err);
+  rt->session_cpu = studiocast::onnx::OrtSession::Create(onnx_path, cpu_opts,
+                                                         &cpu_info, &cpu_err);
 
   if (!rt->session_cuda && !rt->session_cpu) {
     if (error) {
-      *error = "Failed to create ONNX sessions: cuda='" + cuda_err + "' cpu='" + cpu_err + "'";
+      *error = "Failed to create ONNX sessions: cuda='" + cuda_err + "' cpu='" +
+               cpu_err + "'";
     }
     return false;
   }
@@ -301,28 +327,29 @@ bool GazeCorrectionEyeContact::InitRuntimeForEye(const std::filesystem::path& on
   return ConfigureRuntimeIo(rt, error);
 }
 
-bool GazeCorrectionEyeContact::ConfigureRuntimeIo(EyeRuntime* rt, std::string* error) {
-  if (error) error->clear();
+bool GazeCorrectionEyeContact::ConfigureRuntimeIo(EyeRuntime *rt,
+                                                  std::string *error) {
+  if (error)
+    error->clear();
   if (!rt || !rt->session_active) {
-    if (error) *error = "ConfigureRuntimeIo: session is null";
+    if (error)
+      *error = "ConfigureRuntimeIo: session is null";
     return false;
   }
 
   std::string e;
-  if (!DetectEyeInputsFromSession(rt->session_info,
-                                 &rt->eye_name,
-                                 &rt->eye_shape,
-                                 &rt->anchors_name,
-                                 &rt->anchors_shape,
-                                 &rt->angles_name,
-                                 &rt->angles_shape,
-                                 &e)) {
-    if (error) *error = e;
+  if (!DetectEyeInputsFromSession(
+          rt->session_info, &rt->eye_name, &rt->eye_shape, &rt->anchors_name,
+          &rt->anchors_shape, &rt->angles_name, &rt->angles_shape, &e)) {
+    if (error)
+      *error = e;
     return false;
   }
 
-  if (!DetectOutputFromSession(rt->session_info, &rt->output_name, &rt->output_shape, &e)) {
-    if (error) *error = e;
+  if (!DetectOutputFromSession(rt->session_info, &rt->output_name,
+                               &rt->output_shape, &e)) {
+    if (error)
+      *error = e;
     return false;
   }
 
@@ -331,39 +358,53 @@ bool GazeCorrectionEyeContact::ConfigureRuntimeIo(EyeRuntime* rt, std::string* e
     rt->eye_is_nhwc = (rt->eye_shape[3] == 3);
     const int64_t h = rt->eye_is_nhwc ? rt->eye_shape[1] : rt->eye_shape[2];
     const int64_t w = rt->eye_is_nhwc ? rt->eye_shape[2] : rt->eye_shape[3];
-    if (h > 0) rt->input_h = static_cast<int>(h);
-    if (w > 0) rt->input_w = static_cast<int>(w);
+    if (h > 0)
+      rt->input_h = static_cast<int>(h);
+    if (w > 0)
+      rt->input_w = static_cast<int>(w);
   }
 
   if (rt->anchors_shape.size() == 4) {
-    const int64_t c = (rt->anchors_shape[1] > 0) ? rt->anchors_shape[1] : rt->anchors_shape[3];
-    if (c > 0) rt->anchor_channels = static_cast<int>(c);
+    const int64_t c = (rt->anchors_shape[1] > 0) ? rt->anchors_shape[1]
+                                                 : rt->anchors_shape[3];
+    if (c > 0)
+      rt->anchor_channels = static_cast<int>(c);
     rt->anchors_is_nhwc = (rt->anchors_shape[3] == c);
   }
 
   if (rt->output_shape.size() == 4) {
     rt->output_is_nhwc = (rt->output_shape[3] > 0 && rt->output_shape[1] <= 0);
-    const int64_t c = rt->output_is_nhwc ? rt->output_shape[3] : rt->output_shape[1];
+    const int64_t c =
+        rt->output_is_nhwc ? rt->output_shape[3] : rt->output_shape[1];
     rt->out_channels = static_cast<int>(c);
   }
 
-  // Allocate buffers based on the inferred shapes, replacing -1 with our expected dims.
-  auto fix_shape = [](std::vector<int64_t>* s, int w, int h, int c, bool nhwc) {
-    if (s->size() != 4) return;
+  // Allocate buffers based on the inferred shapes, replacing -1 with our
+  // expected dims.
+  auto fix_shape = [](std::vector<int64_t> *s, int w, int h, int c, bool nhwc) {
+    if (s->size() != 4)
+      return;
     (*s)[0] = 1;
     if (nhwc) {
-      if ((*s)[1] <= 0) (*s)[1] = h;
-      if ((*s)[2] <= 0) (*s)[2] = w;
-      if ((*s)[3] <= 0) (*s)[3] = c;
+      if ((*s)[1] <= 0)
+        (*s)[1] = h;
+      if ((*s)[2] <= 0)
+        (*s)[2] = w;
+      if ((*s)[3] <= 0)
+        (*s)[3] = c;
     } else {
-      if ((*s)[1] <= 0) (*s)[1] = c;
-      if ((*s)[2] <= 0) (*s)[2] = h;
-      if ((*s)[3] <= 0) (*s)[3] = w;
+      if ((*s)[1] <= 0)
+        (*s)[1] = c;
+      if ((*s)[2] <= 0)
+        (*s)[2] = h;
+      if ((*s)[3] <= 0)
+        (*s)[3] = w;
     }
   };
 
   fix_shape(&rt->eye_shape, rt->input_w, rt->input_h, 3, rt->eye_is_nhwc);
-  fix_shape(&rt->anchors_shape, rt->input_w, rt->input_h, rt->anchor_channels, rt->anchors_is_nhwc);
+  fix_shape(&rt->anchors_shape, rt->input_w, rt->input_h, rt->anchor_channels,
+            rt->anchors_is_nhwc);
   // Angles: [1,2] best-effort.
   if (rt->angles_shape.size() == 2) {
     rt->angles_shape[0] = 1;
@@ -371,11 +412,15 @@ bool GazeCorrectionEyeContact::ConfigureRuntimeIo(EyeRuntime* rt, std::string* e
   } else if (rt->angles_shape.size() == 1) {
     rt->angles_shape[0] = 2;
   }
-  fix_shape(&rt->output_shape, rt->input_w, rt->input_h, rt->out_channels, rt->output_is_nhwc);
+  fix_shape(&rt->output_shape, rt->input_w, rt->input_h, rt->out_channels,
+            rt->output_is_nhwc);
 
-  const std::size_t eye_elems = static_cast<std::size_t>(3) * rt->input_w * rt->input_h;
-  const std::size_t anchor_elems = static_cast<std::size_t>(rt->anchor_channels) * rt->input_w * rt->input_h;
-  const std::size_t out_elems = static_cast<std::size_t>(rt->out_channels) * rt->input_w * rt->input_h;
+  const std::size_t eye_elems =
+      static_cast<std::size_t>(3) * rt->input_w * rt->input_h;
+  const std::size_t anchor_elems =
+      static_cast<std::size_t>(rt->anchor_channels) * rt->input_w * rt->input_h;
+  const std::size_t out_elems =
+      static_cast<std::size_t>(rt->out_channels) * rt->input_w * rt->input_h;
   rt->eye_tensor.assign(eye_elems, 0.f);
   rt->anchors_tensor.assign(anchor_elems, 0.f);
   rt->angles_tensor.assign(2, 0.f);
@@ -383,34 +428,29 @@ bool GazeCorrectionEyeContact::ConfigureRuntimeIo(EyeRuntime* rt, std::string* e
 
   rt->ort_inputs.clear();
   rt->ort_outputs.clear();
-  rt->ort_inputs.push_back(studiocast::onnx::OrtSession::RunInput{rt->eye_name.c_str(),
-                                                           rt->eye_tensor.data(),
-                                                           rt->eye_tensor.size(),
-                                                           rt->eye_shape.data(),
-                                                           rt->eye_shape.size()});
-  rt->ort_inputs.push_back(studiocast::onnx::OrtSession::RunInput{rt->anchors_name.c_str(),
-                                                           rt->anchors_tensor.data(),
-                                                           rt->anchors_tensor.size(),
-                                                           rt->anchors_shape.data(),
-                                                           rt->anchors_shape.size()});
+  rt->ort_inputs.push_back(studiocast::onnx::OrtSession::RunInput{
+      rt->eye_name.c_str(), rt->eye_tensor.data(), rt->eye_tensor.size(),
+      rt->eye_shape.data(), rt->eye_shape.size()});
+  rt->ort_inputs.push_back(studiocast::onnx::OrtSession::RunInput{
+      rt->anchors_name.c_str(), rt->anchors_tensor.data(),
+      rt->anchors_tensor.size(), rt->anchors_shape.data(),
+      rt->anchors_shape.size()});
 
   // Angles: shape rank can be 1 or 2.
-  rt->ort_inputs.push_back(studiocast::onnx::OrtSession::RunInput{rt->angles_name.c_str(),
-                                                           rt->angles_tensor.data(),
-                                                           2,
-                                                           rt->angles_shape.data(),
-                                                           rt->angles_shape.size()});
-  rt->ort_outputs.push_back(studiocast::onnx::OrtSession::RunOutput{rt->output_name.c_str(),
-                                                             rt->output_tensor.data(),
-                                                             rt->output_tensor.size(),
-                                                             rt->output_shape.data(),
-                                                             rt->output_shape.size()});
+  rt->ort_inputs.push_back(studiocast::onnx::OrtSession::RunInput{
+      rt->angles_name.c_str(), rt->angles_tensor.data(), 2,
+      rt->angles_shape.data(), rt->angles_shape.size()});
+  rt->ort_outputs.push_back(studiocast::onnx::OrtSession::RunOutput{
+      rt->output_name.c_str(), rt->output_tensor.data(),
+      rt->output_tensor.size(), rt->output_shape.data(),
+      rt->output_shape.size()});
 
   return true;
 }
 
-bool GazeCorrectionEyeContact::EnsureDlibDependency(std::string* error) {
-  if (error) error->clear();
+bool GazeCorrectionEyeContact::EnsureDlibDependency(std::string *error) {
+  if (error)
+    error->clear();
 
   std::string dep_id = required_landmarks_id_;
   if (!dlib_landmarks_.EnsureInitialized(dep_id, error)) {
@@ -419,18 +459,24 @@ bool GazeCorrectionEyeContact::EnsureDlibDependency(std::string* error) {
   return true;
 }
 
-bool GazeCorrectionEyeContact::EnsureInitialized(const std::string& requested_model_id, std::string* error) {
-  if (error) error->clear();
+bool GazeCorrectionEyeContact::EnsureInitialized(
+    const std::string &requested_model_id, std::string *error) {
+  if (error)
+    error->clear();
 
   if (disabled_) {
-    if (error && !sticky_warning_.empty()) *error = sticky_warning_;
+    if (error && !sticky_warning_.empty())
+      *error = sticky_warning_;
     return false;
   }
   // Resolve desired model id.
   ModelPackRegistry reg = ModelPackRegistry::ScanDefault();
-  const std::string desired = requested_model_id.empty() ? ChoosePreferredModelId(reg) : requested_model_id;
+  const std::string desired = requested_model_id.empty()
+                                  ? ChoosePreferredModelId(reg)
+                                  : requested_model_id;
   if (desired.empty()) {
-    if (error) *error = "No Open Video eye_contact model packs are installed.";
+    if (error)
+      *error = "No Open Video eye_contact model packs are installed.";
     return false;
   }
 
@@ -446,26 +492,32 @@ bool GazeCorrectionEyeContact::EnsureInitialized(const std::string& requested_mo
   registry_ = std::move(reg);
 
 #if !STUDIOCAST_HAVE_ONNXRUNTIME
-  if (error) *error = "ONNX Runtime is not available in this build (STUDIOCAST_HAVE_ONNXRUNTIME=0).";
+  if (error)
+    *error = "ONNX Runtime is not available in this build "
+             "(STUDIOCAST_HAVE_ONNXRUNTIME=0).";
   return false;
 #else
   std::string e;
   if (!LoadModelPack(desired, &e)) {
-    if (error) *error = e;
+    if (error)
+      *error = e;
     return false;
   }
 
   if (!EnsureDlibDependency(&e)) {
-    if (error) *error = e;
+    if (error)
+      *error = e;
     return false;
   }
 
   if (!InitRuntimeForEye(left_model_path_, &left_, &e)) {
-    if (error) *error = "Eye Contact left model init failed: " + e;
+    if (error)
+      *error = "Eye Contact left model init failed: " + e;
     return false;
   }
   if (!InitRuntimeForEye(right_model_path_, &right_, &e)) {
-    if (error) *error = "Eye Contact right model init failed: " + e;
+    if (error)
+      *error = "Eye Contact right model init failed: " + e;
     return false;
   }
 
@@ -481,16 +533,19 @@ bool GazeCorrectionEyeContact::EnsureInitialized(const std::string& requested_mo
 #endif
 }
 
-const FaceDetection* GazeCorrectionEyeContact::ChooseBestFace(const std::vector<FaceDetection>& faces) {
-  if (faces.empty()) return nullptr;
-  const FaceDetection* best = &faces[0];
+const FaceDetection *GazeCorrectionEyeContact::ChooseBestFace(
+    const std::vector<FaceDetection> &faces) {
+  if (faces.empty())
+    return nullptr;
+  const FaceDetection *best = &faces[0];
   float best_score = faces[0].score;
   float best_area = faces[0].w * faces[0].h;
-  for (const auto& f : faces) {
+  for (const auto &f : faces) {
     const float area = f.w * f.h;
     const float score = f.score;
     // Prefer higher score; tie-break by area.
-    if (score > best_score + 1e-5f || (std::abs(score - best_score) < 1e-5f && area > best_area)) {
+    if (score > best_score + 1e-5f ||
+        (std::abs(score - best_score) < 1e-5f && area > best_area)) {
       best = &f;
       best_score = score;
       best_area = area;
@@ -499,19 +554,15 @@ const FaceDetection* GazeCorrectionEyeContact::ChooseBestFace(const std::vector<
   return best;
 }
 
-bool GazeCorrectionEyeContact::ExtractEyeData(const std::uint8_t* rgb,
-                                             int frame_w,
-                                             int frame_h,
-                                             std::size_t frame_stride,
-                                             const FaceLandmarks& lms,
-                                             bool left_eye,
-                                             int input_w,
-                                             int input_h,
-                                             EyeData* out,
-                                             std::string* error) {
-  if (error) error->clear();
+bool GazeCorrectionEyeContact::ExtractEyeData(
+    const std::uint8_t *rgb, int frame_w, int frame_h, std::size_t frame_stride,
+    const FaceLandmarks &lms, bool left_eye, int input_w, int input_h,
+    EyeData *out, std::string *error) {
+  if (error)
+    error->clear();
   if (!out) {
-    if (error) *error = "ExtractEyeData: out is null";
+    if (error)
+      *error = "ExtractEyeData: out is null";
     return false;
   }
   *out = EyeData();
@@ -520,7 +571,8 @@ bool GazeCorrectionEyeContact::ExtractEyeData(const std::uint8_t* rgb,
   out->input_h = input_h;
 
   if (lms.points.size() < 68) {
-    if (error) *error = "ExtractEyeData: expected 68 landmarks";
+    if (error)
+      *error = "ExtractEyeData: expected 68 landmarks";
     return false;
   }
 
@@ -572,29 +624,26 @@ bool GazeCorrectionEyeContact::ExtractEyeData(const std::uint8_t* rgb,
   out->crop_h = crop_h;
 
   // Resize crop to the model input size.
-  const std::uint8_t* crop_ptr = rgb + ByteOffset(frame_stride, left, top);
+  const std::uint8_t *crop_ptr = rgb + ByteOffset(frame_stride, left, top);
   std::vector<std::uint8_t> resized;
   std::string rerr;
-  if (!studiocast::video::ResizeRgb24Bilinear(crop_ptr,
-                                             crop_w,
-                                             crop_h,
-                                             frame_stride,
-                                             input_w,
-                                             input_h,
-                                             &resized,
-                                             static_cast<std::size_t>(input_w * 3),
-                                             &rerr)) {
-    if (error) *error = "Eye crop resize failed: " + rerr;
+  if (!studiocast::video::ResizeRgb24Bilinear(
+          crop_ptr, crop_w, crop_h, frame_stride, input_w, input_h, &resized,
+          static_cast<std::size_t>(input_w * 3), &rerr)) {
+    if (error)
+      *error = "Eye crop resize failed: " + rerr;
     return false;
   }
   out->eye_rgb_u8 = std::move(resized);
 
   // Convert eye to NCHW float32 in 0..1.
-  out->eye_nchw_f32.assign(static_cast<std::size_t>(3) * input_w * input_h, 0.f);
+  out->eye_nchw_f32.assign(static_cast<std::size_t>(3) * input_w * input_h,
+                           0.f);
   const int plane = input_w * input_h;
   for (int y = 0; y < input_h; ++y) {
     for (int x = 0; x < input_w; ++x) {
-      const std::size_t src = static_cast<std::size_t>(y) * input_w * 3 + static_cast<std::size_t>(x) * 3;
+      const std::size_t src = static_cast<std::size_t>(y) * input_w * 3 +
+                              static_cast<std::size_t>(x) * 3;
       const int idx = y * input_w + x;
       out->eye_nchw_f32[idx] = out->eye_rgb_u8[src + 0] / 255.0f;
       out->eye_nchw_f32[plane + idx] = out->eye_rgb_u8[src + 1] / 255.0f;
@@ -607,21 +656,28 @@ bool GazeCorrectionEyeContact::ExtractEyeData(const std::uint8_t* rgb,
   //   L: [3,2,1,0,5,4]
   //   R: [0,1,2,3,4,5]
   std::array<std::pair<float, float>, 6> pts = {p0, p1, p2, p3, p4, p5};
-  std::array<int, 6> seq = left_eye ? std::array<int, 6>{3, 2, 1, 0, 5, 4} : std::array<int, 6>{0, 1, 2, 3, 4, 5};
+  std::array<int, 6> seq = left_eye ? std::array<int, 6>{3, 2, 1, 0, 5, 4}
+                                    : std::array<int, 6>{0, 1, 2, 3, 4, 5};
 
-  out->anchors_nchw_f32.assign(static_cast<std::size_t>(12) * input_w * input_h, 0.f);
+  out->anchors_nchw_f32.assign(static_cast<std::size_t>(12) * input_w * input_h,
+                               0.f);
 
   for (int i = 0; i < 6; ++i) {
-    const auto pt = pts[static_cast<std::size_t>(seq[static_cast<std::size_t>(i)])];
+    const auto pt =
+        pts[static_cast<std::size_t>(seq[static_cast<std::size_t>(i)])];
     const int resize_x = static_cast<int>(
-        std::round((pt.first - static_cast<float>(left)) * static_cast<float>(input_w) / static_cast<float>(crop_w)));
+        std::round((pt.first - static_cast<float>(left)) *
+                   static_cast<float>(input_w) / static_cast<float>(crop_w)));
     const int resize_y = static_cast<int>(
-        std::round((pt.second - static_cast<float>(top)) * static_cast<float>(input_h) / static_cast<float>(crop_h)));
+        std::round((pt.second - static_cast<float>(top)) *
+                   static_cast<float>(input_h) / static_cast<float>(crop_h)));
 
     const int c_x = 2 * i;
     const int c_y = 2 * i + 1;
-    float* ch_x = out->anchors_nchw_f32.data() + static_cast<std::size_t>(c_x) * input_w * input_h;
-    float* ch_y = out->anchors_nchw_f32.data() + static_cast<std::size_t>(c_y) * input_w * input_h;
+    float *ch_x = out->anchors_nchw_f32.data() +
+                  static_cast<std::size_t>(c_x) * input_w * input_h;
+    float *ch_y = out->anchors_nchw_f32.data() +
+                  static_cast<std::size_t>(c_y) * input_w * input_h;
 
     for (int y = 0; y < input_h; ++y) {
       const float dy = static_cast<float>(y - resize_y);
@@ -637,17 +693,18 @@ bool GazeCorrectionEyeContact::ExtractEyeData(const std::uint8_t* rgb,
   return true;
 }
 
-bool GazeCorrectionEyeContact::RunModelForEye(EyeRuntime* rt,
-                                             const EyeData& eye,
-                                             float yaw,
-                                             float pitch,
-                                             std::string* error) {
-  if (error) error->clear();
+bool GazeCorrectionEyeContact::RunModelForEye(EyeRuntime *rt,
+                                              const EyeData &eye, float yaw,
+                                              float pitch, std::string *error) {
+  if (error)
+    error->clear();
   if (!rt || !rt->session_active) {
-    if (error) *error = "RunModelForEye: rt/session is null";
+    if (error)
+      *error = "RunModelForEye: rt/session is null";
     return false;
   }
-  if (!eye.valid) return true;
+  if (!eye.valid)
+    return true;
 
   const int w = rt->input_w;
   const int h = rt->input_h;
@@ -656,7 +713,8 @@ bool GazeCorrectionEyeContact::RunModelForEye(EyeRuntime* rt,
   if (!rt->eye_is_nhwc) {
     // NCHW
     if (eye.eye_nchw_f32.size() != rt->eye_tensor.size()) {
-      if (error) *error = "RunModelForEye: eye tensor size mismatch";
+      if (error)
+        *error = "RunModelForEye: eye tensor size mismatch";
       return false;
     }
     rt->eye_tensor = eye.eye_nchw_f32;
@@ -683,7 +741,9 @@ bool GazeCorrectionEyeContact::RunModelForEye(EyeRuntime* rt,
       rt->anchors_tensor.assign(want, 0.f);
       const std::size_t have = eye.anchors_nchw_f32.size();
       const std::size_t copy = std::min(want, have);
-      std::copy(eye.anchors_nchw_f32.begin(), eye.anchors_nchw_f32.begin() + static_cast<long>(copy), rt->anchors_tensor.begin());
+      std::copy(eye.anchors_nchw_f32.begin(),
+                eye.anchors_nchw_f32.begin() + static_cast<long>(copy),
+                rt->anchors_tensor.begin());
     } else {
       rt->anchors_tensor = eye.anchors_nchw_f32;
     }
@@ -694,11 +754,13 @@ bool GazeCorrectionEyeContact::RunModelForEye(EyeRuntime* rt,
     for (int y = 0; y < h; ++y) {
       for (int x = 0; x < w; ++x) {
         const int idx = y * w + x;
-        const std::size_t dst_base = (static_cast<std::size_t>(y) * w + x) * static_cast<std::size_t>(C);
+        const std::size_t dst_base =
+            (static_cast<std::size_t>(y) * w + x) * static_cast<std::size_t>(C);
         for (int c = 0; c < C; ++c) {
           const std::size_t src = static_cast<std::size_t>(c) * plane + idx;
           if (src < eye.anchors_nchw_f32.size()) {
-            rt->anchors_tensor[dst_base + static_cast<std::size_t>(c)] = eye.anchors_nchw_f32[src];
+            rt->anchors_tensor[dst_base + static_cast<std::size_t>(c)] =
+                eye.anchors_nchw_f32[src];
           }
         }
       }
@@ -711,11 +773,9 @@ bool GazeCorrectionEyeContact::RunModelForEye(EyeRuntime* rt,
   rt->angles_tensor[1] = pitch;
 
   std::string run_err;
-  if (rt->session_active->RunCpu(rt->ort_inputs.data(),
-                              rt->ort_inputs.size(),
-                              rt->ort_outputs.data(),
-                              rt->ort_outputs.size(),
-                              &run_err)) {
+  if (rt->session_active->RunCpu(rt->ort_inputs.data(), rt->ort_inputs.size(),
+                                 rt->ort_outputs.data(), rt->ort_outputs.size(),
+                                 &run_err)) {
     return true;
   }
 
@@ -723,26 +783,26 @@ bool GazeCorrectionEyeContact::RunModelForEye(EyeRuntime* rt,
   if (rt->session_active == rt->session_cuda.get() && rt->session_cpu) {
     rt->session_active = rt->session_cpu.get();
     using_cpu_fallback_ = true;
-    if (rt->session_active->RunCpu(rt->ort_inputs.data(),
-                                rt->ort_inputs.size(),
-                                rt->ort_outputs.data(),
-                                rt->ort_outputs.size(),
-                                &run_err)) {
+    if (rt->session_active->RunCpu(rt->ort_inputs.data(), rt->ort_inputs.size(),
+                                   rt->ort_outputs.data(),
+                                   rt->ort_outputs.size(), &run_err)) {
       return true;
     }
   }
 
-  if (error) *error = run_err;
+  if (error)
+    *error = run_err;
   return false;
 }
 
-bool GazeCorrectionEyeContact::WarpOrDecodeOutputToRgbU8(const EyeRuntime& rt,
-                                                       const EyeData& eye,
-                                                       std::vector<std::uint8_t>* out_rgb_u8,
-                                                       std::string* error) const {
-  if (error) error->clear();
+bool GazeCorrectionEyeContact::WarpOrDecodeOutputToRgbU8(
+    const EyeRuntime &rt, const EyeData &eye,
+    std::vector<std::uint8_t> *out_rgb_u8, std::string *error) const {
+  if (error)
+    error->clear();
   if (!out_rgb_u8) {
-    if (error) *error = "WarpOrDecodeOutputToRgbU8: out is null";
+    if (error)
+      *error = "WarpOrDecodeOutputToRgbU8: out is null";
     return false;
   }
 
@@ -760,10 +820,14 @@ bool GazeCorrectionEyeContact::WarpOrDecodeOutputToRgbU8(const EyeRuntime& rt,
           const float r = rt.output_tensor[idx];
           const float g = rt.output_tensor[plane + idx];
           const float b = rt.output_tensor[2 * plane + idx];
-          const std::size_t dst = static_cast<std::size_t>(y) * w * 3 + static_cast<std::size_t>(x) * 3;
-          (*out_rgb_u8)[dst + 0] = static_cast<std::uint8_t>(ClampInt(static_cast<int>(std::round(Clamp01(r) * 255.f)), 0, 255));
-          (*out_rgb_u8)[dst + 1] = static_cast<std::uint8_t>(ClampInt(static_cast<int>(std::round(Clamp01(g) * 255.f)), 0, 255));
-          (*out_rgb_u8)[dst + 2] = static_cast<std::uint8_t>(ClampInt(static_cast<int>(std::round(Clamp01(b) * 255.f)), 0, 255));
+          const std::size_t dst = static_cast<std::size_t>(y) * w * 3 +
+                                  static_cast<std::size_t>(x) * 3;
+          (*out_rgb_u8)[dst + 0] = static_cast<std::uint8_t>(ClampInt(
+              static_cast<int>(std::round(Clamp01(r) * 255.f)), 0, 255));
+          (*out_rgb_u8)[dst + 1] = static_cast<std::uint8_t>(ClampInt(
+              static_cast<int>(std::round(Clamp01(g) * 255.f)), 0, 255));
+          (*out_rgb_u8)[dst + 2] = static_cast<std::uint8_t>(ClampInt(
+              static_cast<int>(std::round(Clamp01(b) * 255.f)), 0, 255));
         }
       }
     } else {
@@ -773,19 +837,25 @@ bool GazeCorrectionEyeContact::WarpOrDecodeOutputToRgbU8(const EyeRuntime& rt,
           const float r = rt.output_tensor[src + 0];
           const float g = rt.output_tensor[src + 1];
           const float b = rt.output_tensor[src + 2];
-          const std::size_t dst = static_cast<std::size_t>(y) * w * 3 + static_cast<std::size_t>(x) * 3;
-          (*out_rgb_u8)[dst + 0] = static_cast<std::uint8_t>(ClampInt(static_cast<int>(std::round(Clamp01(r) * 255.f)), 0, 255));
-          (*out_rgb_u8)[dst + 1] = static_cast<std::uint8_t>(ClampInt(static_cast<int>(std::round(Clamp01(g) * 255.f)), 0, 255));
-          (*out_rgb_u8)[dst + 2] = static_cast<std::uint8_t>(ClampInt(static_cast<int>(std::round(Clamp01(b) * 255.f)), 0, 255));
+          const std::size_t dst = static_cast<std::size_t>(y) * w * 3 +
+                                  static_cast<std::size_t>(x) * 3;
+          (*out_rgb_u8)[dst + 0] = static_cast<std::uint8_t>(ClampInt(
+              static_cast<int>(std::round(Clamp01(r) * 255.f)), 0, 255));
+          (*out_rgb_u8)[dst + 1] = static_cast<std::uint8_t>(ClampInt(
+              static_cast<int>(std::round(Clamp01(g) * 255.f)), 0, 255));
+          (*out_rgb_u8)[dst + 2] = static_cast<std::uint8_t>(ClampInt(
+              static_cast<int>(std::round(Clamp01(b) * 255.f)), 0, 255));
         }
       }
     }
     return true;
   }
 
-  // Otherwise treat the output as a 2-channel flow field and warp the input eye.
+  // Otherwise treat the output as a 2-channel flow field and warp the input
+  // eye.
   if (rt.out_channels != 2) {
-    if (error) *error = "Unexpected eye_contact output channels (expected 2 or 3).";
+    if (error)
+      *error = "Unexpected eye_contact output channels (expected 2 or 3).";
     return false;
   }
 
@@ -813,38 +883,36 @@ bool GazeCorrectionEyeContact::WarpOrDecodeOutputToRgbU8(const EyeRuntime& rt,
       float r = 0.f, g = 0.f, b = 0.f;
       BilinearSampleRgbNchw(eye.eye_nchw_f32.data(), w, h, sx, sy, &r, &g, &b);
 
-      const std::size_t dst = static_cast<std::size_t>(y) * w * 3 + static_cast<std::size_t>(x) * 3;
-      (*out_rgb_u8)[dst + 0] = static_cast<std::uint8_t>(ClampInt(static_cast<int>(std::round(Clamp01(r) * 255.f)), 0, 255));
-      (*out_rgb_u8)[dst + 1] = static_cast<std::uint8_t>(ClampInt(static_cast<int>(std::round(Clamp01(g) * 255.f)), 0, 255));
-      (*out_rgb_u8)[dst + 2] = static_cast<std::uint8_t>(ClampInt(static_cast<int>(std::round(Clamp01(b) * 255.f)), 0, 255));
+      const std::size_t dst =
+          static_cast<std::size_t>(y) * w * 3 + static_cast<std::size_t>(x) * 3;
+      (*out_rgb_u8)[dst + 0] = static_cast<std::uint8_t>(
+          ClampInt(static_cast<int>(std::round(Clamp01(r) * 255.f)), 0, 255));
+      (*out_rgb_u8)[dst + 1] = static_cast<std::uint8_t>(
+          ClampInt(static_cast<int>(std::round(Clamp01(g) * 255.f)), 0, 255));
+      (*out_rgb_u8)[dst + 2] = static_cast<std::uint8_t>(
+          ClampInt(static_cast<int>(std::round(Clamp01(b) * 255.f)), 0, 255));
     }
   }
   return true;
 }
 
-void GazeCorrectionEyeContact::CompositeEyeIntoFrame(std::uint8_t* frame_rgb,
-                                                    int frame_w,
-                                                    int frame_h,
-                                                    std::size_t frame_stride,
-                                                    const EyeData& eye,
-                                                    const std::vector<std::uint8_t>& corrected_rgb_u8,
-                                                    float strength01) {
-  if (!frame_rgb || !eye.valid) return;
+void GazeCorrectionEyeContact::CompositeEyeIntoFrame(
+    std::uint8_t *frame_rgb, int frame_w, int frame_h, std::size_t frame_stride,
+    const EyeData &eye, const std::vector<std::uint8_t> &corrected_rgb_u8,
+    float strength01) {
+  if (!frame_rgb || !eye.valid)
+    return;
   strength01 = Clamp01(strength01);
-  if (strength01 <= 0.f) return;
+  if (strength01 <= 0.f)
+    return;
 
   // Upscale corrected eye to the crop size.
   std::vector<std::uint8_t> up;
   std::string rerr;
-  (void)studiocast::video::ResizeRgb24Bilinear(corrected_rgb_u8.data(),
-                                             eye.input_w,
-                                             eye.input_h,
-                                             static_cast<std::size_t>(eye.input_w * 3),
-                                             eye.crop_w,
-                                             eye.crop_h,
-                                             &up,
-                                             static_cast<std::size_t>(eye.crop_w * 3),
-                                             &rerr);
+  (void)studiocast::video::ResizeRgb24Bilinear(
+      corrected_rgb_u8.data(), eye.input_w, eye.input_h,
+      static_cast<std::size_t>(eye.input_w * 3), eye.crop_w, eye.crop_h, &up,
+      static_cast<std::size_t>(eye.crop_w * 3), &rerr);
 
   // Blend into the original frame.
   const int x0 = ClampInt(eye.crop_left, 0, frame_w - 1);
@@ -854,11 +922,16 @@ void GazeCorrectionEyeContact::CompositeEyeIntoFrame(std::uint8_t* frame_rgb,
 
   const int out_w = x1 - x0;
   const int out_h = y1 - y0;
-  if (out_w <= 0 || out_h <= 0) return;
+  if (out_w <= 0 || out_h <= 0)
+    return;
 
   for (int y = 0; y < out_h; ++y) {
-    std::uint8_t* dst_row = frame_rgb + static_cast<std::size_t>(y0 + y) * frame_stride + static_cast<std::size_t>(x0) * 3;
-    const std::uint8_t* src_row = up.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(eye.crop_w) * 3;
+    std::uint8_t *dst_row = frame_rgb +
+                            static_cast<std::size_t>(y0 + y) * frame_stride +
+                            static_cast<std::size_t>(x0) * 3;
+    const std::uint8_t *src_row =
+        up.data() +
+        static_cast<std::size_t>(y) * static_cast<std::size_t>(eye.crop_w) * 3;
     for (int x = 0; x < out_w; ++x) {
       const std::size_t d = static_cast<std::size_t>(x) * 3;
       const std::size_t s = static_cast<std::size_t>(x) * 3;
@@ -866,105 +939,101 @@ void GazeCorrectionEyeContact::CompositeEyeIntoFrame(std::uint8_t* frame_rgb,
         const float o = dst_row[d + static_cast<std::size_t>(c)];
         const float n = src_row[s + static_cast<std::size_t>(c)];
         const float v = Lerp(o, n, strength01);
-        dst_row[d + static_cast<std::size_t>(c)] = static_cast<std::uint8_t>(ClampInt(static_cast<int>(std::round(v)), 0, 255));
+        dst_row[d + static_cast<std::size_t>(c)] = static_cast<std::uint8_t>(
+            ClampInt(static_cast<int>(std::round(v)), 0, 255));
       }
     }
   }
 }
 
-bool GazeCorrectionEyeContact::ApplyRgbInPlace(std::uint64_t capture_sequence,
-                                              std::uint8_t* rgb,
-                                              int width,
-                                              int height,
-                                              std::size_t stride,
-                                              int strength,
-                                              bool look_away_enabled,
-                                              const std::string& face_detection_model_id,
-                                              const std::string& requested_model_id,
-                                              YunetFaceDetector* yunet,
-                                              FrameAnalysisCache* cache,
-                                              std::string* error) {
-  if (error) error->clear();
+bool GazeCorrectionEyeContact::ApplyRgbInPlace(
+    std::uint64_t capture_sequence, std::uint8_t *rgb, int width, int height,
+    std::size_t stride, int strength, bool look_away_enabled,
+    const std::string &face_detection_model_id,
+    const std::string &requested_model_id, YunetFaceDetector *yunet,
+    FrameAnalysisCache *cache, std::string *error) {
+  if (error)
+    error->clear();
   (void)look_away_enabled;
 
-  if (!rgb || width <= 0 || height <= 0 || stride < static_cast<std::size_t>(width * 3)) {
-    if (error) *error = "ApplyRgbInPlace: invalid RGB frame";
+  if (!rgb || width <= 0 || height <= 0 ||
+      stride < static_cast<std::size_t>(width * 3)) {
+    if (error)
+      *error = "ApplyRgbInPlace: invalid RGB frame";
     return false;
   }
   if (!yunet) {
-    if (error) *error = "ApplyRgbInPlace: yunet is null";
+    if (error)
+      *error = "ApplyRgbInPlace: yunet is null";
     return false;
   }
   if (!cache) {
-    if (error) *error = "ApplyRgbInPlace: cache is null";
+    if (error)
+      *error = "ApplyRgbInPlace: cache is null";
     return false;
   }
 
-  if (strength <= 0) return true;
+  if (strength <= 0)
+    return true;
   const float strength01 = Clamp01(static_cast<float>(strength) / 100.f);
 
   std::string init_err;
   if (!EnsureInitialized(requested_model_id, &init_err)) {
-    // If not initialized (missing models), treat as bypass rather than hard failure.
-    if (error) *error = init_err;
+    // If not initialized (missing models), treat as bypass rather than hard
+    // failure.
+    if (error)
+      *error = init_err;
     return false;
   }
 
   // Ensure face detections.
   std::string det_err;
-  if (!yunet->EnsureDetectionsForFrame(rgb, width, height, stride, face_detection_model_id, capture_sequence, cache, &det_err)) {
-    if (error) *error = det_err;
+  if (!yunet->EnsureDetectionsForFrame(rgb, width, height, stride,
+                                       face_detection_model_id,
+                                       capture_sequence, cache, &det_err)) {
+    if (error)
+      *error = det_err;
     return false;
   }
   if (!cache->face_detections.has_value() || cache->face_detections->empty()) {
-    return true;  // no face => bypass
+    return true; // no face => bypass
   }
 
-  const FaceDetection* face = ChooseBestFace(*cache->face_detections);
-  if (!face) return true;
+  const FaceDetection *face = ChooseBestFace(*cache->face_detections);
+  if (!face)
+    return true;
 
   // Landmarks (cached).
   std::string lm_err;
-  if (!dlib_landmarks_.EnsureLandmarksForFrame(rgb, width, height, stride, capture_sequence, *face, cache, &lm_err)) {
-    if (error) *error = lm_err;
+  if (!dlib_landmarks_.EnsureLandmarksForFrame(rgb, width, height, stride,
+                                               capture_sequence, *face, cache,
+                                               &lm_err)) {
+    if (error)
+      *error = lm_err;
     return false;
   }
-  if (!cache->face_landmarks.has_value()) return true;
+  if (!cache->face_landmarks.has_value())
+    return true;
 
   // Extract eye inputs.
   EyeData left_eye;
   EyeData right_eye;
   std::string ex_err;
-  const auto& lms = *cache->face_landmarks;
-  if (!ExtractEyeData(rgb,
-                      width,
-                      height,
-                      stride,
-                      lms,
-                      true,
-                      left_.input_w,
-                      left_.input_h,
-                      &left_eye,
-                      &ex_err)) {
+  const auto &lms = *cache->face_landmarks;
+  if (!ExtractEyeData(rgb, width, height, stride, lms, true, left_.input_w,
+                      left_.input_h, &left_eye, &ex_err)) {
     // No usable eye region.
   }
-  if (!ExtractEyeData(rgb,
-                      width,
-                      height,
-                      stride,
-                      lms,
-                      false,
-                      right_.input_w,
-                      right_.input_h,
-                      &right_eye,
-                      &ex_err)) {
+  if (!ExtractEyeData(rgb, width, height, stride, lms, false, right_.input_w,
+                      right_.input_h, &right_eye, &ex_err)) {
     // No usable eye region.
   }
 
-  if (!left_eye.valid && !right_eye.valid) return true;
+  if (!left_eye.valid && !right_eye.valid)
+    return true;
 
-  // Placeholder gaze angles: aim slightly upward towards a typical webcam position.
-  // Strength scales the effective angle.
+  // Placeholder gaze angles: aim slightly upward towards a typical webcam
+  // position. Strength scales the effective angle.
   const float yaw = 0.0f * strength01;
   const float pitch = -0.10f * strength01;
 
@@ -973,37 +1042,43 @@ bool GazeCorrectionEyeContact::ApplyRgbInPlace(std::uint64_t capture_sequence,
 
   if (left_eye.valid) {
     if (!RunModelForEye(&left_, left_eye, yaw, pitch, &run_err)) {
-      if (error) *error = run_err;
+      if (error)
+        *error = run_err;
       runtime_failures_++;
       if (runtime_failures_ >= 3) {
-        DisableAfterFailure("Open Video eye contact disabled after repeated failures.");
+        DisableAfterFailure(
+            "Open Video eye contact disabled after repeated failures.");
       }
       return false;
     }
     std::vector<std::uint8_t> corrected;
     std::string werr;
     if (WarpOrDecodeOutputToRgbU8(left_, left_eye, &corrected, &werr)) {
-      CompositeEyeIntoFrame(rgb, width, height, stride, left_eye, corrected, strength01);
+      CompositeEyeIntoFrame(rgb, width, height, stride, left_eye, corrected,
+                            strength01);
     }
   }
 
   if (right_eye.valid) {
     if (!RunModelForEye(&right_, right_eye, yaw, pitch, &run_err)) {
-      if (error) *error = run_err;
+      if (error)
+        *error = run_err;
       runtime_failures_++;
       if (runtime_failures_ >= 3) {
-        DisableAfterFailure("Open Video eye contact disabled after repeated failures.");
+        DisableAfterFailure(
+            "Open Video eye contact disabled after repeated failures.");
       }
       return false;
     }
     std::vector<std::uint8_t> corrected;
     std::string werr;
     if (WarpOrDecodeOutputToRgbU8(right_, right_eye, &corrected, &werr)) {
-      CompositeEyeIntoFrame(rgb, width, height, stride, right_eye, corrected, strength01);
+      CompositeEyeIntoFrame(rgb, width, height, stride, right_eye, corrected,
+                            strength01);
     }
   }
 
   return true;
 }
 
-}  // namespace studiocast::open_video
+} // namespace studiocast::open_video

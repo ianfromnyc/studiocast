@@ -6,54 +6,58 @@ namespace studiocast::maxine::effects {
 
 namespace {
 
-std::string StatusToString(const maxine::vfx::VfxApi* vfx, const maxine::NvcvApi* nvcv, maxine::NvCV_Status s) {
+std::string StatusToString(const maxine::vfx::VfxApi *vfx,
+                           const maxine::NvcvApi *nvcv, maxine::NvCV_Status s) {
   if (vfx && vfx->IsInitialized()) {
     return vfx->StatusToString(s);
   }
   if (nvcv && nvcv->IsInitialized() && nvcv->f().NvCV_GetErrorStringFromCode) {
-    const char* msg = nvcv->f().NvCV_GetErrorStringFromCode(s);
-    if (msg) return msg;
+    const char *msg = nvcv->f().NvCV_GetErrorStringFromCode(s);
+    if (msg)
+      return msg;
   }
   std::ostringstream oss;
   oss << "NvCV_Status(" << s << ")";
   return oss.str();
 }
 
-}  // namespace
+} // namespace
 
-VfxGreenScreenEffect::VfxGreenScreenEffect(maxine::vfx::VfxApi* vfx,
-                                           maxine::NvcvApi* nvcv,
+VfxGreenScreenEffect::VfxGreenScreenEffect(maxine::vfx::VfxApi *vfx,
+                                           maxine::NvcvApi *nvcv,
                                            std::filesystem::path model_dir)
     : vfx_(vfx), nvcv_(nvcv), model_dir_(std::move(model_dir)) {
   // Clear POD image.
   matte_gpu_ = maxine::NvCVImage{};
 }
 
-VfxGreenScreenEffect::~VfxGreenScreenEffect() {
-  Destroy();
-}
+VfxGreenScreenEffect::~VfxGreenScreenEffect() { Destroy(); }
 
-void VfxGreenScreenEffect::SetConfig(const Config& cfg) {
+void VfxGreenScreenEffect::SetConfig(const Config &cfg) {
   cfg_ = cfg;
-  if (cfg_.state_count == 0) cfg_.state_count = 1;
+  if (cfg_.state_count == 0)
+    cfg_.state_count = 1;
   cfg_dirty_ = true;
 }
 
-bool VfxGreenScreenEffect::Initialize(std::string* error) {
+bool VfxGreenScreenEffect::Initialize(std::string *error) {
   return EnsureEffectCreated(error);
 }
 
-bool VfxGreenScreenEffect::Configure(const studiocast::video::effects::BroadcastCameraEffects& settings,
-                                     std::string* error) {
+bool VfxGreenScreenEffect::Configure(
+    const studiocast::video::effects::BroadcastCameraEffects &settings,
+    std::string *error) {
   // Map canonical settings onto our config.
   Config next = cfg_;
   next.mode = settings.virtual_background.greenscreen_mode;
   next.temporal = settings.virtual_background.greenscreen_temporal;
 
   // Keep state_count stable for now; it can be wired later via effect params.
-  if (next.temporal && next.state_count == 0) next.state_count = 1;
+  if (next.temporal && next.state_count == 0)
+    next.state_count = 1;
 
-  if (next.mode != cfg_.mode || next.temporal != cfg_.temporal || next.state_count != cfg_.state_count) {
+  if (next.mode != cfg_.mode || next.temporal != cfg_.temporal ||
+      next.state_count != cfg_.state_count) {
     cfg_ = next;
     cfg_dirty_ = true;
   }
@@ -65,56 +69,69 @@ bool VfxGreenScreenEffect::Configure(const studiocast::video::effects::Broadcast
   return true;
 }
 
-NvCV_Status VfxGreenScreenEffect::Process(studiocast::video::GpuFrame& frame, std::string* error) {
+NvCV_Status VfxGreenScreenEffect::Process(studiocast::video::GpuFrame &frame,
+                                          std::string *error) {
   matte_ready_ = false;
 
   if (!frame.ValidDimensions()) {
-    if (error) *error = "Invalid frame dimensions.";
+    if (error)
+      *error = "Invalid frame dimensions.";
     return -1;
   }
   if (!frame.nvcv_gpu) {
-    if (error) *error = "Green Screen requires frame.nvcv_gpu (NvCVImage on GPU).";
+    if (error)
+      *error = "Green Screen requires frame.nvcv_gpu (NvCVImage on GPU).";
     return -1;
   }
 
   std::string init_err;
   if (!EnsureEffectCreated(&init_err)) {
-    if (error) *error = init_err;
+    if (error)
+      *error = init_err;
     return -1;
   }
 
   if (cfg_dirty_) {
     std::string cfg_err;
     if (!ApplyConfigLocked(&cfg_err)) {
-      if (error) *error = cfg_err;
+      if (error)
+        *error = cfg_err;
       return -1;
     }
   }
 
   std::string matte_err;
-  if (!EnsureMatteImage(static_cast<unsigned>(frame.width), static_cast<unsigned>(frame.height), &matte_err)) {
-    if (error) *error = matte_err;
+  if (!EnsureMatteImage(static_cast<unsigned>(frame.width),
+                        static_cast<unsigned>(frame.height), &matte_err)) {
+    if (error)
+      *error = matte_err;
     return -1;
   }
 
   // Bind I/O images.
-  auto& f = vfx_->f();
-  NvCV_Status s = f.NvVFX_SetImage(handle_, maxine::vfx::NVVFX_INPUT_IMAGE, frame.nvcv_gpu);
+  auto &f = vfx_->f();
+  NvCV_Status s =
+      f.NvVFX_SetImage(handle_, maxine::vfx::NVVFX_INPUT_IMAGE, frame.nvcv_gpu);
   if (s != maxine::NVCV_SUCCESS) {
-    if (error) *error = "NvVFX_SetImage(srcImage) failed: " + StatusToString(vfx_, nvcv_, s);
+    if (error)
+      *error =
+          "NvVFX_SetImage(srcImage) failed: " + StatusToString(vfx_, nvcv_, s);
     return s;
   }
 
   s = f.NvVFX_SetImage(handle_, maxine::vfx::NVVFX_OUTPUT_IMAGE, &matte_gpu_);
   if (s != maxine::NVCV_SUCCESS) {
-    if (error) *error = "NvVFX_SetImage(dstImage) failed: " + StatusToString(vfx_, nvcv_, s);
+    if (error)
+      *error =
+          "NvVFX_SetImage(dstImage) failed: " + StatusToString(vfx_, nvcv_, s);
     return s;
   }
 
   // Run synchronously for simplicity.
   s = f.NvVFX_Run(handle_, /*async=*/0);
   if (s != maxine::NVCV_SUCCESS) {
-    if (error) *error = "NvVFX_Run failed: " + StatusToString(vfx_, nvcv_, s);
+    if (error)
+      *error = "NvVFX_Run failed: " + StatusToString(vfx_, nvcv_, s);
     return s;
   }
 
@@ -122,22 +139,28 @@ NvCV_Status VfxGreenScreenEffect::Process(studiocast::video::GpuFrame& frame, st
   return s;
 }
 
-bool VfxGreenScreenEffect::EnsureEffectCreated(std::string* error) {
+bool VfxGreenScreenEffect::EnsureEffectCreated(std::string *error) {
   if (!vfx_ || !vfx_->IsInitialized()) {
-    if (error) *error = "VFX runtime not initialized (VfxApi).";
+    if (error)
+      *error = "VFX runtime not initialized (VfxApi).";
     return false;
   }
   if (!nvcv_ || !nvcv_->IsInitialized()) {
-    if (error) *error = "NvCVImage runtime not initialized (NvcvApi).";
+    if (error)
+      *error = "NvCVImage runtime not initialized (NvcvApi).";
     return false;
   }
-  if (handle_) return true;
+  if (handle_)
+    return true;
 
-  auto& f = vfx_->f();
+  auto &f = vfx_->f();
 
-  NvCV_Status s = f.NvVFX_CreateEffect(maxine::vfx::NVVFX_FX_GREEN_SCREEN, &handle_);
+  NvCV_Status s =
+      f.NvVFX_CreateEffect(maxine::vfx::NVVFX_FX_GREEN_SCREEN, &handle_);
   if (s != maxine::NVCV_SUCCESS || !handle_) {
-    if (error) *error = "NvVFX_CreateEffect(Green Screen) failed: " + StatusToString(vfx_, nvcv_, s);
+    if (error)
+      *error = "NvVFX_CreateEffect(Green Screen) failed: " +
+               StatusToString(vfx_, nvcv_, s);
     handle_ = nullptr;
     return false;
   }
@@ -145,7 +168,9 @@ bool VfxGreenScreenEffect::EnsureEffectCreated(std::string* error) {
   // CUDA stream.
   s = f.NvVFX_CudaStreamCreate(&stream_);
   if (s != maxine::NVCV_SUCCESS || !stream_) {
-    if (error) *error = "NvVFX_CudaStreamCreate failed: " + StatusToString(vfx_, nvcv_, s);
+    if (error)
+      *error =
+          "NvVFX_CudaStreamCreate failed: " + StatusToString(vfx_, nvcv_, s);
     Destroy();
     return false;
   }
@@ -153,7 +178,8 @@ bool VfxGreenScreenEffect::EnsureEffectCreated(std::string* error) {
 
   s = f.NvVFX_SetCudaStream(handle_, maxine::vfx::NVVFX_CUDA_STREAM, stream_);
   if (s != maxine::NVCV_SUCCESS) {
-    if (error) *error = "NvVFX_SetCudaStream failed: " + StatusToString(vfx_, nvcv_, s);
+    if (error)
+      *error = "NvVFX_SetCudaStream failed: " + StatusToString(vfx_, nvcv_, s);
     Destroy();
     return false;
   }
@@ -161,9 +187,12 @@ bool VfxGreenScreenEffect::EnsureEffectCreated(std::string* error) {
   // Model directory.
   if (!model_dir_.empty()) {
     const auto model_str = model_dir_.string();
-    s = f.NvVFX_SetString(handle_, maxine::vfx::NVVFX_MODEL_DIRECTORY, model_str.c_str());
+    s = f.NvVFX_SetString(handle_, maxine::vfx::NVVFX_MODEL_DIRECTORY,
+                          model_str.c_str());
     if (s != maxine::NVCV_SUCCESS) {
-      if (error) *error = "NvVFX_SetString(modelDir) failed: " + StatusToString(vfx_, nvcv_, s);
+      if (error)
+        *error = "NvVFX_SetString(modelDir) failed: " +
+                 StatusToString(vfx_, nvcv_, s);
       Destroy();
       return false;
     }
@@ -178,7 +207,8 @@ bool VfxGreenScreenEffect::EnsureEffectCreated(std::string* error) {
 
   s = f.NvVFX_Load(handle_);
   if (s != maxine::NVCV_SUCCESS) {
-    if (error) *error = "NvVFX_Load failed: " + StatusToString(vfx_, nvcv_, s);
+    if (error)
+      *error = "NvVFX_Load failed: " + StatusToString(vfx_, nvcv_, s);
     Destroy();
     return false;
   }
@@ -186,27 +216,33 @@ bool VfxGreenScreenEffect::EnsureEffectCreated(std::string* error) {
   return true;
 }
 
-bool VfxGreenScreenEffect::ApplyConfigLocked(std::string* error) {
+bool VfxGreenScreenEffect::ApplyConfigLocked(std::string *error) {
   if (!handle_) {
-    if (error) *error = "Green Screen effect not created.";
+    if (error)
+      *error = "Green Screen effect not created.";
     return false;
   }
 
-  if (cfg_.state_count == 0) cfg_.state_count = 1;
+  if (cfg_.state_count == 0)
+    cfg_.state_count = 1;
 
-  auto& f = vfx_->f();
+  auto &f = vfx_->f();
 
   // Mode.
   NvCV_Status s = f.NvVFX_SetU32(handle_, maxine::vfx::NVVFX_MODE, cfg_.mode);
   if (s != maxine::NVCV_SUCCESS) {
-    if (error) *error = "NvVFX_SetU32(mode) failed: " + StatusToString(vfx_, nvcv_, s);
+    if (error)
+      *error = "NvVFX_SetU32(mode) failed: " + StatusToString(vfx_, nvcv_, s);
     return false;
   }
 
   // Temporal flag.
-  s = f.NvVFX_SetU32(handle_, maxine::vfx::NVVFX_TEMPORAL, cfg_.temporal ? 1u : 0u);
+  s = f.NvVFX_SetU32(handle_, maxine::vfx::NVVFX_TEMPORAL,
+                     cfg_.temporal ? 1u : 0u);
   if (s != maxine::NVCV_SUCCESS) {
-    if (error) *error = "NvVFX_SetU32(temporal) failed: " + StatusToString(vfx_, nvcv_, s);
+    if (error)
+      *error =
+          "NvVFX_SetU32(temporal) failed: " + StatusToString(vfx_, nvcv_, s);
     return false;
   }
 
@@ -218,18 +254,20 @@ bool VfxGreenScreenEffect::ApplyConfigLocked(std::string* error) {
   return true;
 }
 
-bool VfxGreenScreenEffect::EnsureTemporalStateLocked(std::string* error) {
+bool VfxGreenScreenEffect::EnsureTemporalStateLocked(std::string *error) {
   if (!handle_) {
-    if (error) *error = "Green Screen effect not created.";
+    if (error)
+      *error = "Green Screen effect not created.";
     return false;
   }
 
-  auto& f = vfx_->f();
+  auto &f = vfx_->f();
 
   if (!cfg_.temporal) {
     // Disable and free any previous state handles.
-    for (auto& h : states_) {
-      if (!h) continue;
+    for (auto &h : states_) {
+      if (!h)
+        continue;
       (void)f.NvVFX_DeallocateState(handle_, h);
       h = nullptr;
     }
@@ -240,8 +278,9 @@ bool VfxGreenScreenEffect::EnsureTemporalStateLocked(std::string* error) {
 
   // Allocate/bind state handle array.
   if (states_.size() != cfg_.state_count) {
-    for (auto& h : states_) {
-      if (!h) continue;
+    for (auto &h : states_) {
+      if (!h)
+        continue;
       (void)f.NvVFX_DeallocateState(handle_, h);
       h = nullptr;
     }
@@ -249,22 +288,26 @@ bool VfxGreenScreenEffect::EnsureTemporalStateLocked(std::string* error) {
     states_bound_ = false;
   }
 
-  for (auto& h : states_) {
-    if (h) continue;
+  for (auto &h : states_) {
+    if (h)
+      continue;
     NvCV_Status s = f.NvVFX_AllocateState(handle_, &h);
     if (s != maxine::NVCV_SUCCESS || !h) {
-      if (error) *error = "NvVFX_AllocateState failed: " + StatusToString(vfx_, nvcv_, s);
+      if (error)
+        *error =
+            "NvVFX_AllocateState failed: " + StatusToString(vfx_, nvcv_, s);
       return false;
     }
   }
 
   if (!states_bound_) {
-    NvCV_Status s = f.NvVFX_SetStateObjectHandleArray(handle_,
-                                                      maxine::vfx::NVVFX_STATE,
-                                                      states_.data(),
-                                                      static_cast<std::uint32_t>(states_.size()));
+    NvCV_Status s = f.NvVFX_SetStateObjectHandleArray(
+        handle_, maxine::vfx::NVVFX_STATE, states_.data(),
+        static_cast<std::uint32_t>(states_.size()));
     if (s != maxine::NVCV_SUCCESS) {
-      if (error) *error = "NvVFX_SetStateObjectHandleArray(state) failed: " + StatusToString(vfx_, nvcv_, s);
+      if (error)
+        *error = "NvVFX_SetStateObjectHandleArray(state) failed: " +
+                 StatusToString(vfx_, nvcv_, s);
       return false;
     }
     states_bound_ = true;
@@ -273,19 +316,23 @@ bool VfxGreenScreenEffect::EnsureTemporalStateLocked(std::string* error) {
   return true;
 }
 
-bool VfxGreenScreenEffect::EnsureMatteImage(unsigned width, unsigned height, std::string* error) {
+bool VfxGreenScreenEffect::EnsureMatteImage(unsigned width, unsigned height,
+                                            std::string *error) {
   if (!nvcv_ || !nvcv_->IsInitialized()) {
-    if (error) *error = "NvCVImage runtime not initialized.";
+    if (error)
+      *error = "NvCVImage runtime not initialized.";
     return false;
   }
 
-  if (matte_allocated_ && matte_gpu_.width == width && matte_gpu_.height == height && matte_gpu_.gpuMem == maxine::NVCV_GPU) {
+  if (matte_allocated_ && matte_gpu_.width == width &&
+      matte_gpu_.height == height && matte_gpu_.gpuMem == maxine::NVCV_GPU) {
     return true;
   }
 
-  auto& nf = nvcv_->f();
+  auto &nf = nvcv_->f();
   if (!nf.NvCVImage_Alloc || !nf.NvCVImage_Dealloc) {
-    if (error) *error = "NvCVImage_Alloc/Dealloc unavailable.";
+    if (error)
+      *error = "NvCVImage_Alloc/Dealloc unavailable.";
     return false;
   }
 
@@ -295,16 +342,14 @@ bool VfxGreenScreenEffect::EnsureMatteImage(unsigned width, unsigned height, std
     matte_allocated_ = false;
   }
 
-  const maxine::NvCV_Status s = nf.NvCVImage_Alloc(&matte_gpu_,
-                                          width,
-                                          height,
-                                          maxine::NVCV_A,
-                                          maxine::NVCV_U8,
-                                          maxine::NVCV_CHUNKY,
-                                          maxine::NVCV_GPU,
-                                          /*alignment=*/0);
+  const maxine::NvCV_Status s =
+      nf.NvCVImage_Alloc(&matte_gpu_, width, height, maxine::NVCV_A,
+                         maxine::NVCV_U8, maxine::NVCV_CHUNKY, maxine::NVCV_GPU,
+                         /*alignment=*/0);
   if (s != maxine::NVCV_SUCCESS) {
-    if (error) *error = "NvCVImage_Alloc(matte Au8 GPU) failed: " + StatusToString(vfx_, nvcv_, s);
+    if (error)
+      *error = "NvCVImage_Alloc(matte Au8 GPU) failed: " +
+               StatusToString(vfx_, nvcv_, s);
     return false;
   }
 
@@ -325,9 +370,10 @@ void VfxGreenScreenEffect::Destroy() {
 
   // Free VFX state handles.
   if (vfx_ && vfx_->IsInitialized() && handle_) {
-    auto& f = vfx_->f();
-    for (auto& h : states_) {
-      if (!h) continue;
+    auto &f = vfx_->f();
+    for (auto &h : states_) {
+      if (!h)
+        continue;
       (void)f.NvVFX_DeallocateState(handle_, h);
       h = nullptr;
     }
@@ -351,4 +397,4 @@ void VfxGreenScreenEffect::Destroy() {
   cfg_dirty_ = true;
 }
 
-}  // namespace studiocast::maxine::effects
+} // namespace studiocast::maxine::effects

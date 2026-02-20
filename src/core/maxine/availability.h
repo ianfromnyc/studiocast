@@ -23,11 +23,12 @@ struct CanonicalMaxineBlockedCopy {
 // Builds the canonical "Maxine unavailable: ..." summary + remediation bullets.
 // Pure formatting only: does not probe the system.
 CanonicalMaxineBlockedCopy
-BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics& d,
+BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics &d,
                                 MaxineNeed need = MaxineNeed::any);
 
 // Formats `summary` + `steps` into a single human-friendly multi-line string.
-std::string FormatCanonicalMaxineBlockedCopy(const CanonicalMaxineBlockedCopy& c);
+std::string
+FormatCanonicalMaxineBlockedCopy(const CanonicalMaxineBlockedCopy &c);
 
 // Compile-time availability of the Maxine backend.
 //
@@ -39,6 +40,6 @@ bool BackendBuilt();
 
 // Runtime availability check (best-effort).
 // Returns false with a human-friendly reason if unavailable.
-bool RuntimeAvailable(std::string* reason);
+bool RuntimeAvailable(std::string *reason);
 
-}  // namespace studiocast::maxine
+} // namespace studiocast::maxine

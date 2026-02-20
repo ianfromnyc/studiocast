@@ -10,22 +10,28 @@ namespace {
 
 std::string BoolJson(bool v) { return v ? "true" : "false"; }
 
-std::string JsonEscape(const std::string& s) { return studiocast::util::json::EscapeString(s); }
+std::string JsonEscape(const std::string &s) {
+  return studiocast::util::json::EscapeString(s);
+}
 
-void AppendJsonStringArray(std::ostringstream* oss, const std::vector<std::string>& a) {
+void AppendJsonStringArray(std::ostringstream *oss,
+                           const std::vector<std::string> &a) {
   *oss << "[";
   for (std::size_t i = 0; i < a.size(); ++i) {
-    if (i) *oss << ",";
+    if (i)
+      *oss << ",";
     *oss << "\"" << JsonEscape(a[i]) << "\"";
   }
   *oss << "]";
 }
 
-void AppendJsonStringMap(std::ostringstream* oss, const std::map<std::string, std::string>& m) {
+void AppendJsonStringMap(std::ostringstream *oss,
+                         const std::map<std::string, std::string> &m) {
   *oss << "{";
   bool first = true;
-  for (const auto& [k, v] : m) {
-    if (!first) *oss << ",";
+  for (const auto &[k, v] : m) {
+    if (!first)
+      *oss << ",";
     first = false;
     *oss << "\"" << JsonEscape(k) << "\":";
     *oss << "\"" << JsonEscape(v) << "\"";
@@ -33,11 +39,14 @@ void AppendJsonStringMap(std::ostringstream* oss, const std::map<std::string, st
   *oss << "}";
 }
 
-void AppendJsonModels(std::ostringstream* oss, const std::vector<OpenCudaDiagnostics::ModelInfo>& models) {
+void AppendJsonModels(
+    std::ostringstream *oss,
+    const std::vector<OpenCudaDiagnostics::ModelInfo> &models) {
   *oss << "[";
   for (std::size_t i = 0; i < models.size(); ++i) {
-    if (i) *oss << ",";
-    const auto& m = models[i];
+    if (i)
+      *oss << ",";
+    const auto &m = models[i];
     *oss << "{";
     *oss << "\"id\":\"" << JsonEscape(m.id) << "\",";
     *oss << "\"display_name\":\"" << JsonEscape(m.display_name) << "\",";
@@ -49,7 +58,7 @@ void AppendJsonModels(std::ostringstream* oss, const std::vector<OpenCudaDiagnos
   *oss << "]";
 }
 
-}  // namespace
+} // namespace
 
 std::string OpenCudaDiagnostics::ToJson() const {
   std::ostringstream oss;
@@ -86,4 +95,4 @@ std::string OpenCudaDiagnostics::ToJson() const {
   return oss.str();
 }
 
-}  // namespace studiocast::open_cuda
+} // namespace studiocast::open_cuda

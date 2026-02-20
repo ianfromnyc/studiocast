@@ -11,6 +11,6 @@ namespace studiocast::ipc {
 // Fallback: /tmp/studiocast-runtime-$UID/studiocast/studiocastd.sock
 //
 // The parent directory is created if necessary.
-std::filesystem::path DaemonSocketPath(std::string* error);
+std::filesystem::path DaemonSocketPath(std::string *error);
 
-}  // namespace studiocast::ipc
+} // namespace studiocast::ipc

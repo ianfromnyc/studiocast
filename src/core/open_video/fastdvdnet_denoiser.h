@@ -7,8 +7,8 @@
 #include <string>
 #include <vector>
 
-#include "core/open_video/model_pack_registry.h"
 #include "core/onnx/ort_session.h"
+#include "core/open_video/model_pack_registry.h"
 
 namespace studiocast::open_video {
 
@@ -27,18 +27,21 @@ namespace studiocast::open_video {
 //   [t-2, t-1, t, t, t]
 // (future frames are repeated as the current frame).
 class FastDvdnetDenoiser {
- public:
+public:
   FastDvdnetDenoiser();
   ~FastDvdnetDenoiser();
 
-  FastDvdnetDenoiser(const FastDvdnetDenoiser&) = delete;
-  FastDvdnetDenoiser& operator=(const FastDvdnetDenoiser&) = delete;
+  FastDvdnetDenoiser(const FastDvdnetDenoiser &) = delete;
+  FastDvdnetDenoiser &operator=(const FastDvdnetDenoiser &) = delete;
 
   // Attempt to initialize the denoiser using the default Open Video model root.
   //
-  // The chosen model pack is selected from installed packs under task="video_denoise".
-  // If multiple packs are installed, a deterministic preference order is used.
-  bool EnsureInitialized(int src_w, int src_h, const std::string& requested_model_id, std::string* error);
+  // The chosen model pack is selected from installed packs under
+  // task="video_denoise". If multiple packs are installed, a deterministic
+  // preference order is used.
+  bool EnsureInitialized(int src_w, int src_h,
+                         const std::string &requested_model_id,
+                         std::string *error);
 
   // Reset temporal windowing state (but keep the loaded model/session).
   void ResetTemporalState();
@@ -47,58 +50,53 @@ class FastDvdnetDenoiser {
   //
   // Returns true on success, false on fatal errors (in which case the caller
   // should bypass the effect).
-  bool ApplyRgbInPlace(std::uint64_t capture_sequence,
-                       std::uint8_t* rgb,
-                       int width,
-                       int height,
-                       std::size_t stride,
-                       int strength,
-                       const std::string& requested_model_id,
-                       std::string* error);
+  bool ApplyRgbInPlace(std::uint64_t capture_sequence, std::uint8_t *rgb,
+                       int width, int height, std::size_t stride, int strength,
+                       const std::string &requested_model_id,
+                       std::string *error);
 
   // Diagnostics.
   bool initialized() const { return initialized_; }
   bool disabled() const { return disabled_; }
   bool using_cpu_fallback() const { return using_cpu_fallback_; }
-  const std::string& active_model_id() const { return active_model_id_; }
-  const std::filesystem::path& active_model_path() const { return active_model_path_; }
-  const std::string& sticky_warning() const { return sticky_warning_; }
+  const std::string &active_model_id() const { return active_model_id_; }
+  const std::filesystem::path &active_model_path() const {
+    return active_model_path_;
+  }
+  const std::string &sticky_warning() const { return sticky_warning_; }
 
- private:
+private:
   struct LoadedModel {
     std::string id;
     std::filesystem::path onnx;
-    int default_sigma = 25;  // best-effort hint, not required
+    int default_sigma = 25; // best-effort hint, not required
   };
 
   static int AlignUp(int v, int align);
   static float Clamp01(float x);
 
-  static std::string ChoosePreferredModelId(const ModelPackRegistry& reg);
-  static bool LoadDefaultSigmaFromManifest(const std::filesystem::path& manifest_path, int* out_sigma);
-  static bool ResolveModelFromRegistry(const ModelPackRegistry& reg,
-                                       const std::string& requested_model_id,
-                                       LoadedModel* out,
-                                       std::string* error);
+  static std::string ChoosePreferredModelId(const ModelPackRegistry &reg);
+  static bool
+  LoadDefaultSigmaFromManifest(const std::filesystem::path &manifest_path,
+                               int *out_sigma);
+  static bool ResolveModelFromRegistry(const ModelPackRegistry &reg,
+                                       const std::string &requested_model_id,
+                                       LoadedModel *out, std::string *error);
 
-  bool EnsureSessionForModel(const LoadedModel& model, std::string* error);
-  bool RefreshGeometry(int src_w, int src_h, std::string* error);
-  bool DetectIoNames(std::string* error);
+  bool EnsureSessionForModel(const LoadedModel &model, std::string *error);
+  bool RefreshGeometry(int src_w, int src_h, std::string *error);
+  bool DetectIoNames(std::string *error);
 
-  void PreprocessRgbToChwPadded(const std::uint8_t* rgb,
-                               int width,
-                               int height,
-                               std::size_t stride,
-                               std::vector<float>* out_chw) const;
+  void PreprocessRgbToChwPadded(const std::uint8_t *rgb, int width, int height,
+                                std::size_t stride,
+                                std::vector<float> *out_chw) const;
 
-  void BuildNoisyTensorFromHistory(std::vector<float>* out_noisy) const;
+  void BuildNoisyTensorFromHistory(std::vector<float> *out_noisy) const;
   void EnsureNoiseMap(float sigma_over_255);
-  void PostprocessToRgbInPlace(std::uint8_t* rgb,
-                              int width,
-                              int height,
-                              std::size_t stride) const;
+  void PostprocessToRgbInPlace(std::uint8_t *rgb, int width, int height,
+                               std::size_t stride) const;
 
-  void DisableAfterFailure(const std::string& why);
+  void DisableAfterFailure(const std::string &why);
 
   bool initialized_ = false;
   bool disabled_ = false;
@@ -112,7 +110,7 @@ class FastDvdnetDenoiser {
   studiocast::onnx::OrtSessionInfo session_info_;
   std::unique_ptr<studiocast::onnx::OrtSession> ort_session_cuda_;
   std::unique_ptr<studiocast::onnx::OrtSession> ort_session_cpu_;
-  studiocast::onnx::OrtSession* ort_session_active_ = nullptr;
+  studiocast::onnx::OrtSession *ort_session_active_ = nullptr;
   bool using_cpu_fallback_ = false;
 
   std::string noisy_name_;
@@ -130,7 +128,7 @@ class FastDvdnetDenoiser {
   std::vector<int64_t> denoised_shape_;
 
   // Temporal history (preprocessed CHW frames, proc_w_*proc_h_).
-  static constexpr int kHistoryFrames = 3;  // t-2, t-1, t
+  static constexpr int kHistoryFrames = 3; // t-2, t-1, t
   std::vector<std::vector<float>> history_;
   int history_filled_ = 0;
   int history_write_idx_ = 0;
@@ -152,4 +150,4 @@ class FastDvdnetDenoiser {
   int runtime_failures_ = 0;
 };
 
-}  // namespace studiocast::open_video
+} // namespace studiocast::open_video

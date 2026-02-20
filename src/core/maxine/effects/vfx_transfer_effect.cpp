@@ -4,13 +4,11 @@
 
 namespace studiocast::maxine::effects {
 
-VfxTransferEffect::VfxTransferEffect(maxine::vfx::VfxApi* vfx,
-                                     maxine::NvcvApi* nvcv,
+VfxTransferEffect::VfxTransferEffect(maxine::vfx::VfxApi *vfx,
+                                     maxine::NvcvApi *nvcv,
                                      std::filesystem::path model_dir,
                                      OutputFormat out_fmt)
-    : vfx_(vfx),
-      nvcv_(nvcv),
-      model_dir_(std::move(model_dir)),
+    : vfx_(vfx), nvcv_(nvcv), model_dir_(std::move(model_dir)),
       out_fmt_(out_fmt) {}
 
 VfxTransferEffect::~VfxTransferEffect() { Destroy(); }
@@ -18,42 +16,50 @@ VfxTransferEffect::~VfxTransferEffect() { Destroy(); }
 void VfxTransferEffect::Destroy() {
   output_ready_ = false;
 
-  if (out_allocated_ && nvcv_ && nvcv_->IsInitialized() && nvcv_->f().NvCVImage_Dealloc) {
+  if (out_allocated_ && nvcv_ && nvcv_->IsInitialized() &&
+      nvcv_->f().NvCVImage_Dealloc) {
     (void)nvcv_->f().NvCVImage_Dealloc(&out_gpu_);
   }
   out_gpu_ = maxine::NvCVImage{};
   out_allocated_ = false;
 
-  if (handle_ && vfx_ && vfx_->IsInitialized() && vfx_->f().NvVFX_DestroyEffect) {
+  if (handle_ && vfx_ && vfx_->IsInitialized() &&
+      vfx_->f().NvVFX_DestroyEffect) {
     vfx_->f().NvVFX_DestroyEffect(handle_);
   }
   handle_ = nullptr;
 
-  if (own_stream_ && stream_ && vfx_ && vfx_->IsInitialized() && vfx_->f().NvVFX_CudaStreamDestroy) {
+  if (own_stream_ && stream_ && vfx_ && vfx_->IsInitialized() &&
+      vfx_->f().NvVFX_CudaStreamDestroy) {
     vfx_->f().NvVFX_CudaStreamDestroy(stream_);
   }
   stream_ = nullptr;
   own_stream_ = false;
 }
 
-bool VfxTransferEffect::EnsureEffectCreated(std::string* error) {
-  if (handle_) return true;
+bool VfxTransferEffect::EnsureEffectCreated(std::string *error) {
+  if (handle_)
+    return true;
   if (!vfx_ || !vfx_->IsInitialized()) {
-    if (error) *error = "VFX runtime not initialized.";
+    if (error)
+      *error = "VFX runtime not initialized.";
     return false;
   }
 
-  const auto& f = vfx_->f();
+  const auto &f = vfx_->f();
   if (!f.NvVFX_CreateEffect) {
-    if (error) *error = "NvVFX_CreateEffect missing.";
+    if (error)
+      *error = "NvVFX_CreateEffect missing.";
     return false;
   }
 
-  const maxine::NvCV_Status st = f.NvVFX_CreateEffect(maxine::vfx::NVVFX_FX_TRANSFER, &handle_);
+  const maxine::NvCV_Status st =
+      f.NvVFX_CreateEffect(maxine::vfx::NVVFX_FX_TRANSFER, &handle_);
   if (st != maxine::NVCV_SUCCESS || !handle_) {
     if (error) {
       std::ostringstream oss;
-      oss << "NvVFX_CreateEffect(Transfer) failed: " << vfx_->StatusToString(st);
+      oss << "NvVFX_CreateEffect(Transfer) failed: "
+          << vfx_->StatusToString(st);
       *error = oss.str();
     }
     handle_ = nullptr;
@@ -74,22 +80,26 @@ bool VfxTransferEffect::EnsureEffectCreated(std::string* error) {
   return true;
 }
 
-bool VfxTransferEffect::ApplyConfigLocked(std::string* error) {
-  if (!cfg_dirty_) return true;
+bool VfxTransferEffect::ApplyConfigLocked(std::string *error) {
+  if (!cfg_dirty_)
+    return true;
   if (!handle_) {
-    if (error) *error = "Transfer effect not created.";
+    if (error)
+      *error = "Transfer effect not created.";
     return false;
   }
-  const auto& f = vfx_->f();
+  const auto &f = vfx_->f();
 
   // modelDir is generally required across VFX effects; Transfer may ignore it,
   // but setting it keeps behavior consistent.
   if (f.NvVFX_SetString && !model_dir_.empty()) {
-    (void)f.NvVFX_SetString(handle_, maxine::vfx::NVVFX_MODEL_DIRECTORY, model_dir_.string().c_str());
+    (void)f.NvVFX_SetString(handle_, maxine::vfx::NVVFX_MODEL_DIRECTORY,
+                            model_dir_.string().c_str());
   }
 
   if (f.NvVFX_SetCudaStream && stream_) {
-    (void)f.NvVFX_SetCudaStream(handle_, maxine::vfx::NVVFX_CUDA_STREAM, stream_);
+    (void)f.NvVFX_SetCudaStream(handle_, maxine::vfx::NVVFX_CUDA_STREAM,
+                                stream_);
   }
 
   const auto st = f.NvVFX_Load(handle_);
@@ -106,29 +116,29 @@ bool VfxTransferEffect::ApplyConfigLocked(std::string* error) {
   return true;
 }
 
-bool VfxTransferEffect::EnsureOutputImage(unsigned width, unsigned height, std::string* error) {
+bool VfxTransferEffect::EnsureOutputImage(unsigned width, unsigned height,
+                                          std::string *error) {
   if (!nvcv_ || !nvcv_->IsInitialized() || !nvcv_->f().NvCVImage_Alloc) {
-    if (error) *error = "NvCVImage runtime not initialized.";
+    if (error)
+      *error = "NvCVImage runtime not initialized.";
     return false;
   }
 
   // (Re)allocate output image for the requested dimensions/format.
   if (out_allocated_) {
     if (out_gpu_.width == width && out_gpu_.height == height &&
-        out_gpu_.pixelFormat == out_fmt_.pixel_format && out_gpu_.componentType == out_fmt_.component_type &&
-        out_gpu_.planar == out_fmt_.layout && out_gpu_.gpuMem == out_fmt_.mem_space) {
+        out_gpu_.pixelFormat == out_fmt_.pixel_format &&
+        out_gpu_.componentType == out_fmt_.component_type &&
+        out_gpu_.planar == out_fmt_.layout &&
+        out_gpu_.gpuMem == out_fmt_.mem_space) {
       return true;
     }
 
     if (nvcv_->f().NvCVImage_Realloc) {
-      const auto st = nvcv_->f().NvCVImage_Realloc(&out_gpu_,
-                                                   width,
-                                                   height,
-                                                   out_fmt_.pixel_format,
-                                                   out_fmt_.component_type,
-                                                   out_fmt_.layout,
-                                                   out_fmt_.mem_space,
-                                                   /*alignment=*/0);
+      const auto st = nvcv_->f().NvCVImage_Realloc(
+          &out_gpu_, width, height, out_fmt_.pixel_format,
+          out_fmt_.component_type, out_fmt_.layout, out_fmt_.mem_space,
+          /*alignment=*/0);
       if (st == maxine::NVCV_SUCCESS) {
         return true;
       }
@@ -142,14 +152,10 @@ bool VfxTransferEffect::EnsureOutputImage(unsigned width, unsigned height, std::
     out_allocated_ = false;
   }
 
-  const auto st = nvcv_->f().NvCVImage_Alloc(&out_gpu_,
-                                             width,
-                                             height,
-                                             out_fmt_.pixel_format,
-                                             out_fmt_.component_type,
-                                             out_fmt_.layout,
-                                             out_fmt_.mem_space,
-                                             /*alignment=*/0);
+  const auto st = nvcv_->f().NvCVImage_Alloc(
+      &out_gpu_, width, height, out_fmt_.pixel_format, out_fmt_.component_type,
+      out_fmt_.layout, out_fmt_.mem_space,
+      /*alignment=*/0);
   if (st != maxine::NVCV_SUCCESS) {
     if (error) {
       *error = "NvCVImage_Alloc(Transfer output) failed: " + std::to_string(st);
@@ -160,37 +166,47 @@ bool VfxTransferEffect::EnsureOutputImage(unsigned width, unsigned height, std::
   return true;
 }
 
-bool VfxTransferEffect::Initialize(std::string* error) {
-  if (!EnsureEffectCreated(error)) return false;
-  if (!ApplyConfigLocked(error)) return false;
+bool VfxTransferEffect::Initialize(std::string *error) {
+  if (!EnsureEffectCreated(error))
+    return false;
+  if (!ApplyConfigLocked(error))
+    return false;
   return true;
 }
 
-bool VfxTransferEffect::Configure(const studiocast::video::effects::BroadcastCameraEffects&, std::string*) {
+bool VfxTransferEffect::Configure(
+    const studiocast::video::effects::BroadcastCameraEffects &, std::string *) {
   // Transfer has no user-facing configuration in StudioCast.
   return true;
 }
 
-maxine::NvCV_Status VfxTransferEffect::Process(studiocast::video::GpuFrame& frame, std::string* error) {
+maxine::NvCV_Status
+VfxTransferEffect::Process(studiocast::video::GpuFrame &frame,
+                           std::string *error) {
   output_ready_ = false;
   if (!frame.ValidDimensions() || !frame.nvcv_gpu) {
-    if (error) *error = "Transfer requires frame.nvcv_gpu and valid dimensions.";
+    if (error)
+      *error = "Transfer requires frame.nvcv_gpu and valid dimensions.";
     return -1;
   }
 
   std::string err;
   if (!Initialize(&err)) {
-    if (error) *error = err;
+    if (error)
+      *error = err;
     return -1;
   }
 
-  if (!EnsureOutputImage(static_cast<unsigned>(frame.width), static_cast<unsigned>(frame.height), &err)) {
-    if (error) *error = err;
+  if (!EnsureOutputImage(static_cast<unsigned>(frame.width),
+                         static_cast<unsigned>(frame.height), &err)) {
+    if (error)
+      *error = err;
     return -1;
   }
 
-  const auto& f = vfx_->f();
-  (void)f.NvVFX_SetImage(handle_, maxine::vfx::NVVFX_INPUT_IMAGE, frame.nvcv_gpu);
+  const auto &f = vfx_->f();
+  (void)f.NvVFX_SetImage(handle_, maxine::vfx::NVVFX_INPUT_IMAGE,
+                         frame.nvcv_gpu);
   (void)f.NvVFX_SetImage(handle_, maxine::vfx::NVVFX_OUTPUT_IMAGE, &out_gpu_);
 
   const auto st = f.NvVFX_Run(handle_, /*async=*/1);
@@ -205,4 +221,4 @@ maxine::NvCV_Status VfxTransferEffect::Process(studiocast::video::GpuFrame& fram
   return maxine::NVCV_SUCCESS;
 }
 
-}  // namespace studiocast::maxine::effects
+} // namespace studiocast::maxine::effects

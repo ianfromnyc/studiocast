@@ -6,10 +6,10 @@
 #include <string>
 #include <vector>
 
+#include "core/onnx/ort_session.h"
 #include "core/open_video/dlib_face_landmarks.h"
 #include "core/open_video/frame_analysis_cache.h"
 #include "core/open_video/model_pack_registry.h"
-#include "core/onnx/ort_session.h"
 #include "core/open_video/yunet_face_detector.h"
 
 namespace studiocast::open_video {
@@ -28,46 +28,43 @@ namespace studiocast::open_video {
 // implementation. Model conversions may evolve; the code tries to be robust
 // to common ONNX layouts (NCHW/NHWC) and output variants (flow vs direct RGB).
 class GazeCorrectionEyeContact {
- public:
+public:
   GazeCorrectionEyeContact();
   ~GazeCorrectionEyeContact();
 
-  GazeCorrectionEyeContact(const GazeCorrectionEyeContact&) = delete;
-  GazeCorrectionEyeContact& operator=(const GazeCorrectionEyeContact&) = delete;
+  GazeCorrectionEyeContact(const GazeCorrectionEyeContact &) = delete;
+  GazeCorrectionEyeContact &
+  operator=(const GazeCorrectionEyeContact &) = delete;
 
   void Reset();
 
   // Loads the Open Video eye_contact pack and its dependencies.
-  bool EnsureInitialized(const std::string& requested_model_id, std::string* error);
+  bool EnsureInitialized(const std::string &requested_model_id,
+                         std::string *error);
 
   // Apply eye contact correction in-place on an RGB24 frame.
   //
   // Returns true on success (or clean bypass), false on fatal errors.
-  bool ApplyRgbInPlace(std::uint64_t capture_sequence,
-                       std::uint8_t* rgb,
-                       int width,
-                       int height,
-                       std::size_t stride,
-                       int strength,
+  bool ApplyRgbInPlace(std::uint64_t capture_sequence, std::uint8_t *rgb,
+                       int width, int height, std::size_t stride, int strength,
                        bool look_away_enabled,
-                       const std::string& face_detection_model_id,
-                       const std::string& requested_model_id,
-                       YunetFaceDetector* yunet,
-                       FrameAnalysisCache* cache,
-                       std::string* error);
+                       const std::string &face_detection_model_id,
+                       const std::string &requested_model_id,
+                       YunetFaceDetector *yunet, FrameAnalysisCache *cache,
+                       std::string *error);
 
   bool initialized() const { return initialized_; }
   bool disabled() const { return disabled_; }
   bool using_cpu_fallback() const { return using_cpu_fallback_; }
-  const std::string& active_model_id() const { return active_model_id_; }
-  const std::string& sticky_warning() const { return sticky_warning_; }
+  const std::string &active_model_id() const { return active_model_id_; }
+  const std::string &sticky_warning() const { return sticky_warning_; }
 
- private:
+private:
   struct EyeRuntime {
     studiocast::onnx::OrtSessionInfo session_info;
     std::unique_ptr<studiocast::onnx::OrtSession> session_cuda;
     std::unique_ptr<studiocast::onnx::OrtSession> session_cpu;
-    studiocast::onnx::OrtSession* session_active = nullptr;
+    studiocast::onnx::OrtSession *session_active = nullptr;
 
     bool eye_is_nhwc = false;
     bool anchors_is_nhwc = false;
@@ -107,68 +104,54 @@ class GazeCorrectionEyeContact {
     int crop_h = 0;
     int input_w = 64;
     int input_h = 48;
-    std::vector<std::uint8_t> eye_rgb_u8;   // resized (input_w*input_h*3)
-    std::vector<float> eye_nchw_f32;        // (3*input_h*input_w)
-    std::vector<float> anchors_nchw_f32;    // (12*input_h*input_w)
+    std::vector<std::uint8_t> eye_rgb_u8; // resized (input_w*input_h*3)
+    std::vector<float> eye_nchw_f32;      // (3*input_h*input_w)
+    std::vector<float> anchors_nchw_f32;  // (12*input_h*input_w)
   };
 
   static float Clamp01(float x);
   static float Lerp(float a, float b, float t);
 
-  static std::string ChoosePreferredModelId(const ModelPackRegistry& reg);
+  static std::string ChoosePreferredModelId(const ModelPackRegistry &reg);
 
-  static bool DetectEyeInputsFromSession(const studiocast::onnx::OrtSessionInfo& info,
-                                         std::string* out_eye_name,
-                                         std::vector<int64_t>* out_eye_shape,
-                                         std::string* out_anchors_name,
-                                         std::vector<int64_t>* out_anchors_shape,
-                                         std::string* out_angles_name,
-                                         std::vector<int64_t>* out_angles_shape,
-                                         std::string* error);
+  static bool DetectEyeInputsFromSession(
+      const studiocast::onnx::OrtSessionInfo &info, std::string *out_eye_name,
+      std::vector<int64_t> *out_eye_shape, std::string *out_anchors_name,
+      std::vector<int64_t> *out_anchors_shape, std::string *out_angles_name,
+      std::vector<int64_t> *out_angles_shape, std::string *error);
 
-  static bool DetectOutputFromSession(const studiocast::onnx::OrtSessionInfo& info,
-                                      std::string* out_name,
-                                      std::vector<int64_t>* out_shape,
-                                      std::string* error);
+  static bool
+  DetectOutputFromSession(const studiocast::onnx::OrtSessionInfo &info,
+                          std::string *out_name,
+                          std::vector<int64_t> *out_shape, std::string *error);
 
-  bool LoadModelPack(const std::string& model_id, std::string* error);
-  bool InitRuntimeForEye(const std::filesystem::path& onnx_path, EyeRuntime* rt, std::string* error);
-  bool ConfigureRuntimeIo(EyeRuntime* rt, std::string* error);
+  bool LoadModelPack(const std::string &model_id, std::string *error);
+  bool InitRuntimeForEye(const std::filesystem::path &onnx_path, EyeRuntime *rt,
+                         std::string *error);
+  bool ConfigureRuntimeIo(EyeRuntime *rt, std::string *error);
 
-  bool EnsureDlibDependency(std::string* error);
+  bool EnsureDlibDependency(std::string *error);
 
-  static const FaceDetection* ChooseBestFace(const std::vector<FaceDetection>& faces);
-  bool ExtractEyeData(const std::uint8_t* rgb,
-                      int frame_w,
-                      int frame_h,
-                      std::size_t frame_stride,
-                      const FaceLandmarks& lms,
-                      bool left_eye,
-                      int input_w,
-                      int input_h,
-                      EyeData* out,
-                      std::string* error);
+  static const FaceDetection *
+  ChooseBestFace(const std::vector<FaceDetection> &faces);
+  bool ExtractEyeData(const std::uint8_t *rgb, int frame_w, int frame_h,
+                      std::size_t frame_stride, const FaceLandmarks &lms,
+                      bool left_eye, int input_w, int input_h, EyeData *out,
+                      std::string *error);
 
-  bool RunModelForEye(EyeRuntime* rt,
-                      const EyeData& eye,
-                      float yaw,
-                      float pitch,
-                      std::string* error);
+  bool RunModelForEye(EyeRuntime *rt, const EyeData &eye, float yaw,
+                      float pitch, std::string *error);
 
-  bool WarpOrDecodeOutputToRgbU8(const EyeRuntime& rt,
-                                const EyeData& eye,
-                                std::vector<std::uint8_t>* out_rgb_u8,
-                                std::string* error) const;
+  bool WarpOrDecodeOutputToRgbU8(const EyeRuntime &rt, const EyeData &eye,
+                                 std::vector<std::uint8_t> *out_rgb_u8,
+                                 std::string *error) const;
 
-  void CompositeEyeIntoFrame(std::uint8_t* frame_rgb,
-                             int frame_w,
-                             int frame_h,
-                             std::size_t frame_stride,
-                             const EyeData& eye,
-                             const std::vector<std::uint8_t>& corrected_rgb_u8,
+  void CompositeEyeIntoFrame(std::uint8_t *frame_rgb, int frame_w, int frame_h,
+                             std::size_t frame_stride, const EyeData &eye,
+                             const std::vector<std::uint8_t> &corrected_rgb_u8,
                              float strength01);
 
-  void DisableAfterFailure(const std::string& why);
+  void DisableAfterFailure(const std::string &why);
 
   bool initialized_ = false;
   bool disabled_ = false;
@@ -188,4 +171,4 @@ class GazeCorrectionEyeContact {
   int runtime_failures_ = 0;
 };
 
-}  // namespace studiocast::open_video
+} // namespace studiocast::open_video

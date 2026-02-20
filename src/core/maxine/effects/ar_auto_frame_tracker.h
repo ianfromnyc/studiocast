@@ -19,8 +19,8 @@ struct RectF {
 };
 
 struct AutoFrameKnobs {
-  int strength = 50;   // 0..100
-  int smoothing = 70;  // 0..100
+  int strength = 50;      // 0..100
+  int smoothing = 70;     // 0..100
   float headroom = 0.15f; // 0..1
 };
 
@@ -33,51 +33,48 @@ struct AutoFrameKnobs {
 //  - Provide a reasonable center-crop fallback when no detections are available
 class ArAutoFrameTracker {
 public:
-  explicit ArAutoFrameTracker(studiocast::maxine::ar::ArApi* ar);
+  explicit ArAutoFrameTracker(studiocast::maxine::ar::ArApi *ar);
   ~ArAutoFrameTracker();
 
-  ArAutoFrameTracker(const ArAutoFrameTracker&) = delete;
-  ArAutoFrameTracker& operator=(const ArAutoFrameTracker&) = delete;
+  ArAutoFrameTracker(const ArAutoFrameTracker &) = delete;
+  ArAutoFrameTracker &operator=(const ArAutoFrameTracker &) = delete;
 
-  // `input_bgr_gpu` must remain valid for the lifetime of the initialized tracker.
-  bool EnsureInitialized(NvCVImage* input_bgr_gpu, std::string* error_out);
+  // `input_bgr_gpu` must remain valid for the lifetime of the initialized
+  // tracker.
+  bool EnsureInitialized(NvCVImage *input_bgr_gpu, std::string *error_out);
   void Reset();
 
-  void SetKnobs(const AutoFrameKnobs& knobs) { knobs_ = knobs; }
+  void SetKnobs(const AutoFrameKnobs &knobs) { knobs_ = knobs; }
   void SetOutputAspect(float aspect) { output_aspect_ = aspect; }
 
   // Run detection + update the smoothed crop rectangle.
   // Returns false only on hard AR API failures.
-  bool Update(int frame_w, int frame_h, std::string* error_out);
+  bool Update(int frame_w, int frame_h, std::string *error_out);
 
   RectF SmoothedCropPx() const { return crop_smoothed_px_; }
   bool last_had_detection() const { return last_had_detection_; }
 
   // Math helpers (deterministic; used by self-test).
   static float SmoothingAlpha(int smoothing_percent);
-  static RectF CenterCrop(int frame_w, int frame_h, float output_aspect, float zoom);
-  static RectF ClampToFrame(const RectF& r, int frame_w, int frame_h);
-  static RectF ComputeTargetCropFromBoxPx(const RectF& box_px,
-                                         int frame_w,
-                                         int frame_h,
-                                         float output_aspect,
-                                         const AutoFrameKnobs& knobs);
-  static RectF Lerp(const RectF& a, const RectF& b, float alpha);
+  static RectF CenterCrop(int frame_w, int frame_h, float output_aspect,
+                          float zoom);
+  static RectF ClampToFrame(const RectF &r, int frame_w, int frame_h);
+  static RectF ComputeTargetCropFromBoxPx(const RectF &box_px, int frame_w,
+                                          int frame_h, float output_aspect,
+                                          const AutoFrameKnobs &knobs);
+  static RectF Lerp(const RectF &a, const RectF &b, float alpha);
 
 private:
-  bool EnsureFeatureInitialized(const char* feature_id,
-                               NvAR_FeatureHandle* out_handle,
-                               std::string* error_out);
-  bool ConfigureBoxOutputs(NvAR_FeatureHandle handle, std::string* error_out);
-  bool RunAndExtractBestBox(NvAR_FeatureHandle handle,
-                            int frame_w,
-                            int frame_h,
-                            RectF* out_best_box_px,
-                            bool* out_found,
-                            std::string* error_out);
+  bool EnsureFeatureInitialized(const char *feature_id,
+                                NvAR_FeatureHandle *out_handle,
+                                std::string *error_out);
+  bool ConfigureBoxOutputs(NvAR_FeatureHandle handle, std::string *error_out);
+  bool RunAndExtractBestBox(NvAR_FeatureHandle handle, int frame_w, int frame_h,
+                            RectF *out_best_box_px, bool *out_found,
+                            std::string *error_out);
 
-  studiocast::maxine::ar::ArApi* ar_ = nullptr; // non-owning
-  NvCVImage* input_bgr_gpu_ = nullptr;          // non-owning
+  studiocast::maxine::ar::ArApi *ar_ = nullptr; // non-owning
+  NvCVImage *input_bgr_gpu_ = nullptr;          // non-owning
 
   NvAR_FeatureHandle face_handle_ = nullptr;
   NvAR_FeatureHandle body_handle_ = nullptr; // optional
@@ -95,4 +92,4 @@ private:
   bool last_had_detection_ = false;
 };
 
-}  // namespace studiocast::maxine::effects
+} // namespace studiocast::maxine::effects

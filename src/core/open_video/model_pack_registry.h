@@ -27,12 +27,12 @@ struct ModelFile {
 };
 
 // v1-style ONNX tensor metadata.
-// Used by a small subset of Open Video tasks (notably matting) where the runtime
-// needs deterministic IO names and fixed model dimensions.
+// Used by a small subset of Open Video tasks (notably matting) where the
+// runtime needs deterministic IO names and fixed model dimensions.
 struct ModelTensorSpec {
   std::string name;
-  std::string layout;   // e.g. "nchw" or "nhwc"
-  std::string dtype;    // e.g. "float32"
+  std::string layout; // e.g. "nchw" or "nhwc"
+  std::string dtype;  // e.g. "float32"
   int width = 0;
   int height = 0;
   int channels = 0;
@@ -40,15 +40,15 @@ struct ModelTensorSpec {
 
 struct ModelOutputSpec {
   std::string name;
-  std::string kind;   // e.g. "alpha"
-  std::string dtype;  // e.g. "float32"
+  std::string kind;  // e.g. "alpha"
+  std::string dtype; // e.g. "float32"
 };
 
 struct ModelPreprocessSpec {
   std::array<double, 3> mean{0.0, 0.0, 0.0};
   std::array<double, 3> std{1.0, 1.0, 1.0};
-  std::string color;  // e.g. "rgb"
-  std::string range;  // e.g. "0..1"
+  std::string color; // e.g. "rgb"
+  std::string range; // e.g. "0..1"
 };
 
 struct MattingSpec {
@@ -86,43 +86,50 @@ struct ModelPack {
 //   <models_root>/open_video/<subject>/<pack_dir>/
 // where <models_root> is normally ~/.local/share/studiocast/models.
 class ModelPackRegistry {
- public:
-  // Scan the given Open Video models directory (the directory containing <subject>/...).
+public:
+  // Scan the given Open Video models directory (the directory containing
+  // <subject>/...).
   //
-  // Any pack that fails to load/validate is recorded in Problems() with a reason string.
-  // Valid packs are available via ListModels()/ResolveModel().
-  static ModelPackRegistry Scan(const std::filesystem::path& open_video_models_dir);
+  // Any pack that fails to load/validate is recorded in Problems() with a
+  // reason string. Valid packs are available via ListModels()/ResolveModel().
+  static ModelPackRegistry
+  Scan(const std::filesystem::path &open_video_models_dir);
 
   // Convenience for scanning the default XDG location.
   static ModelPackRegistry ScanDefault();
 
-  const std::vector<ModelPack>& ListModels() const { return models_; }
-  std::optional<ModelPack> ResolveModel(const std::string& id) const;
+  const std::vector<ModelPack> &ListModels() const { return models_; }
+  std::optional<ModelPack> ResolveModel(const std::string &id) const;
 
   // Convenience view of installed model ids by task.
   //
   // This is used by effect runtimes to pick a deterministic default and to
   // surface user-friendly install diagnostics.
-  const std::map<std::string, std::vector<std::string>>& Tasks() const { return tasks_; }
+  const std::map<std::string, std::vector<std::string>> &Tasks() const {
+    return tasks_;
+  }
 
   // Find a model pack by task + id.
   // Returns std::nullopt if the id is not found or does not match the task.
-  std::optional<ModelPack> Find(const std::string& task, const std::string& id) const;
+  std::optional<ModelPack> Find(const std::string &task,
+                                const std::string &id) const;
 
   // Deterministic default selection:
   //  - prefer first model that matches task
   //  - else first installed model
   //  - else empty
-  std::string DefaultModelIdForTask(const std::string& task) const;
+  std::string DefaultModelIdForTask(const std::string &task) const;
 
   // Key is best-effort model id; if unknown, the pack directory is used.
-  const std::map<std::string, std::string>& Problems() const { return problems_; }
+  const std::map<std::string, std::string> &Problems() const {
+    return problems_;
+  }
 
- private:
+private:
   std::filesystem::path root_;
-  std::vector<ModelPack> models_;                // sorted by task,id
-  std::map<std::string, std::string> problems_;  // sorted by key
-  std::map<std::string, std::vector<std::string>> tasks_;  // task -> model ids
+  std::vector<ModelPack> models_;                         // sorted by task,id
+  std::map<std::string, std::string> problems_;           // sorted by key
+  std::map<std::string, std::vector<std::string>> tasks_; // task -> model ids
 };
 
-}  // namespace studiocast::open_video
+} // namespace studiocast::open_video

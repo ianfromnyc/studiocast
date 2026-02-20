@@ -13,14 +13,14 @@ namespace studiocast::video::effects {
 //
 // Later, the focus mask will come from AI segmentation (e.g. Maxine).
 class BackgroundRemoveCpuEffect final : public IVideoEffect {
- public:
+public:
   BackgroundRemoveCpuEffect() = default;
 
-  const char* Id() const override { return "background_remove"; }
-  const char* DisplayName() const override { return "Background Removal"; }
-  const char* Backend() const override { return "cpu"; }
+  const char *Id() const override { return "background_remove"; }
+  const char *DisplayName() const override { return "Background Removal"; }
+  const char *Backend() const override { return "cpu"; }
 
-  void Apply(const Rgb24FrameView& frame, EffectContext* ctx) override;
+  void Apply(const Rgb24FrameView &frame, EffectContext *ctx) override;
 };
 
-}  // namespace studiocast::video::effects
+} // namespace studiocast::video::effects

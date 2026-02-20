@@ -18,8 +18,8 @@ struct Rgb24Frame {
 
   void ResizeTight(int w, int h);
 
-  std::uint8_t* data() { return buf.data(); }
-  const std::uint8_t* data() const { return buf.data(); }
+  std::uint8_t *data() { return buf.data(); }
+  const std::uint8_t *data() const { return buf.data(); }
   std::size_t size() const { return buf.size(); }
 };
 
@@ -27,15 +27,12 @@ struct Rgb24Frame {
 //
 // Returns false on decode errors.
 // Thread-safe: no shared global decoder state.
-bool DecodeMjpegToRgb24(const std::uint8_t* mjpg,
-                        std::size_t len,
-                        Rgb24Frame& out,
-                        int& w,
-                        int& h,
-                        std::string* error);
+bool DecodeMjpegToRgb24(const std::uint8_t *mjpg, std::size_t len,
+                        Rgb24Frame &out, int &w, int &h, std::string *error);
 
-inline bool DecodeMjpegToRgb24(const std::uint8_t* mjpg, std::size_t len, Rgb24Frame& out, int& w, int& h) {
+inline bool DecodeMjpegToRgb24(const std::uint8_t *mjpg, std::size_t len,
+                               Rgb24Frame &out, int &w, int &h) {
   return DecodeMjpegToRgb24(mjpg, len, out, w, h, nullptr);
 }
 
-}  // namespace studiocast::video
+} // namespace studiocast::video

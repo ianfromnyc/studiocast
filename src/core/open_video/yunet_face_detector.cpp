@@ -17,11 +17,13 @@ namespace {
 
 // Helper to pick a "best" model id from a list of candidates.
 // Our curated packs follow a *_fp32 / *_int8bq / *_int8 naming scheme.
-std::string PickPreferredModelId(const std::vector<std::string>& model_ids) {
-  if (model_ids.empty()) return "";
+std::string PickPreferredModelId(const std::vector<std::string> &model_ids) {
+  if (model_ids.empty())
+    return "";
 
-  auto has_id = [&](const std::string& needle) {
-    return std::find(model_ids.begin(), model_ids.end(), needle) != model_ids.end();
+  auto has_id = [&](const std::string &needle) {
+    return std::find(model_ids.begin(), model_ids.end(), needle) !=
+           model_ids.end();
   };
 
   // Prefer higher quality variants when available.
@@ -31,8 +33,9 @@ std::string PickPreferredModelId(const std::vector<std::string>& model_ids) {
       "yunet_opencv_zoo_int8bq",
       "yunet_opencv_zoo_int8",
   };
-  for (const auto& id : prefer) {
-    if (has_id(id)) return id;
+  for (const auto &id : prefer) {
+    if (has_id(id))
+      return id;
   }
 
   // Otherwise, fall back to the first discovered pack.
@@ -40,20 +43,25 @@ std::string PickPreferredModelId(const std::vector<std::string>& model_ids) {
 }
 
 // JSON helpers.
-std::optional<double> JsonNumber(const util::json::Value::Object& obj, const std::string& key) {
+std::optional<double> JsonNumber(const util::json::Value::Object &obj,
+                                 const std::string &key) {
   auto it = obj.find(key);
-  if (it == obj.end()) return std::nullopt;
-  if (const double* n = it->second.AsNumber()) return *n;
+  if (it == obj.end())
+    return std::nullopt;
+  if (const double *n = it->second.AsNumber())
+    return *n;
   return std::nullopt;
 }
 
-const util::json::Value::Object* JsonObject(const util::json::Value::Object& obj, const std::string& key) {
+const util::json::Value::Object *
+JsonObject(const util::json::Value::Object &obj, const std::string &key) {
   auto it = obj.find(key);
-  if (it == obj.end()) return nullptr;
+  if (it == obj.end())
+    return nullptr;
   return it->second.AsObject();
 }
 
-}  // namespace
+} // namespace
 
 void YunetFaceDetector::Reset() {
   initialized_ = false;
@@ -71,8 +79,10 @@ void YunetFaceDetector::Reset() {
   kps_idx_ = {{-1, -1, -1}};
 }
 
-bool YunetFaceDetector::LoadSettingsFromManifest(const std::filesystem::path& manifest_path, std::string* error) {
-  if (error) error->clear();
+bool YunetFaceDetector::LoadSettingsFromManifest(
+    const std::filesystem::path &manifest_path, std::string *error) {
+  if (error)
+    error->clear();
 
   const auto text = util::ReadTextFile(manifest_path.string());
   if (!text) {
@@ -91,21 +101,28 @@ bool YunetFaceDetector::LoadSettingsFromManifest(const std::filesystem::path& ma
     return false;
   }
 
-  const auto* top = root.AsObject();
-  if (!top) return true;  // Treat unknown schema as "use defaults".
+  const auto *top = root.AsObject();
+  if (!top)
+    return true; // Treat unknown schema as "use defaults".
 
-  const auto* onnx = JsonObject(*top, "onnx");
-  if (!onnx) return true;
+  const auto *onnx = JsonObject(*top, "onnx");
+  if (!onnx)
+    return true;
 
-  if (const auto* pre = JsonObject(*onnx, "preprocess")) {
-    if (auto w = JsonNumber(*pre, "width")) settings_.input_w = static_cast<int>(*w);
-    if (auto h = JsonNumber(*pre, "height")) settings_.input_h = static_cast<int>(*h);
+  if (const auto *pre = JsonObject(*onnx, "preprocess")) {
+    if (auto w = JsonNumber(*pre, "width"))
+      settings_.input_w = static_cast<int>(*w);
+    if (auto h = JsonNumber(*pre, "height"))
+      settings_.input_h = static_cast<int>(*h);
   }
 
-  if (const auto* post = JsonObject(*onnx, "postprocess")) {
-    if (auto s = JsonNumber(*post, "score_threshold")) settings_.score_threshold = static_cast<float>(*s);
-    if (auto n = JsonNumber(*post, "nms_threshold")) settings_.nms_threshold = static_cast<float>(*n);
-    if (auto k = JsonNumber(*post, "top_k")) settings_.top_k = static_cast<int>(*k);
+  if (const auto *post = JsonObject(*onnx, "postprocess")) {
+    if (auto s = JsonNumber(*post, "score_threshold"))
+      settings_.score_threshold = static_cast<float>(*s);
+    if (auto n = JsonNumber(*post, "nms_threshold"))
+      settings_.nms_threshold = static_cast<float>(*n);
+    if (auto k = JsonNumber(*post, "top_k"))
+      settings_.top_k = static_cast<int>(*k);
   }
 
   // Clamp to sane values.
@@ -118,21 +135,24 @@ bool YunetFaceDetector::LoadSettingsFromManifest(const std::filesystem::path& ma
   return true;
 }
 
-bool YunetFaceDetector::BuildBindings(std::string* error) {
-  if (error) error->clear();
+bool YunetFaceDetector::BuildBindings(std::string *error) {
+  if (error)
+    error->clear();
   if (!session_) {
-    if (error) *error = "ORT session is not initialized";
+    if (error)
+      *error = "ORT session is not initialized";
     return false;
   }
 
   if (session_info_.input_shapes.empty() || session_info_.input_names.empty()) {
-    if (error) *error = "ORT session input metadata missing";
+    if (error)
+      *error = "ORT session input metadata missing";
     return false;
   }
 
   // Determine input layout.
   input_is_nhwc_ = false;
-  const auto& ishape = session_info_.input_shapes[0];
+  const auto &ishape = session_info_.input_shapes[0];
   if (ishape.size() == 4) {
     if (ishape[3] == 3) {
       input_is_nhwc_ = true;
@@ -148,45 +168,60 @@ bool YunetFaceDetector::BuildBindings(std::string* error) {
     input_shape_ = {1, 3, settings_.input_h, settings_.input_w};
   }
 
-  const std::size_t in_floats = static_cast<std::size_t>(settings_.input_w) * static_cast<std::size_t>(settings_.input_h) * 3u;
+  const std::size_t in_floats = static_cast<std::size_t>(settings_.input_w) *
+                                static_cast<std::size_t>(settings_.input_h) *
+                                3u;
   input_tensor_.assign(in_floats, 0.0f);
 
   // Build output bindings.
   outputs_.clear();
   outputs_.reserve(session_info_.output_names.size());
 
-  auto stride_index = [](const std::string& name) -> int {
+  auto stride_index = [](const std::string &name) -> int {
     // Accept "*_8", "*_16", "*_32".
-    if (name.size() >= 2 && name.rfind("_8") == name.size() - 2) return 0;
-    if (name.size() >= 3 && name.rfind("_16") == name.size() - 3) return 1;
-    if (name.size() >= 3 && name.rfind("_32") == name.size() - 3) return 2;
+    if (name.size() >= 2 && name.rfind("_8") == name.size() - 2)
+      return 0;
+    if (name.size() >= 3 && name.rfind("_16") == name.size() - 3)
+      return 1;
+    if (name.size() >= 3 && name.rfind("_32") == name.size() - 3)
+      return 2;
     return -1;
   };
 
-  auto allocate_output = [&](const std::string& name, const std::vector<int64_t>& declared_shape) {
+  auto allocate_output = [&](const std::string &name,
+                             const std::vector<int64_t> &declared_shape) {
     OutputBinding ob;
     ob.name = name;
 
     int stride = 0;
     const int si = stride_index(name);
-    if (si == 0) stride = 8;
-    else if (si == 1) stride = 16;
-    else if (si == 2) stride = 32;
-    else stride = 8;
+    if (si == 0)
+      stride = 8;
+    else if (si == 1)
+      stride = 16;
+    else if (si == 2)
+      stride = 32;
+    else
+      stride = 8;
 
     const int rows = std::max(1, settings_.input_h / stride);
     const int cols = std::max(1, settings_.input_w / stride);
 
     int channels = 1;
-    if (name.rfind("bbox_", 0) == 0) channels = 4;
-    else if (name.rfind("kps_", 0) == 0) channels = 10;
-    else channels = 1;
+    if (name.rfind("bbox_", 0) == 0)
+      channels = 4;
+    else if (name.rfind("kps_", 0) == 0)
+      channels = 10;
+    else
+      channels = 1;
 
     // Determine layout from declared shape.
     bool nhwc = true;
     if (declared_shape.size() == 4) {
-      if (declared_shape[3] == channels) nhwc = true;
-      else if (declared_shape[1] == channels) nhwc = false;
+      if (declared_shape[3] == channels)
+        nhwc = true;
+      else if (declared_shape[1] == channels)
+        nhwc = false;
     }
 
     if (nhwc) {
@@ -197,7 +232,8 @@ bool YunetFaceDetector::BuildBindings(std::string* error) {
 
     std::size_t n = 1;
     for (const auto d : ob.shape) {
-      if (d <= 0) continue;
+      if (d <= 0)
+        continue;
       n *= static_cast<std::size_t>(d);
     }
     ob.data.assign(n, 0.0f);
@@ -205,14 +241,17 @@ bool YunetFaceDetector::BuildBindings(std::string* error) {
   };
 
   for (std::size_t i = 0; i < session_info_.output_names.size(); ++i) {
-    const auto& name = session_info_.output_names[i];
-    const auto& shape = (i < session_info_.output_shapes.size()) ? session_info_.output_shapes[i] : std::vector<int64_t>{};
+    const auto &name = session_info_.output_names[i];
+    const auto &shape = (i < session_info_.output_shapes.size())
+                            ? session_info_.output_shapes[i]
+                            : std::vector<int64_t>{};
     allocate_output(name, shape);
   }
 
-  auto find_out = [&](const std::string& name) -> int {
+  auto find_out = [&](const std::string &name) -> int {
     for (std::size_t i = 0; i < outputs_.size(); ++i) {
-      if (outputs_[i].name == name) return static_cast<int>(i);
+      if (outputs_[i].name == name)
+        return static_cast<int>(i);
     }
     return -1;
   };
@@ -223,12 +262,14 @@ bool YunetFaceDetector::BuildBindings(std::string* error) {
   kps_idx_ = {{find_out("kps_8"), find_out("kps_16"), find_out("kps_32")}};
 
   for (int i = 0; i < 3; ++i) {
-    if (cls_idx_[i] < 0 || obj_idx_[i] < 0 || bbox_idx_[i] < 0 || kps_idx_[i] < 0) {
+    if (cls_idx_[i] < 0 || obj_idx_[i] < 0 || bbox_idx_[i] < 0 ||
+        kps_idx_[i] < 0) {
       if (error) {
         std::ostringstream oss;
-        oss << "YuNet outputs missing expected tensors for stride=" << (i == 0 ? 8 : (i == 1 ? 16 : 32))
-            << ". Available outputs:";
-        for (const auto& o : outputs_) oss << " " << o.name;
+        oss << "YuNet outputs missing expected tensors for stride="
+            << (i == 0 ? 8 : (i == 1 ? 16 : 32)) << ". Available outputs:";
+        for (const auto &o : outputs_)
+          oss << " " << o.name;
         *error = oss.str();
       }
       return false;
@@ -238,20 +279,26 @@ bool YunetFaceDetector::BuildBindings(std::string* error) {
   return true;
 }
 
-bool YunetFaceDetector::EnsureInitialized(const std::string& requested_model_id, std::string* error) {
-  if (error) error->clear();
+bool YunetFaceDetector::EnsureInitialized(const std::string &requested_model_id,
+                                          std::string *error) {
+  if (error)
+    error->clear();
 
   ModelPackRegistry reg = ModelPackRegistry::ScanDefault();
   const auto it = reg.Tasks().find("face_detection");
   if (it == reg.Tasks().end() || it->second.empty()) {
     if (error) {
-      *error = "No Open Video face_detection models installed. Install a YuNet model pack under " +
-               (util::StudioCastModelsDir().string() + "/open_video/face_detection/.");
+      *error = "No Open Video face_detection models installed. Install a YuNet "
+               "model pack under " +
+               (util::StudioCastModelsDir().string() +
+                "/open_video/face_detection/.");
     }
     return false;
   }
 
-  const std::string model_id = requested_model_id.empty() ? PickPreferredModelId(it->second) : requested_model_id;
+  const std::string model_id = requested_model_id.empty()
+                                   ? PickPreferredModelId(it->second)
+                                   : requested_model_id;
   if (initialized_ && model_id == active_model_id_) {
     registry_ = std::move(reg);
     return true;
@@ -263,23 +310,26 @@ bool YunetFaceDetector::EnsureInitialized(const std::string& requested_model_id,
   const auto pack = registry_.Find("face_detection", model_id);
   if (!pack) {
     if (error) {
-      *error = requested_model_id.empty()
-                   ? ("Failed to resolve face_detection model_id '" + model_id + "'")
-                   : ("Requested face_detection model_id '" + model_id + "' is not installed");
+      *error =
+          requested_model_id.empty()
+              ? ("Failed to resolve face_detection model_id '" + model_id + "'")
+              : ("Requested face_detection model_id '" + model_id +
+                 "' is not installed");
     }
     return false;
   }
 
   // Find the main ONNX file.
   std::filesystem::path model_path;
-  for (const auto& f : pack->files) {
+  for (const auto &f : pack->files) {
     if (f.role == "main" && f.kind == "onnx") {
       model_path = f.path;
       break;
     }
   }
   if (model_path.empty()) {
-    if (error) *error = "YuNet pack is missing a role=main kind=onnx file";
+    if (error)
+      *error = "YuNet pack is missing a role=main kind=onnx file";
     return false;
   }
 
@@ -291,9 +341,13 @@ bool YunetFaceDetector::EnsureInitialized(const std::string& requested_model_id,
   opts.prefer_cuda = true;
   opts.cuda_device_id = 0;
   std::string ort_err;
-  auto sess = studiocast::onnx::OrtSession::Create(model_path, opts, &session_info_, &ort_err);
+  auto sess = studiocast::onnx::OrtSession::Create(model_path, opts,
+                                                   &session_info_, &ort_err);
   if (!sess) {
-    if (error) *error = ort_err.empty() ? ("Failed to create ORT session for " + model_path.string()) : ort_err;
+    if (error)
+      *error = ort_err.empty()
+                   ? ("Failed to create ORT session for " + model_path.string())
+                   : ort_err;
     return false;
   }
 
@@ -303,7 +357,8 @@ bool YunetFaceDetector::EnsureInitialized(const std::string& requested_model_id,
 
   std::string bind_err;
   if (!BuildBindings(&bind_err)) {
-    if (error) *error = bind_err;
+    if (error)
+      *error = bind_err;
     Reset();
     return false;
   }
@@ -312,7 +367,10 @@ bool YunetFaceDetector::EnsureInitialized(const std::string& requested_model_id,
   return true;
 }
 
-YunetFaceDetector::Letterbox YunetFaceDetector::ComputeLetterbox(int src_w, int src_h, int dst_w, int dst_h) {
+YunetFaceDetector::Letterbox YunetFaceDetector::ComputeLetterbox(int src_w,
+                                                                 int src_h,
+                                                                 int dst_w,
+                                                                 int dst_h) {
   Letterbox lb;
   lb.out_w = std::max(1, dst_w);
   lb.out_h = std::max(1, dst_h);
@@ -328,39 +386,44 @@ YunetFaceDetector::Letterbox YunetFaceDetector::ComputeLetterbox(int src_w, int 
   const float sy = static_cast<float>(dst_h) / static_cast<float>(src_h);
   lb.scale = std::min(sx, sy);
 
-  const int resized_w = std::max(1, static_cast<int>(std::lround(src_w * lb.scale)));
-  const int resized_h = std::max(1, static_cast<int>(std::lround(src_h * lb.scale)));
+  const int resized_w =
+      std::max(1, static_cast<int>(std::lround(src_w * lb.scale)));
+  const int resized_h =
+      std::max(1, static_cast<int>(std::lround(src_h * lb.scale)));
   lb.pad_x = (dst_w - resized_w) / 2;
   lb.pad_y = (dst_h - resized_h) / 2;
   return lb;
 }
 
-void YunetFaceDetector::FillInputTensorBgr(const std::uint8_t* rgb,
-                                          int src_w,
-                                          int src_h,
-                                          std::size_t src_stride,
-                                          const Letterbox& lb) {
+void YunetFaceDetector::FillInputTensorBgr(const std::uint8_t *rgb, int src_w,
+                                           int src_h, std::size_t src_stride,
+                                           const Letterbox &lb) {
   const int out_w = settings_.input_w;
   const int out_h = settings_.input_h;
 
   // Clear to black (letterbox padding).
   std::fill(input_tensor_.begin(), input_tensor_.end(), 0.0f);
 
-  if (!rgb || src_w <= 1 || src_h <= 1) return;
+  if (!rgb || src_w <= 1 || src_h <= 1)
+    return;
 
   const float inv_scale = (lb.scale > 0.0f) ? (1.0f / lb.scale) : 1.0f;
-  const int content_w = std::max(1, static_cast<int>(std::lround(src_w * lb.scale)));
-  const int content_h = std::max(1, static_cast<int>(std::lround(src_h * lb.scale)));
+  const int content_w =
+      std::max(1, static_cast<int>(std::lround(src_w * lb.scale)));
+  const int content_h =
+      std::max(1, static_cast<int>(std::lround(src_h * lb.scale)));
   const int x0 = std::max(0, lb.pad_x);
   const int y0 = std::max(0, lb.pad_y);
   const int x1 = std::min(out_w, lb.pad_x + content_w);
   const int y1 = std::min(out_h, lb.pad_y + content_h);
 
-  const std::size_t plane = static_cast<std::size_t>(out_w) * static_cast<std::size_t>(out_h);
+  const std::size_t plane =
+      static_cast<std::size_t>(out_w) * static_cast<std::size_t>(out_h);
 
   for (int oy = y0; oy < y1; ++oy) {
     // Map to source y.
-    const float sy = (static_cast<float>(oy - lb.pad_y) + 0.5f) * inv_scale - 0.5f;
+    const float sy =
+        (static_cast<float>(oy - lb.pad_y) + 0.5f) * inv_scale - 0.5f;
     int y_base = static_cast<int>(std::floor(sy));
     float ty = sy - static_cast<float>(y_base);
     if (y_base < 0) {
@@ -373,11 +436,14 @@ void YunetFaceDetector::FillInputTensorBgr(const std::uint8_t* rgb,
       ty = 0.0f;
     }
 
-    const std::uint8_t* row0 = rgb + static_cast<std::size_t>(y_base) * src_stride;
-    const std::uint8_t* row1 = rgb + static_cast<std::size_t>(y_next) * src_stride;
+    const std::uint8_t *row0 =
+        rgb + static_cast<std::size_t>(y_base) * src_stride;
+    const std::uint8_t *row1 =
+        rgb + static_cast<std::size_t>(y_next) * src_stride;
 
     for (int ox = x0; ox < x1; ++ox) {
-      const float sx = (static_cast<float>(ox - lb.pad_x) + 0.5f) * inv_scale - 0.5f;
+      const float sx =
+          (static_cast<float>(ox - lb.pad_x) + 0.5f) * inv_scale - 0.5f;
       int x_base = static_cast<int>(std::floor(sx));
       float tx = sx - static_cast<float>(x_base);
       if (x_base < 0) {
@@ -390,10 +456,10 @@ void YunetFaceDetector::FillInputTensorBgr(const std::uint8_t* rgb,
         tx = 0.0f;
       }
 
-      const std::uint8_t* p00 = row0 + static_cast<std::size_t>(x_base) * 3;
-      const std::uint8_t* p01 = row0 + static_cast<std::size_t>(x_next) * 3;
-      const std::uint8_t* p10 = row1 + static_cast<std::size_t>(x_base) * 3;
-      const std::uint8_t* p11 = row1 + static_cast<std::size_t>(x_next) * 3;
+      const std::uint8_t *p00 = row0 + static_cast<std::size_t>(x_base) * 3;
+      const std::uint8_t *p01 = row0 + static_cast<std::size_t>(x_next) * 3;
+      const std::uint8_t *p10 = row1 + static_cast<std::size_t>(x_base) * 3;
+      const std::uint8_t *p11 = row1 + static_cast<std::size_t>(x_next) * 3;
 
       // Input is RGB; model expects BGR.
       const float r00 = static_cast<float>(p00[0]);
@@ -420,7 +486,9 @@ void YunetFaceDetector::FillInputTensorBgr(const std::uint8_t* rgb,
       const float g = g0 + (g1 - g0) * ty;
       const float b = b0 + (b1 - b0) * ty;
 
-      const std::size_t idx = static_cast<std::size_t>(oy) * static_cast<std::size_t>(out_w) + static_cast<std::size_t>(ox);
+      const std::size_t idx =
+          static_cast<std::size_t>(oy) * static_cast<std::size_t>(out_w) +
+          static_cast<std::size_t>(ox);
       if (input_is_nhwc_) {
         const std::size_t base = idx * 3u;
         input_tensor_[base + 0] = b;
@@ -435,7 +503,7 @@ void YunetFaceDetector::FillInputTensorBgr(const std::uint8_t* rgb,
   }
 }
 
-float YunetFaceDetector::IoU(const FaceDetection& a, const FaceDetection& b) {
+float YunetFaceDetector::IoU(const FaceDetection &a, const FaceDetection &b) {
   const float ax0 = a.x;
   const float ay0 = a.y;
   const float ax1 = a.x + a.w;
@@ -459,17 +527,15 @@ float YunetFaceDetector::IoU(const FaceDetection& a, const FaceDetection& b) {
   return (uni > 0.0f) ? (inter / uni) : 0.0f;
 }
 
-bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
-                                                int width,
-                                                int height,
-                                                std::size_t stride,
-                                                const std::string& requested_model_id,
-                                                std::uint64_t capture_sequence,
-                                                FrameAnalysisCache* cache,
-                                                std::string* error) {
-  if (error) error->clear();
+bool YunetFaceDetector::EnsureDetectionsForFrame(
+    const std::uint8_t *rgb, int width, int height, std::size_t stride,
+    const std::string &requested_model_id, std::uint64_t capture_sequence,
+    FrameAnalysisCache *cache, std::string *error) {
+  if (error)
+    error->clear();
   if (!cache) {
-    if (error) *error = "FrameAnalysisCache is null";
+    if (error)
+      *error = "FrameAnalysisCache is null";
     return false;
   }
 
@@ -480,11 +546,13 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
 
   std::string init_err;
   if (!EnsureInitialized(requested_model_id, &init_err)) {
-    if (error) *error = init_err;
+    if (error)
+      *error = init_err;
     return false;
   }
 
-  const Letterbox lb = ComputeLetterbox(width, height, settings_.input_w, settings_.input_h);
+  const Letterbox lb =
+      ComputeLetterbox(width, height, settings_.input_w, settings_.input_h);
   FillInputTensorBgr(rgb, width, height, stride, lb);
 
   // Bind input.
@@ -498,7 +566,7 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
   // Bind outputs.
   std::vector<studiocast::onnx::OrtSession::RunOutput> outs;
   outs.reserve(outputs_.size());
-  for (auto& ob : outputs_) {
+  for (auto &ob : outputs_) {
     studiocast::onnx::OrtSession::RunOutput o;
     o.name = ob.name.c_str();
     o.data = ob.data.data();
@@ -510,7 +578,8 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
 
   std::string run_err;
   if (!session_->RunCpu(&in, 1, outs.data(), outs.size(), &run_err)) {
-    if (error) *error = run_err;
+    if (error)
+      *error = run_err;
     return false;
   }
 
@@ -526,12 +595,13 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
     const int stride_px = strides[s];
     const int cols = padW / stride_px;
     const int rows = padH / stride_px;
-    if (cols <= 0 || rows <= 0) continue;
+    if (cols <= 0 || rows <= 0)
+      continue;
 
-    const auto& cls = outputs_[static_cast<std::size_t>(cls_idx_[s])];
-    const auto& obj = outputs_[static_cast<std::size_t>(obj_idx_[s])];
-    const auto& bbox = outputs_[static_cast<std::size_t>(bbox_idx_[s])];
-    const auto& kps = outputs_[static_cast<std::size_t>(kps_idx_[s])];
+    const auto &cls = outputs_[static_cast<std::size_t>(cls_idx_[s])];
+    const auto &obj = outputs_[static_cast<std::size_t>(obj_idx_[s])];
+    const auto &bbox = outputs_[static_cast<std::size_t>(bbox_idx_[s])];
+    const auto &kps = outputs_[static_cast<std::size_t>(kps_idx_[s])];
 
     const bool bbox_nhwc = (bbox.shape.size() == 4 && bbox.shape[3] == 4);
     const bool kps_nhwc = (kps.shape.size() == 4 && kps.shape[3] == 10);
@@ -541,22 +611,30 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
         const int idx = r * cols + c;
 
         // cls/obj are 1-channel so layout does not matter.
-        float cls_score = std::clamp(cls.data[static_cast<std::size_t>(idx)], 0.0f, 1.0f);
-        float obj_score = std::clamp(obj.data[static_cast<std::size_t>(idx)], 0.0f, 1.0f);
+        float cls_score =
+            std::clamp(cls.data[static_cast<std::size_t>(idx)], 0.0f, 1.0f);
+        float obj_score =
+            std::clamp(obj.data[static_cast<std::size_t>(idx)], 0.0f, 1.0f);
         float score = std::sqrt(cls_score * obj_score);
-        if (score < settings_.score_threshold) continue;
+        if (score < settings_.score_threshold)
+          continue;
 
         auto read_bbox = [&](int k) -> float {
           if (bbox_nhwc) {
-            return bbox.data[static_cast<std::size_t>(idx) * 4u + static_cast<std::size_t>(k)];
+            return bbox.data[static_cast<std::size_t>(idx) * 4u +
+                             static_cast<std::size_t>(k)];
           }
-          const std::size_t plane = static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
-          return bbox.data[static_cast<std::size_t>(k) * plane + static_cast<std::size_t>(idx)];
+          const std::size_t plane =
+              static_cast<std::size_t>(rows) * static_cast<std::size_t>(cols);
+          return bbox.data[static_cast<std::size_t>(k) * plane +
+                           static_cast<std::size_t>(idx)];
         };
 
         // OpenCV FaceDetectorYN decode.
-        const float cx = (static_cast<float>(c) + read_bbox(0)) * static_cast<float>(stride_px);
-        const float cy = (static_cast<float>(r) + read_bbox(1)) * static_cast<float>(stride_px);
+        const float cx = (static_cast<float>(c) + read_bbox(0)) *
+                         static_cast<float>(stride_px);
+        const float cy = (static_cast<float>(r) + read_bbox(1)) *
+                         static_cast<float>(stride_px);
         const float w = std::exp(read_bbox(2)) * static_cast<float>(stride_px);
         const float h = std::exp(read_bbox(3)) * static_cast<float>(stride_px);
         const float x1 = cx - w * 0.5f;
@@ -567,20 +645,21 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
         // Keypoints are available but are not currently needed for Auto Frame.
 
         faces.push_back(FaceDetection{
-                .x = x1,
-                .y = y1,
-                .w = w,
-                .h = h,
-                .score = score,
-            });
+            .x = x1,
+            .y = y1,
+            .w = w,
+            .h = h,
+            .score = score,
+        });
       }
     }
   }
 
   // Sort by score descending.
-  std::sort(faces.begin(), faces.end(), [](const FaceDetection& a, const FaceDetection& b) {
-    return a.score > b.score;
-  });
+  std::sort(faces.begin(), faces.end(),
+            [](const FaceDetection &a, const FaceDetection &b) {
+              return a.score > b.score;
+            });
   if (static_cast<int>(faces.size()) > settings_.top_k) {
     faces.resize(static_cast<std::size_t>(settings_.top_k));
   }
@@ -588,7 +667,7 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
   // Map to original frame space and run NMS.
   std::vector<FaceDetection> mapped;
   mapped.reserve(faces.size());
-  for (const auto& f : faces) {
+  for (const auto &f : faces) {
     FaceDetection out = f;
     // Undo letterbox.
     out.x = (out.x - static_cast<float>(lb.pad_x)) / lb.scale;
@@ -606,9 +685,9 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
 
   std::vector<FaceDetection> kept;
   kept.reserve(mapped.size());
-  for (const auto& cand : mapped) {
+  for (const auto &cand : mapped) {
     bool suppress = false;
-    for (const auto& prev : kept) {
+    for (const auto &prev : kept) {
       if (IoU(cand, prev) > settings_.nms_threshold) {
         suppress = true;
         break;
@@ -623,4 +702,4 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
   return true;
 }
 
-}  // namespace studiocast::open_video
+} // namespace studiocast::open_video

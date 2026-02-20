@@ -11,4 +11,4 @@ namespace studiocast::open_audio {
 // with caching).
 OpenAudioDiagnostics DiagnoseOpenAudioDefault();
 
-}  // namespace studiocast::open_audio
+} // namespace studiocast::open_audio

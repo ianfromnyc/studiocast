@@ -16,7 +16,8 @@ struct ModelPack {
   std::string onnx_filename;
 
   // Optional: which effects this model claims to support.
-  // Values should use stable effect IDs (see core/audio/effects/broadcast_audio_effect_contract.h).
+  // Values should use stable effect IDs (see
+  // core/audio/effects/broadcast_audio_effect_contract.h).
   std::vector<std::string> effects;
 
   // Optional metadata for UI / future validation.
@@ -27,13 +28,15 @@ struct ModelPack {
     // Name of the tensor input.
     std::string name;
 
-    // Optional range mapping for user-facing strength (0..1 normalized) to model domain.
-    // Value fed to the model is: min_value + t * (max_value - min_value)
+    // Optional range mapping for user-facing strength (0..1 normalized) to
+    // model domain. Value fed to the model is: min_value + t * (max_value -
+    // min_value)
     float min_value = 0.0f;
     float max_value = 1.0f;
 
     // Optional explicit tensor shape for scalar inputs. Default is [1].
-    // The engine currently supports only scalar-shaped aux inputs (product(shape)==1).
+    // The engine currently supports only scalar-shaped aux inputs
+    // (product(shape)==1).
     std::vector<int64_t> shape;
   };
 
@@ -48,7 +51,8 @@ struct ModelPack {
     std::string audio_output;
 
     // Optional state tensor names for streaming models.
-    // If empty, the engine will attempt to treat all non-audio inputs/outputs as state.
+    // If empty, the engine will attempt to treat all non-audio inputs/outputs
+    // as state.
     std::vector<std::string> state_inputs;
     std::vector<std::string> state_outputs;
 
@@ -71,18 +75,20 @@ struct ModelPack {
 //   <models_root>/open_audio/<model_id>/
 // where <models_root> is normally ~/.local/share/studiocast/models.
 class ModelPackRegistry {
- public:
-  // Scan the given Open Audio models directory (the directory containing <model_id>/...).
+public:
+  // Scan the given Open Audio models directory (the directory containing
+  // <model_id>/...).
   //
-  // Any pack that fails to load/validate is recorded in Problems() with a reason string.
-  // Valid packs are available via ListModels()/ResolveModel().
-  static ModelPackRegistry Scan(const std::filesystem::path& open_audio_models_dir);
+  // Any pack that fails to load/validate is recorded in Problems() with a
+  // reason string. Valid packs are available via ListModels()/ResolveModel().
+  static ModelPackRegistry
+  Scan(const std::filesystem::path &open_audio_models_dir);
 
   // Convenience for scanning the default XDG location.
   static ModelPackRegistry ScanDefault();
 
-  const std::vector<ModelPack>& ListModels() const { return models_; }
-  std::optional<ModelPack> ResolveModel(const std::string& id) const;
+  const std::vector<ModelPack> &ListModels() const { return models_; }
+  std::optional<ModelPack> ResolveModel(const std::string &id) const;
 
   // Deterministic default selection.
   // Current behavior:
@@ -99,15 +105,17 @@ class ModelPackRegistry {
   //   - "studio_voice"
   //
   // If effect_id is empty, this behaves like DefaultModelId().
-  std::string DefaultModelIdForEffect(const std::string& effect_id) const;
+  std::string DefaultModelIdForEffect(const std::string &effect_id) const;
 
   // Key is best-effort model id; if unknown, the directory name is used.
-  const std::map<std::string, std::string>& Problems() const { return problems_; }
+  const std::map<std::string, std::string> &Problems() const {
+    return problems_;
+  }
 
- private:
+private:
   std::filesystem::path root_;
-  std::vector<ModelPack> models_;                // sorted by id
-  std::map<std::string, std::string> problems_;  // sorted by key
+  std::vector<ModelPack> models_;               // sorted by id
+  std::map<std::string, std::string> problems_; // sorted by key
 };
 
-}  // namespace studiocast::open_audio
+} // namespace studiocast::open_audio

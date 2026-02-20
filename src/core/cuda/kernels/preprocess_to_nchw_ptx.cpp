@@ -20,7 +20,7 @@ namespace {
 //   mean0, mean1, mean2,
 //   invStd0, invStd1, invStd2,
 //   dstIsBgr, srcIsBgr
-static constexpr const char* kPreprocessPtx = R"ptx(
+static constexpr const char *kPreprocessPtx = R"ptx(
 .version 6.0
 .target sm_30
 .address_size 64
@@ -276,14 +276,16 @@ struct GlobalCuda {
   std::string err;
 };
 
-GlobalCuda& g() {
+GlobalCuda &g() {
   static GlobalCuda s;
   return s;
 }
 
-bool EnsureCudaReady(studiocast::maxine::CudaDriverApi** out_cuda, std::string* error_out) {
-  if (error_out) error_out->clear();
-  GlobalCuda& st = g();
+bool EnsureCudaReady(studiocast::maxine::CudaDriverApi **out_cuda,
+                     std::string *error_out) {
+  if (error_out)
+    error_out->clear();
+  GlobalCuda &st = g();
   std::call_once(st.once, [&]() {
     std::string e;
     if (!st.cuda.Initialize(&e)) {
@@ -294,12 +296,14 @@ bool EnsureCudaReady(studiocast::maxine::CudaDriverApi** out_cuda, std::string* 
     st.ok = true;
   });
   if (!st.ok) {
-    if (error_out) *error_out = st.err.empty() ? "CUDA unavailable" : st.err;
+    if (error_out)
+      *error_out = st.err.empty() ? "CUDA unavailable" : st.err;
     return false;
   }
   std::string e;
   if (!st.cuda.EnsureContext(&e)) {
-    if (error_out) *error_out = e;
+    if (error_out)
+      *error_out = e;
     return false;
   }
   *out_cuda = &st.cuda;
@@ -312,17 +316,20 @@ struct KernelState {
   studiocast::maxine::CUfunction fn = nullptr;
 };
 
-KernelState& kernel() {
+KernelState &kernel() {
   static KernelState s;
   return s;
 }
 
-bool EnsureKernelLoaded(studiocast::maxine::CudaDriverApi* cuda, std::string* error_out) {
-  if (error_out) error_out->clear();
-  KernelState& k = kernel();
-  if (k.loaded) return true;
+bool EnsureKernelLoaded(studiocast::maxine::CudaDriverApi *cuda,
+                        std::string *error_out) {
+  if (error_out)
+    error_out->clear();
+  KernelState &k = kernel();
+  if (k.loaded)
+    return true;
 
-  const auto& f = cuda->f();
+  const auto &f = cuda->f();
   studiocast::maxine::CUresult st = studiocast::maxine::CUDA_SUCCESS;
   std::string jit_log;
   if (f.cuModuleLoadDataEx) {
@@ -336,86 +343,103 @@ bool EnsureKernelLoaded(studiocast::maxine::CudaDriverApi* cuda, std::string* er
         studiocast::maxine::CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES,
         studiocast::maxine::CU_JIT_LOG_VERBOSE,
     };
-    void* vals[] = {
+    void *vals[] = {
         info,
-        reinterpret_cast<void*>(static_cast<std::size_t>(sizeof(info))),
+        reinterpret_cast<void *>(static_cast<std::size_t>(sizeof(info))),
         err,
-        reinterpret_cast<void*>(static_cast<std::size_t>(sizeof(err))),
-        reinterpret_cast<void*>(static_cast<std::size_t>(1)),
+        reinterpret_cast<void *>(static_cast<std::size_t>(sizeof(err))),
+        reinterpret_cast<void *>(static_cast<std::size_t>(1)),
     };
 
-    st = f.cuModuleLoadDataEx(&k.module,
-                             kPreprocessPtx,
-                             static_cast<unsigned int>(sizeof(opts) / sizeof(opts[0])),
-                             opts,
-                             vals);
-    jit_log = std::string("PTX JIT info log:\n") + info + "\nPTX JIT error log:\n" + err;
+    st = f.cuModuleLoadDataEx(
+        &k.module, kPreprocessPtx,
+        static_cast<unsigned int>(sizeof(opts) / sizeof(opts[0])), opts, vals);
+    jit_log = std::string("PTX JIT info log:\n") + info +
+              "\nPTX JIT error log:\n" + err;
   } else {
     st = f.cuModuleLoadData(&k.module, kPreprocessPtx);
   }
   if (st != studiocast::maxine::CUDA_SUCCESS) {
     if (error_out) {
-      *error_out = "cuModuleLoadData(preprocess_to_nchw_f32) failed: " + cuda->StatusToString(st);
-      if (!jit_log.empty()) *error_out += "\n" + jit_log;
+      *error_out = "cuModuleLoadData(preprocess_to_nchw_f32) failed: " +
+                   cuda->StatusToString(st);
+      if (!jit_log.empty())
+        *error_out += "\n" + jit_log;
     }
     return false;
   }
   st = f.cuModuleGetFunction(&k.fn, k.module, "preprocess_to_nchw_f32");
   if (st != studiocast::maxine::CUDA_SUCCESS) {
-    if (error_out) *error_out = "cuModuleGetFunction(preprocess_to_nchw_f32) failed: " + cuda->StatusToString(st);
+    if (error_out)
+      *error_out = "cuModuleGetFunction(preprocess_to_nchw_f32) failed: " +
+                   cuda->StatusToString(st);
     return false;
   }
   k.loaded = true;
   return true;
 }
 
-}  // namespace
+} // namespace
 
-bool PreprocessToTensor(const CudaImage& src,
-                        const CudaTensor& dst,
-                        const ModelPreprocessSpec& spec,
+bool PreprocessToTensor(const CudaImage &src, const CudaTensor &dst,
+                        const ModelPreprocessSpec &spec,
                         studiocast::maxine::CUstream stream,
-                        std::string* error_out) {
-  if (error_out) error_out->clear();
+                        std::string *error_out) {
+  if (error_out)
+    error_out->clear();
   if (!src.Valid() || !dst.Valid()) {
-    if (error_out) *error_out = "PreprocessToTensor: invalid src/dst.";
+    if (error_out)
+      *error_out = "PreprocessToTensor: invalid src/dst.";
     return false;
   }
-  if (src.format != PixelFormatGpu::rgb_u8 && src.format != PixelFormatGpu::bgr_u8) {
-    if (error_out) *error_out = "PreprocessToTensor: unsupported src format (expected rgb_u8 or bgr_u8).";
+  if (src.format != PixelFormatGpu::rgb_u8 &&
+      src.format != PixelFormatGpu::bgr_u8) {
+    if (error_out)
+      *error_out = "PreprocessToTensor: unsupported src format (expected "
+                   "rgb_u8 or bgr_u8).";
     return false;
   }
   if (spec.dst_w <= 0 || spec.dst_h <= 0) {
-    if (error_out) *error_out = "PreprocessToTensor: invalid dst size in spec.";
+    if (error_out)
+      *error_out = "PreprocessToTensor: invalid dst size in spec.";
     return false;
   }
   if (dst.n != 1 || dst.c != 3 || dst.h != spec.dst_h || dst.w != spec.dst_w) {
-    if (error_out) *error_out =
-        "PreprocessToTensor: dst tensor shape mismatch (expected N=1,C=3,H=spec.dst_h,W=spec.dst_w).";
+    if (error_out)
+      *error_out = "PreprocessToTensor: dst tensor shape mismatch (expected "
+                   "N=1,C=3,H=spec.dst_h,W=spec.dst_w).";
     return false;
   }
   if (src.pitch > std::numeric_limits<std::uint32_t>::max()) {
-    if (error_out) *error_out = "PreprocessToTensor: src pitch too large for PTX kernel ABI.";
+    if (error_out)
+      *error_out =
+          "PreprocessToTensor: src pitch too large for PTX kernel ABI.";
     return false;
   }
   if (spec.std[0] == 0.0f || spec.std[1] == 0.0f || spec.std[2] == 0.0f) {
-    if (error_out) *error_out = "PreprocessToTensor: std contains zero.";
+    if (error_out)
+      *error_out = "PreprocessToTensor: std contains zero.";
     return false;
   }
 
-  const std::size_t want_bytes = static_cast<std::size_t>(dst.n) * static_cast<std::size_t>(dst.c) *
-                                 static_cast<std::size_t>(dst.h) * static_cast<std::size_t>(dst.w) * sizeof(float);
+  const std::size_t want_bytes =
+      static_cast<std::size_t>(dst.n) * static_cast<std::size_t>(dst.c) *
+      static_cast<std::size_t>(dst.h) * static_cast<std::size_t>(dst.w) *
+      sizeof(float);
   if (dst.bytes < want_bytes) {
-    if (error_out) *error_out = "PreprocessToTensor: dst tensor buffer too small.";
+    if (error_out)
+      *error_out = "PreprocessToTensor: dst tensor buffer too small.";
     return false;
   }
 
-  studiocast::maxine::CudaDriverApi* cuda = nullptr;
-  if (!EnsureCudaReady(&cuda, error_out)) return false;
-  if (!EnsureKernelLoaded(cuda, error_out)) return false;
+  studiocast::maxine::CudaDriverApi *cuda = nullptr;
+  if (!EnsureCudaReady(&cuda, error_out))
+    return false;
+  if (!EnsureKernelLoaded(cuda, error_out))
+    return false;
 
-  KernelState& k = kernel();
-  const auto& f = cuda->f();
+  KernelState &k = kernel();
+  const auto &f = cuda->f();
 
   const std::uint32_t src_pitch = static_cast<std::uint32_t>(src.pitch);
   const std::uint32_t src_w = static_cast<std::uint32_t>(src.w);
@@ -430,48 +454,45 @@ bool PreprocessToTensor(const CudaImage& src,
   const float inv0 = 1.0f / spec.std[0];
   const float inv1 = 1.0f / spec.std[1];
   const float inv2 = 1.0f / spec.std[2];
-  const std::uint32_t dst_is_bgr = (spec.dst_order == ChannelOrder::bgr) ? 1u : 0u;
-  const std::uint32_t src_is_bgr = (src.format == PixelFormatGpu::bgr_u8) ? 1u : 0u;
+  const std::uint32_t dst_is_bgr =
+      (spec.dst_order == ChannelOrder::bgr) ? 1u : 0u;
+  const std::uint32_t src_is_bgr =
+      (src.format == PixelFormatGpu::bgr_u8) ? 1u : 0u;
 
-  void* args[] = {
-      const_cast<unsigned long long*>(&src_ptr),
-      const_cast<std::uint32_t*>(&src_pitch),
-      const_cast<std::uint32_t*>(&src_w),
-      const_cast<std::uint32_t*>(&src_h),
-      const_cast<unsigned long long*>(&dst_ptr),
-      const_cast<std::uint32_t*>(&dst_w),
-      const_cast<std::uint32_t*>(&dst_h),
-      const_cast<float*>(&mean0),
-      const_cast<float*>(&mean1),
-      const_cast<float*>(&mean2),
-      const_cast<float*>(&inv0),
-      const_cast<float*>(&inv1),
-      const_cast<float*>(&inv2),
-      const_cast<std::uint32_t*>(&dst_is_bgr),
-      const_cast<std::uint32_t*>(&src_is_bgr),
+  void *args[] = {
+      const_cast<unsigned long long *>(&src_ptr),
+      const_cast<std::uint32_t *>(&src_pitch),
+      const_cast<std::uint32_t *>(&src_w),
+      const_cast<std::uint32_t *>(&src_h),
+      const_cast<unsigned long long *>(&dst_ptr),
+      const_cast<std::uint32_t *>(&dst_w),
+      const_cast<std::uint32_t *>(&dst_h),
+      const_cast<float *>(&mean0),
+      const_cast<float *>(&mean1),
+      const_cast<float *>(&mean2),
+      const_cast<float *>(&inv0),
+      const_cast<float *>(&inv1),
+      const_cast<float *>(&inv2),
+      const_cast<std::uint32_t *>(&dst_is_bgr),
+      const_cast<std::uint32_t *>(&src_is_bgr),
   };
 
   constexpr unsigned int block_x = 16;
   constexpr unsigned int block_y = 16;
-  const unsigned int grid_x = (static_cast<unsigned int>(spec.dst_w) + block_x - 1u) / block_x;
-  const unsigned int grid_y = (static_cast<unsigned int>(spec.dst_h) + block_y - 1u) / block_y;
+  const unsigned int grid_x =
+      (static_cast<unsigned int>(spec.dst_w) + block_x - 1u) / block_x;
+  const unsigned int grid_y =
+      (static_cast<unsigned int>(spec.dst_h) + block_y - 1u) / block_y;
 
-  const studiocast::maxine::CUresult st = f.cuLaunchKernel(k.fn,
-                                                          grid_x,
-                                                          grid_y,
-                                                          1,
-                                                          block_x,
-                                                          block_y,
-                                                          1,
-                                                          0,
-                                                          stream,
-                                                          args,
-                                                          nullptr);
+  const studiocast::maxine::CUresult st = f.cuLaunchKernel(
+      k.fn, grid_x, grid_y, 1, block_x, block_y, 1, 0, stream, args, nullptr);
   if (st != studiocast::maxine::CUDA_SUCCESS) {
-    if (error_out) *error_out = "cuLaunchKernel(preprocess_to_nchw_f32) failed: " + cuda->StatusToString(st);
+    if (error_out)
+      *error_out = "cuLaunchKernel(preprocess_to_nchw_f32) failed: " +
+                   cuda->StatusToString(st);
     return false;
   }
   return true;
 }
 
-}  // namespace studiocast::cuda::kernels
+} // namespace studiocast::cuda::kernels

@@ -16,22 +16,24 @@ namespace studiocast::open_cuda {
 // - Uses Ort::IoBinding to bind input/output tensors to GPU buffers.
 // - Avoids per-frame device allocations (tensors are re-used).
 class OpenCudaMattingSession {
- public:
+public:
   struct Options {
     int device_id = 0;
     bool enable_tensorrt = false;
   };
 
-  OpenCudaMattingSession(studiocast::maxine::CudaDriverApi* cuda, studiocast::open_video::ModelPack pack);
-  OpenCudaMattingSession(studiocast::maxine::CudaDriverApi* cuda, studiocast::open_video::ModelPack pack, Options opts);
+  OpenCudaMattingSession(studiocast::maxine::CudaDriverApi *cuda,
+                         studiocast::open_video::ModelPack pack);
+  OpenCudaMattingSession(studiocast::maxine::CudaDriverApi *cuda,
+                         studiocast::open_video::ModelPack pack, Options opts);
   ~OpenCudaMattingSession();
 
-  OpenCudaMattingSession(const OpenCudaMattingSession&) = delete;
-  OpenCudaMattingSession& operator=(const OpenCudaMattingSession&) = delete;
+  OpenCudaMattingSession(const OpenCudaMattingSession &) = delete;
+  OpenCudaMattingSession &operator=(const OpenCudaMattingSession &) = delete;
 
   // Prepare internal buffers and validate model metadata.
   // Safe to call repeatedly.
-  bool EnsureInitialized(int frame_w, int frame_h, std::string* error_out);
+  bool EnsureInitialized(int frame_w, int frame_h, std::string *error_out);
 
   // Run matting inference.
   //
@@ -43,15 +45,15 @@ class OpenCudaMattingSession {
   // cannot be configured to use the provided stream, the function may
   // synchronize the stream for correctness.
   bool Run(studiocast::maxine::CUstream stream,
-           const studiocast::cuda::CudaImage& input_rgb_gpu,
-           studiocast::cuda::CudaTensor* output_alpha_gpu,
-           std::string* error_out);
+           const studiocast::cuda::CudaImage &input_rgb_gpu,
+           studiocast::cuda::CudaTensor *output_alpha_gpu,
+           std::string *error_out);
 
-  const studiocast::open_video::ModelPack& pack() const;
+  const studiocast::open_video::ModelPack &pack() const;
 
- private:
+private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-}  // namespace studiocast::open_cuda
+} // namespace studiocast::open_cuda

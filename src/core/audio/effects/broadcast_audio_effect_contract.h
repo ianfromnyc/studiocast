@@ -16,19 +16,24 @@ namespace studiocast::audio::effects::contract {
 
 // ---- Effect IDs ----
 inline constexpr std::string_view kEffectIdNoiseRemoval = "noise_removal";
-inline constexpr std::string_view kEffectIdRoomEchoRemoval = "room_echo_removal";
+inline constexpr std::string_view kEffectIdRoomEchoRemoval =
+    "room_echo_removal";
 inline constexpr std::string_view kEffectIdStudioVoice = "studio_voice";
 
 // ---- Parameter IDs (stable) ----
 namespace param {
 inline constexpr std::string_view kEnabled = "enabled";
-inline constexpr std::string_view kStrength = "strength";  // integer percent 0..100
-inline constexpr std::string_view kEngine = "engine";       // "auto"|"maxine"|"open_source"|"off"
+inline constexpr std::string_view kStrength =
+    "strength"; // integer percent 0..100
+inline constexpr std::string_view kEngine =
+    "engine"; // "auto"|"maxine"|"open_source"|"off"
 inline constexpr std::string_view kModelId = "model_id";
 inline constexpr std::string_view kModelPath = "model_path";
 
-// Studio voice uses a dedicated strength knob to avoid ambiguity with the legacy noise/echo strength.
-inline constexpr std::string_view kStudioVoiceStrength = "studio_voice_strength";
-}  // namespace param
+// Studio voice uses a dedicated strength knob to avoid ambiguity with the
+// legacy noise/echo strength.
+inline constexpr std::string_view kStudioVoiceStrength =
+    "studio_voice_strength";
+} // namespace param
 
-}  // namespace studiocast::audio::effects::contract
+} // namespace studiocast::audio::effects::contract

@@ -6,28 +6,28 @@ namespace studiocast::video::effects {
 
 std::string ToString(RequiredComponent v) {
   switch (v) {
-    case RequiredComponent::none:
-      return "none";
-    case RequiredComponent::gpu_utility:
-      return "gpu_utility";
-    case RequiredComponent::maxine_vfx:
-      return "maxine_vfx";
-    case RequiredComponent::maxine_ar:
-      return "maxine_ar";
+  case RequiredComponent::none:
+    return "none";
+  case RequiredComponent::gpu_utility:
+    return "gpu_utility";
+  case RequiredComponent::maxine_vfx:
+    return "maxine_vfx";
+  case RequiredComponent::maxine_ar:
+    return "maxine_ar";
   }
   return "none";
 }
 
 std::string ToString(ParamType v) {
   switch (v) {
-    case ParamType::boolean:
-      return "bool";
-    case ParamType::integer:
-      return "int";
-    case ParamType::floating:
-      return "float";
-    case ParamType::string:
-      return "string";
+  case ParamType::boolean:
+    return "bool";
+  case ParamType::integer:
+    return "int";
+  case ParamType::floating:
+    return "float";
+  case ParamType::string:
+    return "string";
   }
   return "bool";
 }
@@ -114,7 +114,8 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
                         .step = 1,
                         .default_int = contract::kGreenscreenModeDefault,
                         .default_string = ""},
-        ParamDescriptor{.id = std::string(contract::param::kGreenscreenTemporal),
+        ParamDescriptor{.id =
+                            std::string(contract::param::kGreenscreenTemporal),
                         .display_name = "Temporal consistency",
                         .type = ParamType::boolean,
                         .default_bool = contract::kGreenscreenTemporalDefault,
@@ -160,7 +161,8 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
                         .step = 1,
                         .default_int = contract::kGreenscreenModeDefault,
                         .default_string = ""},
-        ParamDescriptor{.id = std::string(contract::param::kGreenscreenTemporal),
+        ParamDescriptor{.id =
+                            std::string(contract::param::kGreenscreenTemporal),
                         .display_name = "Temporal consistency",
                         .type = ParamType::boolean,
                         .default_bool = contract::kGreenscreenTemporalDefault,
@@ -174,8 +176,8 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     VideoEffectDescriptor d;
     d.id = std::string(contract::kEffectIdAutoFrame);
     d.display_name = "Auto Frame";
-    // Auto Frame can run either via Maxine AR (when available) or via the Open CUDA fallback.
-    // We only require the generic GPU utility component here.
+    // Auto Frame can run either via Maxine AR (when available) or via the Open
+    // CUDA fallback. We only require the generic GPU utility component here.
     d.required_components = {RequiredComponent::gpu_utility};
     d.mutex_groups = {std::string(contract::kMutexGroupBackgroundOrAutoFrame)};
     d.pipeline_order = 20;
@@ -216,8 +218,8 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     VideoEffectDescriptor d;
     d.id = std::string(contract::kEffectIdEyeContact);
     d.display_name = "Eye Contact";
-    // Auto Frame can run either via Maxine AR (when available) or via the Open CUDA fallback.
-    // We only require the generic GPU utility component here.
+    // Auto Frame can run either via Maxine AR (when available) or via the Open
+    // CUDA fallback. We only require the generic GPU utility component here.
     d.required_components = {RequiredComponent::gpu_utility};
     d.pipeline_order = 30;
     d.params = {
@@ -248,7 +250,8 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     VideoEffectDescriptor d;
     d.id = std::string(contract::kEffectIdVideoNoiseRemoval);
     d.display_name = "Video Noise Removal";
-    // Open-source (Open CUDA) fallback exists; keep this available when Maxine is missing.
+    // Open-source (Open CUDA) fallback exists; keep this available when Maxine
+    // is missing.
     d.required_components = {RequiredComponent::gpu_utility};
     d.pipeline_order = 50;
     d.params = {
@@ -263,7 +266,8 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
                         .min = 0,
                         .max = 100,
                         .step = 1,
-                        .default_int = contract::kVideoNoiseRemovalStrengthDefault,
+                        .default_int =
+                            contract::kVideoNoiseRemovalStrengthDefault,
                         .default_string = ""},
     };
     out.push_back(d);
@@ -272,7 +276,8 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     VideoEffectDescriptor d;
     d.id = std::string(contract::kEffectIdVirtualKeyLight);
     d.display_name = "Virtual Key Light";
-    // Open-source (Open CUDA) fallback exists; keep this available when Maxine is missing.
+    // Open-source (Open CUDA) fallback exists; keep this available when Maxine
+    // is missing.
     d.required_components = {RequiredComponent::gpu_utility};
     d.pipeline_order = 60;
     d.params = {
@@ -287,13 +292,15 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
                         .min = 0,
                         .max = 100,
                         .step = 1,
-                        .default_int = contract::kVirtualKeyLightIntensityDefault,
+                        .default_int =
+                            contract::kVirtualKeyLightIntensityDefault,
                         .default_string = ""},
         ParamDescriptor{.id = std::string(contract::param::kTemperaturePreset),
                         .display_name = "Temperature preset",
                         .type = ParamType::string,
                         .default_string = "neutral"},
-        ParamDescriptor{.id = std::string(contract::param::kDirectionPanDegrees),
+        ParamDescriptor{.id =
+                            std::string(contract::param::kDirectionPanDegrees),
                         .display_name = "Direction pan (degrees)",
                         .type = ParamType::integer,
                         .min = contract::kVirtualKeyLightPanMin,
@@ -328,7 +335,8 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
                         .step = 1,
                         .default_int = contract::kVignetteIntensityDefault,
                         .default_string = ""},
-        ParamDescriptor{.id = std::string(contract::param::kCenterOnTrackedFace),
+        ParamDescriptor{.id =
+                            std::string(contract::param::kCenterOnTrackedFace),
                         .display_name = "Center on tracked face",
                         .type = ParamType::boolean,
                         .default_bool = true,
@@ -340,4 +348,4 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
   return out;
 }
 
-}  // namespace studiocast::video::effects
+} // namespace studiocast::video::effects

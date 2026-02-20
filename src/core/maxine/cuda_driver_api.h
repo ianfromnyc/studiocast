@@ -1,8 +1,8 @@
 #pragma once
 
 #include <cstddef>
-#include <filesystem>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 
 #include "core/util/dynlib.h"
@@ -21,11 +21,11 @@ struct CUfunc_st;
 struct CUstream_st;
 struct CUarray_st;
 
-using CUcontext = CUctx_st*;
-using CUmodule = CUmod_st*;
-using CUfunction = CUfunc_st*;
-using CUstream = CUstream_st*;
-using CUarray = CUarray_st*;
+using CUcontext = CUctx_st *;
+using CUmodule = CUmod_st *;
+using CUfunction = CUfunc_st *;
+using CUstream = CUstream_st *;
+using CUarray = CUarray_st *;
 using CUdeviceptr = unsigned long long;
 using CUdevice = int;
 
@@ -43,7 +43,7 @@ struct CUDA_MEMCPY2D {
   std::size_t srcXInBytes;
   std::size_t srcY;
   CUmemorytype srcMemoryType;
-  const void* srcHost;
+  const void *srcHost;
   CUdeviceptr srcDevice;
   CUarray srcArray;
   std::size_t srcPitch;
@@ -51,7 +51,7 @@ struct CUDA_MEMCPY2D {
   std::size_t dstXInBytes;
   std::size_t dstY;
   CUmemorytype dstMemoryType;
-  void* dstHost;
+  void *dstHost;
   CUdeviceptr dstDevice;
   CUarray dstArray;
   std::size_t dstPitch;
@@ -74,41 +74,36 @@ inline constexpr CUjit_option CU_JIT_LOG_VERBOSE = 12;
 class CudaDriverApi {
 public:
   using cuInit_t = CUresult (*)(unsigned int flags);
-  using cuModuleLoadData_t = CUresult (*)(CUmodule* module, const void* image);
-  using cuModuleLoadDataEx_t = CUresult (*)(CUmodule* module,
-                                            const void* image,
+  using cuModuleLoadData_t = CUresult (*)(CUmodule *module, const void *image);
+  using cuModuleLoadDataEx_t = CUresult (*)(CUmodule *module, const void *image,
                                             unsigned int numOptions,
-                                            CUjit_option* options,
-                                            void** optionValues);
-  using cuModuleGetFunction_t = CUresult (*)(CUfunction* hfunc, CUmodule hmod, const char* name);
-  using cuLaunchKernel_t = CUresult (*)(CUfunction f,
-                                       unsigned int gridDimX,
-                                       unsigned int gridDimY,
-                                       unsigned int gridDimZ,
-                                       unsigned int blockDimX,
-                                       unsigned int blockDimY,
-                                       unsigned int blockDimZ,
-                                       unsigned int sharedMemBytes,
-                                       CUstream hStream,
-                                       void** kernelParams,
-                                       void** extra);
-  using cuMemAllocPitch_t = CUresult (*)(CUdeviceptr* dptr,
-                                        std::size_t* pPitch,
-                                        std::size_t WidthInBytes,
-                                        std::size_t Height,
-                                        unsigned int ElementSizeBytes);
+                                            CUjit_option *options,
+                                            void **optionValues);
+  using cuModuleGetFunction_t = CUresult (*)(CUfunction *hfunc, CUmodule hmod,
+                                             const char *name);
+  using cuLaunchKernel_t = CUresult (*)(
+      CUfunction f, unsigned int gridDimX, unsigned int gridDimY,
+      unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY,
+      unsigned int blockDimZ, unsigned int sharedMemBytes, CUstream hStream,
+      void **kernelParams, void **extra);
+  using cuMemAllocPitch_t = CUresult (*)(CUdeviceptr *dptr, std::size_t *pPitch,
+                                         std::size_t WidthInBytes,
+                                         std::size_t Height,
+                                         unsigned int ElementSizeBytes);
   using cuMemFree_t = CUresult (*)(CUdeviceptr dptr);
-  using cuMemcpy2DAsync_t = CUresult (*)(const CUDA_MEMCPY2D* pCopy, CUstream hStream);
-  using cuStreamCreate_t = CUresult (*)(CUstream* phStream, unsigned int Flags);
+  using cuMemcpy2DAsync_t = CUresult (*)(const CUDA_MEMCPY2D *pCopy,
+                                         CUstream hStream);
+  using cuStreamCreate_t = CUresult (*)(CUstream *phStream, unsigned int Flags);
   using cuStreamDestroy_t = CUresult (*)(CUstream hStream);
   using cuStreamSynchronize_t = CUresult (*)(CUstream hStream);
-  using cuDeviceGetCount_t = CUresult (*)(int* count);
-  using cuDeviceGet_t = CUresult (*)(CUdevice* device, int ordinal);
-  using cuDevicePrimaryCtxRetain_t = CUresult (*)(CUcontext* pctx, CUdevice dev);
+  using cuDeviceGetCount_t = CUresult (*)(int *count);
+  using cuDeviceGet_t = CUresult (*)(CUdevice *device, int ordinal);
+  using cuDevicePrimaryCtxRetain_t = CUresult (*)(CUcontext *pctx,
+                                                  CUdevice dev);
   using cuDevicePrimaryCtxRelease_t = CUresult (*)(CUdevice dev);
   using cuCtxSetCurrent_t = CUresult (*)(CUcontext ctx);
-  using cuCtxGetCurrent_t = CUresult (*)(CUcontext* pctx);
-  using cuGetErrorString_t = CUresult (*)(CUresult error, const char** pStr);
+  using cuCtxGetCurrent_t = CUresult (*)(CUcontext *pctx);
+  using cuGetErrorString_t = CUresult (*)(CUresult error, const char **pStr);
 
   struct Functions {
     cuInit_t cuInit = nullptr;
@@ -134,63 +129,54 @@ public:
   CudaDriverApi();
   ~CudaDriverApi();
 
-  CudaDriverApi(const CudaDriverApi&) = delete;
-  CudaDriverApi& operator=(const CudaDriverApi&) = delete;
+  CudaDriverApi(const CudaDriverApi &) = delete;
+  CudaDriverApi &operator=(const CudaDriverApi &) = delete;
 
-  CudaDriverApi(CudaDriverApi&&) noexcept;
-  CudaDriverApi& operator=(CudaDriverApi&&) noexcept;
+  CudaDriverApi(CudaDriverApi &&) noexcept;
+  CudaDriverApi &operator=(CudaDriverApi &&) noexcept;
 
-  bool Initialize(std::string* error_out);
+  bool Initialize(std::string *error_out);
   bool IsInitialized() const { return initialized_; }
 
-  const Functions& f() const { return f_; }
+  const Functions &f() const { return f_; }
 
   std::string StatusToString(CUresult code) const;
-  const std::string& error() const { return error_; }
+  const std::string &error() const { return error_; }
 
   struct PitchAllocation {
     CUdeviceptr ptr = 0;
     std::size_t pitch = 0;
   };
 
-  bool AllocatePitch(std::size_t width_bytes,
-                     std::size_t height,
-                     PitchAllocation* out,
-                     std::string* error_out,
+  bool AllocatePitch(std::size_t width_bytes, std::size_t height,
+                     PitchAllocation *out, std::string *error_out,
                      unsigned int element_size_bytes = 1);
 
-  bool Free(CUdeviceptr ptr, std::string* error_out);
+  bool Free(CUdeviceptr ptr, std::string *error_out);
 
-  bool MemcpyHtoD2DAsync(CUdeviceptr dst,
-                         std::size_t dst_pitch,
-                         const void* src,
-                         std::size_t src_pitch,
-                         std::size_t width_bytes,
-                         std::size_t height,
-                         CUstream stream,
-                         std::string* error_out);
+  bool MemcpyHtoD2DAsync(CUdeviceptr dst, std::size_t dst_pitch,
+                         const void *src, std::size_t src_pitch,
+                         std::size_t width_bytes, std::size_t height,
+                         CUstream stream, std::string *error_out);
 
-  bool MemcpyDtoH2DAsync(void* dst,
-                         std::size_t dst_pitch,
-                         CUdeviceptr src,
-                         std::size_t src_pitch,
-                         std::size_t width_bytes,
-                         std::size_t height,
-                         CUstream stream,
-                         std::string* error_out);
+  bool MemcpyDtoH2DAsync(void *dst, std::size_t dst_pitch, CUdeviceptr src,
+                         std::size_t src_pitch, std::size_t width_bytes,
+                         std::size_t height, CUstream stream,
+                         std::string *error_out);
 
-  bool CreateStream(CUstream* out, std::string* error_out, unsigned int flags = 0);
-  bool DestroyStream(CUstream stream, std::string* error_out);
-  bool StreamSynchronize(CUstream stream, std::string* error_out);
+  bool CreateStream(CUstream *out, std::string *error_out,
+                    unsigned int flags = 0);
+  bool DestroyStream(CUstream stream, std::string *error_out);
+  bool StreamSynchronize(CUstream stream, std::string *error_out);
 
   // Ensures there is a current CUDA context for subsequent Driver API calls.
   //
   // If a context is already current on the calling thread, this is a no-op.
   // Otherwise, we retain and set the primary context for device 0.
-  bool EnsureContext(std::string* error_out);
+  bool EnsureContext(std::string *error_out);
 
 private:
-  bool LoadSymbols(std::string* error_out);
+  bool LoadSymbols(std::string *error_out);
 
   bool initialized_ = false;
   util::DynLib lib_{std::filesystem::path("libcuda.so.1")};
@@ -202,4 +188,4 @@ private:
   CUcontext primary_ctx_ = nullptr;
 };
 
-}  // namespace studiocast::maxine
+} // namespace studiocast::maxine

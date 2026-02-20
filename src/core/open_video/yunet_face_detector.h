@@ -7,9 +7,9 @@
 #include <string>
 #include <vector>
 
+#include "core/onnx/ort_session.h"
 #include "core/open_video/frame_analysis_cache.h"
 #include "core/open_video/model_pack_registry.h"
-#include "core/onnx/ort_session.h"
 
 namespace studiocast::open_video {
 
@@ -22,39 +22,39 @@ namespace studiocast::open_video {
 // Design goals:
 //  - Real-time streaming friendly (runs on a downscaled letterboxed input).
 //  - Best-effort GPU acceleration via ONNX Runtime CUDA EP when available.
-//  - No duplicated inference within a single capture frame via FrameAnalysisCache.
+//  - No duplicated inference within a single capture frame via
+//  FrameAnalysisCache.
 class YunetFaceDetector {
- public:
+public:
   YunetFaceDetector() = default;
   ~YunetFaceDetector() = default;
 
-  YunetFaceDetector(const YunetFaceDetector&) = delete;
-  YunetFaceDetector& operator=(const YunetFaceDetector&) = delete;
+  YunetFaceDetector(const YunetFaceDetector &) = delete;
+  YunetFaceDetector &operator=(const YunetFaceDetector &) = delete;
 
   void Reset();
 
   // Loads a suitable YuNet model pack and creates an ORT session.
   // Safe to call multiple times. If requested_model_id is empty, the registry
   // default is used.
-  bool EnsureInitialized(const std::string& requested_model_id, std::string* error);
+  bool EnsureInitialized(const std::string &requested_model_id,
+                         std::string *error);
 
   // Ensures cache->face_detections is populated for the given capture_sequence.
   //
   // Returns true if the model ran (even if zero faces were detected).
-  // Returns false if the model could not run; cache->face_detections is left unset.
-  bool EnsureDetectionsForFrame(const std::uint8_t* rgb,
-                                int width,
-                                int height,
+  // Returns false if the model could not run; cache->face_detections is left
+  // unset.
+  bool EnsureDetectionsForFrame(const std::uint8_t *rgb, int width, int height,
                                 std::size_t stride,
-                                const std::string& requested_model_id,
+                                const std::string &requested_model_id,
                                 std::uint64_t capture_sequence,
-                                FrameAnalysisCache* cache,
-                                std::string* error);
+                                FrameAnalysisCache *cache, std::string *error);
 
   bool available() const { return initialized_; }
-  const std::string& active_model_id() const { return active_model_id_; }
+  const std::string &active_model_id() const { return active_model_id_; }
 
- private:
+private:
   struct Settings {
     int input_w = 320;
     int input_h = 320;
@@ -100,17 +100,15 @@ class YunetFaceDetector {
   std::array<int, 3> bbox_idx_{{-1, -1, -1}};
   std::array<int, 3> kps_idx_{{-1, -1, -1}};
 
-  bool LoadSettingsFromManifest(const std::filesystem::path& manifest_path, std::string* error);
-  bool BuildBindings(std::string* error);
+  bool LoadSettingsFromManifest(const std::filesystem::path &manifest_path,
+                                std::string *error);
+  bool BuildBindings(std::string *error);
 
   static Letterbox ComputeLetterbox(int src_w, int src_h, int dst_w, int dst_h);
-  void FillInputTensorBgr(const std::uint8_t* rgb,
-                          int src_w,
-                          int src_h,
-                          std::size_t src_stride,
-                          const Letterbox& lb);
+  void FillInputTensorBgr(const std::uint8_t *rgb, int src_w, int src_h,
+                          std::size_t src_stride, const Letterbox &lb);
 
-  static float IoU(const FaceDetection& a, const FaceDetection& b);
+  static float IoU(const FaceDetection &a, const FaceDetection &b);
 };
 
-}  // namespace studiocast::open_video
+} // namespace studiocast::open_video

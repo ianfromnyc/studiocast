@@ -12,7 +12,7 @@ namespace {
 //   intensity,
 //   centerX, centerY,
 //   invHalfW, invHalfH
-static constexpr const char* kVignettePtx = R"ptx(
+static constexpr const char *kVignettePtx = R"ptx(
 .version 6.0
 .target sm_30
 .address_size 64
@@ -132,34 +132,40 @@ DONE:
 }
 )ptx";
 
-}  // namespace
+} // namespace
 
-bool CudaBgrVignette::Initialize(CudaDriverApi* cuda, std::string* error_out) {
+bool CudaBgrVignette::Initialize(CudaDriverApi *cuda, std::string *error_out) {
   cuda_ = cuda;
   if (!cuda_) {
-    if (error_out) *error_out = "CudaBgrVignette.Initialize: cuda is null.";
+    if (error_out)
+      *error_out = "CudaBgrVignette.Initialize: cuda is null.";
     return false;
   }
   return true;
 }
 
-bool CudaBgrVignette::EnsureKernelLoaded(std::string* error_out) {
-  if (loaded_) return true;
+bool CudaBgrVignette::EnsureKernelLoaded(std::string *error_out) {
+  if (loaded_)
+    return true;
   if (!cuda_ || !cuda_->IsInitialized()) {
-    if (error_out) *error_out = "CUDA driver API is not initialized.";
+    if (error_out)
+      *error_out = "CUDA driver API is not initialized.";
     return false;
   }
 
-  const auto& f = cuda_->f();
+  const auto &f = cuda_->f();
   CUresult st = f.cuModuleLoadData(&module_, kVignettePtx);
   if (st != CUDA_SUCCESS) {
-    if (error_out) *error_out = "cuModuleLoadData failed: " + cuda_->StatusToString(st);
+    if (error_out)
+      *error_out = "cuModuleLoadData failed: " + cuda_->StatusToString(st);
     return false;
   }
 
   st = f.cuModuleGetFunction(&fn_, module_, "vignette_bgr_u8");
   if (st != CUDA_SUCCESS || !fn_) {
-    if (error_out) *error_out = "cuModuleGetFunction(vignette_bgr_u8) failed: " + cuda_->StatusToString(st);
+    if (error_out)
+      *error_out = "cuModuleGetFunction(vignette_bgr_u8) failed: " +
+                   cuda_->StatusToString(st);
     return false;
   }
 
@@ -167,52 +173,50 @@ bool CudaBgrVignette::EnsureKernelLoaded(std::string* error_out) {
   return true;
 }
 
-bool CudaBgrVignette::ApplyInPlace(NvCVImage* bgr_gpu,
-                                  float intensity,
-                                  float center_x_px,
-                                  float center_y_px,
-                                  CUstream stream,
-                                  std::string* error_out) {
+bool CudaBgrVignette::ApplyInPlace(NvCVImage *bgr_gpu, float intensity,
+                                   float center_x_px, float center_y_px,
+                                   CUstream stream, std::string *error_out) {
   if (!bgr_gpu) {
-    if (error_out) *error_out = "ApplyInPlace called with null image.";
+    if (error_out)
+      *error_out = "ApplyInPlace called with null image.";
     return false;
   }
 
   intensity = std::max(0.0f, std::min(1.0f, intensity));
-  if (intensity <= 0.0f) return true;
+  if (intensity <= 0.0f)
+    return true;
 
-  if (!EnsureKernelLoaded(error_out)) return false;
+  if (!EnsureKernelLoaded(error_out))
+    return false;
 
   if (bgr_gpu->gpuMem != NVCV_GPU) {
-    if (error_out) *error_out = "ApplyInPlace requires a GPU NvCVImage.";
+    if (error_out)
+      *error_out = "ApplyInPlace requires a GPU NvCVImage.";
     return false;
   }
   if (bgr_gpu->pixelFormat != NVCV_BGR || bgr_gpu->componentType != NVCV_U8 ||
       bgr_gpu->planar != NVCV_INTERLEAVED) {
-    if (error_out) *error_out = "ApplyInPlace expects chunky BGR/U8 NvCVImage.";
+    if (error_out)
+      *error_out = "ApplyInPlace expects chunky BGR/U8 NvCVImage.";
     return false;
   }
 
   const uint32_t w = bgr_gpu->width;
   const uint32_t h = bgr_gpu->height;
-  if (w == 0 || h == 0) return true;
+  if (w == 0 || h == 0)
+    return true;
 
-  const uint64_t ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(bgr_gpu->pixels));
+  const uint64_t ptr =
+      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(bgr_gpu->pixels));
   const uint32_t pitch = static_cast<uint32_t>(std::max(0, bgr_gpu->pitch));
 
   const float inv_half_w = 2.0f / static_cast<float>(w);
   const float inv_half_h = 2.0f / static_cast<float>(h);
 
-  void* params[] = {
-      (void*)&ptr,
-      (void*)&pitch,
-      (void*)&w,
-      (void*)&h,
-      (void*)&intensity,
-      (void*)&center_x_px,
-      (void*)&center_y_px,
-      (void*)&inv_half_w,
-      (void*)&inv_half_h,
+  void *params[] = {
+      (void *)&ptr,         (void *)&pitch,      (void *)&w,
+      (void *)&h,           (void *)&intensity,  (void *)&center_x_px,
+      (void *)&center_y_px, (void *)&inv_half_w, (void *)&inv_half_h,
   };
 
   constexpr unsigned int kBlockX = 16;
@@ -220,23 +224,16 @@ bool CudaBgrVignette::ApplyInPlace(NvCVImage* bgr_gpu,
   const unsigned int gridX = (w + kBlockX - 1) / kBlockX;
   const unsigned int gridY = (h + kBlockY - 1) / kBlockY;
 
-  const CUresult st = cuda_->f().cuLaunchKernel(fn_,
-                                               gridX,
-                                               gridY,
-                                               1,
-                                               kBlockX,
-                                               kBlockY,
-                                               1,
-                                               0,
-                                               stream,
-                                               params,
-                                               nullptr);
+  const CUresult st = cuda_->f().cuLaunchKernel(
+      fn_, gridX, gridY, 1, kBlockX, kBlockY, 1, 0, stream, params, nullptr);
   if (st != CUDA_SUCCESS) {
-    if (error_out) *error_out = "cuLaunchKernel(vignette_bgr_u8) failed: " + cuda_->StatusToString(st);
+    if (error_out)
+      *error_out = "cuLaunchKernel(vignette_bgr_u8) failed: " +
+                   cuda_->StatusToString(st);
     return false;
   }
 
   return true;
 }
 
-}  // namespace studiocast::maxine
+} // namespace studiocast::maxine

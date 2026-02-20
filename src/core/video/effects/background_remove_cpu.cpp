@@ -6,8 +6,10 @@
 
 namespace studiocast::video::effects {
 
-void BackgroundRemoveCpuEffect::Apply(const Rgb24FrameView& frame, EffectContext* /*ctx*/) {
-  if (!frame.Valid()) return;
+void BackgroundRemoveCpuEffect::Apply(const Rgb24FrameView &frame,
+                                      EffectContext * /*ctx*/) {
+  if (!frame.Valid())
+    return;
 
   const int w = frame.width;
   const int h = frame.height;
@@ -26,21 +28,26 @@ void BackgroundRemoveCpuEffect::Apply(const Rgb24FrameView& frame, EffectContext
   const int bgB = 0;
 
   for (int y = 0; y < h; ++y) {
-    std::uint8_t* row = frame.data + static_cast<std::size_t>(y) * stride;
+    std::uint8_t *row = frame.data + static_cast<std::size_t>(y) * stride;
 
     int dy = 0;
-    if (y < top) dy = top - y;
-    else if (y > bottom) dy = y - bottom;
+    if (y < top)
+      dy = top - y;
+    else if (y > bottom)
+      dy = y - bottom;
 
     for (int x = 0; x < w; ++x) {
       int dx = 0;
-      if (x < left) dx = left - x;
-      else if (x > right) dx = x - right;
+      if (x < left)
+        dx = left - x;
+      else if (x > right)
+        dx = x - right;
 
       const int d = std::max(dx, dy);
-      if (d <= 0) continue;
+      if (d <= 0)
+        continue;
 
-      std::uint8_t* p = row + static_cast<std::size_t>(x) * 3u;
+      std::uint8_t *p = row + static_cast<std::size_t>(x) * 3u;
 
       if (d >= feather) {
         p[0] = static_cast<std::uint8_t>(bgR);
@@ -51,12 +58,15 @@ void BackgroundRemoveCpuEffect::Apply(const Rgb24FrameView& frame, EffectContext
         const int a = d;
         const int ia = feather - d;
 
-        p[0] = static_cast<std::uint8_t>((static_cast<int>(p[0]) * ia + bgR * a) / feather);
-        p[1] = static_cast<std::uint8_t>((static_cast<int>(p[1]) * ia + bgG * a) / feather);
-        p[2] = static_cast<std::uint8_t>((static_cast<int>(p[2]) * ia + bgB * a) / feather);
+        p[0] = static_cast<std::uint8_t>(
+            (static_cast<int>(p[0]) * ia + bgR * a) / feather);
+        p[1] = static_cast<std::uint8_t>(
+            (static_cast<int>(p[1]) * ia + bgG * a) / feather);
+        p[2] = static_cast<std::uint8_t>(
+            (static_cast<int>(p[2]) * ia + bgB * a) / feather);
       }
     }
   }
 }
 
-}  // namespace studiocast::video::effects
+} // namespace studiocast::video::effects

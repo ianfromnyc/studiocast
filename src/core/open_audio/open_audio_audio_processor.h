@@ -30,25 +30,28 @@ struct ResolvedOpenAudioModel {
 
   // Optional metadata propagated from model pack (if available).
   // These are best-effort hints for future extensions (e.g., resampling).
-  int sample_rate = 0;  // 0 = unknown
-  int channels = 1;     // expected model channels (usually 1)
+  int sample_rate = 0; // 0 = unknown
+  int channels = 1;    // expected model channels (usually 1)
 
   struct AuxInput {
     // Name of the tensor input.
     std::string name;
 
-    // Optional range mapping for user-facing strength (0..1 normalized) to model domain.
+    // Optional range mapping for user-facing strength (0..1 normalized) to
+    // model domain.
     float min_value = 0.0f;
     float max_value = 1.0f;
 
     // Optional explicit tensor shape for scalar inputs. Default is [1].
-    // The engine currently supports only scalar-shaped aux inputs (product(shape)==1).
+    // The engine currently supports only scalar-shaped aux inputs
+    // (product(shape)==1).
     std::vector<int64_t> shape;
   };
 
   struct OnnxIo {
     // Expected frame size (in samples) per inference call at model sample_rate.
-    // For the default 10ms framing this is sample_rate / 100 (e.g., 160 @ 16kHz).
+    // For the default 10ms framing this is sample_rate / 100 (e.g., 160 @
+    // 16kHz).
     int frame_samples = 0;
 
     // Optional explicit tensor names for the primary waveform I/O.
@@ -78,9 +81,9 @@ struct ResolvedOpenAudioModel {
 //  3) default installed pack id
 //
 // Returns false with an actionable error string if no model can be resolved.
-bool ResolveOpenAudioModelForMicrophone(const studiocast::audio::effects::BroadcastAudioEffects& fx,
-                                       ResolvedOpenAudioModel* out,
-                                       std::string* error);
+bool ResolveOpenAudioModelForMicrophone(
+    const studiocast::audio::effects::BroadcastAudioEffects &fx,
+    ResolvedOpenAudioModel *out, std::string *error);
 
 // Resolve the Open Audio model selection for the speaker effects.
 //
@@ -90,74 +93,74 @@ bool ResolveOpenAudioModelForMicrophone(const studiocast::audio::effects::Broadc
 //  3) default installed pack id
 //
 // Returns false with an actionable error string if no model can be resolved.
-bool ResolveOpenAudioModelForSpeaker(const studiocast::audio::effects::BroadcastAudioEffects& fx,
-                                    ResolvedOpenAudioModel* out,
-                                    std::string* error);
+bool ResolveOpenAudioModelForSpeaker(
+    const studiocast::audio::effects::BroadcastAudioEffects &fx,
+    ResolvedOpenAudioModel *out, std::string *error);
 
 // Open Audio processor (Phase 4 stub).
 //
 // For Phase 4 this processor is pass-through, but it validates model selection
 // and exposes the resolved model path for status/UI.
 class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
- public:
+public:
   // Creates a processor for microphone effects.
   // Returns nullptr and fills error if model selection cannot be resolved.
   static std::unique_ptr<OpenAudioAudioProcessor> CreateForMicrophone(
-      const studiocast::audio::effects::BroadcastAudioEffects& fx,
-      ResolvedOpenAudioModel* resolved_out,
-      std::string* error);
+      const studiocast::audio::effects::BroadcastAudioEffects &fx,
+      ResolvedOpenAudioModel *resolved_out, std::string *error);
 
-  // Same as CreateForMicrophone but allows overriding ORT session options (e.g., CPU-only self-test).
-  static std::unique_ptr<OpenAudioAudioProcessor> CreateForMicrophoneWithOrtOptions(
-      const studiocast::audio::effects::BroadcastAudioEffects& fx,
-      const studiocast::open_audio::OrtSessionOptions& ort_opts,
-      ResolvedOpenAudioModel* resolved_out,
-      std::string* error);
+  // Same as CreateForMicrophone but allows overriding ORT session options
+  // (e.g., CPU-only self-test).
+  static std::unique_ptr<OpenAudioAudioProcessor>
+  CreateForMicrophoneWithOrtOptions(
+      const studiocast::audio::effects::BroadcastAudioEffects &fx,
+      const studiocast::open_audio::OrtSessionOptions &ort_opts,
+      ResolvedOpenAudioModel *resolved_out, std::string *error);
 
   // Creates a processor for speaker effects.
   // Returns nullptr and fills error if model selection cannot be resolved.
-  static std::unique_ptr<OpenAudioAudioProcessor> CreateForSpeaker(
-      const studiocast::audio::effects::BroadcastAudioEffects& fx,
-      ResolvedOpenAudioModel* resolved_out,
-      std::string* error);
+  static std::unique_ptr<OpenAudioAudioProcessor>
+  CreateForSpeaker(const studiocast::audio::effects::BroadcastAudioEffects &fx,
+                   ResolvedOpenAudioModel *resolved_out, std::string *error);
 
   // Same as CreateForSpeaker but allows overriding ORT session options.
-  static std::unique_ptr<OpenAudioAudioProcessor> CreateForSpeakerWithOrtOptions(
-      const studiocast::audio::effects::BroadcastAudioEffects& fx,
-      const studiocast::open_audio::OrtSessionOptions& ort_opts,
-      ResolvedOpenAudioModel* resolved_out,
-      std::string* error);
+  static std::unique_ptr<OpenAudioAudioProcessor>
+  CreateForSpeakerWithOrtOptions(
+      const studiocast::audio::effects::BroadcastAudioEffects &fx,
+      const studiocast::open_audio::OrtSessionOptions &ort_opts,
+      ResolvedOpenAudioModel *resolved_out, std::string *error);
 
   explicit OpenAudioAudioProcessor(ResolvedOpenAudioModel model);
   ~OpenAudioAudioProcessor() override;
 
   // Update strength / mode without requiring a pipeline restart.
-  // Thread-safe for calls from the supervisor thread while Process() runs on the audio thread.
-  void UpdateFromMicrophoneConfig(const studiocast::audio::effects::BroadcastMicrophoneEffects& mic);
+  // Thread-safe for calls from the supervisor thread while Process() runs on
+  // the audio thread.
+  void UpdateFromMicrophoneConfig(
+      const studiocast::audio::effects::BroadcastMicrophoneEffects &mic);
 
   // Update speaker strength without requiring a pipeline restart.
-  void UpdateFromSpeakerConfig(const studiocast::audio::effects::BroadcastSpeakerEffects& spk);
+  void UpdateFromSpeakerConfig(
+      const studiocast::audio::effects::BroadcastSpeakerEffects &spk);
 
   void Reset() override;
 
-  const ResolvedOpenAudioModel& model() const { return model_; }
+  const ResolvedOpenAudioModel &model() const { return model_; }
 
-  bool Process(const float* in,
-               float* out,
-               std::uint32_t frames,
-               std::uint32_t channels,
-               std::string* error) override;
+  bool Process(const float *in, float *out, std::uint32_t frames,
+               std::uint32_t channels, std::string *error) override;
 
- private:
-  bool InitializeBindings(std::string* error);
+private:
+  bool InitializeBindings(std::string *error);
 
   ResolvedOpenAudioModel model_;
 
-  // Active ORT session (CUDA if available, CPU otherwise). If a CUDA session is active
-  // and a CPU fallback was created, we can switch to CPU on the first runtime failure.
+  // Active ORT session (CUDA if available, CPU otherwise). If a CUDA session is
+  // active and a CPU fallback was created, we can switch to CPU on the first
+  // runtime failure.
   std::unique_ptr<OpenAudioOrtSession> ort_session_cuda_;
   std::unique_ptr<OpenAudioOrtSession> ort_session_cpu_;
-  OpenAudioOrtSession* ort_session_active_ = nullptr;
+  OpenAudioOrtSession *ort_session_active_ = nullptr;
   bool using_cpu_fallback_ = false;
 
   // Model I/O binding (names, shapes, and optional streaming state buffers).
@@ -186,7 +189,8 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
   std::atomic<bool> studio_voice_enabled_{false};
 
   // Effect context for strength curve mapping (set from config).
-  // 0=noise_removal, 1=room_echo_removal, 2=studio_voice, 3=speaker_noise_removal, 4=speaker_room_echo_removal
+  // 0=noise_removal, 1=room_echo_removal, 2=studio_voice,
+  // 3=speaker_noise_removal, 4=speaker_room_echo_removal
   std::atomic<int> strength_mode_{0};
 
   // Engine configuration derived from model pack metadata.
@@ -206,13 +210,15 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
   std::vector<float> model_in_;
   std::vector<float> model_out_;
 
-  // Resampler state (48k <-> model_sample_rate). Only used when sample rates differ.
+  // Resampler state (48k <-> model_sample_rate). Only used when sample rates
+  // differ.
   struct Decimator3;
   struct Interpolator3;
   std::unique_ptr<Decimator3> decim3_;
   std::unique_ptr<Interpolator3> interp3_;
 
-  // Sticky warning after a runtime failure; surfaced via AudioPipeline last_error.
+  // Sticky warning after a runtime failure; surfaced via AudioPipeline
+  // last_error.
   std::string sticky_warning_;
   bool model_disabled_ = false;
 
@@ -222,4 +228,4 @@ class OpenAudioAudioProcessor final : public studiocast::audio::AudioProcessor {
   studiocast::audio::dsp::PostDspChain post_dsp_;
 };
 
-}  // namespace studiocast::open_audio
+} // namespace studiocast::open_audio

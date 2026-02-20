@@ -5,43 +5,45 @@
 #include <vector>
 
 #include "core/config/settings.h"
-#include "core/maxine/effects/vfx_green_screen_effect.h"
 #include "core/maxine/effects/vfx_background_blur_effect.h"
+#include "core/maxine/effects/vfx_green_screen_effect.h"
 #include "core/maxine/nvcv_api.h"
 #include "core/maxine/vfx_api.h"
 #include "core/probe/probe.h"
-#include "core/video/convert.h"
+#include "core/util/xdg.h"
 #include "core/video/camera_pipeline.h"
+#include "core/video/convert.h"
 #include "core/video/effects/broadcast_effects.h"
 #include "core/video/v4l2_capture.h"
-#include "core/util/xdg.h"
 
 namespace fs = std::filesystem;
 
-static void Usage(const char* argv0) {
-  std::cout
-      << "StudioCast Maxine Helper\n\n"
-      << "Usage:\n"
-      << "  " << argv0 << " paths\n"
-      << "  " << argv0 << " init\n"
-      << "  " << argv0 << " doctor\n"
-      << "  " << argv0 << " gpu list\n"
-      << "  " << argv0 << " gpu select --auto\n"
-      << "  " << argv0 << " gpu select --index <N>\n"
-      << "  " << argv0 << " gpu select --uuid <GPU-UUID>\n"
-      << "  " << argv0 << " install-hints\n"
-      << "  " << argv0 << " greenscreen-smoke [--device /dev/video0] [--width N] [--height N] [--fps N]"
-      << " [--frames N] [--mode N] [--temporal 0|1] [--model-dir PATH]\n";
+static void Usage(const char *argv0) {
+  std::cout << "StudioCast Maxine Helper\n\n"
+            << "Usage:\n"
+            << "  " << argv0 << " paths\n"
+            << "  " << argv0 << " init\n"
+            << "  " << argv0 << " doctor\n"
+            << "  " << argv0 << " gpu list\n"
+            << "  " << argv0 << " gpu select --auto\n"
+            << "  " << argv0 << " gpu select --index <N>\n"
+            << "  " << argv0 << " gpu select --uuid <GPU-UUID>\n"
+            << "  " << argv0 << " install-hints\n"
+            << "  " << argv0
+            << " greenscreen-smoke [--device /dev/video0] [--width N] "
+               "[--height N] [--fps N]"
+            << " [--frames N] [--mode N] [--temporal 0|1] [--model-dir PATH]\n";
 }
 
-static void FillSyntheticBgr(std::uint8_t* bgr, int width, int height, std::size_t stride) {
+static void FillSyntheticBgr(std::uint8_t *bgr, int width, int height,
+                             std::size_t stride) {
   // Default background: bright green.
   for (int y = 0; y < height; ++y) {
-    auto* row = bgr + static_cast<std::size_t>(y) * stride;
+    auto *row = bgr + static_cast<std::size_t>(y) * stride;
     for (int x = 0; x < width; ++x) {
-      row[x * 3 + 0] = 0;    // B
-      row[x * 3 + 1] = 255;  // G
-      row[x * 3 + 2] = 0;    // R
+      row[x * 3 + 0] = 0;   // B
+      row[x * 3 + 1] = 255; // G
+      row[x * 3 + 2] = 0;   // R
     }
   }
 
@@ -51,24 +53,21 @@ static void FillSyntheticBgr(std::uint8_t* bgr, int width, int height, std::size
   const int y0 = height / 4;
   const int y1 = (height * 3) / 4;
   for (int y = y0; y < y1; ++y) {
-    auto* row = bgr + static_cast<std::size_t>(y) * stride;
+    auto *row = bgr + static_cast<std::size_t>(y) * stride;
     for (int x = x0; x < x1; ++x) {
-      row[x * 3 + 0] = 0;    // B
-      row[x * 3 + 1] = 0;    // G
-      row[x * 3 + 2] = 255;  // R
+      row[x * 3 + 0] = 0;   // B
+      row[x * 3 + 1] = 0;   // G
+      row[x * 3 + 2] = 255; // R
     }
   }
 }
 
-static void Rgb24ToBgr24(const std::uint8_t* rgb,
-                         std::uint8_t* bgr,
-                         int width,
-                         int height,
-                         std::size_t src_stride,
+static void Rgb24ToBgr24(const std::uint8_t *rgb, std::uint8_t *bgr, int width,
+                         int height, std::size_t src_stride,
                          std::size_t dst_stride) {
   for (int y = 0; y < height; ++y) {
-    const auto* s = rgb + static_cast<std::size_t>(y) * src_stride;
-    auto* d = bgr + static_cast<std::size_t>(y) * dst_stride;
+    const auto *s = rgb + static_cast<std::size_t>(y) * src_stride;
+    auto *d = bgr + static_cast<std::size_t>(y) * dst_stride;
     for (int x = 0; x < width; ++x) {
       d[x * 3 + 0] = s[x * 3 + 2];
       d[x * 3 + 1] = s[x * 3 + 1];
@@ -77,8 +76,9 @@ static void Rgb24ToBgr24(const std::uint8_t* rgb,
   }
 }
 
-static int ParseIntArg(const char* s, int default_value) {
-  if (!s) return default_value;
+static int ParseIntArg(const char *s, int default_value) {
+  if (!s)
+    return default_value;
   try {
     return std::stoi(s);
   } catch (...) {
@@ -86,32 +86,38 @@ static int ParseIntArg(const char* s, int default_value) {
   }
 }
 
-static void PrintGpus(const studiocast::probe::Report& rep) {
+static void PrintGpus(const studiocast::probe::Report &rep) {
   if (rep.gpus.empty()) {
     std::cout << "No GPUs detected via nvidia-smi.\n";
     return;
   }
 
-  for (const auto& g : rep.gpus) {
+  for (const auto &g : rep.gpus) {
     std::cout << "[" << g.index << "] " << g.name;
-    if (!g.uuid.empty()) std::cout << " (" << g.uuid << ")";
-    if (g.compute_cap) std::cout << " cc " << *g.compute_cap;
+    if (!g.uuid.empty())
+      std::cout << " (" << g.uuid << ")";
+    if (g.compute_cap)
+      std::cout << " cc " << *g.compute_cap;
     std::cout << (g.likely_supported ? " [supported]" : " [unsupported]");
-    if (g.maxine_gpu_arg) std::cout << " (maxine --gpu " << *g.maxine_gpu_arg << ")";
+    if (g.maxine_gpu_arg)
+      std::cout << " (maxine --gpu " << *g.maxine_gpu_arg << ")";
     std::cout << "\n";
   }
 }
 
-static std::set<std::string> UniqueMaxineGpuArgs(const studiocast::probe::Report& rep) {
+static std::set<std::string>
+UniqueMaxineGpuArgs(const studiocast::probe::Report &rep) {
   std::set<std::string> out;
-  for (const auto& g : rep.gpus) {
-    if (!g.likely_supported) continue;
-    if (g.maxine_gpu_arg) out.insert(*g.maxine_gpu_arg);
+  for (const auto &g : rep.gpus) {
+    if (!g.likely_supported)
+      continue;
+    if (g.maxine_gpu_arg)
+      out.insert(*g.maxine_gpu_arg);
   }
   return out;
 }
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   if (argc < 2) {
     Usage(argv[0]);
     return 1;
@@ -120,13 +126,14 @@ int main(int argc, char** argv) {
   const std::string cmd = argv[1];
 
   const fs::path base = studiocast::util::StudioCastMaxineDir();
-  const fs::path vfx  = studiocast::util::DefaultVfxRoot();
-  const fs::path ar   = studiocast::util::DefaultArRoot();
-  const fs::path afx  = studiocast::util::DefaultAfxRoot();
+  const fs::path vfx = studiocast::util::DefaultVfxRoot();
+  const fs::path ar = studiocast::util::DefaultArRoot();
+  const fs::path afx = studiocast::util::DefaultAfxRoot();
 
   if (cmd == "paths") {
     std::cout << "StudioCast Paths\n";
-    std::cout << "  Settings: " << studiocast::config::SettingsPath().string() << "\n";
+    std::cout << "  Settings: " << studiocast::config::SettingsPath().string()
+              << "\n";
     std::cout << "  Maxine base: " << base.string() << "\n";
     std::cout << "  VFX : " << vfx.string() << "\n";
     std::cout << "  AR  : " << ar.string() << "\n";
@@ -216,7 +223,8 @@ int main(int argc, char** argv) {
         return 3;
       }
 
-      std::cout << "Saved GPU selection to: " << studiocast::config::SettingsPath().string() << "\n";
+      std::cout << "Saved GPU selection to: "
+                << studiocast::config::SettingsPath().string() << "\n";
       const auto rep = studiocast::probe::Run(false);
       std::cout << "\n" << rep.ToText() << "\n";
       return rep.AllChecksPassed() ? 0 : 4;
@@ -234,22 +242,28 @@ int main(int argc, char** argv) {
     std::cout << "Maxine base:\n  " << base.string() << "\n\n";
 
     std::cout << "GPU policy:\n";
-    std::cout << "  settings: " << studiocast::config::SettingsPath().string() << "\n";
+    std::cout << "  settings: " << studiocast::config::SettingsPath().string()
+              << "\n";
     std::cout << "  mode: " << rep.gpu_selection_mode << "\n";
-    if (rep.selected_gpu_index) std::cout << "  selected index: " << *rep.selected_gpu_index << "\n";
-    if (!rep.selected_gpu_uuid.empty()) std::cout << "  selected uuid: " << rep.selected_gpu_uuid << "\n\n";
+    if (rep.selected_gpu_index)
+      std::cout << "  selected index: " << *rep.selected_gpu_index << "\n";
+    if (!rep.selected_gpu_uuid.empty())
+      std::cout << "  selected uuid: " << rep.selected_gpu_uuid << "\n\n";
 
     std::cout << "Detected GPUs:\n";
     PrintGpus(rep);
     std::cout << "\n";
 
-    std::cout << "VFX core (extract so that '" << vfx.string() << "' exists):\n";
+    std::cout << "VFX core (extract so that '" << vfx.string()
+              << "' exists):\n";
     std::cout << "  mkdir -p \"" << base.string() << "\"\n";
-    std::cout << "  tar -xvf NVIDIA_VFX_SDK_linux_<version>.tar.gz -C \"" << base.string() << "\"\n\n";
+    std::cout << "  tar -xvf NVIDIA_VFX_SDK_linux_<version>.tar.gz -C \""
+              << base.string() << "\"\n\n";
 
     std::cout << "AR core (extract so that '" << ar.string() << "' exists):\n";
     std::cout << "  mkdir -p \"" << base.string() << "\"\n";
-    std::cout << "  tar -xvf NVIDIA_AR_SDK_linux_<version>.tar.gz -C \"" << base.string() << "\"\n\n";
+    std::cout << "  tar -xvf NVIDIA_AR_SDK_linux_<version>.tar.gz -C \""
+              << base.string() << "\"\n\n";
 
     std::cout << "AFX core (create '" << afx.string() << "'):\n";
     std::cout << "  mkdir -p \"" << base.string() << "\"\n";
@@ -258,15 +272,19 @@ int main(int argc, char** argv) {
 
     if (args.empty()) {
       std::cout << "VFX/AR feature install:\n";
-      std::cout << "  No supported GPUs with known --gpu mapping were detected.\n";
+      std::cout
+          << "  No supported GPUs with known --gpu mapping were detected.\n";
       std::cout << "  Run this on a Tensor Core GPU machine (Turing+).\n\n";
     } else {
-      std::cout << "VFX/AR feature install (run once per unique --gpu value):\n";
+      std::cout
+          << "VFX/AR feature install (run once per unique --gpu value):\n";
       std::cout << "  export NGC_CLI_API_KEY=\"<your_api_key>\"\n";
-      for (const auto& a : args) {
-        std::cout << "  cd \"" << vfx.string() << "/features\" && ./install_feature.sh --gpu " << a
+      for (const auto &a : args) {
+        std::cout << "  cd \"" << vfx.string()
+                  << "/features\" && ./install_feature.sh --gpu " << a
                   << " --feature all --ngc-org nvidia --ngc-team maxine\n";
-        std::cout << "  cd \"" << ar.string() << "/features\" && ./install_feature.sh --gpu " << a
+        std::cout << "  cd \"" << ar.string()
+                  << "/features\" && ./install_feature.sh --gpu " << a
                   << " --feature all --ngc-org nvidia --ngc-team maxine\n";
       }
       std::cout << "\n";
@@ -275,11 +293,15 @@ int main(int argc, char** argv) {
     std::cout << "AFX features (MVP: AEC + Superres):\n";
     std::cout << "  export NGC_API_KEY=\"<your_api_key>\"\n";
     std::cout << "  cd \"" << afx.string()
-              << "/features\" && ./download_features.sh --effects superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k\n";
+              << "/features\" && ./download_features.sh --effects "
+                 "superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k\n";
     std::cout << "\n";
-    std::cout << "Optional AFX effects (noise removal / room echo / studio voice):\n";
-    std::cout << "  cd \"" << afx.string()
-              << "/features\" && ./download_features.sh --effects denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k\n";
+    std::cout
+        << "Optional AFX effects (noise removal / room echo / studio voice):\n";
+    std::cout
+        << "  cd \"" << afx.string()
+        << "/features\" && ./download_features.sh --effects "
+           "denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k\n";
 
     return 0;
   }
@@ -308,7 +330,8 @@ int main(int argc, char** argv) {
       } else if (a == "--frames" && i + 1 < argc) {
         frames = ParseIntArg(argv[++i], frames);
       } else if (a == "--mode" && i + 1 < argc) {
-        mode = static_cast<std::uint32_t>(ParseIntArg(argv[++i], static_cast<int>(mode)));
+        mode = static_cast<std::uint32_t>(
+            ParseIntArg(argv[++i], static_cast<int>(mode)));
       } else if (a == "--temporal" && i + 1 < argc) {
         temporal = ParseIntArg(argv[++i], temporal ? 1 : 0) != 0;
       } else if (a == "--model-dir" && i + 1 < argc) {
@@ -322,15 +345,19 @@ int main(int argc, char** argv) {
     std::string err;
     if (!vfx_api.Initialize(&err)) {
       std::cerr << "Maxine VFX runtime unavailable: " << err << "\n";
-      std::cerr << "Hint: run '" << argv[0] << " install-hints' and ensure VFX SDK + features are installed.\n";
+      std::cerr
+          << "Hint: run '" << argv[0]
+          << " install-hints' and ensure VFX SDK + features are installed.\n";
       return 3;
     }
-    if (!nvcv_api.Initialize(studiocast::maxine::NvcvApi::Requirement::VfxCompat, &err)) {
+    if (!nvcv_api.Initialize(
+            studiocast::maxine::NvcvApi::Requirement::VfxCompat, &err)) {
       std::cerr << "NvCVImage runtime unavailable: " << err << "\n";
       return 4;
     }
 
-    studiocast::maxine::effects::VfxGreenScreenEffect gs(&vfx_api, &nvcv_api, model_dir);
+    studiocast::maxine::effects::VfxGreenScreenEffect gs(&vfx_api, &nvcv_api,
+                                                         model_dir);
     studiocast::video::effects::BroadcastCameraEffects settings;
     settings.virtual_background.greenscreen_mode = mode;
     settings.virtual_background.greenscreen_temporal = temporal;
@@ -346,42 +373,38 @@ int main(int argc, char** argv) {
     // Attempt to capture from V4L2; fall back to synthetic.
     studiocast::video::V4l2Capture cap;
     bool have_camera = false;
-    if (cap.Open(device,
-                 width,
-                 height,
-                 fps,
+    if (cap.Open(device, width, height, fps,
                  studiocast::video::CapturePixelFormat::yuyv,
-                 /*prefer_mjpeg=*/true,
-                 &err)) {
+                 /*prefer_mjpeg=*/true, &err)) {
       have_camera = true;
       width = cap.Actual().width;
       height = cap.Actual().height;
       fps = cap.Actual().fps;
     } else {
-      std::cerr << "Warning: failed to open capture device '" << device << "': " << err << "\n";
+      std::cerr << "Warning: failed to open capture device '" << device
+                << "': " << err << "\n";
       std::cerr << "         using a synthetic frame instead.\n";
     }
 
     const std::size_t rgb_stride = static_cast<std::size_t>(width) * 3u;
-    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(height) * rgb_stride);
-    std::vector<std::uint8_t> bgr(static_cast<std::size_t>(height) * rgb_stride);
+    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(height) *
+                                  rgb_stride);
+    std::vector<std::uint8_t> bgr(static_cast<std::size_t>(height) *
+                                  rgb_stride);
 
     // CPU BGR image view (wraps `bgr` memory).
     studiocast::maxine::NvCVImage cpu_bgr{};
     if (!nvcv_api.f().NvCVImage_Init) {
-      std::cerr << "NvCVImage_Init missing from NvCVImage runtime (unexpected).\n";
+      std::cerr
+          << "NvCVImage_Init missing from NvCVImage runtime (unexpected).\n";
       return 7;
     }
     {
-      const auto st = nvcv_api.f().NvCVImage_Init(&cpu_bgr,
-                                                 static_cast<unsigned>(width),
-                                                 static_cast<unsigned>(height),
-                                                 static_cast<int>(rgb_stride),
-                                                 bgr.data(),
-                                                 studiocast::maxine::NVCV_BGR,
-                                                 studiocast::maxine::NVCV_U8,
-                                                 studiocast::maxine::NVCV_CHUNKY,
-                                                 studiocast::maxine::NVCV_CPU);
+      const auto st = nvcv_api.f().NvCVImage_Init(
+          &cpu_bgr, static_cast<unsigned>(width), static_cast<unsigned>(height),
+          static_cast<int>(rgb_stride), bgr.data(),
+          studiocast::maxine::NVCV_BGR, studiocast::maxine::NVCV_U8,
+          studiocast::maxine::NVCV_CHUNKY, studiocast::maxine::NVCV_CPU);
       if (st != studiocast::maxine::NVCV_SUCCESS) {
         std::cerr << "NvCVImage_Init(cpu BGR) failed: " << st << "\n";
         return 8;
@@ -391,14 +414,10 @@ int main(int argc, char** argv) {
     // GPU input image (allocated).
     studiocast::maxine::NvCVImage gpu_bgr{};
     {
-      const auto st = nvcv_api.f().NvCVImage_Alloc(&gpu_bgr,
-                                                  static_cast<unsigned>(width),
-                                                  static_cast<unsigned>(height),
-                                                  studiocast::maxine::NVCV_BGR,
-                                                  studiocast::maxine::NVCV_U8,
-                                                  studiocast::maxine::NVCV_CHUNKY,
-                                                  studiocast::maxine::NVCV_GPU,
-                                                  0);
+      const auto st = nvcv_api.f().NvCVImage_Alloc(
+          &gpu_bgr, static_cast<unsigned>(width), static_cast<unsigned>(height),
+          studiocast::maxine::NVCV_BGR, studiocast::maxine::NVCV_U8,
+          studiocast::maxine::NVCV_CHUNKY, studiocast::maxine::NVCV_GPU, 0);
       if (st != studiocast::maxine::NVCV_SUCCESS) {
         std::cerr << "NvCVImage_Alloc(gpu BGR) failed: " << st << "\n";
         return 9;
@@ -408,14 +427,11 @@ int main(int argc, char** argv) {
     // CPU matte for readback.
     studiocast::maxine::NvCVImage cpu_matte{};
     {
-      const auto st = nvcv_api.f().NvCVImage_Alloc(&cpu_matte,
-                                                  static_cast<unsigned>(width),
-                                                  static_cast<unsigned>(height),
-                                                  studiocast::maxine::NVCV_A,
-                                                  studiocast::maxine::NVCV_U8,
-                                                  studiocast::maxine::NVCV_CHUNKY,
-                                                  studiocast::maxine::NVCV_CPU,
-                                                  0);
+      const auto st = nvcv_api.f().NvCVImage_Alloc(
+          &cpu_matte, static_cast<unsigned>(width),
+          static_cast<unsigned>(height), studiocast::maxine::NVCV_A,
+          studiocast::maxine::NVCV_U8, studiocast::maxine::NVCV_CHUNKY,
+          studiocast::maxine::NVCV_CPU, 0);
       if (st != studiocast::maxine::NVCV_SUCCESS) {
         std::cerr << "NvCVImage_Alloc(cpu matte) failed: " << st << "\n";
         (void)nvcv_api.f().NvCVImage_Dealloc(&gpu_bgr);
@@ -432,21 +448,20 @@ int main(int argc, char** argv) {
           FillSyntheticBgr(bgr.data(), width, height, rgb_stride);
         } else {
           // Convert YUYV -> RGB24.
-          studiocast::video::YuyvToRgb24(fv.data,
-                                        width,
-                                        height,
-                                        cap.Actual().bytes_per_line,
-                                        rgb.data(),
-                                        rgb_stride);
+          studiocast::video::YuyvToRgb24(fv.data, width, height,
+                                         cap.Actual().bytes_per_line,
+                                         rgb.data(), rgb_stride);
           (void)cap.ReleaseFrame(fv, &err);
-          Rgb24ToBgr24(rgb.data(), bgr.data(), width, height, rgb_stride, rgb_stride);
+          Rgb24ToBgr24(rgb.data(), bgr.data(), width, height, rgb_stride,
+                       rgb_stride);
         }
       } else {
         FillSyntheticBgr(bgr.data(), width, height, rgb_stride);
       }
 
       // Upload CPU->GPU.
-      const auto up = nvcv_api.f().NvCVImage_Transfer(&cpu_bgr, &gpu_bgr, 1.0f, gs.cuda_stream(), nullptr);
+      const auto up = nvcv_api.f().NvCVImage_Transfer(
+          &cpu_bgr, &gpu_bgr, 1.0f, gs.cuda_stream(), nullptr);
       if (up != studiocast::maxine::NVCV_SUCCESS) {
         std::cerr << "NvCVImage_Transfer(cpu->gpu) failed: " << up << "\n";
         break;
@@ -461,25 +476,27 @@ int main(int argc, char** argv) {
       err.clear();
       const auto st = gs.Process(frame, &err);
       if (st != studiocast::maxine::NVCV_SUCCESS) {
-        std::cerr << "Green Screen Process failed: " << (err.empty() ? std::to_string(st) : err) << "\n";
+        std::cerr << "Green Screen Process failed: "
+                  << (err.empty() ? std::to_string(st) : err) << "\n";
         break;
       }
 
-      const auto* matte_gpu = gs.MatteGpu();
+      const auto *matte_gpu = gs.MatteGpu();
       if (!matte_gpu) {
         std::cerr << "No matte produced.\n";
         break;
       }
 
       // Download GPU->CPU.
-      const auto down = nvcv_api.f().NvCVImage_Transfer(matte_gpu, &cpu_matte, 1.0f, gs.cuda_stream(), nullptr);
+      const auto down = nvcv_api.f().NvCVImage_Transfer(
+          matte_gpu, &cpu_matte, 1.0f, gs.cuda_stream(), nullptr);
       if (down != studiocast::maxine::NVCV_SUCCESS) {
         std::cerr << "NvCVImage_Transfer(gpu->cpu) failed: " << down << "\n";
         break;
       }
 
       // Compute basic matte statistics.
-      const auto* p = static_cast<const std::uint8_t*>(cpu_matte.pixels);
+      const auto *p = static_cast<const std::uint8_t *>(cpu_matte.pixels);
       if (!p) {
         std::cerr << "Matte CPU image has null pixels.\n";
         break;
@@ -488,18 +505,22 @@ int main(int argc, char** argv) {
       std::uint8_t mn = 255;
       std::uint8_t mx = 0;
       for (int y = 0; y < height; ++y) {
-        const auto* row = p + static_cast<std::size_t>(y) * static_cast<std::size_t>(cpu_matte.pitch);
+        const auto *row = p + static_cast<std::size_t>(y) *
+                                  static_cast<std::size_t>(cpu_matte.pitch);
         for (int x = 0; x < width; ++x) {
           const std::uint8_t v = row[x];
           sum += v;
-          if (v < mn) mn = v;
-          if (v > mx) mx = v;
+          if (v < mn)
+            mn = v;
+          if (v > mx)
+            mx = v;
         }
       }
-      const double mean = static_cast<double>(sum) / static_cast<double>(width * height);
-      std::cout << "Frame " << fi << ": matte stats min=" << static_cast<int>(mn)
-                << " max=" << static_cast<int>(mx)
-                << " mean=" << mean << "\n";
+      const double mean =
+          static_cast<double>(sum) / static_cast<double>(width * height);
+      std::cout << "Frame " << fi
+                << ": matte stats min=" << static_cast<int>(mn)
+                << " max=" << static_cast<int>(mx) << " mean=" << mean << "\n";
     }
 
     (void)nvcv_api.f().NvCVImage_Dealloc(&cpu_matte);
@@ -517,7 +538,7 @@ int main(int argc, char** argv) {
     int frames = 1;
     std::uint32_t mode = 0;
     bool temporal = true;
-    int strength = 32;  // UI knob [1..64]
+    int strength = 32; // UI knob [1..64]
     fs::path model_dir = vfx / "models";
 
     for (int i = 2; i < argc; ++i) {
@@ -533,7 +554,8 @@ int main(int argc, char** argv) {
       } else if (a == "--frames" && i + 1 < argc) {
         frames = ParseIntArg(argv[++i], frames);
       } else if (a == "--mode" && i + 1 < argc) {
-        mode = static_cast<std::uint32_t>(ParseIntArg(argv[++i], static_cast<int>(mode)));
+        mode = static_cast<std::uint32_t>(
+            ParseIntArg(argv[++i], static_cast<int>(mode)));
       } else if (a == "--temporal" && i + 1 < argc) {
         temporal = ParseIntArg(argv[++i], temporal ? 1 : 0) != 0;
       } else if (a == "--strength" && i + 1 < argc) {
@@ -549,19 +571,25 @@ int main(int argc, char** argv) {
     std::string err;
     if (!vfx_api.Initialize(&err)) {
       std::cerr << "Maxine VFX runtime unavailable: " << err << "\n";
-      std::cerr << "Hint: run '" << argv[0] << " install-hints' and ensure VFX SDK + features are installed.\n";
+      std::cerr
+          << "Hint: run '" << argv[0]
+          << " install-hints' and ensure VFX SDK + features are installed.\n";
       return 3;
     }
-    if (!nvcv_api.Initialize(studiocast::maxine::NvcvApi::Requirement::VfxCompat, &err)) {
+    if (!nvcv_api.Initialize(
+            studiocast::maxine::NvcvApi::Requirement::VfxCompat, &err)) {
       std::cerr << "NvCVImage runtime unavailable: " << err << "\n";
       return 4;
     }
 
-    studiocast::maxine::effects::VfxGreenScreenEffect gs(&vfx_api, &nvcv_api, model_dir);
-    studiocast::maxine::effects::VfxBackgroundBlurEffect bgblur(&vfx_api, &nvcv_api, model_dir);
+    studiocast::maxine::effects::VfxGreenScreenEffect gs(&vfx_api, &nvcv_api,
+                                                         model_dir);
+    studiocast::maxine::effects::VfxBackgroundBlurEffect bgblur(
+        &vfx_api, &nvcv_api, model_dir);
 
     studiocast::video::effects::BroadcastCameraEffects settings;
-    settings.virtual_background.mode = studiocast::video::effects::VirtualBackgroundMode::blur;
+    settings.virtual_background.mode =
+        studiocast::video::effects::VirtualBackgroundMode::blur;
     settings.virtual_background.greenscreen_mode = mode;
     settings.virtual_background.greenscreen_temporal = temporal;
     settings.virtual_background.strength = strength;
@@ -582,44 +610,41 @@ int main(int argc, char** argv) {
     // Attempt to capture from V4L2; fall back to synthetic.
     studiocast::video::V4l2Capture cap;
     bool have_camera = false;
-    if (cap.Open(device,
-                 width,
-                 height,
-                 fps,
+    if (cap.Open(device, width, height, fps,
                  studiocast::video::CapturePixelFormat::yuyv,
-                 /*prefer_mjpeg=*/true,
-                 &err)) {
+                 /*prefer_mjpeg=*/true, &err)) {
       have_camera = true;
       width = cap.Actual().width;
       height = cap.Actual().height;
       fps = cap.Actual().fps;
     } else {
-      std::cerr << "Warning: failed to open capture device '" << device << "': " << err << "\n";
+      std::cerr << "Warning: failed to open capture device '" << device
+                << "': " << err << "\n";
       std::cerr << "         using a synthetic frame instead.\n";
     }
 
     const std::size_t rgb_stride = static_cast<std::size_t>(width) * 3u;
-    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(height) * rgb_stride);
-    std::vector<std::uint8_t> bgr(static_cast<std::size_t>(height) * rgb_stride);
-    std::vector<std::uint8_t> out_bgr(static_cast<std::size_t>(height) * rgb_stride);
+    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(height) *
+                                  rgb_stride);
+    std::vector<std::uint8_t> bgr(static_cast<std::size_t>(height) *
+                                  rgb_stride);
+    std::vector<std::uint8_t> out_bgr(static_cast<std::size_t>(height) *
+                                      rgb_stride);
 
     // CPU BGR image view (wraps `bgr` memory).
     if (!nvcv_api.f().NvCVImage_Init) {
-      std::cerr << "NvCVImage_Init missing from NvCVImage runtime (unexpected).\n";
+      std::cerr
+          << "NvCVImage_Init missing from NvCVImage runtime (unexpected).\n";
       return 8;
     }
 
     studiocast::maxine::NvCVImage cpu_bgr{};
     {
-      const auto st = nvcv_api.f().NvCVImage_Init(&cpu_bgr,
-                                                 static_cast<unsigned>(width),
-                                                 static_cast<unsigned>(height),
-                                                 static_cast<int>(rgb_stride),
-                                                 bgr.data(),
-                                                 studiocast::maxine::NVCV_BGR,
-                                                 studiocast::maxine::NVCV_U8,
-                                                 studiocast::maxine::NVCV_CHUNKY,
-                                                 studiocast::maxine::NVCV_CPU);
+      const auto st = nvcv_api.f().NvCVImage_Init(
+          &cpu_bgr, static_cast<unsigned>(width), static_cast<unsigned>(height),
+          static_cast<int>(rgb_stride), bgr.data(),
+          studiocast::maxine::NVCV_BGR, studiocast::maxine::NVCV_U8,
+          studiocast::maxine::NVCV_CHUNKY, studiocast::maxine::NVCV_CPU);
       if (st != studiocast::maxine::NVCV_SUCCESS) {
         std::cerr << "NvCVImage_Init(cpu BGR) failed: " << st << "\n";
         return 9;
@@ -628,15 +653,12 @@ int main(int argc, char** argv) {
 
     studiocast::maxine::NvCVImage cpu_out_bgr{};
     {
-      const auto st = nvcv_api.f().NvCVImage_Init(&cpu_out_bgr,
-                                                 static_cast<unsigned>(width),
-                                                 static_cast<unsigned>(height),
-                                                 static_cast<int>(rgb_stride),
-                                                 out_bgr.data(),
-                                                 studiocast::maxine::NVCV_BGR,
-                                                 studiocast::maxine::NVCV_U8,
-                                                 studiocast::maxine::NVCV_CHUNKY,
-                                                 studiocast::maxine::NVCV_CPU);
+      const auto st = nvcv_api.f().NvCVImage_Init(
+          &cpu_out_bgr, static_cast<unsigned>(width),
+          static_cast<unsigned>(height), static_cast<int>(rgb_stride),
+          out_bgr.data(), studiocast::maxine::NVCV_BGR,
+          studiocast::maxine::NVCV_U8, studiocast::maxine::NVCV_CHUNKY,
+          studiocast::maxine::NVCV_CPU);
       if (st != studiocast::maxine::NVCV_SUCCESS) {
         std::cerr << "NvCVImage_Init(cpu out BGR) failed: " << st << "\n";
         return 10;
@@ -646,14 +668,10 @@ int main(int argc, char** argv) {
     // GPU input image (allocated).
     studiocast::maxine::NvCVImage gpu_bgr{};
     {
-      const auto st = nvcv_api.f().NvCVImage_Alloc(&gpu_bgr,
-                                                  static_cast<unsigned>(width),
-                                                  static_cast<unsigned>(height),
-                                                  studiocast::maxine::NVCV_BGR,
-                                                  studiocast::maxine::NVCV_U8,
-                                                  studiocast::maxine::NVCV_CHUNKY,
-                                                  studiocast::maxine::NVCV_GPU,
-                                                  0);
+      const auto st = nvcv_api.f().NvCVImage_Alloc(
+          &gpu_bgr, static_cast<unsigned>(width), static_cast<unsigned>(height),
+          studiocast::maxine::NVCV_BGR, studiocast::maxine::NVCV_U8,
+          studiocast::maxine::NVCV_CHUNKY, studiocast::maxine::NVCV_GPU, 0);
       if (st != studiocast::maxine::NVCV_SUCCESS) {
         std::cerr << "NvCVImage_Alloc(gpu BGR) failed: " << st << "\n";
         return 11;
@@ -668,21 +686,20 @@ int main(int argc, char** argv) {
           have_camera = false;
           FillSyntheticBgr(bgr.data(), width, height, rgb_stride);
         } else {
-          studiocast::video::YuyvToRgb24(fv.data,
-                                        width,
-                                        height,
-                                        cap.Actual().bytes_per_line,
-                                        rgb.data(),
-                                        rgb_stride);
+          studiocast::video::YuyvToRgb24(fv.data, width, height,
+                                         cap.Actual().bytes_per_line,
+                                         rgb.data(), rgb_stride);
           (void)cap.ReleaseFrame(fv, &err);
-          Rgb24ToBgr24(rgb.data(), bgr.data(), width, height, rgb_stride, rgb_stride);
+          Rgb24ToBgr24(rgb.data(), bgr.data(), width, height, rgb_stride,
+                       rgb_stride);
         }
       } else {
         FillSyntheticBgr(bgr.data(), width, height, rgb_stride);
       }
 
       // Upload CPU->GPU.
-      const auto up = nvcv_api.f().NvCVImage_Transfer(&cpu_bgr, &gpu_bgr, 1.0f, gs.cuda_stream(), nullptr);
+      const auto up = nvcv_api.f().NvCVImage_Transfer(
+          &cpu_bgr, &gpu_bgr, 1.0f, gs.cuda_stream(), nullptr);
       if (up != studiocast::maxine::NVCV_SUCCESS) {
         std::cerr << "NvCVImage_Transfer(cpu->gpu) failed: " << up << "\n";
         break;
@@ -697,11 +714,12 @@ int main(int argc, char** argv) {
       err.clear();
       const auto st = gs.Process(frame, &err);
       if (st != studiocast::maxine::NVCV_SUCCESS) {
-        std::cerr << "Green Screen Process failed: " << (err.empty() ? std::to_string(st) : err) << "\n";
+        std::cerr << "Green Screen Process failed: "
+                  << (err.empty() ? std::to_string(st) : err) << "\n";
         break;
       }
 
-      const auto* matte_gpu = gs.MatteGpu();
+      const auto *matte_gpu = gs.MatteGpu();
       if (!matte_gpu) {
         std::cerr << "No matte produced.\n";
         break;
@@ -712,17 +730,19 @@ int main(int argc, char** argv) {
       err.clear();
       const auto st2 = bgblur.Process(frame, &err);
       if (st2 != studiocast::maxine::NVCV_SUCCESS) {
-        std::cerr << "Background Blur Process failed: " << (err.empty() ? std::to_string(st2) : err) << "\n";
+        std::cerr << "Background Blur Process failed: "
+                  << (err.empty() ? std::to_string(st2) : err) << "\n";
         break;
       }
 
-      const auto* out_gpu = bgblur.OutputGpu();
+      const auto *out_gpu = bgblur.OutputGpu();
       if (!out_gpu) {
         std::cerr << "No output produced.\n";
         break;
       }
 
-      const auto down = nvcv_api.f().NvCVImage_Transfer(out_gpu, &cpu_out_bgr, 1.0f, bgblur.cuda_stream(), nullptr);
+      const auto down = nvcv_api.f().NvCVImage_Transfer(
+          out_gpu, &cpu_out_bgr, 1.0f, bgblur.cuda_stream(), nullptr);
       if (down != studiocast::maxine::NVCV_SUCCESS) {
         std::cerr << "NvCVImage_Transfer(gpu->cpu) failed: " << down << "\n";
         break;
@@ -730,8 +750,10 @@ int main(int argc, char** argv) {
 
       // Compute a quick checksum-like stat on the output.
       std::uint64_t sum = 0;
-      for (const auto v : out_bgr) sum += v;
-      const double mean = static_cast<double>(sum) / static_cast<double>(out_bgr.size());
+      for (const auto v : out_bgr)
+        sum += v;
+      const double mean =
+          static_cast<double>(sum) / static_cast<double>(out_bgr.size());
       std::cout << "Frame " << fi << ": output mean byte=" << mean << "\n";
     }
 

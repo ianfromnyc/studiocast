@@ -10,13 +10,13 @@
 
 namespace studiocast::video::effects {
 
-// Safety-net policy: Open CUDA virtual background failures during application (e.g. missing/corrupt
-// model pack, transient runtime/ORT errors) should NOT abort the camera pipeline.
+// Safety-net policy: Open CUDA virtual background failures during application
+// (e.g. missing/corrupt model pack, transient runtime/ORT errors) should NOT
+// abort the camera pipeline.
 //
-// The pipeline should keep producing pass-through frames while surfacing the error to the user.
-inline bool ShouldAbortPipelineOnOpenCudaVbApplyFailure() {
-  return false;
-}
+// The pipeline should keep producing pass-through frames while surfacing the
+// error to the user.
+inline bool ShouldAbortPipelineOnOpenCudaVbApplyFailure() { return false; }
 
 struct OpenCudaGateDecision {
   bool ok = true;
@@ -25,9 +25,10 @@ struct OpenCudaGateDecision {
 
 // Returns true when the locally-planned effect chain includes at least one
 // Open CUDA-backed effect.
-inline bool WantsOpenCudaForPlannedEffects(const BroadcastCameraEffects& fx) {
+inline bool WantsOpenCudaForPlannedEffects(const BroadcastCameraEffects &fx) {
   const auto plan = BuildBroadcastEffectsPlan(fx);
-  const std::set<std::string> planned(plan.ordered_effect_ids.begin(), plan.ordered_effect_ids.end());
+  const std::set<std::string> planned(plan.ordered_effect_ids.begin(),
+                                      plan.ordered_effect_ids.end());
 
   const auto has = [&](std::string_view id) {
     return planned.count(std::string(id)) != 0;
@@ -45,12 +46,14 @@ inline bool WantsOpenCudaForPlannedEffects(const BroadcastCameraEffects& fx) {
 // rules are runnable on this system (as described by `OpenCudaDiagnostics`).
 //
 // This is a pure decision helper: it does not probe the system.
-inline OpenCudaGateDecision EvaluateOpenCudaGate(const BroadcastCameraEffects& fx,
-                                                 const studiocast::open_cuda::OpenCudaDiagnostics& diag) {
+inline OpenCudaGateDecision
+EvaluateOpenCudaGate(const BroadcastCameraEffects &fx,
+                     const studiocast::open_cuda::OpenCudaDiagnostics &diag) {
   OpenCudaGateDecision out;
 
   const auto plan = BuildBroadcastEffectsPlan(fx);
-  const std::set<std::string> planned(plan.ordered_effect_ids.begin(), plan.ordered_effect_ids.end());
+  const std::set<std::string> planned(plan.ordered_effect_ids.begin(),
+                                      plan.ordered_effect_ids.end());
 
   const auto has = [&](std::string_view id) {
     return planned.count(std::string(id)) != 0;
@@ -67,18 +70,21 @@ inline OpenCudaGateDecision EvaluateOpenCudaGate(const BroadcastCameraEffects& f
     return out;
   }
 
-  const std::set<std::string> avail(diag.available_effects.begin(), diag.available_effects.end());
+  const std::set<std::string> avail(diag.available_effects.begin(),
+                                    diag.available_effects.end());
 
   auto format_blocked = [&](std::string_view effect_id) {
     std::string msg = "Open CUDA backend blocked.";
     const auto it = diag.blocked_effects.find(std::string(effect_id));
     if (it != diag.blocked_effects.end()) {
-      msg += " " + std::string(effect_id) + " unavailable (" + it->second + ").";
+      msg +=
+          " " + std::string(effect_id) + " unavailable (" + it->second + ").";
     } else {
       msg += " " + std::string(effect_id) + " unavailable.";
     }
-    for (const auto& h : diag.install_hints) {
-      if (!h.empty()) msg += "\n" + h;
+    for (const auto &h : diag.install_hints) {
+      if (!h.empty())
+        msg += "\n" + h;
     }
     return msg;
   };
@@ -123,4 +129,4 @@ inline OpenCudaGateDecision EvaluateOpenCudaGate(const BroadcastCameraEffects& f
   return out;
 }
 
-}  // namespace studiocast::video::effects
+} // namespace studiocast::video::effects

@@ -9,9 +9,9 @@ namespace studiocast::open_video {
 
 // Shared analysis artifacts computed once per capture frame.
 //
-// Many video effects need the same underlying signal (foreground matte, face boxes,
-// landmarks). StudioCast avoids re-running expensive inference multiple times per
-// frame by caching analysis outputs keyed by capture_sequence.
+// Many video effects need the same underlying signal (foreground matte, face
+// boxes, landmarks). StudioCast avoids re-running expensive inference multiple
+// times per frame by caching analysis outputs keyed by capture_sequence.
 //
 // Phase M6: This is a lightweight contract used by upcoming Open Video tasks.
 struct FaceDetection {
@@ -31,9 +31,11 @@ struct FaceLandmarks {
 struct FrameAnalysisCache {
   std::uint64_t capture_sequence = 0;
 
-  // Best-effort "begin frame" helper; clears cached results when the sequence changes.
+  // Best-effort "begin frame" helper; clears cached results when the sequence
+  // changes.
   void BeginFrame(std::uint64_t seq) {
-    if (seq == capture_sequence) return;
+    if (seq == capture_sequence)
+      return;
     capture_sequence = seq;
     Clear();
   }
@@ -47,4 +49,4 @@ struct FrameAnalysisCache {
   std::optional<FaceLandmarks> face_landmarks;
 };
 
-}  // namespace studiocast::open_video
+} // namespace studiocast::open_video

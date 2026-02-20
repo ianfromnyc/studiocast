@@ -9,7 +9,8 @@ namespace studiocast::open_audio {
 struct OpenAudioDiagnostics {
   bool ok = false;
 
-  // Best-effort ONNX Runtime details (useful for debugging provider availability).
+  // Best-effort ONNX Runtime details (useful for debugging provider
+  // availability).
   std::string onnxruntime_version;
   std::vector<std::string> onnxruntime_providers;
 
@@ -43,4 +44,4 @@ struct OpenAudioDiagnostics {
   std::string ToJson() const;
 };
 
-}  // namespace studiocast::open_audio
+} // namespace studiocast::open_audio

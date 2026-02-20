@@ -11,7 +11,7 @@ namespace {
 //   srcPtr, srcPitch, srcW, srcH,
 //   dstPtr, dstPitch, dstW, dstH,
 //   cropX, cropY, cropW, cropH
-static constexpr const char* kCropScalePtx = R"ptx(
+static constexpr const char *kCropScalePtx = R"ptx(
 .version 6.0
 .target sm_30
 .address_size 64
@@ -121,7 +121,7 @@ DONE:
 // Parameters:
 //   srcPtr, srcPitch, srcW, srcH,
 //   dstPtr, dstPitch, dstW, dstH
-static constexpr const char* kResizeBilinearPtx = R"ptx(
+static constexpr const char *kResizeBilinearPtx = R"ptx(
 .version 6.0
 .target sm_30
 .address_size 64
@@ -311,34 +311,40 @@ DONE:
 }
 )ptx";
 
-}  // namespace
+} // namespace
 
-bool CudaBgrCropScale::Initialize(CudaDriverApi* cuda, std::string* error_out) {
+bool CudaBgrCropScale::Initialize(CudaDriverApi *cuda, std::string *error_out) {
   cuda_ = cuda;
   if (!cuda_) {
-    if (error_out) *error_out = "CudaBgrCropScale.Initialize: cuda is null.";
+    if (error_out)
+      *error_out = "CudaBgrCropScale.Initialize: cuda is null.";
     return false;
   }
   return true;
 }
 
-bool CudaBgrCropScale::EnsureKernelLoaded(std::string* error_out) {
-  if (loaded_) return true;
+bool CudaBgrCropScale::EnsureKernelLoaded(std::string *error_out) {
+  if (loaded_)
+    return true;
   if (!cuda_ || !cuda_->IsInitialized()) {
-    if (error_out) *error_out = "CUDA driver API is not initialized.";
+    if (error_out)
+      *error_out = "CUDA driver API is not initialized.";
     return false;
   }
 
-  const auto& f = cuda_->f();
+  const auto &f = cuda_->f();
   CUresult st = f.cuModuleLoadData(&module_, kCropScalePtx);
   if (st != CUDA_SUCCESS) {
-    if (error_out) *error_out = "cuModuleLoadData failed: " + cuda_->StatusToString(st);
+    if (error_out)
+      *error_out = "cuModuleLoadData failed: " + cuda_->StatusToString(st);
     return false;
   }
 
   st = f.cuModuleGetFunction(&fn_, module_, "crop_scale_bgr_u8");
   if (st != CUDA_SUCCESS || !fn_) {
-    if (error_out) *error_out = "cuModuleGetFunction(crop_scale_bgr_u8) failed: " + cuda_->StatusToString(st);
+    if (error_out)
+      *error_out = "cuModuleGetFunction(crop_scale_bgr_u8) failed: " +
+                   cuda_->StatusToString(st);
     return false;
   }
 
@@ -346,28 +352,31 @@ bool CudaBgrCropScale::EnsureKernelLoaded(std::string* error_out) {
   return true;
 }
 
-bool CudaBgrCropScale::CropScale(const NvCVImage& src_bgr_gpu,
-                                 NvCVImage* dst_bgr_gpu,
-                                 float crop_x,
-                                 float crop_y,
-                                 float crop_w,
-                                 float crop_h,
-                                 CUstream stream,
-                                 std::string* error_out) {
+bool CudaBgrCropScale::CropScale(const NvCVImage &src_bgr_gpu,
+                                 NvCVImage *dst_bgr_gpu, float crop_x,
+                                 float crop_y, float crop_w, float crop_h,
+                                 CUstream stream, std::string *error_out) {
   if (!dst_bgr_gpu) {
-    if (error_out) *error_out = "CropScale called with null dst.";
+    if (error_out)
+      *error_out = "CropScale called with null dst.";
     return false;
   }
-  if (!EnsureKernelLoaded(error_out)) return false;
+  if (!EnsureKernelLoaded(error_out))
+    return false;
 
   if (src_bgr_gpu.gpuMem != NVCV_GPU || dst_bgr_gpu->gpuMem != NVCV_GPU) {
-    if (error_out) *error_out = "CropScale requires GPU NvCVImage inputs.";
+    if (error_out)
+      *error_out = "CropScale requires GPU NvCVImage inputs.";
     return false;
   }
-  if (src_bgr_gpu.pixelFormat != NVCV_BGR || dst_bgr_gpu->pixelFormat != NVCV_BGR ||
-      src_bgr_gpu.componentType != NVCV_U8 || dst_bgr_gpu->componentType != NVCV_U8 ||
-      src_bgr_gpu.planar != NVCV_INTERLEAVED || dst_bgr_gpu->planar != NVCV_INTERLEAVED) {
-    if (error_out) *error_out = "CropScale expects chunky BGR/U8 NvCVImages.";
+  if (src_bgr_gpu.pixelFormat != NVCV_BGR ||
+      dst_bgr_gpu->pixelFormat != NVCV_BGR ||
+      src_bgr_gpu.componentType != NVCV_U8 ||
+      dst_bgr_gpu->componentType != NVCV_U8 ||
+      src_bgr_gpu.planar != NVCV_INTERLEAVED ||
+      dst_bgr_gpu->planar != NVCV_INTERLEAVED) {
+    if (error_out)
+      *error_out = "CropScale expects chunky BGR/U8 NvCVImages.";
     return false;
   }
 
@@ -382,24 +391,19 @@ bool CudaBgrCropScale::CropScale(const NvCVImage& src_bgr_gpu,
   crop_x = std::max(0.0f, std::min(crop_x, static_cast<float>(srcW) - crop_w));
   crop_y = std::max(0.0f, std::min(crop_y, static_cast<float>(srcH) - crop_h));
 
-  const uint64_t srcPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(src_bgr_gpu.pixels));
-  const uint64_t dstPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(dst_bgr_gpu->pixels));
-  const uint32_t srcPitch = static_cast<uint32_t>(std::max(0, src_bgr_gpu.pitch));
-  const uint32_t dstPitch = static_cast<uint32_t>(std::max(0, dst_bgr_gpu->pitch));
+  const uint64_t srcPtr =
+      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(src_bgr_gpu.pixels));
+  const uint64_t dstPtr =
+      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(dst_bgr_gpu->pixels));
+  const uint32_t srcPitch =
+      static_cast<uint32_t>(std::max(0, src_bgr_gpu.pitch));
+  const uint32_t dstPitch =
+      static_cast<uint32_t>(std::max(0, dst_bgr_gpu->pitch));
 
-  void* params[] = {
-      (void*)&srcPtr,
-      (void*)&srcPitch,
-      (void*)&srcW,
-      (void*)&srcH,
-      (void*)&dstPtr,
-      (void*)&dstPitch,
-      (void*)&dstW,
-      (void*)&dstH,
-      (void*)&crop_x,
-      (void*)&crop_y,
-      (void*)&crop_w,
-      (void*)&crop_h,
+  void *params[] = {
+      (void *)&srcPtr, (void *)&srcPitch, (void *)&srcW,   (void *)&srcH,
+      (void *)&dstPtr, (void *)&dstPitch, (void *)&dstW,   (void *)&dstH,
+      (void *)&crop_x, (void *)&crop_y,   (void *)&crop_w, (void *)&crop_h,
   };
 
   constexpr unsigned int kBlockX = 16;
@@ -407,52 +411,51 @@ bool CudaBgrCropScale::CropScale(const NvCVImage& src_bgr_gpu,
   const unsigned int gridX = (dstW + kBlockX - 1) / kBlockX;
   const unsigned int gridY = (dstH + kBlockY - 1) / kBlockY;
 
-  const CUresult st = cuda_->f().cuLaunchKernel(fn_,
-                                               gridX,
-                                               gridY,
-                                               1,
-                                               kBlockX,
-                                               kBlockY,
-                                               1,
-                                               0,
-                                               stream,
-                                               params,
-                                               nullptr);
+  const CUresult st = cuda_->f().cuLaunchKernel(
+      fn_, gridX, gridY, 1, kBlockX, kBlockY, 1, 0, stream, params, nullptr);
   if (st != CUDA_SUCCESS) {
-    if (error_out) *error_out = "cuLaunchKernel(crop_scale_bgr_u8) failed: " + cuda_->StatusToString(st);
+    if (error_out)
+      *error_out = "cuLaunchKernel(crop_scale_bgr_u8) failed: " +
+                   cuda_->StatusToString(st);
     return false;
   }
 
   return true;
 }
 
-bool CudaBgrResizeBilinear::Initialize(CudaDriverApi* cuda, std::string* error_out) {
+bool CudaBgrResizeBilinear::Initialize(CudaDriverApi *cuda,
+                                       std::string *error_out) {
   cuda_ = cuda;
   if (!cuda_) {
-    if (error_out) *error_out = "CudaBgrResizeBilinear.Initialize: cuda is null.";
+    if (error_out)
+      *error_out = "CudaBgrResizeBilinear.Initialize: cuda is null.";
     return false;
   }
   return true;
 }
 
-bool CudaBgrResizeBilinear::EnsureKernelLoaded(std::string* error_out) {
-  if (loaded_) return true;
+bool CudaBgrResizeBilinear::EnsureKernelLoaded(std::string *error_out) {
+  if (loaded_)
+    return true;
   if (!cuda_ || !cuda_->IsInitialized()) {
-    if (error_out) *error_out = "CUDA driver API is not initialized.";
+    if (error_out)
+      *error_out = "CUDA driver API is not initialized.";
     return false;
   }
 
-  const auto& f = cuda_->f();
+  const auto &f = cuda_->f();
   CUresult st = f.cuModuleLoadData(&module_, kResizeBilinearPtx);
   if (st != CUDA_SUCCESS) {
-    if (error_out) *error_out = "cuModuleLoadData failed: " + cuda_->StatusToString(st);
+    if (error_out)
+      *error_out = "cuModuleLoadData failed: " + cuda_->StatusToString(st);
     return false;
   }
 
   st = f.cuModuleGetFunction(&fn_, module_, "resize_bilinear_bgr_u8");
   if (st != CUDA_SUCCESS || !fn_) {
     if (error_out) {
-      *error_out = "cuModuleGetFunction(resize_bilinear_bgr_u8) failed: " + cuda_->StatusToString(st);
+      *error_out = "cuModuleGetFunction(resize_bilinear_bgr_u8) failed: " +
+                   cuda_->StatusToString(st);
     }
     return false;
   }
@@ -461,24 +464,30 @@ bool CudaBgrResizeBilinear::EnsureKernelLoaded(std::string* error_out) {
   return true;
 }
 
-bool CudaBgrResizeBilinear::Resize(const NvCVImage& src_bgr_gpu,
-                                   NvCVImage* dst_bgr_gpu,
-                                   CUstream stream,
-                                   std::string* error_out) {
+bool CudaBgrResizeBilinear::Resize(const NvCVImage &src_bgr_gpu,
+                                   NvCVImage *dst_bgr_gpu, CUstream stream,
+                                   std::string *error_out) {
   if (!dst_bgr_gpu) {
-    if (error_out) *error_out = "Resize called with null dst.";
+    if (error_out)
+      *error_out = "Resize called with null dst.";
     return false;
   }
-  if (!EnsureKernelLoaded(error_out)) return false;
+  if (!EnsureKernelLoaded(error_out))
+    return false;
 
   if (src_bgr_gpu.gpuMem != NVCV_GPU || dst_bgr_gpu->gpuMem != NVCV_GPU) {
-    if (error_out) *error_out = "Resize requires GPU NvCVImage inputs.";
+    if (error_out)
+      *error_out = "Resize requires GPU NvCVImage inputs.";
     return false;
   }
-  if (src_bgr_gpu.pixelFormat != NVCV_BGR || dst_bgr_gpu->pixelFormat != NVCV_BGR ||
-      src_bgr_gpu.componentType != NVCV_U8 || dst_bgr_gpu->componentType != NVCV_U8 ||
-      src_bgr_gpu.planar != NVCV_INTERLEAVED || dst_bgr_gpu->planar != NVCV_INTERLEAVED) {
-    if (error_out) *error_out = "Resize expects chunky BGR/U8 NvCVImages.";
+  if (src_bgr_gpu.pixelFormat != NVCV_BGR ||
+      dst_bgr_gpu->pixelFormat != NVCV_BGR ||
+      src_bgr_gpu.componentType != NVCV_U8 ||
+      dst_bgr_gpu->componentType != NVCV_U8 ||
+      src_bgr_gpu.planar != NVCV_INTERLEAVED ||
+      dst_bgr_gpu->planar != NVCV_INTERLEAVED) {
+    if (error_out)
+      *error_out = "Resize expects chunky BGR/U8 NvCVImages.";
     return false;
   }
 
@@ -487,24 +496,23 @@ bool CudaBgrResizeBilinear::Resize(const NvCVImage& src_bgr_gpu,
   const uint32_t dstW = dst_bgr_gpu->width;
   const uint32_t dstH = dst_bgr_gpu->height;
   if (srcW == 0 || srcH == 0 || dstW == 0 || dstH == 0) {
-    if (error_out) *error_out = "Resize called with zero dimension.";
+    if (error_out)
+      *error_out = "Resize called with zero dimension.";
     return false;
   }
 
-  const uint64_t srcPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(src_bgr_gpu.pixels));
-  const uint64_t dstPtr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(dst_bgr_gpu->pixels));
-  const uint32_t srcPitch = static_cast<uint32_t>(std::max(0, src_bgr_gpu.pitch));
-  const uint32_t dstPitch = static_cast<uint32_t>(std::max(0, dst_bgr_gpu->pitch));
+  const uint64_t srcPtr =
+      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(src_bgr_gpu.pixels));
+  const uint64_t dstPtr =
+      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(dst_bgr_gpu->pixels));
+  const uint32_t srcPitch =
+      static_cast<uint32_t>(std::max(0, src_bgr_gpu.pitch));
+  const uint32_t dstPitch =
+      static_cast<uint32_t>(std::max(0, dst_bgr_gpu->pitch));
 
-  void* params[] = {
-      (void*)&srcPtr,
-      (void*)&srcPitch,
-      (void*)&srcW,
-      (void*)&srcH,
-      (void*)&dstPtr,
-      (void*)&dstPitch,
-      (void*)&dstW,
-      (void*)&dstH,
+  void *params[] = {
+      (void *)&srcPtr, (void *)&srcPitch, (void *)&srcW, (void *)&srcH,
+      (void *)&dstPtr, (void *)&dstPitch, (void *)&dstW, (void *)&dstH,
   };
 
   constexpr unsigned int kBlockX = 16;
@@ -512,24 +520,17 @@ bool CudaBgrResizeBilinear::Resize(const NvCVImage& src_bgr_gpu,
   const unsigned int gridX = (dstW + kBlockX - 1u) / kBlockX;
   const unsigned int gridY = (dstH + kBlockY - 1u) / kBlockY;
 
-  const auto& f = cuda_->f();
-  const CUresult st = f.cuLaunchKernel(fn_,
-                                       gridX,
-                                       gridY,
-                                       1,
-                                       kBlockX,
-                                       kBlockY,
-                                       1,
-                                       0,
-                                       stream,
-                                       params,
-                                       nullptr);
+  const auto &f = cuda_->f();
+  const CUresult st = f.cuLaunchKernel(fn_, gridX, gridY, 1, kBlockX, kBlockY,
+                                       1, 0, stream, params, nullptr);
   if (st != CUDA_SUCCESS) {
-    if (error_out) *error_out = "cuLaunchKernel(resize_bilinear_bgr_u8) failed: " + cuda_->StatusToString(st);
+    if (error_out)
+      *error_out = "cuLaunchKernel(resize_bilinear_bgr_u8) failed: " +
+                   cuda_->StatusToString(st);
     return false;
   }
 
   return true;
 }
 
-}  // namespace studiocast::maxine
+} // namespace studiocast::maxine

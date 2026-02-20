@@ -33,10 +33,9 @@ struct ModelPreprocessSpec {
 // performed using the same sampling convention as video::ResizeRgb24Bilinear.
 //
 // The operation is enqueued on the provided stream and does not synchronize.
-bool PreprocessToTensor(const CudaImage& src,
-                        const CudaTensor& dst,
-                        const ModelPreprocessSpec& spec,
+bool PreprocessToTensor(const CudaImage &src, const CudaTensor &dst,
+                        const ModelPreprocessSpec &spec,
                         studiocast::maxine::CUstream stream,
-                        std::string* error_out);
+                        std::string *error_out);
 
-}  // namespace studiocast::cuda::kernels
+} // namespace studiocast::cuda::kernels

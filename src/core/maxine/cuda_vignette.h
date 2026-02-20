@@ -13,24 +13,20 @@ namespace studiocast::maxine {
 // step when the Maxine pipeline is active.
 class CudaBgrVignette {
 public:
-  bool Initialize(CudaDriverApi* cuda, std::string* error_out);
+  bool Initialize(CudaDriverApi *cuda, std::string *error_out);
 
   // Applies a radial darkening centered at (center_x_px, center_y_px).
   // intensity: [0..1] where 0 is a no-op and 1 is strong darkening.
-  bool ApplyInPlace(NvCVImage* bgr_gpu,
-                   float intensity,
-                   float center_x_px,
-                   float center_y_px,
-                   CUstream stream,
-                   std::string* error_out);
+  bool ApplyInPlace(NvCVImage *bgr_gpu, float intensity, float center_x_px,
+                    float center_y_px, CUstream stream, std::string *error_out);
 
 private:
-  bool EnsureKernelLoaded(std::string* error_out);
+  bool EnsureKernelLoaded(std::string *error_out);
 
-  CudaDriverApi* cuda_ = nullptr;  // non-owning
+  CudaDriverApi *cuda_ = nullptr; // non-owning
   CUmodule module_ = nullptr;
   CUfunction fn_ = nullptr;
   bool loaded_ = false;
 };
 
-}  // namespace studiocast::maxine
+} // namespace studiocast::maxine

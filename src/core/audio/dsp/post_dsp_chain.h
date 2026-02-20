@@ -17,7 +17,7 @@ namespace studiocast::audio::dsp {
 //  - no allocations during ProcessInPlace()
 //  - state is preallocated in Configure()
 class PostDspChain {
- public:
+public:
   struct LimiterConfig {
     bool enabled = true;
     // Target peak ceiling. Keep slightly below 1.0f to avoid hard clipping.
@@ -40,21 +40,23 @@ class PostDspChain {
 
   // Configure internal buffers/state for the given format.
   // Returns false on invalid inputs.
-  bool Configure(int sample_rate, std::uint32_t channels, std::string* error);
+  bool Configure(int sample_rate, std::uint32_t channels, std::string *error);
 
   void Reset();
 
-  // Optional presence shelf. If gain_db is ~0 or disabled=false, this stage is bypassed.
-  void SetPresenceShelf(const PresenceShelfConfig& cfg);
+  // Optional presence shelf. If gain_db is ~0 or disabled=false, this stage is
+  // bypassed.
+  void SetPresenceShelf(const PresenceShelfConfig &cfg);
 
   // Limiter configuration.
-  void SetLimiter(const LimiterConfig& cfg);
+  void SetLimiter(const LimiterConfig &cfg);
 
   // Process an interleaved buffer in-place.
   // Buffer length is frames * channels.
-  void ProcessInPlace(float* interleaved, std::uint32_t frames, std::uint32_t channels);
+  void ProcessInPlace(float *interleaved, std::uint32_t frames,
+                      std::uint32_t channels);
 
- private:
+private:
   struct Biquad {
     // Direct-form 1 transposed coefficients.
     float b0 = 1.0f;
@@ -64,10 +66,8 @@ class PostDspChain {
     float a2 = 0.0f;
   };
 
-  static Biquad MakeHighShelfBiquad(int sample_rate,
-                                   float freq_hz,
-                                   float gain_db,
-                                   float slope);
+  static Biquad MakeHighShelfBiquad(int sample_rate, float freq_hz,
+                                    float gain_db, float slope);
 
   void RecomputePresenceShelfIfNeeded();
 
@@ -92,4 +92,4 @@ class PostDspChain {
   float limiter_gain_ = 1.0f;
 };
 
-}  // namespace studiocast::audio::dsp
+} // namespace studiocast::audio::dsp

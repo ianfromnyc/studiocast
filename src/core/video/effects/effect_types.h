@@ -21,8 +21,10 @@ enum class BackgroundEffect {
 //
 // StudioCast production rule: Maxine is the only supported effect engine.
 //
-// - auto_select: choose Maxine if available, otherwise mark the effect unavailable
-// - cpu: legacy/development-only (not supported by the production camera pipeline)
+// - auto_select: choose Maxine if available, otherwise mark the effect
+// unavailable
+// - cpu: legacy/development-only (not supported by the production camera
+// pipeline)
 // - maxine: force Maxine path (effect is unavailable if Maxine is unavailable)
 
 enum class EffectBackend {
@@ -35,7 +37,7 @@ std::string ToString(BackgroundEffect v);
 std::string ToString(EffectBackend v);
 
 // Parsing helpers (case-insensitive). Returns false if the value is unknown.
-bool ParseBackgroundEffect(const std::string& s, BackgroundEffect* out);
-bool ParseEffectBackend(const std::string& s, EffectBackend* out);
+bool ParseBackgroundEffect(const std::string &s, BackgroundEffect *out);
+bool ParseEffectBackend(const std::string &s, EffectBackend *out);
 
-}  // namespace studiocast::video::effects
+} // namespace studiocast::video::effects

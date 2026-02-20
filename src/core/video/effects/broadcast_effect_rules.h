@@ -7,7 +7,8 @@
 
 namespace studiocast::video::effects {
 
-// Centralized ordering + compatibility/dependency rules for `BroadcastCameraEffects`.
+// Centralized ordering + compatibility/dependency rules for
+// `BroadcastCameraEffects`.
 //
 // This is the single source of truth for:
 //  - pipeline stage ordering (enabled stages in correct order)
@@ -18,8 +19,8 @@ namespace studiocast::video::effects {
 // MaxineManager diagnostics.
 
 struct DisabledEffectByRule {
-  std::string id;      // stable effect ID (see `broadcast_effect_contract.h`)
-  std::string reason;  // human-friendly reason
+  std::string id;     // stable effect ID (see `broadcast_effect_contract.h`)
+  std::string reason; // human-friendly reason
 };
 
 struct BroadcastEffectsPlan {
@@ -37,6 +38,7 @@ struct BroadcastEffectsPlan {
 };
 
 // Resolves effect ordering and compatibility/dependency rules.
-BroadcastEffectsPlan BuildBroadcastEffectsPlan(const BroadcastCameraEffects& fx);
+BroadcastEffectsPlan
+BuildBroadcastEffectsPlan(const BroadcastCameraEffects &fx);
 
-}  // namespace studiocast::video::effects
+} // namespace studiocast::video::effects

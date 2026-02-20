@@ -6,16 +6,17 @@
 #include <vector>
 
 #include "core/video/pattern.h"
-#include "core/video/v4l2loopback.h"
 #include "core/video/v4l2_writer.h"
+#include "core/video/v4l2loopback.h"
 
 namespace studiocast::video {
 namespace {
 
-std::string ChooseWritableLoopbackDevice(std::string* error) {
+std::string ChooseWritableLoopbackDevice(std::string *error) {
   const auto rep = ProbeLoopback();
-  for (const auto& d : rep.devices) {
-    if (d.is_loopback && d.can_write) return d.dev_node;
+  for (const auto &d : rep.devices) {
+    if (d.is_loopback && d.can_write)
+      return d.dev_node;
   }
 
   if (error) {
@@ -29,7 +30,7 @@ std::string ChooseWritableLoopbackDevice(std::string* error) {
   return {};
 }
 
-}  // namespace
+} // namespace
 
 VideoFeed::~VideoFeed() { Stop(); }
 
@@ -45,50 +46,58 @@ FeedStatus VideoFeed::Status() const {
   return s;
 }
 
-bool VideoFeed::OpenWriterWithMode(V4l2Writer* writer,
-                                  const std::string& device,
-                                  int width,
-                                  int height,
-                                  int fps,
-                                  FeedPixelFormatMode mode,
-                                  std::string* error) {
+bool VideoFeed::OpenWriterWithMode(V4l2Writer *writer,
+                                   const std::string &device, int width,
+                                   int height, int fps,
+                                   FeedPixelFormatMode mode,
+                                   std::string *error) {
   if (!writer) {
-    if (error) *error = "writer is null";
+    if (error)
+      *error = "writer is null";
     return false;
   }
 
   if (mode == FeedPixelFormatMode::auto_select) {
     {
       std::string err;
-      if (writer->Open(device, width, height, fps, PixelFormat::yuyv, &err)) return true;
-      if (error) *error = "Tried yuyv: " + err;
+      if (writer->Open(device, width, height, fps, PixelFormat::yuyv, &err))
+        return true;
+      if (error)
+        *error = "Tried yuyv: " + err;
     }
     {
       std::string err;
-      if (writer->Open(device, width, height, fps, PixelFormat::rgb24, &err)) return true;
-      if (error) *error += "\nTried rgb24: " + err;
+      if (writer->Open(device, width, height, fps, PixelFormat::rgb24, &err))
+        return true;
+      if (error)
+        *error += "\nTried rgb24: " + err;
     }
     return false;
   }
 
-  const PixelFormat fmt = (mode == FeedPixelFormatMode::rgb24) ? PixelFormat::rgb24 : PixelFormat::yuyv;
+  const PixelFormat fmt = (mode == FeedPixelFormatMode::rgb24)
+                              ? PixelFormat::rgb24
+                              : PixelFormat::yuyv;
   return writer->Open(device, width, height, fps, fmt, error);
 }
 
-bool VideoFeed::StartTestPattern(const FeedConfig& cfg, std::string* error) {
+bool VideoFeed::StartTestPattern(const FeedConfig &cfg, std::string *error) {
   // Validate early
   if (cfg.width <= 0 || cfg.height <= 0) {
-    if (error) *error = "Invalid width/height.";
+    if (error)
+      *error = "Invalid width/height.";
     return false;
   }
   if (cfg.fps <= 0 || cfg.fps > 240) {
-    if (error) *error = "Invalid fps (1..240).";
+    if (error)
+      *error = "Invalid fps (1..240).";
     return false;
   }
 
   std::unique_lock<std::mutex> lock(mu_);
   if (running_ || starting_) {
-    if (error) *error = "Video feed already running.";
+    if (error)
+      *error = "Video feed already running.";
     return false;
   }
 
@@ -117,10 +126,13 @@ bool VideoFeed::StartTestPattern(const FeedConfig& cfg, std::string* error) {
   starting_ = false;
 
   if (!running_) {
-    const std::string err = last_error_.empty() ? "Failed to start video feed." : last_error_;
+    const std::string err =
+        last_error_.empty() ? "Failed to start video feed." : last_error_;
     lock.unlock();
-    if (th_.joinable()) th_.join();
-    if (error) *error = err;
+    if (th_.joinable())
+      th_.join();
+    if (error)
+      *error = err;
     return false;
   }
 
@@ -156,7 +168,8 @@ void VideoFeed::ThreadMain(FeedConfig cfg) {
     device = ChooseWritableLoopbackDevice(&derr);
     if (device.empty()) {
       std::lock_guard<std::mutex> lock(mu_);
-      last_error_ = derr.empty() ? "No writable v4l2loopback device found." : derr;
+      last_error_ =
+          derr.empty() ? "No writable v4l2loopback device found." : derr;
       running_ = false;
       start_notified_ = true;
       cv_.notify_all();
@@ -166,7 +179,8 @@ void VideoFeed::ThreadMain(FeedConfig cfg) {
 
   V4l2Writer writer;
   std::string oerr;
-  if (!OpenWriterWithMode(&writer, device, cfg.width, cfg.height, cfg.fps, cfg.format, &oerr)) {
+  if (!OpenWriterWithMode(&writer, device, cfg.width, cfg.height, cfg.fps,
+                          cfg.format, &oerr)) {
     std::lock_guard<std::mutex> lock(mu_);
     last_error_ = "Failed to open " + device + ":\n" + oerr;
     running_ = false;
@@ -199,7 +213,8 @@ void VideoFeed::ThreadMain(FeedConfig cfg) {
   layout.size_image = a.size_image;
 
   const int fps = (a.fps > 0) ? a.fps : cfg.fps;
-  const auto period = std::chrono::nanoseconds(1000000000LL / (fps > 0 ? fps : 30));
+  const auto period =
+      std::chrono::nanoseconds(1000000000LL / (fps > 0 ? fps : 30));
   auto next = std::chrono::steady_clock::now();
 
   int frameIndex = 0;
@@ -208,7 +223,8 @@ void VideoFeed::ThreadMain(FeedConfig cfg) {
     next += period;
 
     std::string perr;
-    if (!FillMovingColorBars(frame.data(), frame.size(), layout, frameIndex, &perr)) {
+    if (!FillMovingColorBars(frame.data(), frame.size(), layout, frameIndex,
+                             &perr)) {
       std::lock_guard<std::mutex> lock(mu_);
       last_error_ = "Pattern fill failed: " + perr;
       break;
@@ -223,7 +239,8 @@ void VideoFeed::ThreadMain(FeedConfig cfg) {
 
     ++frameIndex;
 
-    // Update frame count without locking every single frame (cheap but cleaner).
+    // Update frame count without locking every single frame (cheap but
+    // cleaner).
     if ((frameIndex % 10) == 0) {
       std::lock_guard<std::mutex> lock(mu_);
       frame_index_ = frameIndex;
@@ -247,4 +264,4 @@ void VideoFeed::ThreadMain(FeedConfig cfg) {
   // writer closes in destructor
 }
 
-}  // namespace studiocast::video
+} // namespace studiocast::video

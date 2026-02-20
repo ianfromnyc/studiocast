@@ -15,7 +15,7 @@ struct VirtualSpeakerState {
 std::filesystem::path VirtualSpeakerStatePath();
 
 VirtualSpeakerState LoadVirtualSpeakerState();
-bool SaveVirtualSpeakerState(const VirtualSpeakerState& s, std::string* error);
-bool ClearVirtualSpeakerState(std::string* error);
+bool SaveVirtualSpeakerState(const VirtualSpeakerState &s, std::string *error);
+bool ClearVirtualSpeakerState(std::string *error);
 
-}  // namespace studiocast::audio
+} // namespace studiocast::audio
