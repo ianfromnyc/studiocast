@@ -236,8 +236,12 @@ CameraPipelineStatus CameraPipeline::Status() const {
     s.open_cuda_transfers = open_cuda_transfers_;
   } else {
     // Avoid exposing stale negotiated formats when the pipeline is idle.
+    //
+    // Exception: if the loopback writer is held open (v4l2loopback/exclusive_caps),
+    // expose the negotiated output format so consumers (including the GUI preview)
+    // can open the device without attempting to renegotiate caps.
     s.capture = CaptureFormat{};
-    s.output = ActualFormat{};
+    s.output = writer_.IsOpen() ? output_ : ActualFormat{};
     s.scaling_backend_active.clear();
     s.scaling_from = CaptureFormat{};
     s.scaling_to = ActualFormat{};
@@ -341,14 +345,22 @@ bool CameraPipeline::OpenOutputLocked(const std::string& outDev,
 
   // Try to reuse an existing open writer when possible.
   if (writer_.IsOpen() && writer_device_ == outDev) {
-    const auto& a = writer_.Actual();
-    if (a.width == width && a.height == height && a.fps == fps) {
-      output_ = a;
-      output_device_ = outDev;
-      return true;
+    // Refresh cached negotiated format.
+    //
+    // v4l2loopback allows capture clients to renegotiate global caps via VIDIOC_S_FMT.
+    // If that happens, size_image/bytes_per_line can change under an already-open
+    // writer fd. Refreshing avoids write() failures and start/stop thrashing.
+    std::string refresh_err;
+    if (writer_.RefreshActual(&refresh_err)) {
+      const auto& a = writer_.Actual();
+      if (a.width == width && a.height == height && a.fps == fps) {
+        output_ = a;
+        output_device_ = outDev;
+        return true;
+      }
     }
 
-    // If format/dimensions changed, we need to renegotiate.
+    // If format/dimensions changed (or we couldn't query), renegotiate.
     writer_.Close();
     writer_device_.clear();
   } else if (writer_.IsOpen() && writer_device_ != outDev) {
@@ -419,6 +431,8 @@ bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig& cfg, std::stri
   // keep any already-open writer, otherwise defer without error.
   if (cfg.capture_mode == CaptureMode::auto_best && (!w_set || !h_set)) {
     if (writer_.IsOpen() && writer_device_ == outDev) {
+      std::string refresh_err;
+      (void)writer_.RefreshActual(&refresh_err);
       output_ = writer_.Actual();
       output_device_ = outDev;
     }
@@ -4750,7 +4764,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         want_open_video_video_denoise = true;
 
         std::string ov_err;
-        if (open_video_fastdvdnet.EnsureInitialized(capA.width, capA.height, &ov_err)) {
+        if (open_video_fastdvdnet.EnsureInitialized(capA.width, capA.height, fx.video_noise_removal.model_id, &ov_err)) {
           have_open_video_video_denoise = true;
           set_backend(stage_id, "open_video");
           if (!note.empty()) note += "\n";
@@ -4785,7 +4799,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             // lightweight Open CUDA temporal denoiser.
             want_open_video_video_denoise = true;
             std::string ov_err;
-            if (open_video_fastdvdnet.EnsureInitialized(capA.width, capA.height, &ov_err)) {
+            if (open_video_fastdvdnet.EnsureInitialized(capA.width, capA.height, fx.video_noise_removal.model_id, &ov_err)) {
               have_open_video_video_denoise = true;
               set_backend(stage_id, "open_video");
               if (!note.empty()) note += "\n";
@@ -4839,7 +4853,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       auto try_open_video = [&](std::string* out_err) -> bool {
         want_open_video_eye_contact = true;
         std::string ov_err;
-        if (open_video_eye_contact.EnsureInitialized(&ov_err)) {
+        if (open_video_eye_contact.EnsureInitialized(fx.eye_contact.model_id, &ov_err)) {
           have_open_video_eye_contact = true;
           set_backend(stage_id, "open_video");
           detach_vignette_from_eye_contact();
@@ -5014,7 +5028,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
         bool have_open_video_face_detection = false;
         std::string fd_err;
-        if (open_video_yunet.EnsureInitialized(&fd_err)) {
+        if (open_video_yunet.EnsureInitialized(fx.auto_frame.model_id, &fd_err)) {
           have_open_video_face_detection = true;
         }
 
@@ -5074,7 +5088,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           want_open_cuda_auto_frame = true;
           bool have_open_video_face_detection = false;
           std::string fd_err;
-          if (open_video_yunet.EnsureInitialized(&fd_err)) {
+          if (open_video_yunet.EnsureInitialized(fx.auto_frame.model_id, &fd_err)) {
             have_open_video_face_detection = true;
           }
 
@@ -5562,6 +5576,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                                        capA.height,
                                                        rgbStride,
                                                        fx.video_noise_removal.strength,
+                                                       fx.video_noise_removal.model_id,
                                                        &ov_err)) {
               if (!ov_err.empty()) {
                 std::lock_guard<std::mutex> lock(mu_);
@@ -5621,6 +5636,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                                         rgbStride,
                                                         fx.eye_contact.strength,
                                                         fx.eye_contact.look_away_enabled,
+                                                        fx.auto_frame.model_id,
+                                                        fx.eye_contact.model_id,
                                                         &open_video_yunet,
                                                         &open_video_cache,
                                                         &ov_err)) {
@@ -5895,8 +5912,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             const std::vector<studiocast::open_video::FaceDetection>* face_detections = nullptr;
             if (open_video_yunet.available()) {
               std::string fd_err;
-              if (open_video_yunet.EnsureDetectionsForFrame(
-                      rgb.data(), capA.width, capA.height, rgbStride, capture_sequence, &open_video_cache, &fd_err)) {
+              if (open_video_yunet.EnsureDetectionsForFrame(rgb.data(),
+                                                           capA.width,
+                                                           capA.height,
+                                                           rgbStride,
+                                                           fx.auto_frame.model_id,
+                                                           capture_sequence,
+                                                           &open_video_cache,
+                                                           &fd_err)) {
                 if (open_video_cache.face_detections) {
                   face_detections = &(*open_video_cache.face_detections);
                 }

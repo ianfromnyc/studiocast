@@ -46,13 +46,16 @@ namespace studiocast::gui {
 
         void OnAutoFrameToggled(bool checked);
         void OnAutoFrameZoomChanged(int value);
+        void OnAutoFrameModelChanged(int index);
 
         void OnEyeContactToggled(bool checked);
         void OnEyeContactStrengthChanged(int value);
         void OnEyeContactLookAwayToggled(bool checked);
+        void OnEyeContactModelChanged(int index);
 
         void OnDenoiseToggled(bool checked);
         void OnDenoiseStrengthChanged(int value);
+        void OnDenoiseModelChanged(int index);
 
         void OnOpenInstallHints();
 
@@ -106,17 +109,23 @@ namespace studiocast::gui {
         QCheckBox* autoFrameCheck_ = nullptr;
         QSlider* autoFrameZoomSlider_ = nullptr;
         QLabel* autoFrameZoomValue_ = nullptr;
+        QLabel* autoFrameModelLabel_ = nullptr;
+        QComboBox* autoFrameModelCombo_ = nullptr;
 
         // Eye Contact (Maxine AR)
         QCheckBox* eyeContactCheck_ = nullptr;
         QSlider* eyeContactStrengthSlider_ = nullptr;
         QLabel* eyeContactStrengthValue_ = nullptr;
         QCheckBox* eyeContactLookAwayCheck_ = nullptr;
+        QLabel* eyeContactModelLabel_ = nullptr;
+        QComboBox* eyeContactModelCombo_ = nullptr;
 
         // Video Noise Removal (Maxine VFX)
         QCheckBox* denoiseCheck_ = nullptr;
         QSlider* denoiseStrengthSlider_ = nullptr;
         QLabel* denoiseStrengthValue_ = nullptr;
+        QLabel* denoiseModelLabel_ = nullptr;
+        QComboBox* denoiseModelCombo_ = nullptr;
 
         // Virtual Key Light (Maxine relighting)
         QCheckBox* virtualKeyLightCheck_ = nullptr;
@@ -154,6 +163,11 @@ namespace studiocast::gui {
 
         // Cached signature to avoid repopulating the VB model combo on every poll.
         QString vbModelItemsSig_;
+
+        // Cached signatures to avoid rescanning Open Video model packs on every poll.
+        QString autoFrameModelItemsSig_;
+        QString eyeContactModelItemsSig_;
+        QString denoiseModelItemsSig_;
 
         bool daemonReachable_ = false;
         std::string daemonLastStatusJson_;

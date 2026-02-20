@@ -49,6 +49,13 @@ namespace studiocast::video {
 
         void Close();
 
+        // Refresh cached negotiated format from the kernel.
+        //
+        // This is useful for v4l2loopback: some consumers may renegotiate
+        // global caps via VIDIOC_S_FMT. When that happens, the writer must
+        // update its cached size_image/bytes_per_line to avoid write() failures.
+        bool RefreshActual(std::string* error);
+
         bool WriteFrame(const std::uint8_t* data, std::size_t bytes, std::string* error);
 
         bool IsOpen() const { return fd_ >= 0; }

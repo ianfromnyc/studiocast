@@ -38,7 +38,7 @@ class GazeCorrectionEyeContact {
   void Reset();
 
   // Loads the Open Video eye_contact pack and its dependencies.
-  bool EnsureInitialized(std::string* error);
+  bool EnsureInitialized(const std::string& requested_model_id, std::string* error);
 
   // Apply eye contact correction in-place on an RGB24 frame.
   //
@@ -50,6 +50,8 @@ class GazeCorrectionEyeContact {
                        std::size_t stride,
                        int strength,
                        bool look_away_enabled,
+                       const std::string& face_detection_model_id,
+                       const std::string& requested_model_id,
                        YunetFaceDetector* yunet,
                        FrameAnalysisCache* cache,
                        std::string* error);
@@ -129,7 +131,7 @@ class GazeCorrectionEyeContact {
                                       std::vector<int64_t>* out_shape,
                                       std::string* error);
 
-  bool LoadModelPack(std::string* error);
+  bool LoadModelPack(const std::string& model_id, std::string* error);
   bool InitRuntimeForEye(const std::filesystem::path& onnx_path, EyeRuntime* rt, std::string* error);
   bool ConfigureRuntimeIo(EyeRuntime* rt, std::string* error);
 

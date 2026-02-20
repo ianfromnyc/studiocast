@@ -214,23 +214,22 @@ bool GazeCorrectionEyeContact::DetectOutputFromSession(const studiocast::onnx::O
   return false;
 }
 
-bool GazeCorrectionEyeContact::LoadModelPack(std::string* error) {
+bool GazeCorrectionEyeContact::LoadModelPack(const std::string& model_id, std::string* error) {
   if (error) error->clear();
 
-  registry_ = ModelPackRegistry::ScanDefault();
-
-  active_model_id_ = ChoosePreferredModelId(registry_);
-  if (active_model_id_.empty()) {
+  if (model_id.empty()) {
     if (error) *error = "No Open Video eye_contact model packs are installed.";
     return false;
   }
 
-  const auto pack_opt = registry_.Find("eye_contact", active_model_id_);
+  const auto pack_opt = registry_.Find("eye_contact", model_id);
   if (!pack_opt.has_value()) {
-    if (error) *error = "Open Video eye_contact model pack not found: id='" + active_model_id_ + "'";
+    if (error) *error = "Open Video eye_contact model pack not found: id='" + model_id + "'";
     return false;
   }
   const ModelPack& pack = *pack_opt;
+
+  active_model_id_ = pack.id;
 
   // Resolve dependency on a face_landmarks pack (best-effort).
   required_landmarks_id_.clear();
@@ -420,21 +419,38 @@ bool GazeCorrectionEyeContact::EnsureDlibDependency(std::string* error) {
   return true;
 }
 
-bool GazeCorrectionEyeContact::EnsureInitialized(std::string* error) {
+bool GazeCorrectionEyeContact::EnsureInitialized(const std::string& requested_model_id, std::string* error) {
   if (error) error->clear();
 
   if (disabled_) {
     if (error && !sticky_warning_.empty()) *error = sticky_warning_;
     return false;
   }
-  if (initialized_) return true;
+  // Resolve desired model id.
+  ModelPackRegistry reg = ModelPackRegistry::ScanDefault();
+  const std::string desired = requested_model_id.empty() ? ChoosePreferredModelId(reg) : requested_model_id;
+  if (desired.empty()) {
+    if (error) *error = "No Open Video eye_contact model packs are installed.";
+    return false;
+  }
+
+  if (initialized_ && desired == active_model_id_) {
+    registry_ = std::move(reg);
+    return true;
+  }
+
+  if (initialized_) {
+    Reset();
+  }
+
+  registry_ = std::move(reg);
 
 #if !STUDIOCAST_HAVE_ONNXRUNTIME
   if (error) *error = "ONNX Runtime is not available in this build (STUDIOCAST_HAVE_ONNXRUNTIME=0).";
   return false;
 #else
   std::string e;
-  if (!LoadModelPack(&e)) {
+  if (!LoadModelPack(desired, &e)) {
     if (error) *error = e;
     return false;
   }
@@ -863,6 +879,8 @@ bool GazeCorrectionEyeContact::ApplyRgbInPlace(std::uint64_t capture_sequence,
                                               std::size_t stride,
                                               int strength,
                                               bool look_away_enabled,
+                                              const std::string& face_detection_model_id,
+                                              const std::string& requested_model_id,
                                               YunetFaceDetector* yunet,
                                               FrameAnalysisCache* cache,
                                               std::string* error) {
@@ -886,7 +904,7 @@ bool GazeCorrectionEyeContact::ApplyRgbInPlace(std::uint64_t capture_sequence,
   const float strength01 = Clamp01(static_cast<float>(strength) / 100.f);
 
   std::string init_err;
-  if (!EnsureInitialized(&init_err)) {
+  if (!EnsureInitialized(requested_model_id, &init_err)) {
     // If not initialized (missing models), treat as bypass rather than hard failure.
     if (error) *error = init_err;
     return false;
@@ -894,7 +912,7 @@ bool GazeCorrectionEyeContact::ApplyRgbInPlace(std::uint64_t capture_sequence,
 
   // Ensure face detections.
   std::string det_err;
-  if (!yunet->EnsureDetectionsForFrame(rgb, width, height, stride, capture_sequence, cache, &det_err)) {
+  if (!yunet->EnsureDetectionsForFrame(rgb, width, height, stride, face_detection_model_id, capture_sequence, cache, &det_err)) {
     if (error) *error = det_err;
     return false;
   }

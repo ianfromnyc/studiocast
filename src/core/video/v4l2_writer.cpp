@@ -565,6 +565,85 @@ bool V4l2Writer::Open(const std::string& device,
   return false;
 }
 
+bool V4l2Writer::RefreshActual(std::string* error) {
+  if (fd_ < 0) {
+    if (error) *error = "Writer not open.";
+    return false;
+  }
+
+  // Prefer output types, but allow capture types as a fallback. Some devices expose
+  // both and/or allow querying only one side.
+  const TypeSpec types[] = {
+      {V4L2_BUF_TYPE_VIDEO_OUTPUT, false},
+#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+      {V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, true},
+#endif
+      {V4L2_BUF_TYPE_VIDEO_CAPTURE, false},
+#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+      {V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, true},
+#endif
+  };
+
+  v4l2_format chosen{};
+  bool chosenMplane = false;
+  __u32 chosenType = 0;
+  bool ok = false;
+
+  std::ostringstream attempts;
+  for (const auto& t : types) {
+    std::string ge;
+    v4l2_format f{};
+    if (TryGetFmtAny(fd_, t, &f, &ge)) {
+      chosen = f;
+      chosenMplane = t.mplane;
+      chosenType = t.type;
+      ok = true;
+      break;
+    }
+    attempts << "Tried " << BufTypeName(t.type) << " G_FMT: "
+             << (ge.empty() ? "(no detail)" : ge) << "\n";
+  }
+
+  if (!ok) {
+    if (error) {
+      *error = "Failed to query active V4L2 format (VIDIOC_G_FMT).\n" + attempts.str();
+    }
+    return false;
+  }
+
+  int negotiatedFps = (actual_.fps > 0) ? actual_.fps : 30;
+  int fpsNum = (actual_.fps_num > 0) ? actual_.fps_num : 1;
+  int fpsDen = (actual_.fps_den > 0) ? actual_.fps_den : negotiatedFps;
+
+  // Best-effort fps query.
+  v4l2_streamparm gp{};
+  gp.type = (chosenType != 0) ? chosenType : static_cast<__u32>(V4L2_BUF_TYPE_VIDEO_OUTPUT);
+  if (IoctlRetry(fd_, VIDIOC_G_PARM, &gp) == 0) {
+    const v4l2_fract tpf = IsOutputBufType(gp.type) ? gp.parm.output.timeperframe
+                                                    : gp.parm.capture.timeperframe;
+    const int num = static_cast<int>(tpf.numerator);
+    const int den = static_cast<int>(tpf.denominator);
+    if (num > 0 && den > 0) {
+      fpsNum = num;
+      fpsDen = den;
+      const double f = static_cast<double>(den) / static_cast<double>(num);
+      if (f > 0.0) negotiatedFps = static_cast<int>(std::floor(f + 0.5));
+    }
+  }
+
+  ActualFormat a;
+  std::string perr;
+  if (!ParseChosenFormat(chosen, chosenMplane, negotiatedFps, &a, &perr)) {
+    if (error) *error = "Queried format parsing failed: " + perr;
+    return false;
+  }
+
+  a.fps_num = fpsNum;
+  a.fps_den = fpsDen;
+  actual_ = a;
+  return true;
+}
+
 bool V4l2Writer::WriteFrame(const std::uint8_t* data, std::size_t bytes, std::string* error) {
   if (fd_ < 0) {
     if (error) *error = "Writer not open.";

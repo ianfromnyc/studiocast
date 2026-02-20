@@ -38,7 +38,7 @@ class FastDvdnetDenoiser {
   //
   // The chosen model pack is selected from installed packs under task="video_denoise".
   // If multiple packs are installed, a deterministic preference order is used.
-  bool EnsureInitialized(int src_w, int src_h, std::string* error);
+  bool EnsureInitialized(int src_w, int src_h, const std::string& requested_model_id, std::string* error);
 
   // Reset temporal windowing state (but keep the loaded model/session).
   void ResetTemporalState();
@@ -53,6 +53,7 @@ class FastDvdnetDenoiser {
                        int height,
                        std::size_t stride,
                        int strength,
+                       const std::string& requested_model_id,
                        std::string* error);
 
   // Diagnostics.
@@ -75,7 +76,10 @@ class FastDvdnetDenoiser {
 
   static std::string ChoosePreferredModelId(const ModelPackRegistry& reg);
   static bool LoadDefaultSigmaFromManifest(const std::filesystem::path& manifest_path, int* out_sigma);
-  static bool ResolveModelFromRegistry(const ModelPackRegistry& reg, LoadedModel* out, std::string* error);
+  static bool ResolveModelFromRegistry(const ModelPackRegistry& reg,
+                                       const std::string& requested_model_id,
+                                       LoadedModel* out,
+                                       std::string* error);
 
   bool EnsureSessionForModel(const LoadedModel& model, std::string* error);
   bool RefreshGeometry(int src_w, int src_h, std::string* error);

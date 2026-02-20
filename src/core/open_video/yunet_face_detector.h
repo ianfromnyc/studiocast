@@ -34,8 +34,9 @@ class YunetFaceDetector {
   void Reset();
 
   // Loads a suitable YuNet model pack and creates an ORT session.
-  // Safe to call multiple times.
-  bool EnsureInitialized(std::string* error);
+  // Safe to call multiple times. If requested_model_id is empty, the registry
+  // default is used.
+  bool EnsureInitialized(const std::string& requested_model_id, std::string* error);
 
   // Ensures cache->face_detections is populated for the given capture_sequence.
   //
@@ -45,6 +46,7 @@ class YunetFaceDetector {
                                 int width,
                                 int height,
                                 std::size_t stride,
+                                const std::string& requested_model_id,
                                 std::uint64_t capture_sequence,
                                 FrameAnalysisCache* cache,
                                 std::string* error);

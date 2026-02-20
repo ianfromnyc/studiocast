@@ -217,20 +217,23 @@ std::string BroadcastCameraEffectsToJson(const BroadcastCameraEffects& effects) 
     oss << "\"enabled\":" << (effects.auto_frame.enabled ? "true" : "false") << ",";
     oss << "\"strength\":" << effects.auto_frame.strength << ",";
     oss << "\"smoothing\":" << effects.auto_frame.smoothing << ",";
-    oss << "\"headroom\":" << effects.auto_frame.headroom;
+    oss << "\"headroom\":" << effects.auto_frame.headroom << ",";
+    oss << "\"model_id\":\"" << studiocast::util::json::EscapeString(effects.auto_frame.model_id) << "\"";
     oss << "},";
 
     // Eye contact.
     oss << "\"eye_contact\":{";
     oss << "\"enabled\":" << (effects.eye_contact.enabled ? "true" : "false") << ",";
     oss << "\"strength\":" << effects.eye_contact.strength << ",";
-    oss << "\"look_away_enabled\":" << (effects.eye_contact.look_away_enabled ? "true" : "false");
+    oss << "\"look_away_enabled\":" << (effects.eye_contact.look_away_enabled ? "true" : "false") << ",";
+    oss << "\"model_id\":\"" << studiocast::util::json::EscapeString(effects.eye_contact.model_id) << "\"";
     oss << "},";
 
     // Video noise removal.
     oss << "\"video_noise_removal\":{";
     oss << "\"enabled\":" << (effects.video_noise_removal.enabled ? "true" : "false") << ",";
-    oss << "\"strength\":" << effects.video_noise_removal.strength;
+    oss << "\"strength\":" << effects.video_noise_removal.strength << ",";
+    oss << "\"model_id\":\"" << studiocast::util::json::EscapeString(effects.video_noise_removal.model_id) << "\"";
     oss << "},";
 
     // Virtual key light.
@@ -397,7 +400,7 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
 
     // Auto frame.
     if (const auto* af = GetObj(*obj, "", "auto_frame", error)) {
-        if (!CheckUnknownKeys(*af, {"enabled", "strength", "smoothing", "headroom"}, "auto_frame", options, warnings, error)) return false;
+        if (!CheckUnknownKeys(*af, {"enabled", "strength", "smoothing", "headroom", "model_id"}, "auto_frame", options, warnings, error)) return false;
 
         bool en = out->auto_frame.enabled;
         if (!TryGetBool(*af, "auto_frame", "enabled", &found, &en, error)) return false;
@@ -428,11 +431,15 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
             }
             out->auto_frame.headroom = headroom;
         }
+
+        std::string modelId;
+        if (!TryGetString(*af, "auto_frame", "model_id", &found, &modelId, error)) return false;
+        if (found) out->auto_frame.model_id = modelId;
     }
 
     // Eye contact.
     if (const auto* ec = GetObj(*obj, "", "eye_contact", error)) {
-        if (!CheckUnknownKeys(*ec, {"enabled", "strength", "look_away_enabled"}, "eye_contact", options, warnings, error)) return false;
+        if (!CheckUnknownKeys(*ec, {"enabled", "strength", "look_away_enabled", "model_id"}, "eye_contact", options, warnings, error)) return false;
 
         bool en = out->eye_contact.enabled;
         if (!TryGetBool(*ec, "eye_contact", "enabled", &found, &en, error)) return false;
@@ -448,11 +455,15 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
         bool lookAway = out->eye_contact.look_away_enabled;
         if (!TryGetBool(*ec, "eye_contact", "look_away_enabled", &found, &lookAway, error)) return false;
         if (found) out->eye_contact.look_away_enabled = lookAway;
+
+        std::string modelId;
+        if (!TryGetString(*ec, "eye_contact", "model_id", &found, &modelId, error)) return false;
+        if (found) out->eye_contact.model_id = modelId;
     }
 
     // Video noise removal.
     if (const auto* dn = GetObj(*obj, "", "video_noise_removal", error)) {
-        if (!CheckUnknownKeys(*dn, {"enabled", "strength"}, "video_noise_removal", options, warnings, error)) return false;
+        if (!CheckUnknownKeys(*dn, {"enabled", "strength", "model_id"}, "video_noise_removal", options, warnings, error)) return false;
 
         bool en = out->video_noise_removal.enabled;
         if (!TryGetBool(*dn, "video_noise_removal", "enabled", &found, &en, error)) return false;
@@ -464,6 +475,10 @@ bool ParseBroadcastCameraEffectsJson(const studiocast::util::json::Value& root,
             if (!RequireRangeInt("video_noise_removal.strength", strength, 0, 100, error)) return false;
             out->video_noise_removal.strength = strength;
         }
+
+        std::string modelId;
+        if (!TryGetString(*dn, "video_noise_removal", "model_id", &found, &modelId, error)) return false;
+        if (found) out->video_noise_removal.model_id = modelId;
     }
 
     // Virtual key light.

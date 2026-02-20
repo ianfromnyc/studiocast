@@ -238,13 +238,12 @@ bool YunetFaceDetector::BuildBindings(std::string* error) {
   return true;
 }
 
-bool YunetFaceDetector::EnsureInitialized(std::string* error) {
+bool YunetFaceDetector::EnsureInitialized(const std::string& requested_model_id, std::string* error) {
   if (error) error->clear();
-  if (initialized_) return true;
 
-  registry_ = ModelPackRegistry::ScanDefault();
-  const auto it = registry_.Tasks().find("face_detection");
-  if (it == registry_.Tasks().end() || it->second.empty()) {
+  ModelPackRegistry reg = ModelPackRegistry::ScanDefault();
+  const auto it = reg.Tasks().find("face_detection");
+  if (it == reg.Tasks().end() || it->second.empty()) {
     if (error) {
       *error = "No Open Video face_detection models installed. Install a YuNet model pack under " +
                (util::StudioCastModelsDir().string() + "/open_video/face_detection/.");
@@ -252,10 +251,22 @@ bool YunetFaceDetector::EnsureInitialized(std::string* error) {
     return false;
   }
 
-  const std::string model_id = PickPreferredModelId(it->second);
+  const std::string model_id = requested_model_id.empty() ? PickPreferredModelId(it->second) : requested_model_id;
+  if (initialized_ && model_id == active_model_id_) {
+    registry_ = std::move(reg);
+    return true;
+  }
+
+  Reset();
+  registry_ = std::move(reg);
+
   const auto pack = registry_.Find("face_detection", model_id);
   if (!pack) {
-    if (error) *error = "Failed to resolve face_detection model_id '" + model_id + "'";
+    if (error) {
+      *error = requested_model_id.empty()
+                   ? ("Failed to resolve face_detection model_id '" + model_id + "'")
+                   : ("Requested face_detection model_id '" + model_id + "' is not installed");
+    }
     return false;
   }
 
@@ -452,6 +463,7 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
                                                 int width,
                                                 int height,
                                                 std::size_t stride,
+                                                const std::string& requested_model_id,
                                                 std::uint64_t capture_sequence,
                                                 FrameAnalysisCache* cache,
                                                 std::string* error) {
@@ -467,7 +479,7 @@ bool YunetFaceDetector::EnsureDetectionsForFrame(const std::uint8_t* rgb,
   }
 
   std::string init_err;
-  if (!EnsureInitialized(&init_err)) {
+  if (!EnsureInitialized(requested_model_id, &init_err)) {
     if (error) *error = init_err;
     return false;
   }

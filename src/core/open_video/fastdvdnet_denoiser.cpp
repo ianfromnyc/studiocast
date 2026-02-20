@@ -95,14 +95,17 @@ bool FastDvdnetDenoiser::LoadDefaultSigmaFromManifest(const std::filesystem::pat
   return true;
 }
 
-bool FastDvdnetDenoiser::ResolveModelFromRegistry(const ModelPackRegistry& reg, LoadedModel* out, std::string* error) {
+bool FastDvdnetDenoiser::ResolveModelFromRegistry(const ModelPackRegistry& reg,
+                                                 const std::string& requested_model_id,
+                                                 LoadedModel* out,
+                                                 std::string* error) {
   if (error) error->clear();
   if (!out) {
     if (error) *error = "internal error: out is null";
     return false;
   }
 
-  const std::string chosen = ChoosePreferredModelId(reg);
+  const std::string chosen = requested_model_id.empty() ? ChoosePreferredModelId(reg) : requested_model_id;
   if (chosen.empty()) {
     if (error) *error = "Open Video FastDVDnet: no installed model packs for task 'video_denoise'.";
     return false;
@@ -110,7 +113,10 @@ bool FastDvdnetDenoiser::ResolveModelFromRegistry(const ModelPackRegistry& reg, 
 
   const auto pack = reg.Find("video_denoise", chosen);
   if (!pack.has_value()) {
-    if (error) *error = "Open Video FastDVDnet: selected model id not found: " + chosen;
+    if (error) {
+      *error = requested_model_id.empty() ? ("Open Video FastDVDnet: selected model id not found: " + chosen)
+                                          : ("Open Video FastDVDnet: requested model id not found: " + chosen);
+    }
     return false;
   }
 
@@ -347,7 +353,10 @@ bool FastDvdnetDenoiser::DetectIoNames(std::string* error) {
   return true;
 }
 
-bool FastDvdnetDenoiser::EnsureInitialized(int src_w, int src_h, std::string* error) {
+bool FastDvdnetDenoiser::EnsureInitialized(int src_w,
+                                          int src_h,
+                                          const std::string& requested_model_id,
+                                          std::string* error) {
   if (error) error->clear();
 
   if (disabled_) {
@@ -359,7 +368,7 @@ bool FastDvdnetDenoiser::EnsureInitialized(int src_w, int src_h, std::string* er
   registry_ = ModelPackRegistry::ScanDefault();
   LoadedModel model;
   std::string resolve_err;
-  if (!ResolveModelFromRegistry(registry_, &model, &resolve_err)) {
+  if (!ResolveModelFromRegistry(registry_, requested_model_id, &model, &resolve_err)) {
     if (error) *error = resolve_err;
     return false;
   }
@@ -523,6 +532,7 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
                                         int height,
                                         std::size_t stride,
                                         int strength,
+                                        const std::string& requested_model_id,
                                         std::string* error) {
   if (error) error->clear();
 
@@ -541,7 +551,7 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
   }
 
   std::string init_err;
-  if (!EnsureInitialized(width, height, &init_err)) {
+  if (!EnsureInitialized(width, height, requested_model_id, &init_err)) {
     if (error) *error = init_err;
     return false;
   }

@@ -36,10 +36,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
 #include "core/maxine/reason_codes.h"
+#include "core/open_video/model_pack_registry.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/convert.h"
 #include "core/video/effects/broadcast_effect_contract.h"
@@ -639,57 +641,96 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
 
   // Auto Frame
   auto* afBox = new QGroupBox("Auto Frame", box);
-  auto* afLayout = new QHBoxLayout(afBox);
+  auto* afLayout = new QVBoxLayout(afBox);
+
+  auto* afRow = new QHBoxLayout();
   autoFrameCheck_ = new QCheckBox("Enable", afBox);
-  afLayout->addWidget(autoFrameCheck_);
-  afLayout->addSpacing(12);
-  afLayout->addWidget(new QLabel("Zoom:", afBox));
+  afRow->addWidget(autoFrameCheck_);
+  afRow->addSpacing(12);
+  afRow->addWidget(new QLabel("Zoom:", afBox));
   autoFrameZoomSlider_ = new QSlider(Qt::Horizontal, afBox);
   autoFrameZoomSlider_->setRange(0, 100);
   autoFrameZoomSlider_->setValue(50);
-  afLayout->addWidget(autoFrameZoomSlider_, 1);
+  afRow->addWidget(autoFrameZoomSlider_, 1);
   autoFrameZoomValue_ = new QLabel("50%", afBox);
   autoFrameZoomValue_->setMinimumWidth(44);
   autoFrameZoomValue_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  afLayout->addWidget(autoFrameZoomValue_);
+  afRow->addWidget(autoFrameZoomValue_);
+  afLayout->addLayout(afRow);
+
+  auto* afModelRow = new QHBoxLayout();
+  autoFrameModelLabel_ = new QLabel("Model:", afBox);
+  autoFrameModelCombo_ = new QComboBox(afBox);
+  autoFrameModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  afModelRow->addWidget(autoFrameModelLabel_);
+  afModelRow->addWidget(autoFrameModelCombo_, 1);
+  afLayout->addLayout(afModelRow);
+  autoFrameModelLabel_->setVisible(false);
+  autoFrameModelCombo_->setVisible(false);
   boxLayout->addWidget(afBox);
 
   // Eye Contact
   auto* ecBox = new QGroupBox("Eye Contact", box);
-  auto* ecLayout = new QHBoxLayout(ecBox);
+  auto* ecLayout = new QVBoxLayout(ecBox);
+
+  auto* ecRow = new QHBoxLayout();
   eyeContactCheck_ = new QCheckBox("Enable", ecBox);
-  ecLayout->addWidget(eyeContactCheck_);
-  ecLayout->addSpacing(12);
-  ecLayout->addWidget(new QLabel("Strength:", ecBox));
+  ecRow->addWidget(eyeContactCheck_);
+  ecRow->addSpacing(12);
+  ecRow->addWidget(new QLabel("Strength:", ecBox));
   eyeContactStrengthSlider_ = new QSlider(Qt::Horizontal, ecBox);
   eyeContactStrengthSlider_->setRange(0, 100);
   eyeContactStrengthSlider_->setValue(50);
-  ecLayout->addWidget(eyeContactStrengthSlider_, 1);
+  ecRow->addWidget(eyeContactStrengthSlider_, 1);
   eyeContactStrengthValue_ = new QLabel("50%", ecBox);
   eyeContactStrengthValue_->setMinimumWidth(44);
   eyeContactStrengthValue_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  ecLayout->addWidget(eyeContactStrengthValue_);
-  ecLayout->addSpacing(12);
+  ecRow->addWidget(eyeContactStrengthValue_);
+  ecRow->addSpacing(12);
   eyeContactLookAwayCheck_ = new QCheckBox("Allow look-away", ecBox);
   eyeContactLookAwayCheck_->setChecked(true);
-  ecLayout->addWidget(eyeContactLookAwayCheck_);
+  ecRow->addWidget(eyeContactLookAwayCheck_);
+  ecLayout->addLayout(ecRow);
+
+  auto* ecModelRow = new QHBoxLayout();
+  eyeContactModelLabel_ = new QLabel("Model:", ecBox);
+  eyeContactModelCombo_ = new QComboBox(ecBox);
+  eyeContactModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  ecModelRow->addWidget(eyeContactModelLabel_);
+  ecModelRow->addWidget(eyeContactModelCombo_, 1);
+  ecLayout->addLayout(ecModelRow);
+  eyeContactModelLabel_->setVisible(false);
+  eyeContactModelCombo_->setVisible(false);
   boxLayout->addWidget(ecBox);
 
   // Video Noise Removal
   auto* dnBox = new QGroupBox("Video Noise Removal", box);
-  auto* dnLayout = new QHBoxLayout(dnBox);
+  auto* dnLayout = new QVBoxLayout(dnBox);
+
+  auto* dnRow = new QHBoxLayout();
   denoiseCheck_ = new QCheckBox("Enable", dnBox);
-  dnLayout->addWidget(denoiseCheck_);
-  dnLayout->addSpacing(12);
-  dnLayout->addWidget(new QLabel("Strength:", dnBox));
+  dnRow->addWidget(denoiseCheck_);
+  dnRow->addSpacing(12);
+  dnRow->addWidget(new QLabel("Strength:", dnBox));
   denoiseStrengthSlider_ = new QSlider(Qt::Horizontal, dnBox);
   denoiseStrengthSlider_->setRange(0, 100);
   denoiseStrengthSlider_->setValue(50);
-  dnLayout->addWidget(denoiseStrengthSlider_, 1);
+  dnRow->addWidget(denoiseStrengthSlider_, 1);
   denoiseStrengthValue_ = new QLabel("50%", dnBox);
   denoiseStrengthValue_->setMinimumWidth(44);
   denoiseStrengthValue_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-  dnLayout->addWidget(denoiseStrengthValue_);
+  dnRow->addWidget(denoiseStrengthValue_);
+  dnLayout->addLayout(dnRow);
+
+  auto* dnModelRow = new QHBoxLayout();
+  denoiseModelLabel_ = new QLabel("Model:", dnBox);
+  denoiseModelCombo_ = new QComboBox(dnBox);
+  denoiseModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  dnModelRow->addWidget(denoiseModelLabel_);
+  dnModelRow->addWidget(denoiseModelCombo_, 1);
+  dnLayout->addLayout(dnModelRow);
+  denoiseModelLabel_->setVisible(false);
+  denoiseModelCombo_->setVisible(false);
   boxLayout->addWidget(dnBox);
 
   // Virtual Key Light
@@ -818,13 +859,19 @@ VideoPage::VideoPage(QWidget* parent) : QWidget(parent) {
 
   connect(autoFrameCheck_, &QCheckBox::toggled, this, &VideoPage::OnAutoFrameToggled);
   connect(autoFrameZoomSlider_, &QSlider::valueChanged, this, &VideoPage::OnAutoFrameZoomChanged);
+  connect(autoFrameModelCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, &VideoPage::OnAutoFrameModelChanged);
 
   connect(eyeContactCheck_, &QCheckBox::toggled, this, &VideoPage::OnEyeContactToggled);
   connect(eyeContactStrengthSlider_, &QSlider::valueChanged, this, &VideoPage::OnEyeContactStrengthChanged);
   connect(eyeContactLookAwayCheck_, &QCheckBox::toggled, this, &VideoPage::OnEyeContactLookAwayToggled);
+  connect(eyeContactModelCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, &VideoPage::OnEyeContactModelChanged);
 
   connect(denoiseCheck_, &QCheckBox::toggled, this, &VideoPage::OnDenoiseToggled);
   connect(denoiseStrengthSlider_, &QSlider::valueChanged, this, &VideoPage::OnDenoiseStrengthChanged);
+  connect(denoiseModelCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, &VideoPage::OnDenoiseModelChanged);
 
   connect(openInstallHintsBtn_, &QPushButton::clicked, this, &VideoPage::OnOpenInstallHints);
 
@@ -1211,6 +1258,9 @@ bool VideoPage::SendDaemonVideoEffects() {
   if (autoFrameZoomSlider_) {
     effects_.auto_frame.strength = autoFrameZoomSlider_->value();
   }
+  if (autoFrameModelCombo_ && autoFrameModelCombo_->count() > 0) {
+    effects_.auto_frame.model_id = autoFrameModelCombo_->currentData().toString().toStdString();
+  }
 
   // Virtual background mode.
   if (bgIsAutoFrame || effects_.auto_frame.enabled) {
@@ -1231,10 +1281,16 @@ bool VideoPage::SendDaemonVideoEffects() {
   if (eyeContactCheck_) effects_.eye_contact.enabled = eyeContactCheck_->isChecked();
   if (eyeContactStrengthSlider_) effects_.eye_contact.strength = eyeContactStrengthSlider_->value();
   if (eyeContactLookAwayCheck_) effects_.eye_contact.look_away_enabled = eyeContactLookAwayCheck_->isChecked();
+  if (eyeContactModelCombo_ && eyeContactModelCombo_->count() > 0) {
+    effects_.eye_contact.model_id = eyeContactModelCombo_->currentData().toString().toStdString();
+  }
 
   // Denoise.
   if (denoiseCheck_) effects_.video_noise_removal.enabled = denoiseCheck_->isChecked();
   if (denoiseStrengthSlider_) effects_.video_noise_removal.strength = denoiseStrengthSlider_->value();
+  if (denoiseModelCombo_ && denoiseModelCombo_->count() > 0) {
+    effects_.video_noise_removal.model_id = denoiseModelCombo_->currentData().toString().toStdString();
+  }
 
   // Virtual Key Light.
   if (virtualKeyLightCheck_) effects_.virtual_key_light.enabled = virtualKeyLightCheck_->isChecked();
@@ -1298,6 +1354,24 @@ void VideoPage::OnBackgroundChanged(int /*index*/) {
 void VideoPage::OnVbModelChanged(int /*index*/) {
   if (!vbModelCombo_ || vbModelCombo_->count() <= 0) return;
   effects_.virtual_background.model_id = vbModelCombo_->currentData().toString().toStdString();
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnAutoFrameModelChanged(int /*index*/) {
+  if (!autoFrameModelCombo_ || autoFrameModelCombo_->count() <= 0) return;
+  effects_.auto_frame.model_id = autoFrameModelCombo_->currentData().toString().toStdString();
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnEyeContactModelChanged(int /*index*/) {
+  if (!eyeContactModelCombo_ || eyeContactModelCombo_->count() <= 0) return;
+  effects_.eye_contact.model_id = eyeContactModelCombo_->currentData().toString().toStdString();
+  (void)SendDaemonVideoEffects();
+}
+
+void VideoPage::OnDenoiseModelChanged(int /*index*/) {
+  if (!denoiseModelCombo_ || denoiseModelCombo_->count() <= 0) return;
+  effects_.video_noise_removal.model_id = denoiseModelCombo_->currentData().toString().toStdString();
   (void)SendDaemonVideoEffects();
 }
 
@@ -1486,15 +1560,41 @@ void VideoPage::StartPreview() {
 
   // Determine which device to open for preview.
   QString outDev = outputCombo_->currentData().toString();
-  if (outDev.isEmpty() || outDev == "auto") {
-    // Ask daemon for the selected output in auto mode.
+  int wantW = widthSpin_->value();
+  int wantH = heightSpin_->value();
+  int wantFps = fpsSpin_->value();
+  std::optional<studiocast::video::CapturePixelFormat> wantFmt;
+
+  // Ask daemon for the resolved output device and negotiated output format.
+  //
+  // Using the daemon's negotiated format avoids capture-side renegotiation on
+  // v4l2loopback devices (which can destabilize the producer and cause start/stop
+  // thrashing).
+  {
     std::string json;
     QString err;
     if (DaemonRequest("GET_STATUS", &json, &err)) {
       DaemonVideoStatus st;
       QString perr;
-      if (ParseDaemonStatusJson(json, &st, &perr) && !st.output_device.isEmpty()) {
-        outDev = st.output_device;
+      if (ParseDaemonStatusJson(json, &st, &perr)) {
+        if ((outDev.isEmpty() || outDev == "auto") && !st.output_device.isEmpty()) {
+          outDev = st.output_device;
+        }
+
+        const bool outMatches = (!st.output_device.isEmpty() && outDev == st.output_device);
+        if (outMatches && !st.output_format.pixfmt.isEmpty() && st.output_format.width > 0 && st.output_format.height > 0) {
+          wantW = st.output_format.width;
+          wantH = st.output_format.height;
+          if (st.output_format.fps > 0.0) {
+            wantFps = std::max(1, static_cast<int>(std::floor(st.output_format.fps + 0.5)));
+          }
+
+          if (st.output_format.pixfmt == "RGB3") {
+            wantFmt = studiocast::video::CapturePixelFormat::rgb24;
+          } else if (st.output_format.pixfmt == "YUYV") {
+            wantFmt = studiocast::video::CapturePixelFormat::yuyv;
+          }
+        }
       }
     }
   }
@@ -1504,26 +1604,20 @@ void VideoPage::StartPreview() {
     return;
   }
 
-  const int wantW = widthSpin_->value();
-  const int wantH = heightSpin_->value();
-  const int wantFps = fpsSpin_->value();
+  const auto openFmt = [&](studiocast::video::CapturePixelFormat fmt, std::string* outErr) -> bool {
+    return previewCapture_.Open(outDev.toStdString(), wantW, wantH, wantFps, fmt, false, outErr);
+  };
+
+  // Prefer the daemon's negotiated output format when available.
+  const auto firstFmt = wantFmt.value_or(studiocast::video::CapturePixelFormat::rgb24);
+  const auto secondFmt = (firstFmt == studiocast::video::CapturePixelFormat::rgb24)
+                             ? studiocast::video::CapturePixelFormat::yuyv
+                             : studiocast::video::CapturePixelFormat::rgb24;
 
   std::string err;
-  if (!previewCapture_.Open(outDev.toStdString(),
-                            wantW,
-                            wantH,
-                            wantFps,
-                            studiocast::video::CapturePixelFormat::rgb24,
-                            false,
-                            &err)) {
+  if (!openFmt(firstFmt, &err)) {
     std::string err2;
-    if (!previewCapture_.Open(outDev.toStdString(),
-                              wantW,
-                              wantH,
-                              wantFps,
-                              studiocast::video::CapturePixelFormat::yuyv,
-                              false,
-                              &err2)) {
+    if (!openFmt(secondFmt, &err2)) {
       preview_->SetStatusText("Preview open failed:\n" + QString::fromStdString(err2));
       return;
     }
@@ -1993,6 +2087,125 @@ void VideoPage::UpdateUiEnabled() {
                               vbBackend.compare(QStringLiteral("open_cuda"), Qt::CaseInsensitive) == 0;
     vbModelLabel_->setVisible(showModelRow);
     vbModelCombo_->setVisible(showModelRow);
+  }
+
+  // Open Video model selection for other effects (stored under
+  // ~/.local/share/studiocast/models/open_video/<task>/...).
+  {
+    const auto reg = studiocast::open_video::ModelPackRegistry::ScanDefault();
+    const auto models = reg.ListModels();
+
+    auto update_open_video_model_combo = [&](const char* task,
+                                             QLabel* label,
+                                             QComboBox* combo,
+                                             QString* items_sig,
+                                             const std::string& selected_model_id,
+                                             bool show_row) {
+      if (!label || !combo || !items_sig) return;
+
+      label->setVisible(show_row);
+      combo->setVisible(show_row);
+
+      std::vector<studiocast::open_video::ModelPack> packs;
+      packs.reserve(models.size());
+      for (const auto& m : models) {
+        if (m.task == task) packs.push_back(m);
+      }
+      std::sort(packs.begin(), packs.end(), [](const auto& a, const auto& b) {
+        const std::string& an = a.display_name.empty() ? a.id : a.display_name;
+        const std::string& bn = b.display_name.empty() ? b.id : b.display_name;
+        return an < bn;
+      });
+
+      std::string default_id = reg.DefaultModelIdForTask(task);
+      if (default_id.empty() && !packs.empty()) default_id = packs.front().id;
+
+      QString sig = QString::fromStdString(std::string(task) + "|" + default_id);
+      for (const auto& p : packs) {
+        sig += QString::fromStdString("|" + p.id + ":" + p.display_name);
+      }
+
+      if (sig != *items_sig) {
+        QSignalBlocker b(combo);
+        combo->clear();
+
+        if (packs.empty()) {
+          combo->addItem("<no models installed>", QString());
+        } else {
+          if (!default_id.empty()) {
+            combo->addItem(QString("<auto: %1>").arg(QString::fromStdString(default_id)), QString());
+          } else {
+            combo->addItem("<auto>", QString());
+          }
+
+          for (const auto& p : packs) {
+            QString text;
+            if (!p.display_name.empty() && p.display_name != p.id) {
+              text = QString("%1 (%2)").arg(QString::fromStdString(p.display_name), QString::fromStdString(p.id));
+            } else {
+              text = QString::fromStdString(p.id);
+            }
+            combo->addItem(text, QString::fromStdString(p.id));
+          }
+        }
+
+        *items_sig = sig;
+      }
+
+      {
+        QSignalBlocker b(combo);
+        const QString want = QString::fromStdString(selected_model_id);
+        if (want.isEmpty()) {
+          combo->setCurrentIndex(0);
+        } else {
+          int idx = -1;
+          for (int i = 0; i < combo->count(); ++i) {
+            if (combo->itemData(i).toString() == want) {
+              idx = i;
+              break;
+            }
+          }
+
+          if (idx >= 0) {
+            combo->setCurrentIndex(idx);
+          } else {
+            combo->insertItem(1, QString("<missing: %1>").arg(want), want);
+            combo->setCurrentIndex(1);
+          }
+        }
+      }
+
+      const bool has_models = !packs.empty();
+      combo->setEnabled(daemonReachable_ && has_models);
+      label->setEnabled(daemonReachable_);
+      if (!has_models) {
+        const QString tip = QString("No models installed for task '%1'.").arg(task);
+        combo->setToolTip(tip);
+        label->setToolTip(tip);
+      } else {
+        combo->setToolTip(QString());
+        label->setToolTip(QString());
+      }
+    };
+
+    update_open_video_model_combo("face_detection",
+                                 autoFrameModelLabel_,
+                                 autoFrameModelCombo_,
+                                 &autoFrameModelItemsSig_,
+                                 effects_.auto_frame.model_id,
+                                 effects_.auto_frame.enabled);
+    update_open_video_model_combo("eye_contact",
+                                 eyeContactModelLabel_,
+                                 eyeContactModelCombo_,
+                                 &eyeContactModelItemsSig_,
+                                 effects_.eye_contact.model_id,
+                                 effects_.eye_contact.enabled);
+    update_open_video_model_combo("video_denoise",
+                                 denoiseModelLabel_,
+                                 denoiseModelCombo_,
+                                 &denoiseModelItemsSig_,
+                                 effects_.video_noise_removal.model_id,
+                                 effects_.video_noise_removal.enabled);
   }
 
   // Auto Frame

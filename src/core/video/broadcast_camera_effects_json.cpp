@@ -336,20 +336,23 @@ std::string BroadcastCameraEffectsContractToJson(const studiocast::video::effect
     oss << "\"" << kEnabled << "\":" << (effects.auto_frame.enabled ? "true" : "false") << ',';
     oss << "\"" << kStrength << "\":" << effects.auto_frame.strength << ',';
     oss << "\"" << kSmoothing << "\":" << effects.auto_frame.smoothing << ',';
-    oss << "\"" << kHeadroom << "\":" << effects.auto_frame.headroom;
+    oss << "\"" << kHeadroom << "\":" << effects.auto_frame.headroom << ',';
+    oss << "\"" << kModelId << "\":\"" << studiocast::util::json::EscapeString(effects.auto_frame.model_id) << "\"";
     oss << "},";
 
     // Eye contact
     oss << "\"" << kEffectIdEyeContact << "\":{";
     oss << "\"" << kEnabled << "\":" << (effects.eye_contact.enabled ? "true" : "false") << ',';
     oss << "\"" << kStrength << "\":" << effects.eye_contact.strength << ',';
-    oss << "\"" << kLookAwayEnabled << "\":" << (effects.eye_contact.look_away_enabled ? "true" : "false");
+    oss << "\"" << kLookAwayEnabled << "\":" << (effects.eye_contact.look_away_enabled ? "true" : "false") << ',';
+    oss << "\"" << kModelId << "\":\"" << studiocast::util::json::EscapeString(effects.eye_contact.model_id) << "\"";
     oss << "},";
 
     // Noise removal
     oss << "\"" << kEffectIdVideoNoiseRemoval << "\":{";
     oss << "\"" << kEnabled << "\":" << (effects.video_noise_removal.enabled ? "true" : "false") << ',';
-    oss << "\"" << kStrength << "\":" << effects.video_noise_removal.strength;
+    oss << "\"" << kStrength << "\":" << effects.video_noise_removal.strength << ',';
+    oss << "\"" << kModelId << "\":\"" << studiocast::util::json::EscapeString(effects.video_noise_removal.model_id) << "\"";
     oss << "},";
 
     // Virtual key light
@@ -496,6 +499,10 @@ bool ApplyBroadcastCameraEffectsPatchJson(const studiocast::util::json::Value& r
         float headroom = effects->auto_frame.headroom;
         if (!TryGetFloat(*af, std::string(effects::contract::param::kHeadroom), &found, &headroom, error)) return false;
         if (found) effects->auto_frame.headroom = ClampFloat(headroom, 0.0f, 1.0f);
+
+        std::string modelId = effects->auto_frame.model_id;
+        if (!TryGetString(*af, std::string(effects::contract::param::kModelId), &found, &modelId, error)) return false;
+        if (found) effects->auto_frame.model_id = modelId;
     }
     if (const auto* af = GetObj(*obj, "auto_frame", error)) {
         bool en = effects->auto_frame.enabled;
@@ -516,6 +523,10 @@ bool ApplyBroadcastCameraEffectsPatchJson(const studiocast::util::json::Value& r
         float headroom = effects->auto_frame.headroom;
         if (!TryGetFloat(*af, "headroom", &found, &headroom, error)) return false;
         if (found) effects->auto_frame.headroom = ClampFloat(headroom, 0.0f, 1.0f);
+
+        std::string modelId = effects->auto_frame.model_id;
+        if (!TryGetString(*af, "model_id", &found, &modelId, error)) return false;
+        if (found) effects->auto_frame.model_id = modelId;
     }
 
     // Eye contact.
@@ -531,6 +542,10 @@ bool ApplyBroadcastCameraEffectsPatchJson(const studiocast::util::json::Value& r
         bool lookAway = effects->eye_contact.look_away_enabled;
         if (!TryGetBool(*ec, std::string(effects::contract::param::kLookAwayEnabled), &found, &lookAway, error)) return false;
         if (found) effects->eye_contact.look_away_enabled = lookAway;
+
+        std::string modelId = effects->eye_contact.model_id;
+        if (!TryGetString(*ec, std::string(effects::contract::param::kModelId), &found, &modelId, error)) return false;
+        if (found) effects->eye_contact.model_id = modelId;
     }
     if (const auto* ec = GetObj(*obj, "eye_contact", error)) {
         bool en = effects->eye_contact.enabled;
@@ -544,6 +559,10 @@ bool ApplyBroadcastCameraEffectsPatchJson(const studiocast::util::json::Value& r
         bool lookAway = effects->eye_contact.look_away_enabled;
         if (!TryGetBool(*ec, "look_away_enabled", &found, &lookAway, error)) return false;
         if (found) effects->eye_contact.look_away_enabled = lookAway;
+
+        std::string modelId = effects->eye_contact.model_id;
+        if (!TryGetString(*ec, "model_id", &found, &modelId, error)) return false;
+        if (found) effects->eye_contact.model_id = modelId;
     }
 
     // Noise removal.
@@ -555,6 +574,10 @@ bool ApplyBroadcastCameraEffectsPatchJson(const studiocast::util::json::Value& r
         int strength = effects->video_noise_removal.strength;
         if (!TryGetInt(*dn, std::string(effects::contract::param::kStrength), &found, &strength, error)) return false;
         if (found) effects->video_noise_removal.strength = ClampInt(strength, 0, 100);
+
+        std::string modelId = effects->video_noise_removal.model_id;
+        if (!TryGetString(*dn, std::string(effects::contract::param::kModelId), &found, &modelId, error)) return false;
+        if (found) effects->video_noise_removal.model_id = modelId;
     }
     if (const auto* dn = GetObj(*obj, "video_noise_removal", error)) {
         bool en = effects->video_noise_removal.enabled;
@@ -564,6 +587,10 @@ bool ApplyBroadcastCameraEffectsPatchJson(const studiocast::util::json::Value& r
         int strength = effects->video_noise_removal.strength;
         if (!TryGetInt(*dn, "strength", &found, &strength, error)) return false;
         if (found) effects->video_noise_removal.strength = ClampInt(strength, 0, 100);
+
+        std::string modelId = effects->video_noise_removal.model_id;
+        if (!TryGetString(*dn, "model_id", &found, &modelId, error)) return false;
+        if (found) effects->video_noise_removal.model_id = modelId;
     }
 
     // Virtual key light.

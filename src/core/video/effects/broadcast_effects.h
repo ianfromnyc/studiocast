@@ -73,11 +73,15 @@ struct AutoFrameSettings {
 
     // Fractional extra headroom above the detected subject (0..1).
     float headroom = 0.15f;
+
+    // Optional Open Video model pack override for face detection (YuNet).
+    // Empty means "auto" (registry default).
+    std::string model_id;
 };
 
 inline bool operator==(const AutoFrameSettings& a, const AutoFrameSettings& b) {
     return a.enabled == b.enabled && a.strength == b.strength && a.smoothing == b.smoothing &&
-           a.headroom == b.headroom;
+           a.headroom == b.headroom && a.model_id == b.model_id;
 }
 
 inline bool operator!=(const AutoFrameSettings& a, const AutoFrameSettings& b) { return !(a == b); }
@@ -86,10 +90,15 @@ struct EyeContactSettings {
     bool enabled = false;
     int strength = 50;
     bool look_away_enabled = true;
+
+    // Optional Open Video model pack override for eye contact (gaze_correction_cam).
+    // Empty means "auto" (registry default).
+    std::string model_id;
 };
 
 inline bool operator==(const EyeContactSettings& a, const EyeContactSettings& b) {
-    return a.enabled == b.enabled && a.strength == b.strength && a.look_away_enabled == b.look_away_enabled;
+    return a.enabled == b.enabled && a.strength == b.strength && a.look_away_enabled == b.look_away_enabled &&
+           a.model_id == b.model_id;
 }
 
 inline bool operator!=(const EyeContactSettings& a, const EyeContactSettings& b) { return !(a == b); }
@@ -97,10 +106,14 @@ inline bool operator!=(const EyeContactSettings& a, const EyeContactSettings& b)
 struct VideoNoiseRemovalSettings {
     bool enabled = false;
     int strength = 50;
+
+    // Optional Open Video model pack override for video denoise (FastDVDnet).
+    // Empty means "auto" (registry default).
+    std::string model_id;
 };
 
 inline bool operator==(const VideoNoiseRemovalSettings& a, const VideoNoiseRemovalSettings& b) {
-    return a.enabled == b.enabled && a.strength == b.strength;
+    return a.enabled == b.enabled && a.strength == b.strength && a.model_id == b.model_id;
 }
 
 inline bool operator!=(const VideoNoiseRemovalSettings& a, const VideoNoiseRemovalSettings& b) { return !(a == b); }
