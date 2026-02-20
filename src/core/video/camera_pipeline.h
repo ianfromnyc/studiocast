@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
@@ -201,6 +202,13 @@ private:
   // camera visible to apps even when we're idle.
   V4l2Writer writer_;
   std::string writer_device_;
+
+  // Idle keepalive frames: while the heavy pipeline is stopped, periodically
+  // write a black frame to keep consumers from closing/re-opening due to a
+  // lack of frames (which can trigger consumer-driven thrash).
+  std::chrono::steady_clock::time_point last_keepalive_frame_at_{};
+  ActualFormat keepalive_format_{};
+  std::vector<std::uint8_t> keepalive_frame_;
 };
 
 } // namespace studiocast::video

@@ -314,6 +314,7 @@ struct KernelState {
   bool loaded = false;
   studiocast::maxine::CUmodule module = nullptr;
   studiocast::maxine::CUfunction fn = nullptr;
+  studiocast::maxine::CUcontext loaded_ctx = nullptr;
 };
 
 KernelState &kernel() {
@@ -326,10 +327,31 @@ bool EnsureKernelLoaded(studiocast::maxine::CudaDriverApi *cuda,
   if (error_out)
     error_out->clear();
   KernelState &k = kernel();
-  if (k.loaded)
+  const auto &f = cuda->f();
+
+  // The CUDA driver ties CUmodule/CUfunction handles to the current context.
+  // If the current context changes (e.g. due to other CUDA users in-process),
+  // cached handles become invalid and can yield "invalid resource handle" at
+  // cuLaunchKernel.
+  studiocast::maxine::CUcontext cur = nullptr;
+  if (f.cuCtxGetCurrent) {
+    const auto st_ctx = f.cuCtxGetCurrent(&cur);
+    if (st_ctx != studiocast::maxine::CUDA_SUCCESS || !cur) {
+      if (error_out)
+        *error_out = "cuCtxGetCurrent failed: " + cuda->StatusToString(st_ctx);
+      return false;
+    }
+  }
+
+  if (k.loaded && k.loaded_ctx == cur)
     return true;
 
-  const auto &f = cuda->f();
+  // Context changed: drop cached handles (we don't have cuModuleUnload in our
+  // minimal ABI surface, so we just stop using the old handle).
+  k.loaded = false;
+  k.module = nullptr;
+  k.fn = nullptr;
+  k.loaded_ctx = nullptr;
   studiocast::maxine::CUresult st = studiocast::maxine::CUDA_SUCCESS;
   std::string jit_log;
   if (f.cuModuleLoadDataEx) {
@@ -376,6 +398,7 @@ bool EnsureKernelLoaded(studiocast::maxine::CudaDriverApi *cuda,
     return false;
   }
   k.loaded = true;
+  k.loaded_ctx = cur;
   return true;
 }
 

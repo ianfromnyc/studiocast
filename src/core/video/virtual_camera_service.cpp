@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <deque>
 #include <iostream>
 #include <optional>
 #include <sstream>
@@ -274,6 +275,12 @@ void VirtualCameraService::ThreadMain() {
   auto lastConsumerSeen = std::chrono::steady_clock::now();
   auto nextStartRetry = std::chrono::steady_clock::time_point{};
 
+  auto consumerStableSince = std::chrono::steady_clock::time_point{};
+  auto pipelineBecameRunningAt = std::chrono::steady_clock::time_point{};
+
+  auto stabilizeUntil = std::chrono::steady_clock::time_point{};
+  std::deque<std::chrono::steady_clock::time_point> thrashEvents;
+
   std::optional<studiocast::maxine::MaxineDiagnostics> maxineDiag;
   auto lastMaxineDiagAt = std::chrono::steady_clock::time_point{};
 
@@ -402,12 +409,36 @@ void VirtualCameraService::ThreadMain() {
     if (consumerPresent)
       lastConsumerSeen = now;
 
+    if (consumerPresent) {
+      if (consumerStableSince == std::chrono::steady_clock::time_point{})
+        consumerStableSince = now;
+    } else {
+      consumerStableSince = std::chrono::steady_clock::time_point{};
+    }
+
     auto effects_for_pipeline = cfg.pipeline.effects;
     bool effectsSuppressed = false;
     std::string suppressMsg;
 
-    const bool wantRunRequested = cfg.enabled && consumerPresent;
-    bool wantRun = wantRunRequested;
+    const bool wantRunRequested =
+        cfg.enabled && (cfg.always_on || consumerPresent);
+
+    const int startGraceMs = std::max(0, cfg.start_grace_ms);
+    const bool consumerStable =
+        cfg.always_on ||
+        (consumerPresent &&
+         (startGraceMs == 0 ||
+          (consumerStableSince != std::chrono::steady_clock::time_point{} &&
+           (now - consumerStableSince) >=
+               std::chrono::milliseconds(startGraceMs))));
+
+    // Self-stabilization mode: if we observe repeated start/stop flapping,
+    // temporarily ignore consumer disconnects while enabled.
+    const bool stabilizing =
+        cfg.enabled && (stabilizeUntil != std::chrono::steady_clock::time_point{} &&
+                        now < stabilizeUntil);
+
+    bool wantRun = cfg.enabled && (cfg.always_on || stabilizing || consumerStable);
 
     // Gate expensive capture/processing threads based on engine availability.
     // Keep loopback output alive (see EnsureOutputOpen above) so consumers
@@ -415,7 +446,7 @@ void VirtualCameraService::ThreadMain() {
     bool blocked = false;
     std::string blockedMsg;
 
-    if (wantRunRequested) {
+    if (wantRun) {
       const auto plan =
           effects::BuildBroadcastEffectsPlan(cfg.pipeline.effects);
       const std::set<std::string> planned(plan.ordered_effect_ids.begin(),
@@ -578,6 +609,8 @@ void VirtualCameraService::ThreadMain() {
         std::ostringstream oss;
         oss << "decision enabled=" << (cfg.enabled ? 1 : 0)
             << " consumerPresent=" << (consumerPresent ? 1 : 0)
+            << " consumerStable=" << (consumerStable ? 1 : 0)
+            << " stabilizing=" << (stabilizing ? 1 : 0)
             << " wantRunRequested=" << (wantRunRequested ? 1 : 0)
             << " wantRun=" << (wantRun ? 1 : 0);
         if (blocked)
@@ -637,6 +670,27 @@ void VirtualCameraService::ThreadMain() {
             now < nextStartRetry) {
           // still in backoff window
         } else {
+          const auto recordThrashEvent = [&](const char *what) {
+            (void)what;
+            thrashEvents.push_back(now);
+            constexpr auto kWindow = std::chrono::seconds(10);
+            while (!thrashEvents.empty() && (now - thrashEvents.front()) > kWindow) {
+              thrashEvents.pop_front();
+            }
+            constexpr std::size_t kThreshold = 6;
+            if (thrashEvents.size() >= kThreshold &&
+                (stabilizeUntil == std::chrono::steady_clock::time_point{} ||
+                 now >= stabilizeUntil)) {
+              stabilizeUntil = now + std::chrono::seconds(5);
+              if (dbg) {
+                std::ostringstream oss;
+                oss << "thrash_detected events=" << thrashEvents.size()
+                    << " -> stabilize 5s";
+                VcamDbg(oss.str());
+              }
+            }
+          };
+
           if (dbg) {
             std::ostringstream oss;
             oss << "pipeline Start attempt enabled=" << (cfg.enabled ? 1 : 0)
@@ -655,6 +709,8 @@ void VirtualCameraService::ThreadMain() {
                 << " fps=" << pipelineCfgForPipeline.fps;
             VcamDbg(oss.str());
           }
+
+          recordThrashEvent("start_attempt");
           std::string perr;
           if (!pipeline_.Start(pipelineCfgForPipeline, &perr)) {
             {
@@ -669,6 +725,7 @@ void VirtualCameraService::ThreadMain() {
             haveAppliedCfg = true;
             appliedPipelineCfg = pipelineCfgForPipeline;
             nextStartRetry = std::chrono::steady_clock::time_point{};
+            pipelineBecameRunningAt = now;
             if (dbg)
               VcamDbg("pipeline Start OK");
           }
@@ -676,10 +733,18 @@ void VirtualCameraService::ThreadMain() {
       }
     } else {
       if (pst.running || pst.starting) {
-        const int graceMs = std::max(0, cfg.stop_grace_ms);
+        const int graceMs =
+            cfg.enabled ? std::max(0, cfg.stop_grace_ms) : 0;
         const auto grace = std::chrono::milliseconds(graceMs);
 
-        if (graceMs == 0 || (now - lastConsumerSeen) >= grace) {
+        const int minRunMs = std::max(0, cfg.min_run_ms);
+        const bool withinMinRun =
+            cfg.enabled && minRunMs > 0 &&
+            (pipelineBecameRunningAt != std::chrono::steady_clock::time_point{} &&
+             (now - pipelineBecameRunningAt) <
+                 std::chrono::milliseconds(minRunMs));
+
+        if (!withinMinRun && (graceMs == 0 || (now - lastConsumerSeen) >= grace)) {
           if (dbg) {
             const auto idleMs =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -691,6 +756,26 @@ void VirtualCameraService::ThreadMain() {
                 << " idleMs=" << idleMs << " graceMs=" << graceMs;
             VcamDbg(oss.str());
           }
+
+          // Record stop as a thrash event.
+          thrashEvents.push_back(now);
+          constexpr auto kWindow = std::chrono::seconds(10);
+          while (!thrashEvents.empty() && (now - thrashEvents.front()) > kWindow) {
+            thrashEvents.pop_front();
+          }
+          constexpr std::size_t kThreshold = 6;
+          if (thrashEvents.size() >= kThreshold &&
+              (stabilizeUntil == std::chrono::steady_clock::time_point{} ||
+               now >= stabilizeUntil)) {
+            stabilizeUntil = now + std::chrono::seconds(5);
+            if (dbg) {
+              std::ostringstream oss;
+              oss << "thrash_detected events=" << thrashEvents.size()
+                  << " -> stabilize 5s";
+              VcamDbg(oss.str());
+            }
+          }
+
           pipeline_.Stop();
           haveAppliedCfg = false;
         }

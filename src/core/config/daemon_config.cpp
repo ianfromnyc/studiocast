@@ -612,8 +612,14 @@ DaemonConfig LoadDaemonConfig() {
       if (auto it = kv.find("service.consumer_poll_ms"); it != kv.end()) {
         s.consumer_poll_ms = ParseInt(it->second, s.consumer_poll_ms);
       }
+      if (auto it = kv.find("service.start_grace_ms"); it != kv.end()) {
+        s.start_grace_ms = ParseInt(it->second, s.start_grace_ms);
+      }
       if (auto it = kv.find("service.stop_grace_ms"); it != kv.end()) {
         s.stop_grace_ms = ParseInt(it->second, s.stop_grace_ms);
+      }
+      if (auto it = kv.find("service.min_run_ms"); it != kv.end()) {
+        s.min_run_ms = ParseInt(it->second, s.min_run_ms);
       }
       if (auto it = kv.find("service.always_on"); it != kv.end()) {
         s.always_on = ParseBool(it->second, s.always_on);
@@ -702,7 +708,9 @@ bool SaveDaemonConfig(const DaemonConfig &s, std::string *error) {
       << "\n\n";
 
   out << "service.consumer_poll_ms = " << s.consumer_poll_ms << "\n";
+  out << "service.start_grace_ms = " << s.start_grace_ms << "\n";
   out << "service.stop_grace_ms = " << s.stop_grace_ms << "\n";
+  out << "service.min_run_ms = " << s.min_run_ms << "\n";
   out << "service.always_on = " << (s.always_on ? "true" : "false") << "\n";
 
   return true;
@@ -726,7 +734,9 @@ ToVideoServiceConfig(const DaemonConfig &s) {
   cfg.pipeline.effects = s.video_effects;
 
   cfg.consumer_poll_ms = s.consumer_poll_ms;
+  cfg.start_grace_ms = s.start_grace_ms;
   cfg.stop_grace_ms = s.stop_grace_ms;
+  cfg.min_run_ms = s.min_run_ms;
   cfg.always_on = s.always_on;
   return cfg;
 }
@@ -750,7 +760,9 @@ void ApplyVideoServiceConfigToDaemonConfig(
   out->video_effects = cfg.pipeline.effects;
 
   out->consumer_poll_ms = cfg.consumer_poll_ms;
+  out->start_grace_ms = cfg.start_grace_ms;
   out->stop_grace_ms = cfg.stop_grace_ms;
+  out->min_run_ms = cfg.min_run_ms;
   out->always_on = cfg.always_on;
 }
 

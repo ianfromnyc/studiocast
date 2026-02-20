@@ -881,6 +881,40 @@ bool V4l2Writer::RefreshActual(std::string *error) {
   return true;
 }
 
+bool V4l2Writer::Renegotiate(const std::string &device, int width, int height,
+                             int fps, PixelFormat fmt, std::string *error) {
+  if (fd_ < 0) {
+    if (error)
+      *error = "Writer not open.";
+    return false;
+  }
+  if (device.empty()) {
+    if (error)
+      *error = "Device path is empty.";
+    return false;
+  }
+  if (width <= 0 || height <= 0) {
+    if (error)
+      *error = "Invalid width/height.";
+    return false;
+  }
+  if (fps <= 0 || fps > 240) {
+    if (error)
+      *error = "Invalid fps (1..240).";
+    return false;
+  }
+
+  auto neg = NegotiateFormat(fd_, device, width, height, fps, fmt);
+  if (!neg.ok) {
+    if (error)
+      *error = neg.error;
+    return false;
+  }
+
+  actual_ = neg.actual;
+  return true;
+}
+
 bool V4l2Writer::WriteFrame(const std::uint8_t *data, std::size_t bytes,
                             std::string *error) {
   if (fd_ < 0) {

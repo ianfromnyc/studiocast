@@ -22,9 +22,19 @@ struct VirtualCameraServiceConfig {
   // How often we scan for consumers of the virtual camera.
   int consumer_poll_ms = 250;
 
+  // Debounce consumer detection on start. A consumer must be continuously
+  // present for at least this long before we start the heavy camera pipeline.
+  // This reduces start/stop thrashing when apps probe cameras via open/close.
+  int start_grace_ms = 300;
+
   // After the last consumer disconnects, we wait this long before stopping the
   // pipeline. This avoids rapid start/stop flapping when apps probe cameras.
   int stop_grace_ms = 1000;
+
+  // Once the pipeline starts running, keep it running for at least this long
+  // (while enabled) even if consumer detection briefly drops out. This helps
+  // absorb transient /proc scan gaps and consumer renegotiation windows.
+  int min_run_ms = 1500;
 
   // If true, the pipeline runs even when there are no consumers of the virtual
   // camera. Useful for debugging or when you want the virtual camera to always

@@ -52,6 +52,13 @@ public:
   // update its cached size_image/bytes_per_line to avoid write() failures.
   bool RefreshActual(std::string *error);
 
+  // Re-negotiate output format/fps on the currently open writer FD.
+  //
+  // This avoids closing/re-opening the producer FD, which can destabilize
+  // certain v4l2loopback configurations (especially with exclusive_caps=1).
+  bool Renegotiate(const std::string &device, int width, int height, int fps,
+                   PixelFormat fmt, std::string *error);
+
   bool WriteFrame(const std::uint8_t *data, std::size_t bytes,
                   std::string *error);
 

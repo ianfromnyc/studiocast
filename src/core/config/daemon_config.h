@@ -69,7 +69,9 @@ struct DaemonConfig {
 
   // Service behavior
   int consumer_poll_ms = 250;
+  int start_grace_ms = 300;
   int stop_grace_ms = 1000;
+  int min_run_ms = 1500;
   bool always_on = false;
 };
 

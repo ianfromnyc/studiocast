@@ -166,111 +166,78 @@ bool CudaDriverApi::EnsureContext(std::string *error_out) {
     return false;
   }
 
-  CUcontext cur = nullptr;
-  CUresult st = f_.cuCtxGetCurrent(&cur);
-  if (st != CUDA_SUCCESS) {
-    if (error_out)
-      *error_out = "cuCtxGetCurrent failed: " + StatusToString(st);
-    return false;
-  }
-  if (cur) {
-    // Validate that the current context is still usable.
-    // In some cases (e.g. primary context released elsewhere) a stale/destroyed
-    // context handle can remain current and cause subsequent API calls (like
-    // cuStreamCreate) to fail.
-    st = f_.cuCtxSetCurrent(cur);
-    if (st == CUDA_SUCCESS) {
-      // Functional validation: try to create/destroy a temporary stream.
-      // This is lightweight and catches cases where cuCtxSetCurrent succeeds
-      // but the context is no longer usable.
-      if (f_.cuStreamCreate && f_.cuStreamDestroy) {
-        CUstream tmp = nullptr;
-        const CUresult st_stream = f_.cuStreamCreate(&tmp, 0);
-        if (st_stream == CUDA_SUCCESS && tmp) {
-          (void)f_.cuStreamDestroy(tmp);
-          return true;
-        }
-      } else {
-        return true;
-      }
-    }
-
-    // Try to clear the current context and fall through to re-acquire the
-    // primary context.
-    (void)f_.cuCtxSetCurrent(nullptr);
-    cur = nullptr;
-  }
-
-  // If we've already retained a primary context previously, re-bind it.
-  if (retained_primary_ctx_ && primary_ctx_) {
-    st = f_.cuCtxSetCurrent(primary_ctx_);
+  // Always bind the primary context for device 0.
+  //
+  // Rationale: other in-process components (e.g. CUDA-capable libraries) can
+  // temporarily change the current context on this thread. If we accept an
+  // arbitrary "current" context, we can end up with context/stream/module
+  // mismatches that manifest as cuLaunchKernel errors like "invalid resource
+  // handle". For StudioCast's usage, a consistent primary context is the most
+  // robust choice.
+  if (!retained_primary_ctx_ || !primary_ctx_) {
+    int count = 0;
+    CUresult st = f_.cuDeviceGetCount(&count);
     if (st != CUDA_SUCCESS) {
       if (error_out)
-        *error_out = "cuCtxSetCurrent(primary) failed: " + StatusToString(st);
+        *error_out = "cuDeviceGetCount failed: " + StatusToString(st);
       return false;
     }
-    cur = nullptr;
-    st = f_.cuCtxGetCurrent(&cur);
-    if (st != CUDA_SUCCESS || !cur) {
+    if (count <= 0) {
       if (error_out)
-        *error_out = "Failed to validate current CUDA context after set: " +
-                     StatusToString(st);
+        *error_out = "No CUDA devices found.";
       return false;
     }
-    return true;
+
+    CUdevice dev = 0;
+    st = f_.cuDeviceGet(&dev, 0);
+    if (st != CUDA_SUCCESS) {
+      if (error_out)
+        *error_out = "cuDeviceGet failed: " + StatusToString(st);
+      return false;
+    }
+
+    CUcontext ctx = nullptr;
+    st = f_.cuDevicePrimaryCtxRetain(&ctx, dev);
+    if (st != CUDA_SUCCESS || !ctx) {
+      if (error_out)
+        *error_out = "cuDevicePrimaryCtxRetain failed: " + StatusToString(st);
+      return false;
+    }
+
+    retained_primary_ctx_ = true;
+    primary_dev_ = dev;
+    primary_ctx_ = ctx;
   }
 
-  int count = 0;
-  st = f_.cuDeviceGetCount(&count);
+  CUresult st = f_.cuCtxSetCurrent(primary_ctx_);
   if (st != CUDA_SUCCESS) {
     if (error_out)
-      *error_out = "cuDeviceGetCount failed: " + StatusToString(st);
-    return false;
-  }
-  if (count <= 0) {
-    if (error_out)
-      *error_out = "No CUDA devices found.";
+      *error_out = "cuCtxSetCurrent(primary) failed: " + StatusToString(st);
     return false;
   }
 
-  CUdevice dev = 0;
-  st = f_.cuDeviceGet(&dev, 0);
-  if (st != CUDA_SUCCESS) {
-    if (error_out)
-      *error_out = "cuDeviceGet failed: " + StatusToString(st);
-    return false;
-  }
-
-  CUcontext ctx = nullptr;
-  st = f_.cuDevicePrimaryCtxRetain(&ctx, dev);
-  if (st != CUDA_SUCCESS || !ctx) {
-    if (error_out)
-      *error_out = "cuDevicePrimaryCtxRetain failed: " + StatusToString(st);
-    return false;
-  }
-  st = f_.cuCtxSetCurrent(ctx);
-  if (st != CUDA_SUCCESS) {
-    if (f_.cuDevicePrimaryCtxRelease)
-      (void)f_.cuDevicePrimaryCtxRelease(dev);
-    if (error_out)
-      *error_out = "cuCtxSetCurrent failed: " + StatusToString(st);
-    return false;
-  }
-
-  cur = nullptr;
+  CUcontext cur = nullptr;
   st = f_.cuCtxGetCurrent(&cur);
   if (st != CUDA_SUCCESS || !cur) {
-    if (f_.cuDevicePrimaryCtxRelease)
-      (void)f_.cuDevicePrimaryCtxRelease(dev);
     if (error_out)
       *error_out = "Failed to validate current CUDA context after set: " +
                    StatusToString(st);
     return false;
   }
 
-  retained_primary_ctx_ = true;
-  primary_dev_ = dev;
-  primary_ctx_ = ctx;
+  // Best-effort functional validation.
+  if (f_.cuStreamCreate && f_.cuStreamDestroy) {
+    CUstream tmp = nullptr;
+    const CUresult st_stream = f_.cuStreamCreate(&tmp, 0);
+    if (st_stream != CUDA_SUCCESS || !tmp) {
+      if (error_out)
+        *error_out = "cuStreamCreate failed (context validation): " +
+                     StatusToString(st_stream);
+      return false;
+    }
+    (void)f_.cuStreamDestroy(tmp);
+  }
+
   return true;
 }
 

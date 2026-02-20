@@ -630,7 +630,9 @@ ConfigToJson(const studiocast::video::VirtualCameraServiceConfig &cfg) {
   oss << "\"enabled\":" << BoolJson(cfg.enabled) << ",";
   oss << "\"always_on\":" << BoolJson(cfg.always_on) << ",";
   oss << "\"consumer_poll_ms\":" << cfg.consumer_poll_ms << ",";
+  oss << "\"start_grace_ms\":" << cfg.start_grace_ms << ",";
   oss << "\"stop_grace_ms\":" << cfg.stop_grace_ms << ",";
+  oss << "\"min_run_ms\":" << cfg.min_run_ms << ",";
   oss << "\"input_device\":\"" << JsonEscape(cfg.pipeline.input_device)
       << "\",";
   oss << "\"output_device\":\"" << JsonEscape(cfg.pipeline.output_device)
@@ -1033,8 +1035,12 @@ int main(int argc, char **argv) {
 
   if (const int v = GetArgInt(argc, argv, "--poll-ms", -1); v > 0)
     cfg.consumer_poll_ms = v;
+  if (const int v = GetArgInt(argc, argv, "--start-grace-ms", -1); v >= 0)
+    cfg.start_grace_ms = v;
   if (const int v = GetArgInt(argc, argv, "--stop-grace-ms", -1); v > 0)
     cfg.stop_grace_ms = v;
+  if (const int v = GetArgInt(argc, argv, "--min-run-ms", -1); v >= 0)
+    cfg.min_run_ms = v;
   if (HasArg(argc, argv, "--always-on"))
     cfg.always_on = true;
 
