@@ -638,6 +638,20 @@ bool V4l2Writer::RefreshActual(std::string* error) {
     return false;
   }
 
+  // Some v4l2loopback configurations transiently report a "blank" format
+  // (e.g. width/height=0) during consumer disconnect / renegotiation windows.
+  // Treat that as a failed refresh so we don't overwrite a previously-valid
+  // cached format and trigger output renegotiation thrash.
+  if (a.width <= 0 || a.height <= 0) {
+    if (error) {
+      std::ostringstream oss;
+      oss << "Queried format invalid: " << a.width << "x" << a.height
+          << " pixfmt=" << a.pixfmt;
+      *error = oss.str();
+    }
+    return false;
+  }
+
   a.fps_num = fpsNum;
   a.fps_den = fpsDen;
   actual_ = a;

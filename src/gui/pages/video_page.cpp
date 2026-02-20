@@ -2361,12 +2361,12 @@ void VideoPage::UpdateUiEnabled() {
       }
       StartPreview();
     }
-    if (!enabled && previewCapture_.IsOpen()) {
-      if (DebugGuiPreview()) {
-        GuiPreviewDbg("UpdateUiEnabled: enabled=0 but preview open -> StopPreview()");
-      }
-      StopPreview();
+  }
+  if (!enabled && previewCapture_.IsOpen()) {
+    if (DebugGuiPreview()) {
+      GuiPreviewDbg("UpdateUiEnabled: enabled=0 but preview open -> StopPreview()");
     }
+    StopPreview();
   }
 }
 
