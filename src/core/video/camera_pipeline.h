@@ -152,6 +152,7 @@ namespace studiocast::video {
                               int width,
                               int height,
                               int fps,
+                              bool strict_fps,
                               bool* out_opened_or_renegotiated,
                               std::string* error);
 

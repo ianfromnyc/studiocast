@@ -228,10 +228,15 @@ std::string FormatKeyLightTemperaturePreset(int preset) {
 }
 
 static double FpsToDouble(int fps, int fps_num, int fps_den) {
+    // V4L2 streamparm uses time-per-frame (numerator/denominator).
+    // We want frames-per-second for GUI/status consumers.
+    if (fps > 0) return static_cast<double>(fps);
     if (fps_den > 0 && fps_num > 0) {
-        return static_cast<double>(fps_num) / static_cast<double>(fps_den);
+        // V4L2 uses time-per-frame as a rational: numerator/denominator seconds.
+        // Convert to frames-per-second.
+        return static_cast<double>(fps_den) / static_cast<double>(fps_num);
     }
-    return static_cast<double>(fps);
+    return 0.0;
 }
 
 static std::string CaptureFormatToJson(const studiocast::video::CaptureFormat& f) {

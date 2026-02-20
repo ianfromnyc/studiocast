@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -183,6 +184,10 @@ namespace studiocast::gui {
         int previewW_ = 0;
         int previewH_ = 0;
         int previewBpl_ = 0;
+        // Prevent tight auto-retry loops when preview open fails (e.g. when v4l2loopback
+        // is temporarily OUTPUT-only in exclusive_caps mode).
+        std::chrono::steady_clock::time_point previewAutoRetryAfter_{};
+        int previewAutoRetryFailures_ = 0;
     };
 
 }  // namespace studiocast::gui

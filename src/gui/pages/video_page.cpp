@@ -1632,8 +1632,13 @@ void VideoPage::StartPreview() {
         if (outMatches && !st.output_format.pixfmt.isEmpty() && st.output_format.width > 0 && st.output_format.height > 0) {
           wantW = st.output_format.width;
           wantH = st.output_format.height;
-          if (st.output_format.fps > 0.0) {
-            wantFps = std::max(1, static_cast<int>(std::floor(st.output_format.fps + 0.5)));
+          double fpsFromStatus = st.output_format.fps;
+          if (st.output_format.fps_num > 0 && st.output_format.fps_den > 0) {
+            // V4L2 reports time-per-frame (numerator/denominator). Convert to FPS.
+            fpsFromStatus = static_cast<double>(st.output_format.fps_den) / static_cast<double>(st.output_format.fps_num);
+         }
+          if (fpsFromStatus > 0.0) {
+            wantFps = std::clamp(static_cast<int>(std::floor(fpsFromStatus + 0.5)), 1, 240);
           }
 
           if (st.output_format.pixfmt == "RGB3") {
@@ -1671,10 +1676,20 @@ void VideoPage::StartPreview() {
       if (DebugGuiPreview()) {
         GuiPreviewDbg(std::string("StartPreview: previewCapture_.Open failed: ") + err2);
       }
+
+      // Prevent UpdateUiEnabled() from immediately retrying in a tight loop.
+      previewAutoRetryFailures_ = std::min(previewAutoRetryFailures_ + 1, 20);
+      const auto now = std::chrono::steady_clock::now();
+      const int backoffMs = std::min(2000, 250 * previewAutoRetryFailures_);
+      previewAutoRetryAfter_ = now + std::chrono::milliseconds(backoffMs);
+
       preview_->SetStatusText("Preview open failed:\n" + QString::fromStdString(err2));
       return;
     }
   }
+  // Preview open succeeded; clear any prior auto-retry backoff.
+  previewAutoRetryFailures_ = 0;
+  previewAutoRetryAfter_ = std::chrono::steady_clock::time_point{};
 
   const auto fmt = previewCapture_.Actual();
   previewW_ = fmt.width;
@@ -2335,16 +2350,23 @@ void VideoPage::UpdateUiEnabled() {
 
   // Keep preview in sync with enabled state.
   if (enabled && daemonReachable_ && !previewCapture_.IsOpen()) {
-    if (DebugGuiPreview()) {
-      GuiPreviewDbg("UpdateUiEnabled: enabled=1 but preview not open -> StartPreview()");
+    const auto now = std::chrono::steady_clock::now();
+    if (previewAutoRetryFailures_ > 0 && now < previewAutoRetryAfter_) {
+      if (DebugGuiPreview()) {
+        GuiPreviewDbg("UpdateUiEnabled: enabled=1 but preview not open; auto-retry backoff active");
+      }
+    } else {
+      if (DebugGuiPreview()) {
+        GuiPreviewDbg("UpdateUiEnabled: enabled=1 but preview not open -> StartPreview()");
+      }
+      StartPreview();
     }
-    StartPreview();
-  }
-  if (!enabled && previewCapture_.IsOpen()) {
-    if (DebugGuiPreview()) {
-      GuiPreviewDbg("UpdateUiEnabled: enabled=0 but preview open -> StopPreview()");
+    if (!enabled && previewCapture_.IsOpen()) {
+      if (DebugGuiPreview()) {
+        GuiPreviewDbg("UpdateUiEnabled: enabled=0 but preview open -> StopPreview()");
+      }
+      StopPreview();
     }
-    StopPreview();
   }
 }
 

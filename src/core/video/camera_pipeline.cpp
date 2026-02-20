@@ -241,7 +241,7 @@ CameraPipelineStatus CameraPipeline::Status() const {
     // expose the negotiated output format so consumers (including the GUI preview)
     // can open the device without attempting to renegotiate caps.
     s.capture = CaptureFormat{};
-    s.output = writer_.IsOpen() ? output_ : ActualFormat{};
+    s.output = writer_.IsOpen() ? writer_.Actual() : ActualFormat{};
     s.scaling_backend_active.clear();
     s.scaling_from = CaptureFormat{};
     s.scaling_to = ActualFormat{};
@@ -339,6 +339,7 @@ bool CameraPipeline::OpenOutputLocked(const std::string& outDev,
                                      int width,
                                      int height,
                                      int fps,
+                                     bool strict_fps,
                                      bool* out_opened_or_renegotiated,
                                      std::string* error) {
   if (out_opened_or_renegotiated) *out_opened_or_renegotiated = false;
@@ -357,7 +358,11 @@ bool CameraPipeline::OpenOutputLocked(const std::string& outDev,
     (void)writer_.RefreshActual(&refresh_err);
 
     const auto& a = writer_.Actual();
-    if (a.width == width && a.height == height && a.fps == fps) {
+
+    // When the pipeline is idle (not running / starting), consumers may alter
+    // stream parameters (notably FPS) on some v4l2loopback configurations.
+    // Treat FPS mismatch as non-fatal in the idle keep-alive path.
+    if (a.width == width && a.height == height && (!strict_fps || a.fps == fps)) {
       output_ = a;
       output_device_ = outDev;
       return true;
@@ -445,7 +450,7 @@ bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig& cfg, std::stri
 
   bool opened_or_renegotiated = false;
   std::string oerr;
-  if (!OpenOutputLocked(outDev, cfg.width, cfg.height, cfg.fps, &opened_or_renegotiated, &oerr)) {
+  if (!OpenOutputLocked(outDev, cfg.width, cfg.height, cfg.fps, false, &opened_or_renegotiated, &oerr)) {
     if (error) *error = oerr;
     return false;
   }
@@ -650,7 +655,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     // we switch the loopback format to that smaller negotiated size while a
     // consumer still requests the configured size, the frame can display in the
     // top-left quadrant.
-    if (!OpenOutputLocked(outDev, out_w, out_h, cfg.fps, &opened_or_renegotiated, &oerr)) {
+    if (!OpenOutputLocked(outDev, out_w, out_h, cfg.fps, true, &opened_or_renegotiated, &oerr)) {
       last_error_ = oerr;
       running_ = false;
       start_notified_ = true;
