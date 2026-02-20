@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <iostream>
 #include <optional>
 #include <sstream>
 #include <thread>
@@ -34,6 +36,71 @@ std::string ChooseDefaultOutputLoopback(std::string* error) {
         *error = oss.str();
     }
     return {};
+}
+
+
+
+// Debug helper for diagnosing consumer-driven start/stop flapping.
+//
+// Enable with: STUDIOCAST_DEBUG_VCAM_SUPERVISOR=1
+bool DebugVcamSupervisor() {
+    static const bool enabled = (std::getenv("STUDIOCAST_DEBUG_VCAM_SUPERVISOR") != nullptr);
+    return enabled;
+}
+
+void VcamDbg(const std::string& msg) {
+    if (!DebugVcamSupervisor()) return;
+    static const auto t0 = std::chrono::steady_clock::now();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+    std::cerr << "[vcam_dbg +" << ms << "ms] " << msg << "\n";
+}
+
+std::string FormatPidList(const std::vector<int>& pids) {
+    std::ostringstream oss;
+    oss << "[";
+    for (std::size_t i = 0; i < pids.size(); ++i) {
+        if (i) oss << ",";
+        oss << pids[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+std::string DiffPipelineCfg(const CameraPipelineConfig& a, const CameraPipelineConfig& b) {
+    std::ostringstream oss;
+    bool first = true;
+    const auto add_s = [&](const char* k, const std::string& av, const std::string& bv) {
+        if (av == bv) return;
+        if (!first) oss << ", ";
+        first = false;
+        oss << k << ":'" << av << "'->'" << bv << "'";
+    };
+    const auto add_i = [&](const char* k, int av, int bv) {
+        if (av == bv) return;
+        if (!first) oss << ", ";
+        first = false;
+        oss << k << ":" << av << "->" << bv;
+    };
+    const auto add_b = [&](const char* k, bool av, bool bv) {
+        if (av == bv) return;
+        if (!first) oss << ", ";
+        first = false;
+        oss << k << ":" << (av ? 1 : 0) << "->" << (bv ? 1 : 0);
+    };
+
+    add_s("in", a.input_device, b.input_device);
+    add_s("out", a.output_device, b.output_device);
+    add_i("capture_mode", static_cast<int>(a.capture_mode), static_cast<int>(b.capture_mode));
+    add_i("w", a.width, b.width);
+    add_i("h", a.height, b.height);
+    add_i("fps", a.fps, b.fps);
+    add_b("prefer_mjpeg", a.prefer_mjpeg, b.prefer_mjpeg);
+    add_i("scaling_backend", static_cast<int>(a.scaling_backend), static_cast<int>(b.scaling_backend));
+    add_b("allow_cpu_resize", a.allow_cpu_resize, b.allow_cpu_resize);
+
+    return first ? std::string("(no changes)") : oss.str();
 }
 
 }  // namespace
@@ -170,6 +237,25 @@ VirtualCameraServiceConfig VirtualCameraService::Config() const {
 void VirtualCameraService::ThreadMain() {
     const int selfPid = static_cast<int>(::getpid());
 
+    const bool dbg = DebugVcamSupervisor();
+    int prevConsumerCount = -1;
+    bool prevConsumerPresent = false;
+    std::string prevPidList;
+    std::string prevScanErr;
+
+    bool prevEnabled = false;
+    bool prevWantRunRequested = false;
+    bool prevWantRun = false;
+    bool prevBlocked = false;
+    bool prevEffectsSuppressed = false;
+
+    CameraPipelineStatus prevPipeline{};
+    bool havePrevPipeline = false;
+
+    if (dbg) {
+        VcamDbg("supervisor start pid=" + std::to_string(selfPid));
+    }
+
     // This runs independently of the camera pipeline thread.
     auto lastConsumerSeen = std::chrono::steady_clock::now();
     auto nextStartRetry = std::chrono::steady_clock::time_point{};
@@ -188,6 +274,11 @@ void VirtualCameraService::ThreadMain() {
         {
             std::lock_guard<std::mutex> lock(mu_);
             cfg = cfg_;
+        }
+
+        if (dbg && cfg.enabled != prevEnabled) {
+            VcamDbg(std::string("cfg.enabled=") + (cfg.enabled ? "true" : "false"));
+            prevEnabled = cfg.enabled;
         }
 
         // If the configured output device disappeared (e.g., v4l2loopback was reloaded),
@@ -263,6 +354,23 @@ void VirtualCameraService::ThreadMain() {
             const auto pids = util::PidsWithOpenFile(cfg.pipeline.output_device, opt, &scanErr);
             consumerCount = static_cast<int>(pids.size());
             consumerPresent = consumerCount > 0;
+
+            if (dbg) {
+                const std::string pidList = FormatPidList(pids);
+                if (consumerCount != prevConsumerCount || consumerPresent != prevConsumerPresent ||
+                    pidList != prevPidList || scanErr != prevScanErr) {
+                    std::ostringstream oss;
+                    oss << "consumer_scan dev='" << cfg.pipeline.output_device << "' present="
+                        << (consumerPresent ? 1 : 0) << " count=" << consumerCount
+                        << " pids=" << pidList;
+                    if (!scanErr.empty()) oss << " scanErr=\"" << scanErr << "\"";
+                    VcamDbg(oss.str());
+                    prevConsumerCount = consumerCount;
+                    prevConsumerPresent = consumerPresent;
+                    prevPidList = pidList;
+                    prevScanErr = scanErr;
+                }
+            }
 
             // Non-fatal: keep running even if scan can't see all processes.
             if (!scanErr.empty()) {
@@ -413,6 +521,24 @@ void VirtualCameraService::ThreadMain() {
             }
         }
 
+        if (dbg) {
+            if (wantRunRequested != prevWantRunRequested || wantRun != prevWantRun ||
+                blocked != prevBlocked || effectsSuppressed != prevEffectsSuppressed) {
+                std::ostringstream oss;
+                oss << "decision enabled=" << (cfg.enabled ? 1 : 0)
+                    << " consumerPresent=" << (consumerPresent ? 1 : 0)
+                    << " wantRunRequested=" << (wantRunRequested ? 1 : 0)
+                    << " wantRun=" << (wantRun ? 1 : 0);
+                if (blocked) oss << " blocked=\"" << blockedMsg << "\"";
+                if (effectsSuppressed) oss << " suppressed=\"" << suppressMsg << "\"";
+                VcamDbg(oss.str());
+                prevWantRunRequested = wantRunRequested;
+                prevWantRun = wantRun;
+                prevBlocked = blocked;
+                prevEffectsSuppressed = effectsSuppressed;
+            }
+        }
+
         // Apply effects live regardless of consumer state.
         pipeline_.SetEffects(effects_for_pipeline);
 
@@ -427,6 +553,7 @@ void VirtualCameraService::ThreadMain() {
             }
 
             if (pst.running || pst.starting) {
+                if (dbg) VcamDbg("pipeline Stop: blocked");
                 pipeline_.Stop();
                 haveAppliedCfg = false;
                 nextStartRetry = std::chrono::steady_clock::time_point{};
@@ -439,6 +566,7 @@ void VirtualCameraService::ThreadMain() {
 
         // Restart if config changed and we are running.
         if (pst.running && haveAppliedCfg && NeedsPipelineRestart(appliedPipelineCfg, pipelineCfgForPipeline)) {
+            if (dbg) VcamDbg("pipeline Stop: config restart " + DiffPipelineCfg(appliedPipelineCfg, pipelineCfgForPipeline));
             pipeline_.Stop();
             haveAppliedCfg = false;
             nextStartRetry = std::chrono::steady_clock::time_point{};
@@ -449,18 +577,32 @@ void VirtualCameraService::ThreadMain() {
                 if (nextStartRetry != std::chrono::steady_clock::time_point{} && now < nextStartRetry) {
                     // still in backoff window
                 } else {
+                    if (dbg) {
+                        std::ostringstream oss;
+                        oss << "pipeline Start attempt enabled=" << (cfg.enabled ? 1 : 0)
+                            << " consumerPresent=" << (consumerPresent ? 1 : 0)
+                            << " in='" << (pipelineCfgForPipeline.input_device.empty() ? std::string("(auto)") : pipelineCfgForPipeline.input_device)
+                            << "' out='" << (pipelineCfgForPipeline.output_device.empty() ? std::string("(auto)") : pipelineCfgForPipeline.output_device)
+                            << "' mode=" << static_cast<int>(pipelineCfgForPipeline.capture_mode)
+                            << " w=" << pipelineCfgForPipeline.width
+                            << " h=" << pipelineCfgForPipeline.height
+                            << " fps=" << pipelineCfgForPipeline.fps;
+                        VcamDbg(oss.str());
+                    }
                     std::string perr;
                     if (!pipeline_.Start(pipelineCfgForPipeline, &perr)) {
                         {
                             std::lock_guard<std::mutex> lock(mu_);
                             last_error_ = "Pipeline start failed: " + perr;
                         }
+                        if (dbg) VcamDbg(std::string("pipeline Start FAILED: ") + perr);
                         // Back off a bit; many apps probe cameras aggressively.
                         nextStartRetry = now + std::chrono::seconds(2);
                     } else {
                         haveAppliedCfg = true;
                         appliedPipelineCfg = pipelineCfgForPipeline;
                         nextStartRetry = std::chrono::steady_clock::time_point{};
+                        if (dbg) VcamDbg("pipeline Start OK");
                     }
                 }
             }
@@ -470,9 +612,39 @@ void VirtualCameraService::ThreadMain() {
                 const auto grace = std::chrono::milliseconds(graceMs);
 
                 if (graceMs == 0 || (now - lastConsumerSeen) >= grace) {
+                    if (dbg) {
+                        const auto idleMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastConsumerSeen).count();
+                        std::ostringstream oss;
+                        oss << "pipeline Stop: wantRun=0 enabled=" << (cfg.enabled ? 1 : 0)
+                            << " consumerPresent=" << (consumerPresent ? 1 : 0)
+                            << " idleMs=" << idleMs << " graceMs=" << graceMs;
+                        VcamDbg(oss.str());
+                    }
                     pipeline_.Stop();
                     haveAppliedCfg = false;
                 }
+            }
+        }
+
+        if (dbg) {
+            const auto st = pipeline_.Status();
+            if (!havePrevPipeline ||
+                st.running != prevPipeline.running ||
+                st.starting != prevPipeline.starting ||
+                st.input_device != prevPipeline.input_device ||
+                st.output_device != prevPipeline.output_device ||
+                st.last_error != prevPipeline.last_error ||
+                st.effects_note != prevPipeline.effects_note) {
+                std::ostringstream oss;
+                oss << "pipeline_status running=" << (st.running ? 1 : 0)
+                    << " starting=" << (st.starting ? 1 : 0)
+                    << " in=" << (st.input_device.empty() ? "(auto)" : st.input_device)
+                    << " out=" << (st.output_device.empty() ? "(auto)" : st.output_device);
+                if (!st.last_error.empty()) oss << " last_error=\"" << st.last_error << "\"";
+                if (!st.effects_note.empty()) oss << " note=\"" << st.effects_note << "\"";
+                VcamDbg(oss.str());
+                prevPipeline = st;
+                havePrevPipeline = true;
             }
         }
 

@@ -36,6 +36,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
+#include <iostream>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -49,6 +51,24 @@
 #include "core/video/v4l2loopback.h"
 
 namespace studiocast::gui {
+
+namespace {
+
+// Debug helper for diagnosing preview start/stop behavior.
+// Enable with: STUDIOCAST_DEBUG_GUI_PREVIEW=1
+bool DebugGuiPreview() {
+  static const bool enabled = (std::getenv("STUDIOCAST_DEBUG_GUI_PREVIEW") != nullptr);
+  return enabled;
+}
+
+void GuiPreviewDbg(const std::string& msg) {
+  if (!DebugGuiPreview()) return;
+  std::cerr << "[gui_preview_dbg] " << msg << "\n";
+}
+
+}  // namespace
+
+
 
 class VideoPreviewWidget final : public QWidget {
  public:
@@ -1529,7 +1549,14 @@ void VideoPage::OnVignetteCenterOnFaceToggled(bool checked) {
 }
 
 void VideoPage::OnStart() {
+  if (DebugGuiPreview()) {
+    GuiPreviewDbg("OnStart clicked: sending config/effects and enabling video");
+  }
+
   if (!SendDaemonVideoConfig()) {
+    if (DebugGuiPreview()) {
+      GuiPreviewDbg("OnStart: SendDaemonVideoConfig failed");
+    }
     UpdateStatusText();
     UpdateUiEnabled();
     return;
@@ -1538,12 +1565,19 @@ void VideoPage::OnStart() {
   (void)SendDaemonVideoEffects();
   (void)SendDaemonEnabled(true);
 
+  if (DebugGuiPreview()) {
+    GuiPreviewDbg("OnStart: daemon enabled=true; starting preview");
+  }
+
   StartPreview();
   UpdateStatusText();
   UpdateUiEnabled();
 }
 
 void VideoPage::OnStop() {
+  if (DebugGuiPreview()) {
+    GuiPreviewDbg("OnStop clicked: stopping preview and disabling video");
+  }
   StopPreview();
   (void)SendDaemonEnabled(false);
   UpdateStatusText();
@@ -1556,6 +1590,9 @@ void VideoPage::OnPoll() {
 }
 
 void VideoPage::StartPreview() {
+  if (DebugGuiPreview()) {
+    GuiPreviewDbg("StartPreview: begin");
+  }
   StopPreview();
 
   // Determine which device to open for preview.
@@ -1577,6 +1614,16 @@ void VideoPage::StartPreview() {
       DaemonVideoStatus st;
       QString perr;
       if (ParseDaemonStatusJson(json, &st, &perr)) {
+        if (DebugGuiPreview()) {
+          std::ostringstream oss;
+          oss << "StartPreview: GET_STATUS enabled=" << (st.enabled ? 1 : 0)
+              << " consumer_count=" << st.consumer_count
+              << " output_device='" << st.output_device.toStdString() << "'"
+              << " output_fmt=" << st.output_format.pixfmt.toStdString()
+              << " " << st.output_format.width << "x" << st.output_format.height
+              << " fps=" << st.output_format.fps;
+          GuiPreviewDbg(oss.str());
+        }
         if ((outDev.isEmpty() || outDev == "auto") && !st.output_device.isEmpty()) {
           outDev = st.output_device;
         }
@@ -1600,6 +1647,9 @@ void VideoPage::StartPreview() {
   }
 
   if (outDev.isEmpty() || outDev == "auto") {
+    if (DebugGuiPreview()) {
+      GuiPreviewDbg("StartPreview: no output device selected (outDev empty/auto)");
+    }
     preview_->SetStatusText("Preview unavailable (no output device selected)");
     return;
   }
@@ -1618,6 +1668,9 @@ void VideoPage::StartPreview() {
   if (!openFmt(firstFmt, &err)) {
     std::string err2;
     if (!openFmt(secondFmt, &err2)) {
+      if (DebugGuiPreview()) {
+        GuiPreviewDbg(std::string("StartPreview: previewCapture_.Open failed: ") + err2);
+      }
       preview_->SetStatusText("Preview open failed:\n" + QString::fromStdString(err2));
       return;
     }
@@ -1631,9 +1684,26 @@ void VideoPage::StartPreview() {
 
   previewTimer_->start();
   preview_->SetStatusText("Preview starting...");
+
+  if (DebugGuiPreview()) {
+    const auto a = previewCapture_.Actual();
+    std::ostringstream oss;
+    oss << "StartPreview: Open OK dev='" << outDev.toStdString() << "'"
+        << " fmt=" << a.pixfmt
+        << " " << a.width << "x" << a.height
+        << " fps=" << a.fps
+        << " bpl=" << a.bytes_per_line
+        << " size=" << a.size_image;
+    GuiPreviewDbg(oss.str());
+  }
 }
 
 void VideoPage::StopPreview() {
+  if (DebugGuiPreview()) {
+    GuiPreviewDbg(std::string("StopPreview: timer=") +
+                 ((previewTimer_ && previewTimer_->isActive()) ? "active" : "stopped") +
+                 " capture_open=" + (previewCapture_.IsOpen() ? std::string("yes") : std::string("no")));
+  }
   if (previewTimer_) previewTimer_->stop();
   if (previewCapture_.IsOpen()) previewCapture_.Close();
   previewRgb_.clear();
@@ -2265,9 +2335,15 @@ void VideoPage::UpdateUiEnabled() {
 
   // Keep preview in sync with enabled state.
   if (enabled && daemonReachable_ && !previewCapture_.IsOpen()) {
+    if (DebugGuiPreview()) {
+      GuiPreviewDbg("UpdateUiEnabled: enabled=1 but preview not open -> StartPreview()");
+    }
     StartPreview();
   }
   if (!enabled && previewCapture_.IsOpen()) {
+    if (DebugGuiPreview()) {
+      GuiPreviewDbg("UpdateUiEnabled: enabled=0 but preview open -> StopPreview()");
+    }
     StopPreview();
   }
 }

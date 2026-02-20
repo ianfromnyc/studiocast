@@ -350,17 +350,20 @@ bool CameraPipeline::OpenOutputLocked(const std::string& outDev,
     // v4l2loopback allows capture clients to renegotiate global caps via VIDIOC_S_FMT.
     // If that happens, size_image/bytes_per_line can change under an already-open
     // writer fd. Refreshing avoids write() failures and start/stop thrashing.
+    // NOTE: RefreshActual() is best-effort. Some v4l2loopback configurations
+    // can temporarily reject VIDIOC_G_FMT (e.g. when consumers disconnect).
+    // Do not tear down a working writer fd just because the refresh query fails.
     std::string refresh_err;
-    if (writer_.RefreshActual(&refresh_err)) {
-      const auto& a = writer_.Actual();
-      if (a.width == width && a.height == height && a.fps == fps) {
-        output_ = a;
-        output_device_ = outDev;
-        return true;
-      }
+    (void)writer_.RefreshActual(&refresh_err);
+
+    const auto& a = writer_.Actual();
+    if (a.width == width && a.height == height && a.fps == fps) {
+      output_ = a;
+      output_device_ = outDev;
+      return true;
     }
 
-    // If format/dimensions changed (or we couldn't query), renegotiate.
+    // If format/dimensions changed, renegotiate.
     writer_.Close();
     writer_device_.clear();
   } else if (writer_.IsOpen() && writer_device_ != outDev) {
