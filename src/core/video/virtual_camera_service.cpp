@@ -71,6 +71,46 @@ std::string FormatPidList(const std::vector<int> &pids) {
   return oss.str();
 }
 
+std::string FormatPidsWithNames(const std::vector<int> &pids) {
+  std::ostringstream oss;
+  oss << "[";
+  for (std::size_t i = 0; i < pids.size(); ++i) {
+    if (i)
+      oss << ", ";
+    const int pid = pids[i];
+    oss << pid;
+    const auto name = util::ProcessNameFromPid(pid);
+    if (!name.empty())
+      oss << "(" << name << ")";
+  }
+  oss << "]";
+  return oss.str();
+}
+
+std::string DescribeConsumersHoldingDevice(const std::string &dev, int excludePid) {
+  if (dev.empty())
+    return {};
+
+  util::OpenFileScanOptions opt;
+  opt.exclude_pid = excludePid;
+  opt.stop_at_first = false;
+
+  std::string scanErr;
+  const auto pids = util::PidsWithOpenFile(dev, opt, &scanErr);
+  if (pids.empty() && scanErr.empty())
+    return {};
+
+  std::ostringstream oss;
+  if (!pids.empty()) {
+    oss << "\nConsumers holding " << dev << ": " << FormatPidsWithNames(pids)
+        << "\nHint: close the consumer app(s) and retry.";
+  }
+  if (!scanErr.empty()) {
+    oss << "\n(consumer scan warning: " << scanErr << ")";
+  }
+  return oss.str();
+}
+
 std::string DiffPipelineCfg(const CameraPipelineConfig &a,
                             const CameraPipelineConfig &b) {
   std::ostringstream oss;
@@ -190,8 +230,15 @@ bool VirtualCameraService::Start(const VirtualCameraServiceConfig &cfg,
     if (!localCfg.pipeline.output_device.empty()) {
       std::string oerr;
       if (!pipeline_.EnsureOutputOpen(localCfg.pipeline, &oerr)) {
+        const int selfPid = static_cast<int>(::getpid());
+        const std::string hint = DescribeConsumersHoldingDevice(
+            localCfg.pipeline.output_device, selfPid);
         std::lock_guard<std::mutex> lock(mu_);
-        last_error_ = "Output open failed: " + oerr;
+        last_error_ = "Output open failed: " + oerr + hint;
+      } else {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (last_error_.rfind("Output open failed:", 0) == 0)
+          last_error_.clear();
       }
     }
   }
@@ -360,8 +407,14 @@ void VirtualCameraService::ThreadMain() {
     {
       std::string oerr;
       if (!pipeline_.EnsureOutputOpen(cfg.pipeline, &oerr)) {
+        const std::string hint =
+            DescribeConsumersHoldingDevice(cfg.pipeline.output_device, selfPid);
         std::lock_guard<std::mutex> lock(mu_);
-        last_error_ = "Output open failed: " + oerr;
+        last_error_ = "Output open failed: " + oerr + hint;
+      } else {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (last_error_.rfind("Output open failed:", 0) == 0)
+          last_error_.clear();
       }
     }
 

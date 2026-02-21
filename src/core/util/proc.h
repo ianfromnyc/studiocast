@@ -23,6 +23,11 @@ std::vector<int> PidsWithOpenFile(const std::filesystem::path &target,
                                   const OpenFileScanOptions &opt,
                                   std::string *error);
 
+// Best-effort read of the process name for a PID (from /proc/<pid>/comm).
+//
+// Returns empty string on failure (e.g., process exited or permission denied).
+std::string ProcessNameFromPid(int pid);
+
 // Convenience helper: true if any process other than `exclude_pid` has `target`
 // open.
 bool AnyOtherProcessHasFileOpen(const std::filesystem::path &target,

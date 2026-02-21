@@ -79,6 +79,13 @@ The GUI (`studiocast`) acts as a thin controller by talking to the daemon over a
 
 There is also a systemd user service template in `packaging/systemd/user/studiocastd.service` (installation/packaging step).
 
+For dev/MVP testing you can install + enable the user service with:
+
+```bash
+./scripts/install_user_service.sh --build-dir ./cmake-build-debug --yes
+systemctl --user status studiocastd.service
+```
+
 ## Next steps
 - Add Maxine SDK probing tooling (no redistribution of proprietary SDK assets)
 - Expand daemon control plane to audio (PipeWire-Pulse) and add more CPU/GPU effects

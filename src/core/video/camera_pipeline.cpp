@@ -418,10 +418,12 @@ bool CameraPipeline::OpenOutputLocked(const std::string& outDev,
   if (out_opened_or_renegotiated) *out_opened_or_renegotiated = true;
 
   // v4l2loopback can transiently reject format negotiation (EINVAL) right after
-  // the producer FD was closed (or during consumer disconnect windows). Retry a
-  // few times to avoid supervisor thrash.
-  constexpr int kMaxOpenRetries = 8;
-  constexpr int kRetrySleepMs = 50;
+  // the producer FD was closed (or during consumer disconnect windows). Retry
+  // for a short budget with backoff to avoid supervisor thrash (and to make
+  // fast restarts more reliable).
+  constexpr auto kOpenRetryBudget = std::chrono::seconds(5);
+  constexpr auto kOpenRetrySleepMin = std::chrono::milliseconds(50);
+  constexpr auto kOpenRetrySleepMax = std::chrono::milliseconds(500);
 
   auto contains_invalid_argument = [](const std::string& s) {
     return s.find("Invalid argument") != std::string::npos;
@@ -430,9 +432,17 @@ bool CameraPipeline::OpenOutputLocked(const std::string& outDev,
   std::string werr;
   std::string werr2;
   bool opened = false;
-  for (int attempt = 0; attempt < kMaxOpenRetries; ++attempt) {
+  int attempts = 0;
+
+  const auto t0 = std::chrono::steady_clock::now();
+  auto sleep = kOpenRetrySleepMin;
+  for (int attempt = 0;; ++attempt) {
+    attempts = attempt + 1;
     werr.clear();
     werr2.clear();
+
+    if (stop_.load())
+      break;
 
     if (writer_.Open(outDev, width, height, fps, PixelFormat::rgb24, &werr)) {
       opened = true;
@@ -443,16 +453,36 @@ bool CameraPipeline::OpenOutputLocked(const std::string& outDev,
       break;
     }
 
-    const bool maybe_transient = contains_invalid_argument(werr) || contains_invalid_argument(werr2);
-    if (!maybe_transient || attempt == (kMaxOpenRetries - 1)) break;
-    std::this_thread::sleep_for(std::chrono::milliseconds(kRetrySleepMs));
+    const bool maybe_transient =
+        contains_invalid_argument(werr) || contains_invalid_argument(werr2);
+    if (!maybe_transient)
+      break;
+
+    if ((std::chrono::steady_clock::now() - t0) >= kOpenRetryBudget)
+      break;
+
+    std::this_thread::sleep_for(sleep);
+    sleep = std::min(sleep * 2, kOpenRetrySleepMax);
   }
 
   if (!opened) {
     if (error) {
+      const auto elapsed =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - t0)
+              .count();
       *error = "Failed to open v4l2loopback output " + outDev + ":\n" +
                "Tried rgb24:\n" + werr + "\n\n" +
-               "Tried yuyv:\n" + werr2;
+               "Tried yuyv:\n" + werr2 +
+               "\n\n" +
+               "(open retries: " + std::to_string(attempts) +
+               ", elapsed=" + std::to_string(elapsed) + "ms)";
+
+      if (contains_invalid_argument(werr) || contains_invalid_argument(werr2)) {
+        *error +=
+            "\nHint: this can be a transient v4l2loopback restart window; "
+            "if it persists, try waiting a few seconds or reloading the module.";
+      }
     }
     return false;
   }

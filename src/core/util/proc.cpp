@@ -1,9 +1,12 @@
 #include "proc.h"
 
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <filesystem>
+#include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -60,6 +63,23 @@ bool ParsePid(const std::string &name, int *pid) {
 }
 
 } // namespace
+
+std::string ProcessNameFromPid(int pid) {
+  if (pid <= 0)
+    return {};
+
+  std::ostringstream path;
+  path << "/proc/" << pid << "/comm";
+
+  std::ifstream f(path.str());
+  if (!f.is_open())
+    return {};
+
+  std::string name;
+  std::getline(f, name);
+  // /proc/<pid>/comm includes a trailing newline; getline strips it.
+  return name;
+}
 
 std::vector<int> PidsWithOpenFile(const fs::path &target,
                                   const OpenFileScanOptions &opt,
