@@ -91,7 +91,7 @@ Open CUDA currently consumes only the **segmentation/matting** packs (`task = "m
 Each Open CUDA matting pack is a directory containing `model.json`, `model.onnx`, and `LICENSE.txt`.
 The directory name does **not** need to match `model.json:id` (human-friendly names are OK).
 
-Recommended layout (mirrors `scripts/model_packs/open_video`):
+Recommended layout (mirrors `resources/model_packs/open_video`):
 
 ```text
 ~/.local/share/studiocast/models/open_video/segmentation/<pack_dir>/

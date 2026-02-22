@@ -9,7 +9,7 @@ ${XDG_DATA_HOME:-$HOME/.local/share}/studiocast/models/open_video/
 The repository contains **metadata-only templates** (no binaries) in:
 
 ```text
-./scripts/model_packs/open_video/
+./resources/model_packs/open_video/
 ```
 
 This doc explains how to:
@@ -39,7 +39,7 @@ To install a pack locally (example: YuNet FP32):
 ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/studiocast/models/open_video"
 
 # Pick a template (metadata-only)
-TPL="./scripts/model_packs/open_video/face_detection/Best Quality (YuNet FP32)"
+TPL="./resources/model_packs/open_video/face_detection/Best Quality (YuNet FP32)"
 
 # Install directory (human-friendly; does NOT need to match model.json:id)
 DEST="$ROOT/face_detection/Best Quality (YuNet FP32)"

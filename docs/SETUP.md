@@ -6,7 +6,7 @@ testers and contributors to install prerequisites without guessing.
 ## 1) Install dependencies + v4l2loopback
 
 ```bash
-./scripts/setup_ubuntu22.sh --deps --v4l2loopback --load-loopback --persist-loopback
+./scripts/setup.sh --deps --v4l2loopback --load-loopback --persist-loopback
 ```
 
 This installs build dependencies (Qt6/CMake/Ninja/etc) and runtime dependencies (v4l2loopback DKMS, v4l-utils),
@@ -27,14 +27,14 @@ v4l2-ctl --list-devices
 ## 2) Build StudioCast
 
 ```bash
-./scripts/setup_ubuntu22.sh --build --build-type Release
+./scripts/setup.sh --build --build-type Debug
 ```
 
 Or manually:
 
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+cmake -S . -B cmake-build-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build cmake-build-debug
 ```
 
 ## 3) Optional: Open CUDA backend (no Maxine required)
@@ -64,14 +64,14 @@ Install/usage docs:
 Install the curated model pack:
 
 ```bash
-./scripts/install_open_audio_models.sh
+./scripts/install.sh open-audio-models
 ```
 
 Verify:
 
 ```bash
-./build/studiocast-open audio-list-models
-./build/studiocast-open audio-self-test --model-id fastenhancer_m_vd_v1
+./cmake-build-debug/studiocast-open audio-list-models
+./cmake-build-debug/studiocast-open audio-self-test --model-id fastenhancer_m_vd_v1
 ```
 
 ## 4) Optional: Install NVIDIA Maxine SDK + features
@@ -82,8 +82,8 @@ from NVIDIA and comply with NVIDIA's license terms.
 Use the helper tool to print authoritative paths and install commands:
 
 ```bash
-./build/studiocast-maxine init
-./build/studiocast-maxine install-hints
+./cmake-build-debug/studiocast-maxine init
+./cmake-build-debug/studiocast-maxine install-hints
 ```
 
 ### Optional: automate extraction + feature install
@@ -94,17 +94,17 @@ features (models/libs) via NGC:
 ```bash
 export NGC_CLI_API_KEY="..."   # do not commit this
 export NGC_API_KEY="..."       # do not commit this
-./scripts/setup_maxine.sh \
+./scripts/setup/maxine.sh \
   --vfx-tar ~/Downloads/NVIDIA_VFX_SDK_linux_*.tar.gz \
   --ar-tar  ~/Downloads/NVIDIA_AR_SDK_linux_*.tar.gz \
   --afx-tar ~/Downloads/Audio_Effects_SDK.tar.gz \
-  --install-features --install-afx-features --build-dir ./build
+  --install-features --install-afx-features --build-dir ./cmake-build-debug
 ```
 
 By default, `--install-afx-features` downloads the MVP AFX feature set (AEC + Superres). To customize:
 
 ```bash
-./scripts/setup_maxine.sh --install-afx-features --afx-effects "superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
+./scripts/setup/maxine.sh --install-afx-features --afx-effects "superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
 ```
 
 This runs the SDK-provided `install_feature.sh` scripts under the hood.
@@ -114,8 +114,8 @@ For AFX features, the helper uses the SDK-provided `download_features.sh` script
 ## 5) Run daemon + use in OBS
 
 ```bash
-./build/studiocastd
-./build/studiocastctl status
+./cmake-build-debug/studiocastd
+./cmake-build-debug/studiocastctl status
 ```
 
 In OBS: select **StudioCast Camera** as a camera source.
@@ -125,7 +125,7 @@ In OBS: select **StudioCast Camera** as a camera source.
 If something doesn't work:
 
 ```bash
-./build/studiocastctl debug-report --out studiocast-debug-report.txt
+./cmake-build-debug/studiocastctl debug-report --out studiocast-debug-report.txt
 ```
 
 Attach that file in GitHub issues.

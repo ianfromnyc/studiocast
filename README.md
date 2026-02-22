@@ -22,8 +22,8 @@ StudioCast is known to build on Ubuntu **22.04** and **24.04**.
 For a one-shot prerequisites install (tuned for Ubuntu 22.04+, including 24.04):
 
 ```bash
-./scripts/setup_ubuntu22.sh --deps --v4l2loopback --load-loopback --persist-loopback
-./scripts/setup_ubuntu22.sh --build --build-type Debug
+./scripts/setup.sh --deps --v4l2loopback --load-loopback --persist-loopback
+./scripts/setup.sh --build --build-type Debug
 ```
 
 Manual build:
@@ -82,7 +82,7 @@ There is also a systemd user service template in `packaging/systemd/user/studioc
 For dev/MVP testing you can install + enable the user service with:
 
 ```bash
-./scripts/install_user_service.sh --build-dir ./cmake-build-debug --yes
+./scripts/install.sh user-service --build-dir ./cmake-build-debug --yes
 systemctl --user status studiocastd.service
 ```
 

@@ -298,7 +298,7 @@ static int CmdVideoInstallHints(const char *argv0) {
   std::cout << "The directory name does NOT need to match model.json:id "
                "(human-friendly names are OK).\n\n";
 
-  std::cout << "Recommended layout (mirrors scripts/model_packs/open_video):\n";
+  std::cout << "Recommended layout (mirrors resources/model_packs/open_video):\n";
   std::cout << "  " << OpenCudaRootForDisplay()
             << "/<subject>/<pack_dir>/model.json\n";
   std::cout << "  " << OpenCudaRootForDisplay()

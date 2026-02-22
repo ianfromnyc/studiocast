@@ -2,7 +2,7 @@
 
 StudioCast does **not** ship model binaries in git.
 
-Instead, model packs are defined as **metadata + licensing** in `./scripts/model_packs/open_video/` and are installed into:
+Instead, model packs are defined as **metadata + licensing** in `./resources/model_packs/open_video/` and are installed into:
 
 - `${XDG_DATA_HOME:-$HOME/.local/share}/studiocast/models/open_video/`
 
@@ -47,7 +47,7 @@ open_video/
 
 Notes:
 
-- `./scripts/model_packs/open_video/**` contains **templates only** (metadata + license notes).
+- `./resources/model_packs/open_video/**` contains **templates only** (metadata + license notes).
 - Installed packs live under `~/.local/share/studiocast/models/open_video/**`.
 - Multiple quality/latency variants are represented as multiple packs within the same subject.
 
@@ -109,7 +109,7 @@ Required fields:
 - `output` (object): `name`, `kind` (currently `"alpha"`), `dtype`
 - `preprocess` (object): `kind` (`"linear"`), `scale`, `mean[]`, `std[]`
 
-Example (see `./scripts/model_packs/open_video/segmentation/**/model.json`).
+Example (see `./resources/model_packs/open_video/segmentation/**/model.json`).
 
 ### Schema v2 (multi-task)
 

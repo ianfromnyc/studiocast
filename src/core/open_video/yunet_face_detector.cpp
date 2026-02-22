@@ -27,7 +27,7 @@ std::string PickPreferredModelId(const std::vector<std::string> &model_ids) {
   };
 
   // Prefer higher quality variants when available.
-  // (These ids are defined in scripts/model_packs/open_video/face_detection/*.)
+  // (These ids are defined in resources/model_packs/open_video/face_detection/*.)
   const std::vector<std::string> prefer = {
       "yunet_opencv_zoo_fp32",
       "yunet_opencv_zoo_int8bq",
