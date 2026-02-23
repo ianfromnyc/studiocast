@@ -165,6 +165,9 @@ bool TryAppendCudaEp(Ort::SessionOptions *so, const OrtSessionOptions &opts,
     *needs_stream_sync = false;
 
   try {
+    // Some ORT CUDA EP APIs may log internally. Ensure the process-global ORT
+    // env/logger exists before calling into provider setup.
+    (void)GlobalEnv();
 #if STUDIOCAST_ORT_HAS_CUDA_EP_V2
     const auto &api = Ort::GetApi();
 

@@ -7,6 +7,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -16,6 +18,7 @@
 
 #include "../core/open_video/diagnose.h"
 #include "../core/open_video/matting_session.h"
+#include "core/audio/effects/broadcast_audio_effect_contract.h"
 #include "core/audio/effects/broadcast_audio_effects_json.h"
 #include "core/audio/effects/broadcast_audio_effects_plan.h"
 #include "core/audio/pulse/pactl.h"
@@ -3042,6 +3045,244 @@ int RunSelfTest() {
       expectTrue("open_cuda_gate does not suppress when allowed",
                  fx_for_pipeline2.virtual_background.mode ==
                      studiocast::video::effects::VirtualBackgroundMode::blur);
+    }
+
+    // Repo model pack templates (metadata-only) must exist and be well-formed.
+    //
+    // These templates are used by scripts/tools to guide users to install the
+    // actual model artifacts. StudioCast intentionally does not commit the
+    // model binaries into git.
+    {
+      namespace fs = std::filesystem;
+
+      auto addFailure = [&](const std::string &msg) {
+        ++failures;
+        std::printf("[FAIL] %s\n", msg.c_str());
+      };
+
+      auto expectPathExists = [&](const char *name, const fs::path &p) -> bool {
+        if (fs::exists(p))
+          return true;
+        ++failures;
+        std::printf("[FAIL] %s\n  missing: %s\n", name, p.string().c_str());
+        return false;
+      };
+
+      auto findRepoModelPacksDir = [&]() -> std::optional<fs::path> {
+        const auto tryFrom = [&](fs::path start) -> std::optional<fs::path> {
+          for (int i = 0; i < 10; ++i) {
+            const auto cand = start / "resources" / "model_packs";
+            if (fs::exists(cand) && fs::is_directory(cand))
+              return cand;
+            if (!start.has_parent_path())
+              break;
+            start = start.parent_path();
+          }
+          return std::nullopt;
+        };
+
+        // Prefer current working directory (CI runs from repo root).
+        {
+          std::error_code ec;
+          const auto cwd = fs::current_path(ec);
+          if (!ec) {
+            if (auto r = tryFrom(cwd))
+              return r;
+          }
+        }
+
+        // Fallback: resolve from the executable location.
+        try {
+          const auto exe = fs::canonical("/proc/self/exe");
+          if (exe.has_parent_path()) {
+            if (auto r = tryFrom(exe.parent_path()))
+              return r;
+          }
+        } catch (...) {
+          // Ignore.
+        }
+
+        return std::nullopt;
+      };
+
+      auto readTextFile = [&](const fs::path &p) -> std::optional<std::string> {
+        std::ifstream f(p);
+        if (!f)
+          return std::nullopt;
+        std::string text((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+        return text;
+      };
+
+      auto parseJsonFile = [&](const fs::path &p, studiocast::util::json::Value *out) -> bool {
+        const auto text = readTextFile(p);
+        if (!text) {
+          addFailure(std::string("model pack: failed to read ") + p.string());
+          return false;
+        }
+        std::string err;
+        if (!studiocast::util::json::Parse(*text, out, &err)) {
+          addFailure(std::string("model pack: invalid JSON in ") + p.string() +
+                     ": " + err);
+          return false;
+        }
+        return true;
+      };
+
+      const auto packsRootOpt = findRepoModelPacksDir();
+      expectTrue("repo_model_packs_dir found", packsRootOpt.has_value());
+      if (packsRootOpt) {
+        const auto packsRoot = *packsRootOpt;
+        (void)expectPathExists("repo_model_packs_dir exists", packsRoot);
+
+        // ---- Open Video templates ----
+        const fs::path openVideoRoot = packsRoot / "open_video";
+        if (expectPathExists("open_video templates dir", openVideoRoot)) {
+          struct Subject {
+            const char *dir;
+            const char *name;
+          };
+          const Subject subjects[] = {
+              {"segmentation", "open_video templates: segmentation"},
+              {"eye_contact", "open_video templates: eye_contact"},
+              {"face_detection", "open_video templates: face_detection"},
+              {"face_landmarks", "open_video templates: face_landmarks"},
+              {"video_denoise", "open_video templates: video_denoise"},
+          };
+
+          for (const auto &sub : subjects) {
+            const auto subjectDir = openVideoRoot / sub.dir;
+            if (!expectPathExists(sub.name, subjectDir))
+              continue;
+
+            int packCount = 0;
+            for (const auto &e : fs::directory_iterator(subjectDir)) {
+              if (!e.is_directory())
+                continue;
+              const auto packDir = e.path();
+              const auto manifest = packDir / "model.json";
+              const auto license = packDir / "LICENSE.txt";
+              if (!fs::exists(manifest) || !fs::exists(license))
+                continue;
+              ++packCount;
+
+              studiocast::util::json::Value v;
+              if (!parseJsonFile(manifest, &v))
+                continue;
+              const auto *o = v.AsObject();
+              if (!o) {
+                addFailure(std::string("model pack: expected object in ") +
+                           manifest.string());
+                continue;
+              }
+              auto itId = o->find("id");
+              auto itName = o->find("display_name");
+              auto itTask = o->find("task");
+              if (itId == o->end() || !itId->second.AsString() ||
+                  itId->second.AsString()->empty()) {
+                addFailure(std::string("model pack: missing/empty 'id' in ") +
+                           manifest.string());
+              }
+              if (itName == o->end() || !itName->second.AsString() ||
+                  itName->second.AsString()->empty()) {
+                addFailure(std::string(
+                               "model pack: missing/empty 'display_name' in ") +
+                           manifest.string());
+              }
+              if (itTask == o->end() || !itTask->second.AsString() ||
+                  itTask->second.AsString()->empty()) {
+                addFailure(std::string("model pack: missing/empty 'task' in ") +
+                           manifest.string());
+              }
+            }
+
+            expectTrue((std::string(sub.name) + " has at least one pack")
+                           .c_str(),
+                       packCount > 0);
+          }
+        }
+
+        // ---- Open Audio templates ----
+        const fs::path openAudioRoot = packsRoot / "open_audio";
+        if (expectPathExists("open_audio templates dir", openAudioRoot)) {
+          std::map<std::string, bool> covered;
+          covered[std::string(studiocast::audio::effects::contract::
+                                  kEffectIdNoiseRemoval)] = false;
+          covered[std::string(studiocast::audio::effects::contract::
+                                  kEffectIdRoomEchoRemoval)] = false;
+          covered[std::string(studiocast::audio::effects::contract::
+                                  kEffectIdStudioVoice)] = false;
+
+          int packCount = 0;
+          for (const auto &e : fs::directory_iterator(openAudioRoot)) {
+            if (!e.is_directory())
+              continue;
+            const auto packDir = e.path();
+            const auto manifest = packDir / "model.json";
+            const auto license = packDir / "LICENSE.txt";
+            if (!fs::exists(manifest) || !fs::exists(license))
+              continue;
+            ++packCount;
+
+            studiocast::util::json::Value v;
+            if (!parseJsonFile(manifest, &v))
+              continue;
+            const auto *o = v.AsObject();
+            if (!o) {
+              addFailure(std::string("model pack: expected object in ") +
+                         manifest.string());
+              continue;
+            }
+
+            // Basic required fields (templates may omit the actual ONNX
+            // binary).
+            auto itId = o->find("id");
+            auto itName = o->find("display_name");
+            auto itOnnx = o->find("onnx_filename");
+            auto itEffects = o->find("effects");
+            if (itId == o->end() || !itId->second.AsString() ||
+                itId->second.AsString()->empty()) {
+              addFailure(std::string("model pack: missing/empty 'id' in ") +
+                         manifest.string());
+            }
+            if (itName == o->end() || !itName->second.AsString() ||
+                itName->second.AsString()->empty()) {
+              addFailure(std::string(
+                             "model pack: missing/empty 'display_name' in ") +
+                         manifest.string());
+            }
+            if (itOnnx == o->end() || !itOnnx->second.AsString() ||
+                itOnnx->second.AsString()->empty()) {
+              addFailure(std::string(
+                             "model pack: missing/empty 'onnx_filename' in ") +
+                         manifest.string());
+            }
+            if (itEffects == o->end() || !itEffects->second.AsArray()) {
+              addFailure(
+                  std::string("model pack: missing/invalid 'effects' in ") +
+                  manifest.string());
+            } else {
+              for (const auto &ev : *itEffects->second.AsArray()) {
+                const auto *s = ev.AsString();
+                if (!s)
+                  continue;
+                auto it = covered.find(*s);
+                if (it != covered.end())
+                  it->second = true;
+              }
+            }
+          }
+
+          expectTrue("open_audio templates has at least one pack",
+                     packCount > 0);
+          for (const auto &kv : covered) {
+            expectTrue((std::string("open_audio templates cover effect ") +
+                        kv.first)
+                           .c_str(),
+                       kv.second);
+          }
+        }
+      }
     }
 
     // AFX: Broadcast-equivalent microphone planning rules.

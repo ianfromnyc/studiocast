@@ -1,0 +1,126 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-ubuntu:
+    name: build + self-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            cc: gcc-12
+            cxx: g++-12
+          - os: ubuntu-24.04
+            cc: gcc-13
+            cxx: g++-13
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config git curl ca-certificates \
+            ${{ matrix.cc }} ${{ matrix.cxx }} \
+            qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \
+            libxkbcommon-dev libpulse-dev libsqlite3-dev \
+            libjpeg-turbo8-dev libpng-dev libgl1-mesa-dev
+
+      - name: Toolchain versions
+        run: |
+          cmake --version
+          ninja --version
+          ${{ matrix.cxx }} --version
+
+      - name: Configure (open-source / no Maxine SDK required)
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSTUDIOCAST_ENABLE_OPEN_CUDA=OFF \
+            -DSTUDIOCAST_ENABLE_OPEN_AUDIO=OFF \
+            -DSTUDIOCAST_ENABLE_DLIB=OFF
+
+      - name: Build
+        run: |
+          cmake --build build --target \
+            studiocast-probe \
+            studiocastctl \
+            studiocastd \
+            studiocast \
+            studiocast-open
+
+      - name: Self-test
+        run: |
+          ./build/studiocast-probe --self-test
+
+  build-mint:
+    name: build + self-test (Linux Mint)
+    runs-on: ubuntu-24.04
+    container:
+      image: linuxmintd/mint22-amd64:latest
+    steps:
+      - name: Install base tools (for checkout)
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config curl \
+            qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \
+            libxkbcommon-dev libpulse-dev libsqlite3-dev \
+            libjpeg-turbo8-dev libpng-dev libgl1-mesa-dev
+
+      - name: Toolchain versions
+        run: |
+          cmake --version
+          ninja --version
+          g++ --version
+
+      - name: Configure (open-source / no Maxine SDK required)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSTUDIOCAST_ENABLE_OPEN_CUDA=OFF \
+            -DSTUDIOCAST_ENABLE_OPEN_AUDIO=OFF \
+            -DSTUDIOCAST_ENABLE_DLIB=OFF
+
+      - name: Build
+        run: |
+          cmake --build build --target \
+            studiocast-probe \
+            studiocastctl \
+            studiocastd \
+            studiocast \
+            studiocast-open
+
+      - name: Self-test
+        run: |
+          ./build/studiocast-probe --self-test
