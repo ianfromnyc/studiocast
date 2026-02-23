@@ -267,11 +267,19 @@ void VirtualAudioService::Stop() {
     st_.pipeline_process_time_us_max = 0;
     st_.pipeline_process_time_us_last = 0;
     st_.pipeline_process_overruns = 0;
+    st_.pipeline_pulse_capture_latency_us_last = 0;
+    st_.pipeline_pulse_playback_latency_us_last = 0;
+    st_.pipeline_pulse_latency_us_max = 0;
+    st_.pipeline_resync_events = 0;
     st_.speakers_pipeline_frames_processed = 0;
     st_.speakers_pipeline_process_time_us_sum = 0;
     st_.speakers_pipeline_process_time_us_max = 0;
     st_.speakers_pipeline_process_time_us_last = 0;
     st_.speakers_pipeline_process_overruns = 0;
+    st_.speakers_pipeline_pulse_capture_latency_us_last = 0;
+    st_.speakers_pipeline_pulse_playback_latency_us_last = 0;
+    st_.speakers_pipeline_pulse_latency_us_max = 0;
+    st_.speakers_pipeline_resync_events = 0;
   }
 }
 
@@ -898,6 +906,10 @@ void VirtualAudioService::ThreadMain() {
                 st_.speakers_pipeline_process_time_us_max = 0;
                 st_.speakers_pipeline_process_time_us_last = 0;
                 st_.speakers_pipeline_process_overruns = 0;
+                st_.speakers_pipeline_pulse_capture_latency_us_last = 0;
+                st_.speakers_pipeline_pulse_playback_latency_us_last = 0;
+                st_.speakers_pipeline_pulse_latency_us_max = 0;
+                st_.speakers_pipeline_resync_events = 0;
                 st_.speakers_pipeline_last_error =
                     "Failed to start speaker pipeline: " + perr;
               }
@@ -940,6 +952,13 @@ void VirtualAudioService::ThreadMain() {
               st_.speakers_pipeline_process_time_us_last =
                   stats.process_time_us_last;
               st_.speakers_pipeline_process_overruns = stats.process_overruns;
+              st_.speakers_pipeline_pulse_capture_latency_us_last =
+                  stats.pulse_capture_latency_us_last;
+              st_.speakers_pipeline_pulse_playback_latency_us_last =
+                  stats.pulse_playback_latency_us_last;
+              st_.speakers_pipeline_pulse_latency_us_max =
+                  stats.pulse_latency_us_max;
+              st_.speakers_pipeline_resync_events = stats.resync_events;
               if (!stats.last_error.empty()) {
                 st_.speakers_pipeline_last_error = stats.last_error;
               }
@@ -976,6 +995,10 @@ void VirtualAudioService::ThreadMain() {
         st_.pipeline_process_time_us_max = 0;
         st_.pipeline_process_time_us_last = 0;
         st_.pipeline_process_overruns = 0;
+        st_.pipeline_pulse_capture_latency_us_last = 0;
+        st_.pipeline_pulse_playback_latency_us_last = 0;
+        st_.pipeline_pulse_latency_us_max = 0;
+        st_.pipeline_resync_events = 0;
         st_.effect_selector.clear();
         st_.feature_id.clear();
         st_.intensity = 0.0f;
@@ -1165,6 +1188,12 @@ void VirtualAudioService::ThreadMain() {
           st_.pipeline_process_time_us_max = stats.process_time_us_max;
           st_.pipeline_process_time_us_last = stats.process_time_us_last;
           st_.pipeline_process_overruns = stats.process_overruns;
+          st_.pipeline_pulse_capture_latency_us_last =
+              stats.pulse_capture_latency_us_last;
+          st_.pipeline_pulse_playback_latency_us_last =
+              stats.pulse_playback_latency_us_last;
+          st_.pipeline_pulse_latency_us_max = stats.pulse_latency_us_max;
+          st_.pipeline_resync_events = stats.resync_events;
         }
       }
 
@@ -1231,6 +1260,12 @@ void VirtualAudioService::ThreadMain() {
           st_.pipeline_process_time_us_max = stats.process_time_us_max;
           st_.pipeline_process_time_us_last = stats.process_time_us_last;
           st_.pipeline_process_overruns = stats.process_overruns;
+          st_.pipeline_pulse_capture_latency_us_last =
+              stats.pulse_capture_latency_us_last;
+          st_.pipeline_pulse_playback_latency_us_last =
+              stats.pulse_playback_latency_us_last;
+          st_.pipeline_pulse_latency_us_max = stats.pulse_latency_us_max;
+          st_.pipeline_resync_events = stats.resync_events;
         }
       }
 
@@ -1370,6 +1405,12 @@ void VirtualAudioService::ThreadMain() {
         st_.pipeline_process_time_us_max = stats.process_time_us_max;
         st_.pipeline_process_time_us_last = stats.process_time_us_last;
         st_.pipeline_process_overruns = stats.process_overruns;
+        st_.pipeline_pulse_capture_latency_us_last =
+            stats.pulse_capture_latency_us_last;
+        st_.pipeline_pulse_playback_latency_us_last =
+            stats.pulse_playback_latency_us_last;
+        st_.pipeline_pulse_latency_us_max = stats.pulse_latency_us_max;
+        st_.pipeline_resync_events = stats.resync_events;
       }
     }
 

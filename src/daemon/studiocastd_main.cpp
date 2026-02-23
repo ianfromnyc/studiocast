@@ -572,6 +572,22 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"process_us_max\":" << ast.speakers_pipeline_process_time_us_max
       << ",";
   oss << "\"process_overruns\":" << ast.speakers_pipeline_process_overruns;
+
+  // Optional debug stats. Kept out of the default schema unless explicitly
+  // enabled.
+  if (std::getenv("STUDIOCAST_DEBUG_AUDIO_STATS")) {
+    oss << ",\"debug\":{";
+    oss << "\"pulse_capture_latency_ms\":"
+        << (ast.speakers_pipeline_pulse_capture_latency_us_last / 1000u)
+        << ",";
+    oss << "\"pulse_playback_latency_ms\":"
+        << (ast.speakers_pipeline_pulse_playback_latency_us_last / 1000u)
+        << ",";
+    oss << "\"pulse_latency_ms_max\":"
+        << (ast.speakers_pipeline_pulse_latency_us_max / 1000u) << ",";
+    oss << "\"resync_events\":" << ast.speakers_pipeline_resync_events;
+    oss << "}";
+  }
   oss << "}";
   oss << "},";
 
@@ -609,6 +625,21 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"process_us_last\":" << ast.pipeline_process_time_us_last << ",";
   oss << "\"process_us_max\":" << ast.pipeline_process_time_us_max << ",";
   oss << "\"process_overruns\":" << ast.pipeline_process_overruns << ",";
+
+  // Optional debug stats. Kept out of the default schema unless explicitly
+  // enabled.
+  if (std::getenv("STUDIOCAST_DEBUG_AUDIO_STATS")) {
+    oss << "\"debug\":{";
+    oss << "\"pulse_capture_latency_ms\":"
+        << (ast.pipeline_pulse_capture_latency_us_last / 1000u) << ",";
+    oss << "\"pulse_playback_latency_ms\":"
+        << (ast.pipeline_pulse_playback_latency_us_last / 1000u) << ",";
+    oss << "\"pulse_latency_ms_max\":"
+        << (ast.pipeline_pulse_latency_us_max / 1000u) << ",";
+    oss << "\"resync_events\":" << ast.pipeline_resync_events;
+    oss << "},";
+  }
+
   oss << "\"gpu\":{";
   oss << "\"index\":" << ast.gpu_index << ",";
   oss << "\"name\":\"" << JsonEscape(ast.gpu_name) << "\",";

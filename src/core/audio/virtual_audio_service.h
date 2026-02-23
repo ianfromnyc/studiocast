@@ -79,6 +79,12 @@ struct VirtualAudioServiceStatus {
   std::uint64_t speakers_pipeline_process_time_us_last = 0;
   std::uint64_t speakers_pipeline_process_overruns = 0;
 
+  // Best-effort Pulse latency (microseconds) for speaker pipeline.
+  std::uint64_t speakers_pipeline_pulse_capture_latency_us_last = 0;
+  std::uint64_t speakers_pipeline_pulse_playback_latency_us_last = 0;
+  std::uint64_t speakers_pipeline_pulse_latency_us_max = 0;
+  std::uint64_t speakers_pipeline_resync_events = 0;
+
   bool pipeline_running = false;
   bool pipeline_starting = false;
 
@@ -88,6 +94,12 @@ struct VirtualAudioServiceStatus {
   std::uint64_t pipeline_process_time_us_max = 0;
   std::uint64_t pipeline_process_time_us_last = 0;
   std::uint64_t pipeline_process_overruns = 0;
+
+  // Best-effort Pulse latency (microseconds) for microphone pipeline.
+  std::uint64_t pipeline_pulse_capture_latency_us_last = 0;
+  std::uint64_t pipeline_pulse_playback_latency_us_last = 0;
+  std::uint64_t pipeline_pulse_latency_us_max = 0;
+  std::uint64_t pipeline_resync_events = 0;
 
   std::string selected_source;
   std::string pipeline_sink = "studiocast_sink";

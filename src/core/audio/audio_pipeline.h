@@ -35,6 +35,18 @@ struct AudioPipelineStats {
   // Number of frames where the processing time exceeded the frame duration.
   std::uint64_t process_overruns = 0;
 
+  // Best-effort PulseAudio stream latency estimates (microseconds).
+  // These are queried periodically (not per-frame) to avoid adding overhead to
+  // the real-time loop.
+  std::uint64_t pulse_capture_latency_us_last = 0;
+  std::uint64_t pulse_playback_latency_us_last = 0;
+  // Max observed latency (best-effort). When both capture and playback
+  // latencies are available, this tracks their sum.
+  std::uint64_t pulse_latency_us_max = 0;
+
+  // Number of times the pipeline attempted to resync by flushing Pulse buffers.
+  std::uint64_t resync_events = 0;
+
   std::string last_error;
 };
 
@@ -74,6 +86,12 @@ private:
   std::atomic<std::uint64_t> process_time_us_max_{0};
   std::atomic<std::uint64_t> process_time_us_last_{0};
   std::atomic<std::uint64_t> process_overruns_{0};
+
+  // PulseAudio latency observations and resync counters.
+  std::atomic<std::uint64_t> pulse_capture_latency_us_last_{0};
+  std::atomic<std::uint64_t> pulse_playback_latency_us_last_{0};
+  std::atomic<std::uint64_t> pulse_latency_us_max_{0};
+  std::atomic<std::uint64_t> resync_events_{0};
 
   std::atomic<bool> stop_{false};
   std::thread thread_;
