@@ -362,6 +362,29 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"consumer_present\":" << BoolJson(st.consumer_present) << ",";
   oss << "\"consumer_count\":" << st.consumer_count << ",";
 
+  // Supervisor diagnostics (Phase 2): helps diagnose consumer-driven camera
+  // probing/flapping behavior in apps like Discord.
+  oss << "\"supervisor\":{";
+  oss << "\"consumer_poll_ms\":" << cfg.consumer_poll_ms << ",";
+  oss << "\"start_grace_ms\":" << cfg.start_grace_ms << ",";
+  oss << "\"stop_grace_ms\":" << cfg.stop_grace_ms << ",";
+  oss << "\"min_run_ms\":" << cfg.min_run_ms << ",";
+  oss << "\"pipeline_start_attempts\":" << st.pipeline_start_attempts << ",";
+  oss << "\"pipeline_starts\":" << st.pipeline_starts << ",";
+  oss << "\"pipeline_start_failures\":" << st.pipeline_start_failures
+      << ",";
+  oss << "\"pipeline_stops\":" << st.pipeline_stops << ",";
+  oss << "\"pipeline_config_restarts\":"
+      << st.pipeline_config_restarts << ",";
+  oss << "\"stabilizing\":" << BoolJson(st.stabilizing) << ",";
+  oss << "\"thrash_events_10s\":" << st.thrash_events_10s << ",";
+  oss << "\"last_transition\":\""
+      << JsonEscape(st.last_transition) << "\",";
+  oss << "\"last_transition_ms_ago\":"
+      << st.last_transition_ms_ago << ",";
+  oss << "\"next_start_retry_ms\":" << st.next_start_retry_ms;
+  oss << "},";
+
   oss << "\"input_device\":\"" << JsonEscape(st.pipeline.input_device) << "\",";
   oss << "\"output_device\":\"" << JsonEscape(st.pipeline.output_device)
       << "\",";

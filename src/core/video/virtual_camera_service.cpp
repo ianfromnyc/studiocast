@@ -196,6 +196,17 @@ bool VirtualCameraService::Start(const VirtualCameraServiceConfig &cfg,
     last_consumer_seen_ = std::chrono::steady_clock::time_point{};
     next_start_retry_ = std::chrono::steady_clock::time_point{};
 
+    // Reset supervisor counters/diagnostics for this service session.
+    pipeline_start_attempts_ = 0;
+    pipeline_starts_ = 0;
+    pipeline_start_failures_ = 0;
+    pipeline_stops_ = 0;
+    pipeline_config_restarts_ = 0;
+    stabilizing_ = false;
+    thrash_events_10s_ = 0;
+    last_transition_.clear();
+    last_transition_at_ = std::chrono::steady_clock::time_point{};
+
     stop_.store(false);
     running_ = true;
   }
@@ -281,11 +292,40 @@ void VirtualCameraService::UpdateConfig(const VirtualCameraServiceConfig &cfg) {
 }
 
 VirtualCameraServiceStatus VirtualCameraService::Status() const {
+  const auto now = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lock(mu_);
   VirtualCameraServiceStatus s;
   s.service_running = running_;
   s.consumer_present = consumer_present_;
   s.consumer_count = consumer_count_;
+
+  s.pipeline_start_attempts = pipeline_start_attempts_;
+  s.pipeline_starts = pipeline_starts_;
+  s.pipeline_start_failures = pipeline_start_failures_;
+  s.pipeline_stops = pipeline_stops_;
+  s.pipeline_config_restarts = pipeline_config_restarts_;
+  s.stabilizing = stabilizing_;
+  s.thrash_events_10s = thrash_events_10s_;
+  s.last_transition = last_transition_;
+
+  if (last_transition_at_ != std::chrono::steady_clock::time_point{}) {
+    s.last_transition_ms_ago =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now -
+                                                             last_transition_at_)
+            .count();
+  }
+
+  if (next_start_retry_ != std::chrono::steady_clock::time_point{}) {
+    if (now >= next_start_retry_) {
+      s.next_start_retry_ms = 0;
+    } else {
+      s.next_start_retry_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(next_start_retry_ -
+                                                               now)
+              .count();
+    }
+  }
+
   s.pipeline = pipeline_.Status();
   s.last_error = last_error_;
   return s;
@@ -459,6 +499,37 @@ void VirtualCameraService::ThreadMain() {
     }
 
     const auto now = std::chrono::steady_clock::now();
+
+    // Supervisor diagnostics helpers (Phase 2).
+
+    const auto CountStartAttempt = [&]() {
+      std::lock_guard<std::mutex> lock(mu_);
+      ++pipeline_start_attempts_;
+    };
+
+    const auto CountStartSuccess = [&](const char *reason) {
+      std::lock_guard<std::mutex> lock(mu_);
+      ++pipeline_starts_;
+      last_transition_ = reason ? std::string(reason) : std::string();
+      last_transition_at_ = now;
+    };
+
+    const auto CountStartFailure = [&]() {
+      std::lock_guard<std::mutex> lock(mu_);
+      ++pipeline_start_failures_;
+      last_transition_ = "start_failed";
+      last_transition_at_ = now;
+    };
+
+    const auto CountStop = [&](const char *reason, bool configRestart) {
+      std::lock_guard<std::mutex> lock(mu_);
+      ++pipeline_stops_;
+      if (configRestart)
+        ++pipeline_config_restarts_;
+      last_transition_ = reason ? std::string(reason) : std::string();
+      last_transition_at_ = now;
+    };
+
     if (consumerPresent)
       lastConsumerSeen = now;
 
@@ -696,6 +767,7 @@ void VirtualCameraService::ThreadMain() {
         if (dbg)
           VcamDbg("pipeline Stop: blocked");
         pipeline_.Stop();
+        CountStop(\"stop_blocked\", false);
         haveAppliedCfg = false;
         nextStartRetry = std::chrono::steady_clock::time_point{};
         pst = pipeline_.Status();
@@ -713,6 +785,7 @@ void VirtualCameraService::ThreadMain() {
         VcamDbg("pipeline Stop: config restart " +
                 DiffPipelineCfg(appliedPipelineCfg, pipelineCfgForPipeline));
       pipeline_.Stop();
+      CountStop(\"stop_config_restart\", true);
       haveAppliedCfg = false;
       nextStartRetry = std::chrono::steady_clock::time_point{};
     }
@@ -764,12 +837,14 @@ void VirtualCameraService::ThreadMain() {
           }
 
           recordThrashEvent("start_attempt");
+          CountStartAttempt();
           std::string perr;
           if (!pipeline_.Start(pipelineCfgForPipeline, &perr)) {
             {
               std::lock_guard<std::mutex> lock(mu_);
               last_error_ = "Pipeline start failed: " + perr;
             }
+            CountStartFailure();
             if (dbg)
               VcamDbg(std::string("pipeline Start FAILED: ") + perr);
             // Back off a bit; many apps probe cameras aggressively.
@@ -779,6 +854,13 @@ void VirtualCameraService::ThreadMain() {
             appliedPipelineCfg = pipelineCfgForPipeline;
             nextStartRetry = std::chrono::steady_clock::time_point{};
             pipelineBecameRunningAt = now;
+            if (cfg.always_on) {
+              CountStartSuccess("start_always_on");
+            } else if (stabilizing) {
+              CountStartSuccess("start_stabilizing");
+            } else {
+              CountStartSuccess("start_consumer");
+            }
             if (dbg)
               VcamDbg("pipeline Start OK");
           }
@@ -830,6 +912,11 @@ void VirtualCameraService::ThreadMain() {
           }
 
           pipeline_.Stop();
+          if (cfg.enabled) {
+            CountStop("stop_no_consumers", false);
+          } else {
+            CountStop("stop_disabled", false);
+          }
           haveAppliedCfg = false;
         }
       }
@@ -865,6 +952,8 @@ void VirtualCameraService::ThreadMain() {
       consumer_count_ = consumerCount;
       last_consumer_seen_ = lastConsumerSeen;
       next_start_retry_ = nextStartRetry;
+      stabilizing_ = stabilizing;
+      thrash_events_10s_ = static_cast<int>(thrashEvents.size());
     }
 
     std::this_thread::sleep_for(

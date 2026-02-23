@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <chrono>
 #include <mutex>
 #include <string>
@@ -48,6 +49,25 @@ struct VirtualCameraServiceStatus {
   // True if at least one external process has the virtual camera open.
   bool consumer_present = false;
   int consumer_count = 0;
+
+  // Supervisor diagnostics (counts reset on Start()).
+  std::uint64_t pipeline_start_attempts = 0;
+  std::uint64_t pipeline_starts = 0;
+  std::uint64_t pipeline_start_failures = 0;
+  std::uint64_t pipeline_stops = 0;
+  std::uint64_t pipeline_config_restarts = 0;
+
+  // Best-effort thrash / stabilization visibility (helps diagnose
+  // consumer-driven open/close probing behavior in apps like Discord).
+  bool stabilizing = false;
+  int thrash_events_10s = 0;
+
+  // Last pipeline transition and how long ago it happened.
+  std::string last_transition;
+  std::int64_t last_transition_ms_ago = -1;
+
+  // If >= 0, time until the next pipeline start retry (backoff).
+  std::int64_t next_start_retry_ms = -1;
 
   CameraPipelineStatus pipeline;
   std::string last_error;
@@ -99,6 +119,19 @@ private:
 
   std::chrono::steady_clock::time_point last_consumer_seen_{};
   std::chrono::steady_clock::time_point next_start_retry_{};
+
+  // Supervisor counters / diagnostics (protected by mu_).
+  std::uint64_t pipeline_start_attempts_ = 0;
+  std::uint64_t pipeline_starts_ = 0;
+  std::uint64_t pipeline_start_failures_ = 0;
+  std::uint64_t pipeline_stops_ = 0;
+  std::uint64_t pipeline_config_restarts_ = 0;
+
+  bool stabilizing_ = false;
+  int thrash_events_10s_ = 0;
+
+  std::string last_transition_;
+  std::chrono::steady_clock::time_point last_transition_at_{};
 
   CameraPipeline pipeline_;
 };
