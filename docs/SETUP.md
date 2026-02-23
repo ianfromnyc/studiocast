@@ -9,7 +9,7 @@ testers and contributors to install prerequisites without guessing.
 ./scripts/setup.sh --deps --v4l2loopback --load-loopback --persist-loopback
 ```
 
-This installs build dependencies (Qt6/CMake/Ninja/etc) and runtime dependencies (v4l2loopback DKMS, v4l-utils),
+This installs build dependencies (Qt6/CMake/Ninja/etc), ONNX Runtime (required; GPU build by default), and runtime dependencies (v4l2loopback DKMS, v4l-utils),
 then creates a virtual camera device (by default at `/dev/video10` with label **StudioCast Camera**).
 
 MJPEG decode uses **libjpeg-turbo** (via CMake `FindJPEG`). If you are installing dependencies manually:
@@ -49,8 +49,11 @@ Install/usage docs:
 On Ubuntu 22.04+, the helper script that installs an ONNX Runtime GPU build is:
 
 ```bash
-./scripts/bootstrap_ubuntu22.sh
+./scripts/setup.sh --deps
 ```
+
+`--deps` ensures ONNX Runtime is available via `pkg-config onnxruntime` by installing the upstream tarball under
+`/opt/studiocast/onnxruntime/<version>/...` and configuring runtime linking via `ldconfig`.
 
 ## 3b) Optional: Open Audio backend (no Maxine required)
 

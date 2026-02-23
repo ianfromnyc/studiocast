@@ -29,10 +29,10 @@ StudioCast discovers ONNX Runtime via CMake. For Open CUDA you need an ONNX Runt
 Repo-provided helper (Ubuntu 22.04+):
 
 ```bash
-./scripts/bootstrap_ubuntu22.sh
+./scripts/setup.sh --deps
 ```
 
-This script:
+This script (via `scripts/setup/ubuntu.sh`):
 
 - installs build prerequisites (Qt/CMake/Ninja/etc.),
 - downloads the official ONNX Runtime **GPU** tarball,
@@ -266,7 +266,7 @@ Example (formatted for readability; the on-disk value is on one line):
 On Ubuntu 22.04+, the intended path is:
 
 ```bash
-./scripts/bootstrap_ubuntu22.sh
+./scripts/setup.sh --deps
 ```
 
 ### `open_cuda.ok` is false and `blocked_effects` contains `cuda_unavailable`

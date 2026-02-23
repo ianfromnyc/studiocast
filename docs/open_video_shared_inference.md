@@ -7,7 +7,7 @@ StudioCast’s open-source video effects can require **multiple ML inferences pe
 - face landmarks (for eye contact)
 - video denoise (for video noise removal)
 
-Running the same model twice in a single frame is wasted compute and increases latency.
+Running the same model twice in a single frame is wasted compute and increases latency. We don't want that.
 
 ## Design goal
 

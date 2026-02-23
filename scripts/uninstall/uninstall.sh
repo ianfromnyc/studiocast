@@ -175,7 +175,7 @@ greedy_remove_user_data() {
 }
 
 greedy_remove_system_onnxruntime_bootstrap() {
-  # Installed by scripts/bootstrap_ubuntu22.sh (compat wrapper).
+  # Installed by scripts/setup.sh --deps (scripts/setup/ubuntu.sh).
   local ort_root="/opt/studiocast/onnxruntime"
   local ld_conf="/etc/ld.so.conf.d/studiocast-onnxruntime.conf"
   local pc_file="/usr/local/lib/pkgconfig/onnxruntime.pc"
