@@ -767,7 +767,7 @@ void VirtualCameraService::ThreadMain() {
         if (dbg)
           VcamDbg("pipeline Stop: blocked");
         pipeline_.Stop();
-        CountStop(\"stop_blocked\", false);
+        CountStop("\"stop_blocked\"", false);
         haveAppliedCfg = false;
         nextStartRetry = std::chrono::steady_clock::time_point{};
         pst = pipeline_.Status();
@@ -785,7 +785,7 @@ void VirtualCameraService::ThreadMain() {
         VcamDbg("pipeline Stop: config restart " +
                 DiffPipelineCfg(appliedPipelineCfg, pipelineCfgForPipeline));
       pipeline_.Stop();
-      CountStop(\"stop_config_restart\", true);
+      CountStop("\"stop_config_restart\"", true);
       haveAppliedCfg = false;
       nextStartRetry = std::chrono::steady_clock::time_point{};
     }
