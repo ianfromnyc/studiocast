@@ -1341,6 +1341,14 @@ int main(int argc, char **argv) {
               if (auto it = pc.kv.find("fps"); it != pc.kv.end()) {
                 newCfg.pipeline.fps = std::atoi(it->second.c_str());
               }
+              if (auto it = pc.kv.find("always_on"); it != pc.kv.end()) {
+                bool v = false;
+                if (!ParseBoolArg(it->second, &v)) {
+                  return std::string("ERR ") +
+                         ErrorJson("always_on expects 0|1|true|false");
+                }
+                newCfg.always_on = v;
+              }
 
               svc.UpdateConfig(newCfg);
 
