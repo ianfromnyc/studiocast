@@ -791,7 +791,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   }
 
-  const auto outA = writer_.Actual();
+  ActualFormat outA = writer_.Actual();
 
   // Scaling backend selection (cpu|gpu|auto).
   //
@@ -5458,6 +5458,87 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   std::uint64_t pipeline_open_cuda_upload_calls = 0;
   std::uint64_t pipeline_open_cuda_download_calls = 0;
 
+  const bool debug_v4l2_neg =
+      (std::getenv("STUDIOCAST_DEBUG_V4L2_NEGOTIATION") != nullptr);
+
+  int output_format_changes = 0;
+  int output_refresh_failures = 0;
+  int output_write_recoveries = 0;
+
+  auto ActualFormatToString = [](const ActualFormat &a) {
+    std::ostringstream oss;
+    oss << a.width << "x" << a.height << "@" << a.fps << " ";
+    oss << a.pixfmt;
+    oss << " bpl=" << a.bytes_per_line << " size=" << a.size_image;
+    return oss.str();
+  };
+
+  auto ActualFormatEq = [](const ActualFormat &a, const ActualFormat &b) {
+    return a.width == b.width && a.height == b.height && a.fps == b.fps &&
+           a.pixfmt_fourcc == b.pixfmt_fourcc &&
+           a.bytes_per_line == b.bytes_per_line && a.size_image == b.size_image;
+  };
+
+  constexpr int kOutputRefreshEveryFrames = 30;
+  int frames_until_output_refresh = kOutputRefreshEveryFrames;
+
+  auto RefreshOutputActual = [&](const char *reason, bool force) -> bool {
+    if (!writer_.IsOpen())
+      return false;
+
+    if (!force) {
+      if (--frames_until_output_refresh > 0)
+        return false;
+      frames_until_output_refresh = kOutputRefreshEveryFrames;
+    } else {
+      frames_until_output_refresh = kOutputRefreshEveryFrames;
+    }
+
+    const ActualFormat prev = outA;
+    std::string rerr;
+    if (!writer_.RefreshActual(&rerr)) {
+      ++output_refresh_failures;
+      if (debug_v4l2_neg &&
+          (output_refresh_failures <= 5 || (output_refresh_failures % 30) == 0)) {
+        std::fprintf(stderr,
+                     "v4l2loopback RefreshActual failed reason=%s err="%s"\n",
+                     reason ? reason : "", rerr.c_str());
+      }
+      return false;
+    }
+
+    const ActualFormat cur = writer_.Actual();
+    if (ActualFormatEq(cur, prev))
+      return false;
+
+    outA = cur;
+    ++output_format_changes;
+
+    // Keep output buffers sized to the negotiated kernel format.
+    std::size_t need = outA.size_image;
+    if (need == 0 && outA.bytes_per_line > 0 && outA.height > 0) {
+      need = outA.bytes_per_line * static_cast<std::size_t>(outA.height);
+    }
+    if (need > 0)
+      outBuf.resize(need);
+
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      output_ = outA;
+      scaling_to_ = outA;
+    }
+
+    if (debug_v4l2_neg) {
+      const std::string prevS = ActualFormatToString(prev);
+      const std::string curS = ActualFormatToString(cur);
+      std::fprintf(stderr,
+                   "v4l2loopback output format changed (%s): %s -> %s\n",
+                   reason ? reason : "", prevS.c_str(), curS.c_str());
+    }
+    return true;
+  };
+
+
   while (!stop_.load()) {
     CapturedFrameView f{};
     std::string ferr;
@@ -5553,6 +5634,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     const auto t_capture_end = Clock::now();
     const double capture_ms = ToMs(t_capture_end - t_capture_start);
+
+    // Periodically refresh the v4l2loopback negotiated format so consumer-driven
+    // VIDIOC_S_FMT changes (common in Zoom/Teams) do not force pipeline restarts.
+    (void)RefreshOutputActual("periodic", /*force=*/false);
 
     DeferredGpuOut deferred_gpu_out{};
     bool have_deferred_gpu_out = false;
@@ -6791,6 +6876,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (outA.bytes_per_line == wantRow && outA.size_image == rgbOutBytes) {
         std::string werr;
         if (!writer_.WriteFrame(rgbOut, rgbOutBytes, &werr)) {
+          // Best-effort recovery: consumers may renegotiate global loopback caps
+          // via VIDIOC_S_FMT (common in Zoom/Teams). Refresh and drop this frame
+          // instead of tearing down the whole pipeline.
+          if (RefreshOutputActual("write_fail", /*force=*/true)) {
+            ++output_write_recoveries;
+            continue;
+          }
           std::lock_guard<std::mutex> lock(mu_);
           last_error_ = "Write failed: " + werr;
           break;
@@ -6808,6 +6900,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
         std::string werr;
         if (!writer_.WriteFrame(outBuf.data(), outBuf.size(), &werr)) {
+          // See note above: allow consumer-driven renegotiation without restart.
+          if (RefreshOutputActual("write_fail", /*force=*/true)) {
+            ++output_write_recoveries;
+            continue;
+          }
           std::lock_guard<std::mutex> lock(mu_);
           last_error_ = "Write failed: " + werr;
           break;
@@ -6819,6 +6916,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       std::string werr;
       if (!writer_.WriteFrame(outBuf.data(), outBuf.size(), &werr)) {
+        // See note above: allow consumer-driven renegotiation without restart.
+        if (RefreshOutputActual("write_fail", /*force=*/true)) {
+          ++output_write_recoveries;
+          continue;
+        }
         std::lock_guard<std::mutex> lock(mu_);
         last_error_ = "Write failed: " + werr;
         break;
@@ -6880,6 +6982,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       debug_.latency_ms = ema_latency.ValueOrZero();
       debug_.capture_sequence = last_capture_sequence;
       debug_.dropped_capture_frames = dropped_capture_frames_total;
+
+      debug_.output_format_changes = output_format_changes;
+      debug_.output_refresh_failures = output_refresh_failures;
+      debug_.output_write_recoveries = output_write_recoveries;
 
       open_cuda_transfers_.active_frames = open_cuda_active_frames;
       open_cuda_transfers_.upload_calls = pipeline_open_cuda_upload_calls;

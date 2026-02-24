@@ -235,6 +235,16 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
   std::vector<float> in(samples_per_frame);
   std::vector<float> out(samples_per_frame);
 
+  // Flush any stale buffered audio so the pipeline starts as close to "live" as
+  // possible. This helps keep speaker/mic transitions from playing old queued
+  // audio after toggling effects.
+  {
+    int ferr = 0;
+    (void)::pa_simple_flush(rec, &ferr);
+    ferr = 0;
+    (void)::pa_simple_flush(play, &ferr);
+  }
+
   processor_->Reset();
 
   const bool debug_stats = DebugAudioStats();
@@ -370,7 +380,9 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
     frames_processed_.fetch_add(1, std::memory_order_relaxed);
   }
 
-  ::pa_simple_drain(play, &pa_err); // best-effort
+  // Do not drain on shutdown: dropping queued audio keeps route switches
+  // responsive and avoids playing "late" buffered audio after disabling effects.
+  (void)::pa_simple_flush(play, &pa_err);
   ::pa_simple_free(play);
   ::pa_simple_free(rec);
 }

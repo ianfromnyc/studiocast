@@ -99,6 +99,11 @@ struct CameraPipelineStatus {
     double latency_ms = 0.0;
     std::uint64_t capture_sequence = 0;
     int dropped_capture_frames = 0;
+
+    // Best-effort counters for diagnosing v4l2loopback consumer negotiation.
+    int output_format_changes = 0;
+    int output_refresh_failures = 0;
+    int output_write_recoveries = 0;
   } debug{};
 
   // Optional Open CUDA transfer counters (emitted in status JSON only when
