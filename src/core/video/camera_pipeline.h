@@ -104,6 +104,13 @@ struct CameraPipelineStatus {
     int output_format_changes = 0;
     int output_refresh_failures = 0;
     int output_write_recoveries = 0;
+
+    // Output pacing/jitter diagnostics (useful for browser/WebRTC capture).
+    double pace_sleep_ms = 0.0;
+    double pace_late_ms = 0.0;
+    std::uint64_t pace_sleeps = 0;
+    std::uint64_t pace_late_frames = 0;
+    std::uint64_t pace_resyncs = 0;
   } debug{};
 
   // Optional Open CUDA transfer counters (emitted in status JSON only when

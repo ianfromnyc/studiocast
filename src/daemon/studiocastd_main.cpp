@@ -505,6 +505,18 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
         << st.pipeline.debug.output_refresh_failures << ",";
     oss << "\"output_write_recoveries\":"
         << st.pipeline.debug.output_write_recoveries;
+
+    oss << ",\"pace_sleep_ms\":" << std::setprecision(6)
+        << st.pipeline.debug.pace_sleep_ms;
+    oss << ",\"pace_late_ms\":" << std::setprecision(6)
+        << st.pipeline.debug.pace_late_ms;
+    oss << ",\"pace_sleeps\":"
+        << st.pipeline.debug.pace_sleeps;
+    oss << ",\"pace_late_frames\":"
+        << st.pipeline.debug.pace_late_frames;
+    oss << ",\"pace_resyncs\":"
+        << st.pipeline.debug.pace_resyncs;
+
     oss << "}";
   }
   oss << ",";

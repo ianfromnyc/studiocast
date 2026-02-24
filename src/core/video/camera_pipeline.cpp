@@ -5434,6 +5434,35 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   Ema ema_write;
   Ema ema_period;
 
+  // Output pacing to reduce burstiness (useful for browsers/WebRTC capture).
+  //
+  // The capture thread can sometimes "catch up" and deliver frames in a burst
+  // after a stall (even when we drop old frames). Some consumers (notably
+  // WebRTC stacks) are sensitive to bursty cadence. Pace writes to the
+  // negotiated output FPS when we're ahead of schedule, but never add
+  // extra delay when we're already behind.
+  Ema ema_pace_sleep;
+  Ema ema_pace_late;
+  std::uint64_t pace_sleeps = 0;
+  std::uint64_t pace_late_frames = 0;
+  std::uint64_t pace_resyncs = 0;
+
+  auto PeriodForFps = [](int fps) -> Clock::duration {
+    if (fps <= 0) return Clock::duration::zero();
+    return std::chrono::nanoseconds(1000000000LL / static_cast<long long>(fps));
+  };
+
+  auto PaceFpsFromOutput = [&](const ActualFormat& a) -> int {
+    if (a.fps > 0) return a.fps;
+    if (cfg.fps > 0) return cfg.fps;
+    return 30;
+  };
+
+  int pace_fps = PaceFpsFromOutput(outA);
+  Clock::duration pace_period = PeriodForFps(pace_fps);
+  Clock::time_point next_pace_deadline{};
+  bool have_next_pace_deadline = false;
+
   // Optional end-to-end latency estimate and capture backlog stats.
   Ema ema_latency;
   std::uint64_t last_capture_sequence = 0;
@@ -5501,7 +5530,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (debug_v4l2_neg &&
           (output_refresh_failures <= 5 || (output_refresh_failures % 30) == 0)) {
         std::fprintf(stderr,
-                     "v4l2loopback RefreshActual failed reason=%s err="%s"\n",
+                     "v4l2loopback RefreshActual failed reason=%s err=\"%s\"\n",
                      reason ? reason : "", rerr.c_str());
       }
       return false;
@@ -5513,6 +5542,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     outA = cur;
     ++output_format_changes;
+
+    // If the consumer renegotiated FPS, update pacing immediately so we don't
+    // deliver bursty cadence after a stall (important for browser/WebRTC capture).
+    const int new_pace_fps = PaceFpsFromOutput(outA);
+    if (new_pace_fps != pace_fps) {
+      pace_fps = new_pace_fps;
+      pace_period = PeriodForFps(pace_fps);
+      have_next_pace_deadline = false;
+      ++pace_resyncs;
+    }
 
     // Keep output buffers sized to the negotiated kernel format.
     std::size_t need = outA.size_image;
@@ -6868,6 +6907,34 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     const auto t_scale_end = Clock::now();
     const double scale_ms = scaling_needed ? ToMs(t_scale_end - t_scale_start) : 0.0;
 
+    // Output pacing: enforce negotiated output FPS when we're ahead of
+    // schedule to avoid bursty cadence (helps browser/WebRTC capture).
+    if (pace_period != Clock::duration::zero()) {
+      const auto now = Clock::now();
+
+      if (!have_next_pace_deadline) {
+        next_pace_deadline = now;
+        have_next_pace_deadline = true;
+      } else if (now > (next_pace_deadline + pace_period)) {
+        // More than one frame late: resync to avoid "catch up" bursts.
+        next_pace_deadline = now;
+        ++pace_resyncs;
+      }
+
+      if (now < next_pace_deadline) {
+        const auto sleep_d = next_pace_deadline - now;
+        ema_pace_sleep.Add(ToMs(sleep_d));
+        ++pace_sleeps;
+        std::this_thread::sleep_until(next_pace_deadline);
+      } else if (now > next_pace_deadline) {
+        const auto late_d = now - next_pace_deadline;
+        ema_pace_late.Add(ToMs(late_d));
+        ++pace_late_frames;
+      }
+
+      next_pace_deadline += pace_period;
+    }
+
     const auto t_write_start = Clock::now();
 
     if (outA.format == PixelFormat::rgb24) {
@@ -6986,6 +7053,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       debug_.output_format_changes = output_format_changes;
       debug_.output_refresh_failures = output_refresh_failures;
       debug_.output_write_recoveries = output_write_recoveries;
+
+      debug_.pace_sleep_ms = ema_pace_sleep.ValueOrZero();
+      debug_.pace_late_ms = ema_pace_late.ValueOrZero();
+      debug_.pace_sleeps = pace_sleeps;
+      debug_.pace_late_frames = pace_late_frames;
+      debug_.pace_resyncs = pace_resyncs;
 
       open_cuda_transfers_.active_frames = open_cuda_active_frames;
       open_cuda_transfers_.upload_calls = pipeline_open_cuda_upload_calls;
