@@ -11,7 +11,9 @@ Usage:
   ./scripts/install/user_service.sh [options]
 
 Options:
-  --build-dir DIR     Build dir containing studiocastd/studiocastctl (default: ./cmake-build-debug)
+  --build-dir DIR     Build dir containing built StudioCast binaries.
+                     Default: auto-detect first existing of:
+                       <repo>/build, <repo>/cmake-build-release, <repo>/cmake-build-debug
   --no-link-bins      Do not create/update ~/.local/bin symlinks
   --dry-run           Print actions without executing
   -y, --yes           Assume yes (skip confirmation prompts)
@@ -34,12 +36,16 @@ die() { echo "[install] ERROR: $*" >&2; exit 2; }
 
 DRY_RUN=0
 YES=0
-BUILD_DIR="./cmake-build-debug"
+BUILD_DIR=""
 LINK_BINS=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --build-dir) BUILD_DIR="$2"; shift 2 ;;
+    --build-dir)
+      [[ $# -ge 2 ]] || die "--build-dir requires a path"
+      BUILD_DIR="$2"
+      shift 2
+      ;;
     --no-link-bins) LINK_BINS=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -y|--yes) YES=1; shift ;;
@@ -80,6 +86,35 @@ UNIT_SRC="${REPO_ROOT}/packaging/systemd/user/studiocastd.service"
 HOME_DIR="${HOME:-}"
 [[ -n "$HOME_DIR" ]] || die "HOME is not set"
 
+default_build_dir() {
+  local d
+  for d in "${REPO_ROOT}/build" "${REPO_ROOT}/cmake-build-release" "${REPO_ROOT}/cmake-build-debug"; do
+    if [[ -d "${d}" ]]; then
+      echo "${d}"
+      return 0
+    fi
+  done
+  echo "${REPO_ROOT}/build"
+}
+
+normalize_build_dir() {
+  if [[ -z "${BUILD_DIR}" ]]; then
+    BUILD_DIR="$(default_build_dir)"
+  fi
+
+  # Expand "~" manually for convenience.
+  if [[ "${BUILD_DIR}" == "~"* ]]; then
+    BUILD_DIR="${BUILD_DIR/#~/${HOME_DIR}}"
+  fi
+
+  if [[ ! -d "${BUILD_DIR}" ]]; then
+    die "Build dir not found: ${BUILD_DIR}"
+  fi
+
+  # Canonicalize to an absolute path so symlinks in ~/.local/bin are never broken.
+  BUILD_DIR="$(cd "${BUILD_DIR}" && pwd)"
+}
+
 XDG_CONFIG_HOME_DIR="${XDG_CONFIG_HOME:-$HOME_DIR/.config}"
 SYSTEMD_USER_DIR="${XDG_CONFIG_HOME_DIR}/systemd/user"
 
@@ -88,6 +123,10 @@ UNIT_DST="${SYSTEMD_USER_DIR}/studiocastd.service"
 
 link_bins() {
   [[ -d "$BUILD_DIR" ]] || die "Build dir not found: $BUILD_DIR"
+
+  if [[ ! -x "${BUILD_DIR}/studiocastd" ]]; then
+    die "studiocastd not found in ${BUILD_DIR} (or not executable). Expected: ${BUILD_DIR}/studiocastd. Build it first, or pass --build-dir."
+  fi
 
   run mkdir -p -- "$LOCAL_BIN_DIR"
 
@@ -111,8 +150,10 @@ link_bins() {
     fi
   done
 
-  if [[ ! -x "${LOCAL_BIN_DIR}/studiocastd" ]]; then
-    die "studiocastd not found in $BUILD_DIR (or not executable). Build it first, or pass --build-dir."
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    if [[ ! -x "${LOCAL_BIN_DIR}/studiocastd" ]]; then
+      die "Failed to install ~/.local/bin/studiocastd (symlink missing or not executable)."
+    fi
   fi
 }
 
@@ -135,6 +176,8 @@ enable_unit() {
 }
 
 main() {
+  normalize_build_dir
+
   log "Repo root: $REPO_ROOT"
   log "Build dir: $BUILD_DIR"
   log "Dry-run: $([[ "$DRY_RUN" -eq 1 ]] && echo yes || echo no)"

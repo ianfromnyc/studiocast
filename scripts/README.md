@@ -9,7 +9,13 @@ Top-level scripts are intended to be stable entrypoints. Implementation lives in
 - `./scripts/setup.sh` — setup helper (Ubuntu-family distro dispatcher)
 - `./scripts/install.sh` — installer helper (subcommands)
 - `./scripts/uninstall.sh` — uninstall helper
-- `./scripts/format.sh` — formatting helper
+
+Common installs:
+
+- Full install (builds required targets, installs/enables the user service, installs curated Open Audio+Video model packs):
+  - `./scripts/install.sh full -y --build-dir ./build`
+- List curated model packs without downloading:
+  - `./scripts/install.sh full --list`
 
 Legacy script names are kept as compatibility wrappers for now.
 
