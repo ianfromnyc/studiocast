@@ -1,3 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# StudioCast Ubuntu-family setup helper.
+#
+# This script is invoked via ./scripts/setup.sh.
+# It installs build/runtime prerequisites and configures v4l2loopback.
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./scripts/setup.sh [options]
+
+Options:
+  --deps                 Install build/runtime deps (Qt/CMake/Ninja/etc + Pulse utils).
+  --v4l2loopback          Ensure v4l2loopback module is available (kernel module or DKMS).
+  --load-loopback         Load v4l2loopback now (creates /dev/videoN).
+  --persist-loopback      Persist module load/options across reboot.
+
+  --video-nr N            v4l2loopback device number (default: 10).
+  --label TEXT            v4l2loopback card label (default: "StudioCast Camera").
+  --exclusive-caps 0|1    v4l2loopback exclusive_caps (default: 1).
+
+  --onnxruntime-version V ONNX Runtime version to install (default: 1.17.3).
+  --onnxruntime-flavor    cpu|gpu (default: auto; gpu if nvidia-smi works, else cpu).
+  --onnxruntime-arch A    x64|aarch64 (default: auto from uname -m).
+
+  --build                 Configure + build StudioCast (dev convenience).
+  --build-dir DIR         Build directory (default: ./cmake-build-debug).
+  --build-type TYPE       CMake build type (default: Debug).
+
+  --maxine                Run Maxine helper (see scripts/setup/maxine.sh).
+  -y, --yes               Assume yes for apt installs.
+  -h, --help              Show help.
+
+Examples:
+  ./scripts/setup.sh --deps --v4l2loopback --load-loopback --persist-loopback
+  ./scripts/setup.sh --deps --onnxruntime-flavor gpu
+EOF
+}
 
 YES=0
 DO_DEPS=0
@@ -13,6 +53,27 @@ BUILD_TYPE="Debug"
 DO_MAXINE=0
 MAXINE_ARGS=()
 PARSE_MAXINE_ARGS=0
+
+# ONNX Runtime install defaults.
+# - Prefer GPU flavor if an NVIDIA driver is present.
+# - Let users override via CLI flags.
+ORT_VERSION="${ORT_VERSION:-1.17.3}"
+
+if [[ -z "${ORT_ARCH:-}" ]]; then
+  case "$(uname -m)" in
+    x86_64|amd64) ORT_ARCH="x64" ;;
+    aarch64|arm64) ORT_ARCH="aarch64" ;;
+    *) ORT_ARCH="x64" ;;
+  esac
+fi
+
+if [[ -z "${ORT_FLAVOR:-}" ]]; then
+  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    ORT_FLAVOR="gpu"
+  else
+    ORT_FLAVOR="cpu"
+  fi
+fi
 
 log() { echo "[setup] $*"; }
 

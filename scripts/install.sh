@@ -44,6 +44,8 @@ Options:
   --list                List curated audio+video model pack IDs and exit
   --dry-run             Print the commands that would be executed and exit
 
+  --skip-system-check   Skip system prerequisite checks (ONNX Runtime + v4l2loopback).
+
   -h, --help            Show help
 EOF
 }
@@ -61,6 +63,7 @@ run_full() {
   local force="0"
   local list="0"
   local dry_run="0"
+  local skip_system_check="0"
   local audio_dest=""
   local video_dest=""
   local -a audio_models=()
@@ -113,6 +116,10 @@ run_full() {
         dry_run="1"
         shift
         ;;
+      --skip-system-check)
+        skip_system_check="1"
+        shift
+        ;;
       -h|--help)
         full_usage
         exit 0
@@ -162,6 +169,89 @@ run_full() {
     exit 2
   fi
   build_dir="$(cd "${build_dir}" && pwd)"
+
+  system_preflight() {
+    local failures=0
+    local warn_only=0
+
+    # Keep this lightweight + non-invasive. No sudo, no installs.
+    echo "[install] System preflight (no sudo)..." >&2
+
+    have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+    if ! have_cmd python3; then
+      echo "[install] ERROR: python3 not found (required by model installers)." >&2
+      failures=1
+    fi
+
+    if ! have_cmd curl && ! have_cmd wget; then
+      echo "[install] ERROR: curl or wget is required to download model packs." >&2
+      failures=1
+    fi
+
+    # ONNX Runtime: preferred via pkg-config (build-time), but we also accept runtime-only installs.
+    local ort_ok=0
+    if have_cmd pkg-config && pkg-config --exists onnxruntime; then
+      ort_ok=1
+    elif have_cmd ldconfig && ldconfig -p 2>/dev/null | grep -q 'libonnxruntime\\.so'; then
+      # Runtime lib present, but rebuilds may fail if pkg-config isn't available.
+      ort_ok=1
+      warn_only=1
+      echo "[install] WARN: libonnxruntime.so found via ldconfig, but pkg-config 'onnxruntime' is missing." >&2
+      echo "[install]       Rebuilding may fail. Recommended: ./scripts/setup.sh --deps" >&2
+    fi
+    if [[ "${ort_ok}" -ne 1 ]]; then
+      echo "[install] ERROR: ONNX Runtime not found." >&2
+      echo "[install]        Fix (Ubuntu-family):" >&2
+      echo "[install]          ./scripts/setup.sh --deps" >&2
+      failures=1
+    fi
+
+    # v4l2loopback: module presence is required for the virtual camera device.
+    local video_nr="${STUDIOCAST_V4L2_VIDEO_NR:-10}"
+    if have_cmd modinfo && modinfo v4l2loopback >/dev/null 2>&1; then
+      :
+    else
+      echo "[install] ERROR: v4l2loopback kernel module not available (modinfo v4l2loopback failed)." >&2
+      echo "[install]        Fix (Ubuntu-family):" >&2
+      echo "[install]          ./scripts/setup.sh --v4l2loopback" >&2
+      echo "[install]        Or (more explicit):" >&2
+      echo "[install]          ./scripts/setup/v4l2loopback.sh --install" >&2
+      failures=1
+    fi
+
+    # Device node: not fatal (module may not be loaded yet), but warn loudly.
+    if [[ ! -e "/dev/video${video_nr}" ]]; then
+      echo "[install] WARN: /dev/video${video_nr} not found. The module may not be loaded yet." >&2
+      echo "[install]       To load now + persist:" >&2
+      echo "[install]         ./scripts/setup.sh --load-loopback --persist-loopback --video-nr ${video_nr}" >&2
+      echo "[install]       Or:" >&2
+      echo "[install]         ./scripts/setup/v4l2loopback.sh --load --persist --video-nr ${video_nr}" >&2
+    fi
+
+    # PulseAudio utils (or PipeWire pulse shim) are used for diagnostics and common setups.
+    if ! have_cmd pactl; then
+      echo "[install] WARN: pactl not found. Audio routing/diagnostics may be limited." >&2
+      echo "[install]       Fix (Ubuntu-family): ./scripts/setup.sh --deps" >&2
+    fi
+
+    if [[ "${failures}" -ne 0 ]]; then
+      echo "[install]" >&2
+      echo "[install] Preflight failed. Please run the setup helper first:" >&2
+      echo "[install]   ./scripts/setup.sh --deps --v4l2loopback --load-loopback --persist-loopback" >&2
+      echo "[install]" >&2
+      echo "[install] If you intentionally want to proceed anyway, re-run with: --skip-system-check" >&2
+      exit 2
+    fi
+
+    if [[ "${warn_only}" -ne 0 ]]; then
+      echo "[install] Preflight warnings detected; continuing." >&2
+    fi
+  }
+
+  if [[ "${skip_system_check}" -eq 0 ]]; then
+    system_preflight
+  fi
 
   if [[ ! -f "${build_dir}/CMakeCache.txt" ]]; then
     echo "[install] ERROR: ${build_dir} does not look like a configured CMake build dir (missing CMakeCache.txt)" >&2
