@@ -592,9 +592,10 @@ void VirtualCameraService::ThreadMain() {
       const bool wants_open_cuda_fx =
           wants_vb || wants_denoise || wants_auto_frame || wants_key_light;
 
-      // Effects that currently require Maxine (no Open CUDA implementation).
-      const bool wants_maxine_only =
-          has(effects::contract::kEffectIdEyeContact);
+      // Effects that currently require Maxine (no Open CUDA/Open Video fallback).
+      // NOTE: Eye Contact has an Open Video fallback in AUTO engine mode, so it
+      // should not block the pipeline when Maxine is unavailable.
+      const bool wants_maxine_only = false;
 
       const auto ttl = std::chrono::seconds(2);
 
@@ -715,11 +716,51 @@ void VirtualCameraService::ThreadMain() {
             if (!gate.ok) {
               effectsSuppressed = true;
               suppressMsg = gate.message;
-              effects_for_pipeline.virtual_background.mode =
-                  effects::VirtualBackgroundMode::none;
-              effects_for_pipeline.video_noise_removal.enabled = false;
-              effects_for_pipeline.auto_frame.enabled = false;
-              effects_for_pipeline.virtual_key_light.enabled = false;
+
+              // Selectively suppress only the effects that Open CUDA reports as unavailable.
+              const auto oc_has = [&](std::string_view id) {
+                const std::string sid(id);
+                return std::find(openCudaDiag->available_effects.begin(),
+                                 openCudaDiag->available_effects.end(),
+                                 sid) != openCudaDiag->available_effects.end();
+              };
+
+              if (effects_for_pipeline.video_noise_removal.enabled &&
+                  !oc_has(effects::contract::kEffectIdVideoNoiseRemoval)) {
+                effects_for_pipeline.video_noise_removal.enabled = false;
+              }
+
+              if (effects_for_pipeline.auto_frame.enabled &&
+                  !oc_has(effects::contract::kEffectIdAutoFrame)) {
+                effects_for_pipeline.auto_frame.enabled = false;
+              }
+
+              if (effects_for_pipeline.virtual_key_light.enabled &&
+                  !oc_has(effects::contract::kEffectIdVirtualKeyLight)) {
+                effects_for_pipeline.virtual_key_light.enabled = false;
+              }
+
+              if (effects_for_pipeline.virtual_background.mode !=
+                  effects::VirtualBackgroundMode::none) {
+                std::string_view vb_id;
+                switch (effects_for_pipeline.virtual_background.mode) {
+                case effects::VirtualBackgroundMode::blur:
+                  vb_id = effects::contract::kEffectIdVirtualBackgroundBlur;
+                  break;
+                case effects::VirtualBackgroundMode::remove:
+                  vb_id = effects::contract::kEffectIdVirtualBackgroundRemove;
+                  break;
+                case effects::VirtualBackgroundMode::replace:
+                  vb_id = effects::contract::kEffectIdVirtualBackgroundReplace;
+                  break;
+                default:
+                  break;
+                }
+                if (!vb_id.empty() && !oc_has(vb_id)) {
+                  effects_for_pipeline.virtual_background.mode =
+                      effects::VirtualBackgroundMode::none;
+                }
+              }
             }
           }
         }
