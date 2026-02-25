@@ -561,20 +561,32 @@ QString FriendlyBackendLabel(const QString &id) {
   const QString v = id.trimmed().toLower();
   if (v.isEmpty())
     return QStringLiteral("—");
-  if (v == QStringLiteral("maxine"))
+
+  // Collapse internal engine IDs into user-facing labels.
+  if (v == QStringLiteral("maxine") || v.startsWith(QStringLiteral("maxine")))
     return QStringLiteral("Maxine");
   if (v == QStringLiteral("open_cuda") || v == QStringLiteral("open_source") ||
-      v == QStringLiteral("open_video")) {
+      v == QStringLiteral("open_video") || v == QStringLiteral("open"))
     return QStringLiteral("Open Source");
-  }
+
   if (v == QStringLiteral("passthrough"))
     return QStringLiteral("Pass-through");
-  if (v == QStringLiteral("cpu"))
-    return QStringLiteral("CPU");
+
+  // Common compute descriptors that can appear in daemon mapping.
+  if (v == QStringLiteral("cuda") || v.startsWith(QStringLiteral("cuda_")) ||
+      v.contains(QStringLiteral("cuda_ep")))
+    return QStringLiteral("GPU");
   if (v == QStringLiteral("gpu"))
     return QStringLiteral("GPU");
+  if (v == QStringLiteral("cpu"))
+    return QStringLiteral("CPU");
+
+  if (v == QStringLiteral("builtin"))
+    return QStringLiteral("Built-in");
+
   return id;
 }
+
 
 QString SanitizeBackendNote(QString note) {
   note.replace(QStringLiteral("Open CUDA"), QStringLiteral("Open Source"),
@@ -2516,8 +2528,8 @@ void VideoPage::UpdateUiEnabled() {
       vbModelCombo_->blockSignals(false);
     }
 
-    // Show only when VB is active and the daemon reports Open Source as the
-    // actual backend.
+    // Show only when VB is active and Open Source is the selected (or
+    // effective) backend.
     QMap<QString, QString> backendById;
     if (!st.effects_backends.isEmpty()) {
       const auto parts = st.effects_backends.split(',', Qt::SkipEmptyParts);
@@ -2542,11 +2554,36 @@ void VideoPage::UpdateUiEnabled() {
       vbEffectId = QStringLiteral("virtual_background.replace");
 
     const QString vbBackend = backendById.value(vbEffectId);
-    const bool showModelRow =
-        daemonReachable_ && (st.pipeline_running || st.pipeline_starting) &&
-        vbOn &&
-        vbBackend.compare(QStringLiteral("open_cuda"), Qt::CaseInsensitive) ==
-            0;
+
+    auto isOpenBackend = [](const QString &backend) -> bool {
+      const QString b = backend.trimmed().toLower();
+      return b == QStringLiteral("open_cuda") || b == QStringLiteral("open_video") ||
+             b == QStringLiteral("open_source") || b == QStringLiteral("open");
+    };
+
+    bool showModelRow = false;
+    if (daemonReachable_ && st.open_cuda_present && vbOn) {
+      if (enginePref ==
+          studiocast::video::effects::EffectsEnginePreference::open_cuda) {
+        showModelRow = true;
+      } else if (enginePref ==
+                 studiocast::video::effects::EffectsEnginePreference::auto_select) {
+        const bool maxAvail =
+            maxineSupported && st.maxine_available_effects.contains(vbEffectId);
+        const bool openAvail =
+            st.open_cuda_present && st.open_cuda_ok &&
+            st.open_cuda_available_effects.contains(vbEffectId);
+
+        if (isOpenBackend(vbBackend)) {
+          showModelRow = true;
+        } else if (!maxineSupported && openAvail) {
+          showModelRow = true;
+        } else if (openAvail && !maxAvail) {
+          showModelRow = true;
+        }
+      }
+    }
+
     vbModelLabel_->setVisible(showModelRow);
     vbModelCombo_->setVisible(showModelRow);
   }
@@ -2556,6 +2593,62 @@ void VideoPage::UpdateUiEnabled() {
   {
     const auto reg = studiocast::open_video::ModelPackRegistry::ScanDefault();
     const auto models = reg.ListModels();
+
+    // Determine when Open Source is the active engine for each effect. In AUTO,
+    // some effects may run on Maxine while others fall back to Open Source.
+    QMap<QString, QString> backendById;
+    if (!st.effects_backends.isEmpty()) {
+      const auto parts = st.effects_backends.split(',', Qt::SkipEmptyParts);
+      for (const auto &raw : parts) {
+        const QString p = raw.trimmed();
+        const qsizetype colon = p.indexOf(QChar(':'));
+        if (colon <= 0)
+          continue;
+        const QString id = p.left(colon).trimmed();
+        const QString backend = p.mid(colon + 1).trimmed();
+        if (!id.isEmpty() && !backend.isEmpty())
+          backendById.insert(id, backend);
+      }
+    }
+
+    auto isOpenBackend = [](const QString &backend) -> bool {
+      const QString b = backend.trimmed().toLower();
+      return b == QStringLiteral("open_cuda") || b == QStringLiteral("open_video") ||
+             b == QStringLiteral("open_source") || b == QStringLiteral("open");
+    };
+
+    auto showOpenModelRow = [&](const QString &effectId, bool effectEnabled) -> bool {
+      if (!effectEnabled)
+        return false;
+
+      // Explicit Open Source mode: always show the per-effect model selector.
+      if (enginePref ==
+          studiocast::video::effects::EffectsEnginePreference::open_cuda)
+        return true;
+      if (enginePref ==
+          studiocast::video::effects::EffectsEnginePreference::maxine)
+        return false;
+
+      // AUTO: show only when Open Source is the likely or actual backend.
+      if (isOpenBackend(backendById.value(effectId)))
+        return true;
+
+      const bool maxAvail =
+          maxineSupported && st.maxine_available_effects.contains(effectId);
+      const bool openAvail = st.open_cuda_present && st.open_cuda_ok &&
+                             st.open_cuda_available_effects.contains(effectId);
+
+      // Global fallback: Maxine is unavailable, but Open Source can run.
+      if (!maxineSupported && openAvail)
+        return true;
+
+      // Effect-level fallback: effect exists in Open Source but not Maxine.
+      if (openAvail && !maxAvail)
+        return true;
+
+      return false;
+    };
+
 
     auto update_open_video_model_combo = [&](const char *task, QLabel *label,
                                              QComboBox *combo,
@@ -2624,6 +2717,14 @@ void VideoPage::UpdateUiEnabled() {
 
       {
         QSignalBlocker b(combo);
+
+        // If config references a model that isn't installed, show it explicitly
+        // instead of silently falling back to <auto>.
+        for (int i = combo->count() - 1; i >= 0; --i) {
+          if (combo->itemText(i).startsWith(QStringLiteral("<missing:")))
+            combo->removeItem(i);
+        }
+
         const QString want = QString::fromStdString(selected_model_id);
         if (want.isEmpty()) {
           combo->setCurrentIndex(0);
@@ -2650,7 +2751,7 @@ void VideoPage::UpdateUiEnabled() {
       label->setEnabled(daemonReachable_);
       if (!has_models) {
         const QString tip =
-            QString("No models installed for task '%1'.").arg(task);
+            QString("No models installed for task '%1'.\nRun: studiocast-open video-install-hints").arg(task);
         combo->setToolTip(tip);
         label->setToolTip(tip);
       } else {
@@ -2662,15 +2763,18 @@ void VideoPage::UpdateUiEnabled() {
     update_open_video_model_combo(
         "face_detection", autoFrameModelLabel_, autoFrameModelCombo_,
         &autoFrameModelItemsSig_, effects_.auto_frame.model_id,
-        effects_.auto_frame.enabled);
+        showOpenModelRow(QStringLiteral("auto_frame"),
+                        effects_.auto_frame.enabled));
     update_open_video_model_combo(
         "eye_contact", eyeContactModelLabel_, eyeContactModelCombo_,
         &eyeContactModelItemsSig_, effects_.eye_contact.model_id,
-        effects_.eye_contact.enabled);
+        showOpenModelRow(QStringLiteral("eye_contact"),
+                        effects_.eye_contact.enabled));
     update_open_video_model_combo("video_denoise", denoiseModelLabel_,
                                   denoiseModelCombo_, &denoiseModelItemsSig_,
                                   effects_.video_noise_removal.model_id,
-                                  effects_.video_noise_removal.enabled);
+                                  showOpenModelRow(QStringLiteral("video_noise_removal"),
+                                                  effects_.video_noise_removal.enabled));
   }
 
   // Auto Frame

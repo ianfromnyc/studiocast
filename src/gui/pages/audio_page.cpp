@@ -858,6 +858,12 @@ void AudioPage::SetAiControlsEnabled(bool enabled, const QString &reason) {
     aiBanner_->setText(reason);
   }
 
+  // Avoid stacked banners: when we show a warning, hide the info note.
+  if (aiInfoBanner_ && (!enabled || (aiBanner_ && aiBanner_->isVisible()))) {
+    aiInfoBanner_->setVisible(false);
+    aiInfoBanner_->setToolTip(QString());
+  }
+
   // Disable strength sliders when effect is Off (Broadcast-like).
   if (enabled) {
     if (micEffectCombo_ && strengthSlider_) {
@@ -891,9 +897,13 @@ void AudioPage::UpdateEngineUiVisibility() {
     if (active.isEmpty())
       active = engineActiveValue_->text();
     active = active.trimmed().toLower();
-    activeIsOpen = (active == "open_source") || (active == "open_audio") ||
-                   active.contains("open_source") ||
-                   active.contains("open_audio");
+    activeIsOpen =
+        (active == "open_source") || (active == "open_audio") ||
+        (active == "open_cuda") || (active == "open_video") ||
+        (active == "open source") ||
+        active.contains("open_source") || active.contains("open_audio") ||
+        active.contains("open_cuda") || active.contains("open_video") ||
+        active.contains("open source");
   }
 
   const bool showOpen =
