@@ -14,7 +14,7 @@ For sourcing, conversion, and hosting of the actual model binaries (ONNX / dlib 
 
 ## Subject areas
 
-- `segmentation/` — matte/alpha models (`task = "matting"`)
+- `matting/` — matte/alpha models (`task = "matting"`)
 - `face_detection/` — face detection models
   - Templates include YuNet in Good/Better/Best variants (int8 / int8bq / fp32).
 - `face_landmarks/` — facial landmark detectors

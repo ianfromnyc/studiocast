@@ -3,7 +3,7 @@
   "display_name": "FastEnhancer-S (VCTK-Demand v1, 16kHz)",
   "sample_rate": 16000,
   "channels": 1,
-  "onnx_filename": "fastenhancer_s.onnx",
+  "onnx_filename": "model.onnx",
   "effects": [
     "noise_removal",
     "studio_voice",
@@ -20,7 +20,7 @@
     "project": "FastEnhancer",
     "repo": "https://github.com/aask1357/fastenhancer",
     "release_tag": "onnx-vd-v1.0.0",
-    "asset": "fastenhancer_s.onnx",
+    "asset": "model.onnx",
     "sha256": "e2d0e91bbfab4af1316bb2c41126a38c8b3cd015b93bb630d651af8fdbf7f2e8",
     "notes": "Streaming wav2wav ONNX export. Input=10ms hop (160 @ 16kHz), caches are handled as state tensors."
   }

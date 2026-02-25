@@ -80,13 +80,13 @@ Default root:
 
 Where:
 
-- `<subject>` is a functional category like `segmentation`.
+- `<subject>` is a functional category like `matting` (legacy name: `segmentation`).
 - `<pack_dir>` is any directory name (it does not need to match `model.json:id`).
 
 Each pack contains:
 
-- `model.json` (schema v1; see below)
-- `model.onnx` (filename configurable via `onnx_filename`)
+- `model.json` (matting packs include v1-style fields; multi-task packs use schema v2 with `files[]`)
+- model artifact files (e.g. `model.onnx`, `shape_predictor_68_face_landmarks.dat`)
 - `LICENSE.txt`
 
 Helper tool:

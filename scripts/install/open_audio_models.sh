@@ -11,7 +11,7 @@ set -euo pipefail
 # This script downloads model binaries (not shipped in this repo) and writes a
 # model pack directory containing:
 #   - model.json
-#   - *.onnx
+#   - model.onnx
 #   - LICENSE.txt
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,14 +27,22 @@ MODEL_IDS=(
   "fastenhancer_l_vd_v1"
 )
 
-# Upstream download info (FastEnhancer ONNX release).
-FASTENHANCER_TAG="onnx-vd-v1.0.0"
-FASTENHANCER_BASE_URL="https://github.com/aask1357/fastenhancer/releases/download/${FASTENHANCER_TAG}"
-FASTENHANCER_S_ASSET="fastenhancer_s.onnx"
+# Hosted download info (Hugging Face repo containing StudioCast-packaged model artifacts).
+#
+# You can override these at runtime:
+#   STUDIOCAST_HF_REPO_ID=10dallasj/studiocast
+#   STUDIOCAST_HF_REV=main
+#   STUDIOCAST_HF_OPEN_AUDIO_PREFIX=open_audio   (or empty if you uploaded to repo root)
+HF_REPO_ID="${STUDIOCAST_HF_REPO_ID:-10dallasj/studiocast}"
+HF_REV="${STUDIOCAST_HF_REV:-main}"
+HF_OPEN_AUDIO_PREFIX="${STUDIOCAST_HF_OPEN_AUDIO_PREFIX:-open_audio}"
+HF_BASE_URL="https://huggingface.co/${HF_REPO_ID}/resolve/${HF_REV}"
+
+FASTENHANCER_S_ASSET="model.onnx"
 FASTENHANCER_S_SHA256="e2d0e91bbfab4af1316bb2c41126a38c8b3cd015b93bb630d651af8fdbf7f2e8"
-FASTENHANCER_M_ASSET="fastenhancer_m.onnx"
+FASTENHANCER_M_ASSET="model.onnx"
 FASTENHANCER_M_SHA256="367059e724dd367c056dc906e9698ec5864c80c9a88e0597f7a2b0f81c506aaa"
-FASTENHANCER_L_ASSET="fastenhancer_l.onnx"
+FASTENHANCER_L_ASSET="model.onnx"
 FASTENHANCER_L_SHA256="915d4ae3871c3271e75c194e72a3ff031d5593be4f6f56ccb78df82071ef0750"
 
 usage() {
@@ -63,7 +71,11 @@ After install:
 
 Notes:
   - This script does NOT require Maxine.
-  - Model binaries are downloaded from upstream GitHub releases.
+  - Model binaries are downloaded from Hugging Face.
+  - Configure the source repo via env vars:
+      STUDIOCAST_HF_REPO_ID=10dallasj/studiocast
+      STUDIOCAST_HF_REV=main
+      STUDIOCAST_HF_OPEN_AUDIO_PREFIX=open_audio   (or empty if uploaded to repo root)
 USAGE
 }
 
@@ -98,6 +110,34 @@ download_to() {
   fi
 }
 
+hf_join() {
+  # Join path components with '/'. Empty components are skipped.
+  local out=""
+  local part
+  for part in "$@"; do
+    [[ -n "${part}" ]] || continue
+    if [[ -z "${out}" ]]; then
+      out="${part}"
+    else
+      out="${out%/}/${part#/}"
+    fi
+  done
+  echo "${out}"
+}
+
+hf_url_for_pack_file() {
+  local pack_id="$1"
+  local filename="$2"
+
+  # Try the configured prefix first, then fall back to repo root.
+  local rel1
+  local rel2
+  rel1="$(hf_join "${HF_OPEN_AUDIO_PREFIX}" "${pack_id}" "${filename}")"
+  rel2="$(hf_join "${pack_id}" "${filename}")"
+
+  echo "${HF_BASE_URL}/${rel1}"$'\n'"${HF_BASE_URL}/${rel2}"
+}
+
 install_pack_fastenhancer_variant() {
   local pack_id="$1"
   local asset="$2"
@@ -122,8 +162,11 @@ install_pack_fastenhancer_variant() {
     cp -f "${tpl_dir}/README.txt" "${pack_dir}/README.txt"
   fi
 
-  local onnx_path="${pack_dir}/${asset}"
-  local url="${FASTENHANCER_BASE_URL}/${asset}"
+  local onnx_path="${pack_dir}/model.onnx"
+
+  # Download from HF (prefer) using our pack layout.
+  local url_candidates
+  url_candidates="$(hf_url_for_pack_file "${pack_id}" "${asset}")"
 
   if [[ -f "${onnx_path}" && "${force}" != "1" ]]; then
     # Verify existing file.
@@ -136,12 +179,23 @@ install_pack_fastenhancer_variant() {
     echo "⚠ ${pack_id}: existing ONNX checksum mismatch; re-downloading (use --force to silence)."
   fi
 
-  echo "→ Downloading ${pack_id}: ${url}"
+  echo "→ Downloading ${pack_id} from HF repo: ${HF_REPO_ID}"
   local tmp
   tmp="$(mktemp)"
   trap 'rm -f "${tmp}"' RETURN
 
-  download_to "${url}" "${tmp}"
+  local ok="0"
+  while IFS= read -r url; do
+    [[ -n "${url}" ]] || continue
+    if download_to "${url}" "${tmp}"; then
+      ok="1"
+      break
+    fi
+    echo "⚠ download failed: ${url}" >&2
+  done <<< "${url_candidates}"
+  if [[ "${ok}" != "1" ]]; then
+    die "Failed to download ${pack_id}/${asset} from HF repo ${HF_REPO_ID}.\nTried:\n${url_candidates}"
+  fi
 
   local got
   got="$(sha256_file "${tmp}")"

@@ -3143,7 +3143,7 @@ int RunSelfTest() {
             const char *name;
           };
           const Subject subjects[] = {
-              {"segmentation", "open_video templates: segmentation"},
+              {"matting", "open_video templates: matting"},
               {"eye_contact", "open_video templates: eye_contact"},
               {"face_detection", "open_video templates: face_detection"},
               {"face_landmarks", "open_video templates: face_landmarks"},

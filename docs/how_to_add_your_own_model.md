@@ -18,7 +18,7 @@ Packs are organized by **subject area**, then by **model pack**:
 
 ```
 open_video/
-  segmentation/
+  matting/
     <pack_dir>/
       model.json
       LICENSE.txt
@@ -91,13 +91,13 @@ Current/planned tasks:
 
 ## `model.json` schema
 
-StudioCast currently has a stable **v1 schema** for `task = "matting"` (used by the Open CUDA backend).
+StudioCast supports **v1-style matting fields** (input/output/preprocess) required by the Open CUDA backend.
 
-For the additional video tasks above, StudioCast uses a more flexible **v2 schema**.
+Most non-matting tasks use a more flexible **v2 schema** (`schema_version = 2`) with an explicit `files[]` list.
 
-### Schema v1 (matting)
+### Matting fields (Open CUDA)
 
-V1 is used by Open CUDA `task="matting"` packs.
+Open CUDA matting packs require the v1-style `input` / `output` / `preprocess` fields. Packs may be schema v1 or schema v2, but must include these fields.
 
 Required fields:
 
@@ -109,7 +109,7 @@ Required fields:
 - `output` (object): `name`, `kind` (currently `"alpha"`), `dtype`
 - `preprocess` (object): `kind` (`"linear"`), `scale`, `mean[]`, `std[]`
 
-Example (see `./resources/model_packs/open_video/segmentation/**/model.json`).
+Example (see `./resources/model_packs/open_video/matting/**/model.json`).
 
 ### Schema v2 (multi-task)
 

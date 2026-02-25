@@ -17,9 +17,26 @@
     "dtype": "float32"
   },
   "preprocess": {
-    "mean": [0.485, 0.456, 0.406],
-    "std":  [0.229, 0.224, 0.225],
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ],
     "color": "rgb",
     "range": "0..1"
-  }
+  },
+  "schema_version": 2,
+  "files": [
+    {
+      "name": "model.onnx",
+      "kind": "onnx",
+      "role": "main",
+      "sha256": "1fd47f959a0a6a4909e2c9fe0b6037399d28d725f2cd08d24b8c1421044cc207"
+    }
+  ]
 }

@@ -86,7 +86,7 @@ For sourcing/conversion/hosting of the actual model binaries (ONNX / dlib files)
 
 ### Model pack layout
 
-Open CUDA currently consumes only the **segmentation/matting** packs (`task = "matting"`).
+Open CUDA currently consumes only the **matting** packs (`task = "matting"`).
 
 Each Open CUDA matting pack is a directory containing `model.json`, `model.onnx`, and `LICENSE.txt`.
 The directory name does **not** need to match `model.json:id` (human-friendly names are OK).
@@ -94,7 +94,7 @@ The directory name does **not** need to match `model.json:id` (human-friendly na
 Recommended layout (mirrors `resources/model_packs/open_video`):
 
 ```text
-~/.local/share/studiocast/models/open_video/segmentation/<pack_dir>/
+~/.local/share/studiocast/models/open_video/matting/<pack_dir>/
   model.onnx
   model.json
   LICENSE.txt
