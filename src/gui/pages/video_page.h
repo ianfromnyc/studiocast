@@ -143,6 +143,7 @@ private:
   QCheckBox *vignetteCenterOnFaceCheck_ = nullptr;
 
   QLabel *effectEngineValue_ = nullptr;
+  QLabel *engineInfoBanner_ = nullptr;
   QLabel *maxineBanner_ = nullptr;
 
   QPushButton *openInstallHintsBtn_ = nullptr;

@@ -91,6 +91,33 @@ bool DaemonRequest(const std::string &request, std::string *outJson,
     *outJson = res.json;
   return true;
 }
+QString FirstLine(const QString &s) {
+  const QString t = s.trimmed();
+  const int nl = t.indexOf('\n');
+  if (nl < 0)
+    return t;
+  return t.left(nl).trimmed();
+}
+
+QString FriendlyBackendLabel(const QString &id) {
+  const QString v = id.trimmed().toLower();
+  if (v.isEmpty())
+    return QStringLiteral("—");
+  if (v == QStringLiteral("maxine"))
+    return QStringLiteral("Maxine");
+  if (v == QStringLiteral("open_source") || v == QStringLiteral("open_audio"))
+    return QStringLiteral("Open Source");
+  if (v == QStringLiteral("passthrough"))
+    return QStringLiteral("Pass-through");
+  if (v == QStringLiteral("loopback"))
+    return QStringLiteral("Loopback");
+  if (v == QStringLiteral("pipeline"))
+    return QStringLiteral("Pipeline");
+  if (v == QStringLiteral("off"))
+    return QStringLiteral("Off");
+  return id;
+}
+
 } // namespace
 
 AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
@@ -194,7 +221,7 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
       openAudioModelLabel_ = new QLabel("Model:", micEffectsBox_);
       openAudioModelCombo_ = new QComboBox(micEffectsBox_);
       openAudioModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-      openAudioModelCombo_->addItem("Default (auto)", "");
+      openAudioModelCombo_->addItem("<auto>", "");
       modelRow->addWidget(openAudioModelLabel_);
       modelRow->addWidget(openAudioModelCombo_, 1);
       aiLayout->addLayout(modelRow);
@@ -322,7 +349,7 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
       speakerOpenAudioModelCombo_ = new QComboBox(speakerEffectsBox_);
       speakerOpenAudioModelCombo_->setSizeAdjustPolicy(
           QComboBox::AdjustToContents);
-      speakerOpenAudioModelCombo_->addItem("Default (auto)", "");
+      speakerOpenAudioModelCombo_->addItem("<auto>", "");
       modelRow->addWidget(speakerOpenAudioModelLabel_);
       modelRow->addWidget(speakerOpenAudioModelCombo_, 1);
       spkLayout->addLayout(modelRow);
@@ -860,8 +887,13 @@ void AudioPage::UpdateEngineUiVisibility() {
   // has fallen back to Open Source.
   bool activeIsOpen = false;
   if (engineActiveValue_) {
-    const QString active = engineActiveValue_->text().trimmed().toLower();
-    activeIsOpen = (active == "open_source") || active.contains("open_source");
+    QString active = engineActiveValue_->toolTip();
+    if (active.isEmpty())
+      active = engineActiveValue_->text();
+    active = active.trimmed().toLower();
+    activeIsOpen = (active == "open_source") || (active == "open_audio") ||
+                   active.contains("open_source") ||
+                   active.contains("open_audio");
   }
 
   const bool showOpen =
@@ -969,19 +1001,60 @@ void AudioPage::RefreshDaemonAudioStatus() {
   const bool running = pipeline.value("running").toBool(false);
   const bool starting = pipeline.value("starting").toBool(false);
   const QString lastErr = pipeline.value("last_error").toString();
-
   const QString backendActive = pipeline.value("backend_active").toString();
   const QString effectsNote = pipeline.value("effects_note").toString();
 
+  // Tab-specific summary: in Speakers mode, prefer the speakers pipeline backend
+  // and note rather than the microphone pipeline.
+  QString backendForUi = backendActive;
+  QString noteForUi = effectsNote;
+  if (mode_ == AudioPageMode::Speakers) {
+    backendForUi.clear();
+    noteForUi.clear();
+
+    if (audio.contains("speakers")) {
+      const auto spk = audio.value("speakers").toObject();
+      const bool spkRouting = spk.value("routing_active").toBool(false);
+      const QString spkRouteMode = spk.value("route_mode").toString();
+      const QString spkBackend = spk.value("backend_active").toString();
+      const QString spkNote = spk.value("effects_note").toString();
+
+      QString spkPipeBackend;
+      QString spkPipeNote;
+      if (spk.contains("pipeline")) {
+        const auto spkPipe = spk.value("pipeline").toObject();
+        spkPipeBackend = spkPipe.value("backend_active").toString();
+        spkPipeNote = spkPipe.value("effects_note").toString();
+      }
+
+      backendForUi = spkBackend.isEmpty() ? spkPipeBackend : spkBackend;
+      noteForUi = spkNote.trimmed().isEmpty() ? spkPipeNote : spkNote;
+
+      const QString rm = spkRouteMode.trimmed().toLower();
+      if (rm == QStringLiteral("loopback")) {
+        backendForUi = QStringLiteral("loopback");
+        if (noteForUi.trimmed().isEmpty() && spkRouting) {
+          noteForUi =
+              QStringLiteral("Speakers routed via loopback (pass-through).");
+        }
+      } else if (rm == QStringLiteral("off")) {
+        backendForUi = QStringLiteral("off");
+        noteForUi.clear();
+      }
+    }
+  }
+
   if (engineActiveValue_) {
-    engineActiveValue_->setText(backendActive.isEmpty() ? QStringLiteral("—")
-                                                        : backendActive);
+    engineActiveValue_->setText(FriendlyBackendLabel(backendForUi));
+    engineActiveValue_->setToolTip(backendForUi);
   }
 
   if (aiInfoBanner_) {
-    const QString note = effectsNote.trimmed();
-    aiInfoBanner_->setVisible(!note.isEmpty());
-    aiInfoBanner_->setText(note);
+    const QString full = noteForUi.trimmed();
+    const QString first = FirstLine(full);
+    aiInfoBanner_->setVisible(!first.isEmpty());
+    aiInfoBanner_->setText(first);
+    aiInfoBanner_->setToolTip(full);
   }
 
   daemonStatusText_ =
@@ -1144,18 +1217,24 @@ void AudioPage::RefreshDaemonAudioStatus() {
     const QString prior = combo->currentData().toString();
     combo->blockSignals(true);
     combo->clear();
-    combo->addItem("Default (auto)", "");
+    combo->addItem("<auto>", "");
     if (!openAudioStatusPresent_) {
       combo->addItem("<Open Audio status not reported>", "");
+    } else if (!openAudioOk_) {
+      combo->addItem("<Open Audio unavailable>", "");
     } else {
       const auto models = openAudio.value("models").toArray();
+      if (models.isEmpty()) {
+        combo->addItem("<no models installed>", "");
+      }
       for (const auto &mv : models) {
         const auto m = mv.toObject();
         const QString id = m.value("id").toString();
         const QString name = m.value("display_name").toString();
         if (id.isEmpty())
           continue;
-        const QString label = name.isEmpty() ? id : (name + " (" + id + ")");
+        const QString label =
+            name.isEmpty() ? id : (name + " (" + id + ")");
         combo->addItem(label, id);
       }
     }
@@ -1195,6 +1274,35 @@ void AudioPage::RefreshDaemonAudioStatus() {
     combo->setCurrentIndex(idx >= 0 ? idx : 0);
   };
 
+  auto setModelComboWithMissing = [](QComboBox *combo, const QString &id) {
+    if (!combo)
+      return;
+    const QString want = id.trimmed();
+    combo->blockSignals(true);
+    for (int i = combo->count() - 1; i >= 0; --i) {
+      if (combo->itemText(i).startsWith(QStringLiteral("<missing:"))) {
+        combo->removeItem(i);
+      }
+    }
+    if (want.isEmpty()) {
+      combo->setCurrentIndex(0);
+      combo->blockSignals(false);
+      return;
+    }
+    int idx = combo->findData(want);
+    if (idx >= 0) {
+      combo->setCurrentIndex(idx);
+      combo->blockSignals(false);
+      return;
+    }
+    const int insertAt = std::min(1, combo->count());
+    combo->insertItem(insertAt,
+                      QStringLiteral("<missing: %1>").arg(want), want);
+    combo->setCurrentIndex(insertAt);
+    combo->blockSignals(false);
+  };
+
+
   if (micEffectCombo_) {
     QString id = "off";
     if (studio) {
@@ -1215,12 +1323,7 @@ void AudioPage::RefreshDaemonAudioStatus() {
   if (strengthValueLabel_ && strengthSlider_) {
     strengthValueLabel_->setText(QString::number(strengthSlider_->value()));
   }
-
-  if (openAudioModelCombo_) {
-    const int idx = openAudioModelCombo_->findData(micModelId);
-    if (idx >= 0)
-      openAudioModelCombo_->setCurrentIndex(idx);
-  }
+  setModelComboWithMissing(openAudioModelCombo_, micModelId);
   if (openAudioModelPathEdit_) {
     openAudioModelPathEdit_->setText(micModelPath);
   }
@@ -1244,12 +1347,7 @@ void AudioPage::RefreshDaemonAudioStatus() {
     speakerStrengthValueLabel_->setText(
         QString::number(speakerStrengthSlider_->value()));
   }
-
-  if (speakerOpenAudioModelCombo_) {
-    const int idx = speakerOpenAudioModelCombo_->findData(spkModelId);
-    if (idx >= 0)
-      speakerOpenAudioModelCombo_->setCurrentIndex(idx);
-  }
+  setModelComboWithMissing(speakerOpenAudioModelCombo_, spkModelId);
   if (speakerOpenAudioModelPathEdit_) {
     speakerOpenAudioModelPathEdit_->setText(spkModelPath);
   }

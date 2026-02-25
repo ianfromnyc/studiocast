@@ -549,6 +549,81 @@ QString FormatMaxineReasonCode(const QString &code) {
   const std::string s = code.toStdString();
   return QString::fromStdString(studiocast::maxine::reasons::ToEnglish(s));
 }
+QString FirstLine(const QString &s) {
+  const QString t = s.trimmed();
+  const int nl = t.indexOf('\n');
+  if (nl < 0)
+    return t;
+  return t.left(nl).trimmed();
+}
+
+QString FriendlyBackendLabel(const QString &id) {
+  const QString v = id.trimmed().toLower();
+  if (v.isEmpty())
+    return QStringLiteral("—");
+  if (v == QStringLiteral("maxine"))
+    return QStringLiteral("Maxine");
+  if (v == QStringLiteral("open_cuda") || v == QStringLiteral("open_source") ||
+      v == QStringLiteral("open_video")) {
+    return QStringLiteral("Open Source");
+  }
+  if (v == QStringLiteral("passthrough"))
+    return QStringLiteral("Pass-through");
+  if (v == QStringLiteral("cpu"))
+    return QStringLiteral("CPU");
+  if (v == QStringLiteral("gpu"))
+    return QStringLiteral("GPU");
+  return id;
+}
+
+QString SanitizeBackendNote(QString note) {
+  note.replace(QStringLiteral("Open CUDA"), QStringLiteral("Open Source"),
+               Qt::CaseInsensitive);
+  note.replace(QStringLiteral("open_cuda"), QStringLiteral("open_source"),
+               Qt::CaseInsensitive);
+  return note;
+}
+
+QString SummarizeEffectsBackends(const QString &raw) {
+  const QString t = raw.trimmed();
+  if (t.isEmpty())
+    return {};
+
+  QStringList keys;
+  const auto parts = t.split(',', Qt::SkipEmptyParts);
+  for (const auto &part : parts) {
+    const QString p = part.trimmed();
+    if (p.isEmpty())
+      continue;
+
+    QString backend;
+    const qsizetype colon = p.indexOf(QChar(':'));
+    if (colon >= 0) {
+      backend = p.mid(colon + 1).trimmed();
+    } else {
+      backend = p;
+    }
+
+    if (backend.isEmpty())
+      continue;
+    const QString key = backend.trimmed().toLower();
+    if (!keys.contains(key))
+      keys.push_back(key);
+  }
+
+  if (keys.isEmpty())
+    return {};
+
+  QStringList labels;
+  for (const auto &k : keys) {
+    labels.push_back(FriendlyBackendLabel(k));
+  }
+
+  if (labels.size() == 1)
+    return labels[0];
+  return QStringLiteral("Mixed (%1)").arg(labels.join(QStringLiteral(" + ")));
+}
+
 
 bool DaemonRequest(const std::string &request, std::string *outJson,
                    QString *outErr) {
@@ -630,13 +705,13 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   sizeRow->addStretch(1);
   boxLayout->addLayout(sizeRow);
 
-  // Effect engine preference (Auto / Maxine / Open CUDA)
+  // Backend preference (Auto / Maxine / Open Source)
   auto *engineRow = new QHBoxLayout();
-  engineRow->addWidget(new QLabel("Effect engine:", box));
+  engineRow->addWidget(new QLabel("Backend:", box));
   engineCombo_ = new QComboBox(box);
   engineCombo_->addItem("Auto", "auto");
   engineCombo_->addItem("Maxine", "maxine");
-  engineCombo_->addItem("Open CUDA", "open_cuda");
+  engineCombo_->addItem("Open Source", "open_cuda");
   engineRow->addWidget(engineCombo_);
   engineRow->addSpacing(12);
   engineRow->addWidget(new QLabel("Active:", box));
@@ -645,6 +720,12 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   engineRow->addWidget(effectEngineValue_);
   engineRow->addStretch(1);
   boxLayout->addLayout(engineRow);
+
+  engineInfoBanner_ = new QLabel(box);
+  engineInfoBanner_->setWordWrap(true);
+  engineInfoBanner_->setProperty("scBanner", "info");
+  engineInfoBanner_->setVisible(false);
+  boxLayout->addWidget(engineInfoBanner_);
 
   maxineBanner_ = new QLabel(box);
   maxineBanner_->setWordWrap(true);
@@ -1660,7 +1741,7 @@ void VideoPage::OnOpenInstallHints() {
   QString text;
   QString title;
   if (pref == studiocast::video::effects::EffectsEnginePreference::open_cuda) {
-    title = "Open CUDA install hints";
+    title = "Open Source install hints";
     text = runHints(resolveProgram("studiocast-open"), "studiocast-open");
   } else if (pref ==
              studiocast::video::effects::EffectsEnginePreference::maxine) {
@@ -2003,15 +2084,37 @@ void VideoPage::UpdateUiEnabled() {
   if (engineCombo_) {
     engineCombo_->setEnabled(daemonReachable_);
   }
-
   if (effectEngineValue_) {
     if (!daemonReachable_) {
       effectEngineValue_->setText("—");
-    } else if (!st.effects_backends.isEmpty()) {
-      effectEngineValue_->setText(st.effects_backends);
+      effectEngineValue_->setToolTip(QString());
+    } else if (!enabled) {
+      effectEngineValue_->setText(QStringLiteral("Off"));
+      effectEngineValue_->setToolTip(QString());
+    } else if (!st.pipeline_running) {
+      effectEngineValue_->setText(QStringLiteral("Starting…"));
+      effectEngineValue_->setToolTip(QString());
+    } else if (st.effects_backends.trimmed().isEmpty()) {
+      effectEngineValue_->setText(QStringLiteral("Pass-through"));
+      effectEngineValue_->setToolTip(QString());
     } else {
-      effectEngineValue_->setText(QString::fromStdString(
-          studiocast::video::effects::ToString(enginePref)));
+      const QString raw = st.effects_backends.trimmed();
+      const QString summary = SummarizeEffectsBackends(raw);
+      effectEngineValue_->setText(summary.isEmpty() ? raw : summary);
+      effectEngineValue_->setToolTip(raw);
+    }
+  }
+
+  if (engineInfoBanner_) {
+    if (!daemonReachable_) {
+      engineInfoBanner_->setVisible(false);
+      engineInfoBanner_->setToolTip(QString());
+    } else {
+      const QString full = SanitizeBackendNote(st.effects_note).trimmed();
+      const QString first = FirstLine(full);
+      engineInfoBanner_->setVisible(!first.isEmpty());
+      engineInfoBanner_->setText(first);
+      engineInfoBanner_->setToolTip(full);
     }
   }
 
@@ -2026,44 +2129,30 @@ void VideoPage::UpdateUiEnabled() {
       const auto fmtMaxineBlocked = [&]() -> QString {
         QString s = "Maxine unavailable.";
         if (!st.maxine_blocked_reason.isEmpty()) {
-          s += "\n" + FormatMaxineReasonCode(st.maxine_blocked_reason);
-        }
-        if (!st.maxine_blocked_details.isEmpty()) {
-          s += "\n\n";
-          for (const auto &d : st.maxine_blocked_details) {
-            s += "• " + d + "\n";
-          }
+          const QString reason =
+              FormatMaxineReasonCode(st.maxine_blocked_reason);
+          if (!reason.isEmpty())
+            s += "\n" + reason;
         }
         return s.trimmed();
       };
 
       const auto fmtOpenCudaBlocked = [&]() -> QString {
-        QString s = "Open CUDA unavailable.";
+        QString s = "Open Source unavailable.";
         if (!st.open_cuda_present) {
-          s += "\nDaemon did not report Open CUDA status (older studiocastd).";
+          s += "\nStatus not reported by daemon.";
         } else if (!st.open_cuda_ok) {
           if (st.open_cuda_installed_models.isEmpty()) {
-            s += "\nNo usable Open CUDA model packs were found.";
+            s += "\nNo usable model packs were found.";
           }
         }
 
         if (!st.open_cuda_missing_models.isEmpty()) {
-          s += "\n\nMissing/invalid model packs:";
-          for (auto it = st.open_cuda_missing_models.begin();
-               it != st.open_cuda_missing_models.end(); ++it) {
-            s += "\n• " + it.key() + ": " + it.value();
-          }
+          s += QStringLiteral("\nMissing/invalid model pack(s): %1")
+                   .arg(st.open_cuda_missing_models.size());
         }
 
-        if (!st.open_cuda_install_hints.isEmpty()) {
-          s += "\n\n" + st.open_cuda_install_hints.join("\n");
-        } else {
-          s += "\n\nModel packs: "
-               "~/.local/share/studiocast/models/open_video/<subject>/"
-               "<pack_dir>/";
-        }
-
-        s += "\n\nRun: studiocast-open install-hints";
+        s += "\nRun: studiocast-open install-hints";
         return s.trimmed();
       };
 
@@ -2071,22 +2160,21 @@ void VideoPage::UpdateUiEnabled() {
           studiocast::video::effects::EffectsEnginePreference::maxine) {
         if (!st.maxine_supported) {
           msg = fmtMaxineBlocked();
-          msg += "\n\nEffects are disabled. Open Diagnostics for install/path "
-                 "hints.";
+          msg += "\n\nEffects disabled. Open Diagnostics for details.";
           show = true;
         }
       } else if (enginePref == studiocast::video::effects::
                                    EffectsEnginePreference::open_cuda) {
         if (!st.open_cuda_present || !st.open_cuda_ok) {
           msg = fmtOpenCudaBlocked();
-          msg += "\n\nEffects are disabled. Open Diagnostics for details.";
+          msg += "\n\nEffects disabled. Open Diagnostics for details.";
           show = true;
         }
       } else {
         // auto_select
         if (!st.maxine_supported &&
             !(st.open_cuda_present && st.open_cuda_ok)) {
-          msg = "No effects engine is available.";
+          msg = "No backend is available.";
           msg += "\n\n" + fmtMaxineBlocked();
           msg += "\n\n" + fmtOpenCudaBlocked();
           show = true;
@@ -2095,13 +2183,15 @@ void VideoPage::UpdateUiEnabled() {
 
       maxineBanner_->setText(msg);
       maxineBanner_->setVisible(show);
+      if (engineInfoBanner_ && show)
+        engineInfoBanner_->setVisible(false);
     }
   }
 
   if (openInstallHintsBtn_) {
     if (enginePref ==
         studiocast::video::effects::EffectsEnginePreference::open_cuda) {
-      openInstallHintsBtn_->setText("Open CUDA install hints");
+      openInstallHintsBtn_->setText("Open Source install hints");
     } else if (enginePref ==
                studiocast::video::effects::EffectsEnginePreference::maxine) {
       openInstallHintsBtn_->setText("Maxine install hints");
@@ -2134,7 +2224,7 @@ void VideoPage::UpdateUiEnabled() {
               studiocast::video::effects::EffectsEnginePreference::open_cuda &&
           !st.open_cuda_missing_models.isEmpty()) {
         note = QStringLiteral(
-            "NOTE: Some Open CUDA model packs are missing/invalid.\n");
+            "NOTE: Some Open Source model packs are missing/invalid.\n");
         for (auto it = st.open_cuda_missing_models.begin();
              it != st.open_cuda_missing_models.end(); ++it) {
           note += QStringLiteral("• ") + it.key() + QStringLiteral(": ") +
@@ -2192,7 +2282,7 @@ void VideoPage::UpdateUiEnabled() {
       return st.open_cuda_available_effects.contains(id);
     }
 
-    // auto_select: prefer Maxine if available, else Open CUDA.
+    // auto_select: prefer Maxine if available, else Open Source.
     if (maxineSupported && st.maxine_available_effects.contains(id))
       return true;
     if (st.open_cuda_present && st.open_cuda_ok &&
@@ -2223,13 +2313,13 @@ void VideoPage::UpdateUiEnabled() {
     if (enginePref ==
         studiocast::video::effects::EffectsEnginePreference::open_cuda) {
       if (!st.open_cuda_present) {
-        return "Open CUDA status not reported by daemon.";
+        return "Open Source status not reported by daemon.";
       }
       if (!st.open_cuda_ok) {
         QStringList lines;
-        lines << "Open CUDA unavailable.";
+        lines << "Open Source unavailable.";
         if (st.open_cuda_installed_models.isEmpty()) {
-          lines << "No usable Open CUDA model packs were found.";
+          lines << "No usable Open Source model packs were found.";
         }
         if (!st.open_cuda_missing_models.isEmpty()) {
           lines << "";
@@ -2347,7 +2437,7 @@ void VideoPage::UpdateUiEnabled() {
       browseReplaceImageBtn_->setEnabled(on);
   }
 
-  // Virtual Background model selection (Open CUDA-only).
+  // Virtual Background model selection (Open Source-only).
   if (vbModelLabel_ && vbModelCombo_) {
     // Populate model list from daemon status (best-effort).
     if (daemonReachable_ && st.open_cuda_present) {
@@ -2375,7 +2465,13 @@ void VideoPage::UpdateUiEnabled() {
       if (sig != vbModelItemsSig_) {
         vbModelCombo_->blockSignals(true);
         vbModelCombo_->clear();
-        vbModelCombo_->addItem(QStringLiteral("Default (auto)"), QString());
+        if (!st.open_cuda_default_model_id.isEmpty()) {
+          vbModelCombo_->addItem(
+              QStringLiteral("<auto: %1>").arg(st.open_cuda_default_model_id),
+              QString());
+        } else {
+          vbModelCombo_->addItem(QStringLiteral("<auto>"), QString());
+        }
 
         for (const auto &m : st.open_cuda_models) {
           if (m.id.isEmpty())
@@ -2399,26 +2495,28 @@ void VideoPage::UpdateUiEnabled() {
       vbModelCombo_->blockSignals(true);
 
       // If config references a model that isn't installed, show it explicitly
-      // instead of silently falling back to Default.
-      if (vbModelCombo_->count() > 0 &&
-          vbModelCombo_->itemText(0).startsWith(QStringLiteral("Missing: "))) {
-        vbModelCombo_->removeItem(0);
+      // instead of silently falling back to <auto>.
+      for (int i = vbModelCombo_->count() - 1; i >= 0; --i) {
+        if (vbModelCombo_->itemText(i).startsWith(
+                QStringLiteral("<missing:"))) {
+          vbModelCombo_->removeItem(i);
+        }
       }
 
       int idx = vbModelCombo_->findData(selectedId);
       if (!selectedId.isEmpty() && idx < 0) {
-        const QString missingLabel =
-            QStringLiteral("Missing: %1 (select a valid model)")
-                .arg(selectedId);
-        vbModelCombo_->insertItem(0, missingLabel, selectedId);
-        idx = 0;
+        const int insertAt = std::min(1, vbModelCombo_->count());
+        vbModelCombo_->insertItem(
+            insertAt, QStringLiteral("<missing: %1>").arg(selectedId),
+            selectedId);
+        idx = insertAt;
       }
 
       vbModelCombo_->setCurrentIndex(idx >= 0 ? idx : 0);
       vbModelCombo_->blockSignals(false);
     }
 
-    // Show only when VB is active and the daemon reports Open CUDA as the
+    // Show only when VB is active and the daemon reports Open Source as the
     // actual backend.
     QMap<QString, QString> backendById;
     if (!st.effects_backends.isEmpty()) {
