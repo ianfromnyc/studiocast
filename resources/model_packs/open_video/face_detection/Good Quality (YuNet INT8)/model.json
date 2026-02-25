@@ -5,14 +5,14 @@
   "task": "face_detection",
   "files": [
     {
-      "name": "face_detection_yunet_2023mar_int8.onnx",
+      "name": "model.onnx",
       "kind": "onnx",
       "role": "main",
-      "sha256": ""
+      "sha256": "dcff547e130b5669d20dac7392c3984055662ea6b38e75e724bfebc2308295db"
     }
   ],
   "onnx": {
-    "main": "face_detection_yunet_2023mar_int8.onnx",
+    "main": "model.onnx",
     "inputs": [
       {
         "name": "input",
@@ -24,21 +24,66 @@
       }
     ],
     "outputs": [
-      { "name": "cls_8", "kind": "scores", "dtype": "float32" },
-      { "name": "cls_16", "kind": "scores", "dtype": "float32" },
-      { "name": "cls_32", "kind": "scores", "dtype": "float32" },
-
-      { "name": "obj_8", "kind": "objectness", "dtype": "float32" },
-      { "name": "obj_16", "kind": "objectness", "dtype": "float32" },
-      { "name": "obj_32", "kind": "objectness", "dtype": "float32" },
-
-      { "name": "bbox_8", "kind": "boxes", "dtype": "float32" },
-      { "name": "bbox_16", "kind": "boxes", "dtype": "float32" },
-      { "name": "bbox_32", "kind": "boxes", "dtype": "float32" },
-
-      { "name": "kps_8", "kind": "keypoints", "dtype": "float32" },
-      { "name": "kps_16", "kind": "keypoints", "dtype": "float32" },
-      { "name": "kps_32", "kind": "keypoints", "dtype": "float32" }
+      {
+        "name": "cls_8",
+        "kind": "scores",
+        "dtype": "float32"
+      },
+      {
+        "name": "cls_16",
+        "kind": "scores",
+        "dtype": "float32"
+      },
+      {
+        "name": "cls_32",
+        "kind": "scores",
+        "dtype": "float32"
+      },
+      {
+        "name": "obj_8",
+        "kind": "objectness",
+        "dtype": "float32"
+      },
+      {
+        "name": "obj_16",
+        "kind": "objectness",
+        "dtype": "float32"
+      },
+      {
+        "name": "obj_32",
+        "kind": "objectness",
+        "dtype": "float32"
+      },
+      {
+        "name": "bbox_8",
+        "kind": "boxes",
+        "dtype": "float32"
+      },
+      {
+        "name": "bbox_16",
+        "kind": "boxes",
+        "dtype": "float32"
+      },
+      {
+        "name": "bbox_32",
+        "kind": "boxes",
+        "dtype": "float32"
+      },
+      {
+        "name": "kps_8",
+        "kind": "keypoints",
+        "dtype": "float32"
+      },
+      {
+        "name": "kps_16",
+        "kind": "keypoints",
+        "dtype": "float32"
+      },
+      {
+        "name": "kps_32",
+        "kind": "keypoints",
+        "dtype": "float32"
+      }
     ],
     "preprocess": {
       "kind": "opencv_yunet",
@@ -53,7 +98,7 @@
   },
   "origin": {
     "upstream_repo": "https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet",
-    "upstream_model": "face_detection_yunet_2023mar_int8.onnx",
+    "upstream_model": "model.onnx",
     "license": "MIT",
     "notes": "This is the int8 quantized YuNet variant (\"YuNet quant\" in the upstream README accuracy table)."
   }

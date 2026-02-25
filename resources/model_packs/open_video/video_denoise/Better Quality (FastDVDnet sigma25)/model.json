@@ -5,14 +5,14 @@
   "task": "video_denoise",
   "files": [
     {
-      "name": "fastdvdnet_sigma25.onnx",
+      "name": "model.onnx",
       "kind": "onnx",
       "role": "main",
-      "sha256": ""
+      "sha256": "500517e2706130ab84d140add26353ded2afb1317b6ab747c6417fa7134963dc"
     }
   ],
   "onnx": {
-    "main": "fastdvdnet_sigma25.onnx",
+    "main": "model.onnx",
     "inputs": [
       {
         "name": "noisy",
@@ -45,7 +45,10 @@
       "range": "0..1"
     },
     "postprocess": {
-      "clamp": [0.0, 1.0]
+      "clamp": [
+        0.0,
+        1.0
+      ]
     }
   },
   "runtime_hints": {

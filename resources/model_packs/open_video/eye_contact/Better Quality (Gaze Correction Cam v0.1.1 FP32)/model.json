@@ -11,19 +11,25 @@
       "name": "gaze_flx_left.onnx",
       "kind": "onnx",
       "role": "left",
-      "sha256": ""
+      "sha256": "1a5129972dbc2ace9170d79ad4986e8c5130a79ac2180c01c826ef242d8e3d00"
     },
     {
       "name": "gaze_flx_right.onnx",
       "kind": "onnx",
       "role": "right",
-      "sha256": ""
+      "sha256": "736b7c6b91d1475d45083b00325d54d380ae1c51767e1f7ef69a3d14083cfcf1"
     }
   ],
   "onnx": {
     "models": [
-      { "role": "left", "file": "gaze_flx_left.onnx" },
-      { "role": "right", "file": "gaze_flx_right.onnx" }
+      {
+        "role": "left",
+        "file": "gaze_flx_left.onnx"
+      },
+      {
+        "role": "right",
+        "file": "gaze_flx_right.onnx"
+      }
     ],
     "inputs": [
       {
@@ -71,6 +77,9 @@
   "origin": {
     "upstream_repo": "https://github.com/WangWilly/gaze-correction-cam",
     "upstream_tag": "v0.1.1",
+    "release_assets": [
+      "weights.zip"
+    ],
     "license": "BSD-3-Clause",
     "notes": "Upstream ships TensorFlow checkpoints (L/R eye). StudioCast expects C++-friendly ONNX exports hosted separately.\nThis pack is the reference FP32 template (no binaries are committed)."
   }
