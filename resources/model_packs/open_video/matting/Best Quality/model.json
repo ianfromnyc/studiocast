@@ -36,7 +36,7 @@
       "name": "model.onnx",
       "kind": "onnx",
       "role": "main",
-      "sha256": "f6e95cc5ebcc40630b14e1094f6c5a55dca177fb644e3b4ab18248dbfd4bfe24"
+      "sha256": "1b5f0c0a4afa6aa60a3a70280a0d196e58c8210f1603ffc9f5f51b45290ef40e"
     }
   ]
 }

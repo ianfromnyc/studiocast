@@ -8,7 +8,7 @@
       "name": "model.onnx",
       "kind": "onnx",
       "role": "main",
-      "sha256": "0b6ceccb83e3d6cb38ae9a92499469937eb210e0267f26f7e68c5a13b53818c3"
+      "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
     }
   ],
   "onnx": {

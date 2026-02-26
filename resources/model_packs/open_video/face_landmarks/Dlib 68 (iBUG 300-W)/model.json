@@ -8,7 +8,7 @@
       "name": "shape_predictor_68_face_landmarks.dat",
       "kind": "dlib_shape_predictor",
       "role": "main",
-      "sha256": ""
+      "sha256": "fbdc2cb80eb9aa7a758672cbfdda32ba6300efe9b6e6c7a299ff7e736b11b92f"
     }
   ],
   "dlib": {

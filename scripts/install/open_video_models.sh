@@ -31,8 +31,8 @@ DEFAULT_DEST_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/studiocast/models/open_v
 #   STUDIOCAST_HF_OPEN_VIDEO_FALLBACK_PREFIX=open_cuda   (legacy; optional)
 HF_REPO_ID="${STUDIOCAST_HF_REPO_ID:-10dallasj/studiocast}"
 HF_REV="${STUDIOCAST_HF_REV:-main}"
-HF_OPEN_VIDEO_PREFIX="${STUDIOCAST_HF_OPEN_VIDEO_PREFIX:-open_video}"
-HF_OPEN_VIDEO_FALLBACK_PREFIX="${STUDIOCAST_HF_OPEN_VIDEO_FALLBACK_PREFIX:-open_cuda}"
+HF_OPEN_VIDEO_PREFIX="${STUDIOCAST_HF_OPEN_VIDEO_PREFIX:-}"
+HF_OPEN_VIDEO_FALLBACK_PREFIX="${STUDIOCAST_HF_OPEN_VIDEO_FALLBACK_PREFIX:-}"
 HF_BASE_URL="https://huggingface.co/${HF_REPO_ID}/resolve/${HF_REV}"
 
 usage() {
@@ -128,10 +128,10 @@ hf_join() {
 }
 
 subject_alt_for_rel() {
-  # If the relative path begins with matting/ or segmentation/, return the other.
+  # If the relative path begins with matting/ or segmentation/, return matting/
   local rel="$1"
   if [[ "${rel}" == matting/* ]]; then
-    echo "segmentation/${rel#matting/}"
+    echo "matting/${rel#matting/}"
   elif [[ "${rel}" == segmentation/* ]]; then
     echo "matting/${rel#segmentation/}"
   else
@@ -251,12 +251,15 @@ verify_onnx_io_names() {
 
   [[ -n "${expected_in}" && -n "${expected_out}" ]] || return 0
 
-  python3 - <<PY
+  python3 - "${onnx_path}" "${expected_in}" "${expected_out}" <<'PY' >/dev/null
 import sys
 try:
     import onnx
 except Exception as e:
-    print(f"WARN: cannot import onnx python package; skipping IO-name validation for {sys.argv[1]} ({e})", file=sys.stderr)
+    print(
+        f"WARN: cannot import onnx python package; skipping IO-name validation for {sys.argv[1]} ({e})",
+        file=sys.stderr,
+    )
     raise SystemExit(0)
 
 m = onnx.load(sys.argv[1])
@@ -268,9 +271,7 @@ if ins[0] != sys.argv[2]:
     raise SystemExit(f"Unexpected ONNX input name: got '{ins[0]}', expected '{sys.argv[2]}'")
 if outs[0] != sys.argv[3]:
     raise SystemExit(f"Unexpected ONNX output name: got '{outs[0]}', expected '{sys.argv[3]}'")
-print("OK")
 PY
-  "${onnx_path}" "${expected_in}" "${expected_out}" >/dev/null
 }
 
 patch_birefnet_output_to_alpha() {
