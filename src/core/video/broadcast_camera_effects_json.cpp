@@ -657,8 +657,6 @@ bool ApplyBroadcastCameraEffectsPatchJson(
       return false;
     if (found) {
       effects->auto_frame.enabled = en;
-      if (en)
-        effects->virtual_background.mode = VirtualBackgroundMode::none;
     }
 
     int strength = effects->auto_frame.strength;
