@@ -78,19 +78,7 @@ BuildBroadcastEffectsPlan(const BroadcastCameraEffects &fx) {
     vb_id.clear();
   }
 
-  // 2) Auto Frame and Virtual Background are mutually exclusive.
-  // Contract rule: if both are enabled by a patch/config drift, Auto Frame
-  // wins.
-  if (enable_auto_frame && enable_virtual_background) {
-    plan.disabled.push_back(DisabledEffectByRule{
-        .id = vb_id,
-        .reason =
-            "Disabled: incompatible with `auto_frame` (auto_frame wins)."});
-    enable_virtual_background = false;
-    vb_id.clear();
-  }
-
-  // 3) Mirror is intentionally not implemented in the pipeline.
+  // 2) Mirror is intentionally not implemented in the pipeline.
   // Keep it in the schema/UI for backward compatibility, but never schedule it.
   if (enable_mirror) {
     plan.disabled.push_back(DisabledEffectByRule{
@@ -103,9 +91,11 @@ BuildBroadcastEffectsPlan(const BroadcastCameraEffects &fx) {
   //  - Noise removal early improves subsequent stages.
   //  - Eye Contact operates on facial features; run before background/key-light
   //  composites.
-  //  - Key Light and Virtual Background both depend on segmentation; run before
-  //  framing.
-  //  - Auto Frame last so it frames the final image.
+  //  - Virtual Background and Key Light both depend on segmentation; run before
+  //    framing. Prefer Virtual Background before Key Light so the matting output
+  //    can be reused (avoids redundant matting work and extra transfers on the
+  //    Open CUDA path).
+  //  - Auto Frame last so it frames the final composite.
   //  - Vignette after framing.
 
   if (enable_noise_removal) {
@@ -118,13 +108,13 @@ BuildBroadcastEffectsPlan(const BroadcastCameraEffects &fx) {
         std::string(contract::kEffectIdEyeContact));
   }
 
+  if (enable_virtual_background) {
+    plan.ordered_effect_ids.push_back(vb_id);
+  }
+
   if (enable_key_light) {
     plan.ordered_effect_ids.push_back(
         std::string(contract::kEffectIdVirtualKeyLight));
-  }
-
-  if (enable_virtual_background) {
-    plan.ordered_effect_ids.push_back(vb_id);
   }
 
   if (enable_auto_frame) {

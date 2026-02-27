@@ -2370,6 +2370,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     int last_frame_w = 0;
     int last_frame_h = 0;
 
+    // Matte fallback throttling.
+    // When Auto Frame falls back to foreground matting (no face detections), avoid running the
+    // matting model every frame unless another stage (e.g. virtual background) already computed
+    // the matte for this capture sequence.
+    std::uint64_t last_matte_query_sequence = 0;
+    bool have_last_matte_box = false;
+    studiocast::maxine::effects::RectF last_matte_box_px{};
+
     std::vector<std::uint8_t> tmp_rgb;
 
     bool have_smoothed_crop = false;
@@ -2394,6 +2402,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       last_tracking_kind = TrackingKind::kNone;
       last_frame_w = 0;
       last_frame_h = 0;
+      last_matte_query_sequence = 0;
+      have_last_matte_box = false;
+      last_matte_box_px = {};
     }
 
     static bool ComputeMatteBoxPxFromAlpha(const std::vector<float>& alpha,
@@ -2552,6 +2563,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       have_smoothed_crop = false;
       last_had_detection = false;
       last_tracking_kind = TrackingKind::kNone;
+      last_matte_query_sequence = 0;
+      have_last_matte_box = false;
+      last_matte_box_px = {};
       active_model_id = current_model_id;
       last_frame_w = frame_w;
       last_frame_h = frame_h;
@@ -2579,10 +2593,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
+      const bool face_detector_ran = (face_detections != nullptr);
       const bool have_faces = (face_detections && !face_detections->empty());
 
       std::string err;
-      if (!EnsureInitialized(width, height, fx, /*require_matte_tracking=*/!have_faces, &err)) {
+      if (!EnsureInitialized(width, height, fx,
+                             /*require_matte_tracking=*/!face_detector_ran,
+                             &err)) {
         // Best-effort: if we can't initialize tracking, just bypass auto frame.
         if (error && !err.empty()) {
           *error = err;
@@ -2621,33 +2638,74 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         found = true;
         kind = TrackingKind::kFace;
       } else if (matte) {
-        const std::vector<float>* alpha_cpu = nullptr;
-        int alpha_w = 0;
-        int alpha_h = 0;
-        std::string alpha_err;
-        if (matte->GetAlphaCpuForFrame(rgb,
-                                       stride,
-                                       capture_sequence,
-                                       width,
-                                       height,
-                                       fx,
-                                       &alpha_cpu,
-                                       &alpha_w,
-                                       &alpha_h,
-                                       &alpha_err) &&
-            alpha_cpu) {
-          found = ComputeMatteBoxPxFromAlpha(*alpha_cpu,
-                                             alpha_w,
-                                             alpha_h,
-                                             width,
-                                             height,
-                                             &box_px);
-          kind = found ? TrackingKind::kMatte : TrackingKind::kNone;
-        } else {
-          if (error && !alpha_err.empty()) {
-            *error = "Open CUDA Auto Frame: " + alpha_err;
+        // If another stage already computed matting for this frame (e.g. Virtual Background
+        // or Virtual Key Light), reuse the cached result immediately.
+        const bool matte_cached_this_frame =
+            matte->cached_matte_valid && matte->cached_matte_sequence == capture_sequence;
+
+        // Otherwise, rate-limit matting inference when it is only used for tracking.
+        // Matting can be significantly more expensive than face detection.
+        constexpr std::uint64_t kMatteFallbackIntervalFrames = 10;
+        const bool should_query_matte =
+            matte_cached_this_frame || (last_matte_query_sequence == 0) ||
+            (capture_sequence >=
+             (last_matte_query_sequence + kMatteFallbackIntervalFrames));
+
+        if (!should_query_matte) {
+          if (have_last_matte_box) {
+            box_px = last_matte_box_px;
+            found = true;
+            kind = TrackingKind::kMatte;
           }
-          return true;
+        } else {
+          // Ensure the shared matting session exists, but avoid allocating VB-only buffers
+          // when matting is only used for tracking.
+          std::string matte_init_err;
+          if (!matte->EnsureInitialized(width, height, fx, &matte_init_err,
+                                        /*require_vb_buffers=*/false)) {
+            if (error && !matte_init_err.empty()) {
+              *error = "Open CUDA Auto Frame: " + matte_init_err;
+            }
+            return true;
+          }
+
+          const std::vector<float>* alpha_cpu = nullptr;
+          int alpha_w = 0;
+          int alpha_h = 0;
+          std::string alpha_err;
+          if (matte->GetAlphaCpuForFrame(rgb,
+                                         stride,
+                                         capture_sequence,
+                                         width,
+                                         height,
+                                         fx,
+                                         &alpha_cpu,
+                                         &alpha_w,
+                                         &alpha_h,
+                                         &alpha_err) &&
+              alpha_cpu) {
+            found = ComputeMatteBoxPxFromAlpha(*alpha_cpu,
+                                               alpha_w,
+                                               alpha_h,
+                                               width,
+                                               height,
+                                               &box_px);
+            kind = found ? TrackingKind::kMatte : TrackingKind::kNone;
+
+            last_matte_query_sequence = capture_sequence;
+            if (found) {
+              have_last_matte_box = true;
+              last_matte_box_px = box_px;
+            } else {
+              have_last_matte_box = false;
+              last_matte_box_px = {};
+            }
+          } else {
+            if (error && !alpha_err.empty()) {
+              *error = "Open CUDA Auto Frame: " + alpha_err;
+            }
+            return true;
+          }
         }
       }
 
@@ -5143,7 +5201,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
       }
 
-    } else if (has(studiocast::video::effects::contract::kEffectIdAutoFrame)) {
+    }
+
+    // Auto Frame.
+    if (has(studiocast::video::effects::contract::kEffectIdAutoFrame)) {
       const std::string stage_id = std::string(studiocast::video::effects::contract::kEffectIdAutoFrame);
 
       // Vignette attachment is only supported on the Maxine GPU paths. If we end up using the
@@ -5800,6 +5861,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       // CPU->GPU upload for matting. We can avoid that duplicate upload by deferring the key
       // light stage until after the Open CUDA VB stage has already uploaded and computed the matte.
       bool pending_open_cuda_key_light = false;
+      bool open_cuda_vb_ran_this_frame = false;
 
       auto apply_stage = [&](const std::string& stage_id) {
         bool defer_readback = allow_defer_readback && (stage_id == last_stage_for_defer);
@@ -5938,7 +6000,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (have_open_cuda_key_light) {
             // If Open CUDA VB is also enabled, defer key light until after VB so the VB upload
             // can be reused for matte computation (avoids a redundant upload in key light).
-            if (open_cuda_any_stage_enabled) {
+            if (open_cuda_any_stage_enabled && !open_cuda_vb_ran_this_frame) {
               pending_open_cuda_key_light = true;
               return;
             }
@@ -5987,6 +6049,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           }
 
           if (have_open_cuda_vb) {
+            open_cuda_vb_ran_this_frame = true;
             // If the Open CUDA key light stage was deferred earlier in the chain (to avoid a
             // redundant CPU->GPU upload for matting), apply it here immediately after the Open CUDA
             // VB stage finishes (or is bypassed) so downstream stage ordering is preserved.

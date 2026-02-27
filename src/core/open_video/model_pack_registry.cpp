@@ -621,7 +621,12 @@ std::optional<ModelPack> ModelPackRegistry::Find(const std::string &task,
 std::string
 ModelPackRegistry::DefaultModelIdForTask(const std::string &task) const {
   if (task == "matting") {
-    // Middle-of-the-road quality default for foreground matting.
+    // Prefer the lightest matting model by default (good enough for tracking/segmentation
+    // and keeps latency low on mid-range GPUs).
+    if (Find("matting", "modnet-webnn-256-fp32"))
+      return "modnet-webnn-256-fp32";
+
+    // Fall back to a higher-quality option when MODNet isn't installed.
     if (Find("matting", "birefnet_lite"))
       return "birefnet_lite";
   }

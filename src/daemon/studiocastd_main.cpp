@@ -1589,12 +1589,6 @@ int main(int argc, char **argv) {
                 bfx.vignette.center_on_tracked_face = en;
               }
 
-              // Enforce mutually exclusive background modes.
-              if (bfx.auto_frame.enabled) {
-                bfx.virtual_background.mode =
-                    studiocast::video::effects::VirtualBackgroundMode::none;
-              }
-
               // Persist via canonical schema.
               newCfg.pipeline.effects = bfx;
 

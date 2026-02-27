@@ -228,9 +228,6 @@ bool ApplyVirtualBackgroundEffectPatch(VirtualBackgroundMode mode,
   if (found) {
     if (enabled) {
       fx->virtual_background.mode = mode;
-      // If a virtual background mode is explicitly enabled by a patch,
-      // it should disable auto-frame unless the same patch re-enables it.
-      fx->auto_frame.enabled = false;
     } else {
       if (fx->virtual_background.mode == mode)
         fx->virtual_background.mode = VirtualBackgroundMode::none;
@@ -307,15 +304,10 @@ bool ApplyVirtualBackgroundEffectPatch(VirtualBackgroundMode mode,
 }
 
 void ResolveBackgroundMutex(BroadcastCameraEffects *fx) {
-  if (!fx)
-    return;
-  if (fx->auto_frame.enabled) {
-    fx->virtual_background.mode = VirtualBackgroundMode::none;
-    return;
-  }
-  if (fx->virtual_background.mode != VirtualBackgroundMode::none) {
-    fx->auto_frame.enabled = false;
-  }
+  // Auto Frame and Virtual Background can be enabled simultaneously.
+  // Keep this helper as a no-op for backward compatibility with older configs
+  // and IPC paths that still call it.
+  (void)fx;
 }
 
 } // namespace
@@ -566,7 +558,6 @@ bool ApplyBroadcastCameraEffectsPatchJson(
     if (found) {
       if (mode == "auto_frame") {
         effects->auto_frame.enabled = true;
-        effects->virtual_background.mode = VirtualBackgroundMode::none;
       } else {
         VirtualBackgroundMode m{};
         if (!ParseVirtualBackgroundMode(mode, &m)) {
@@ -575,9 +566,6 @@ bool ApplyBroadcastCameraEffectsPatchJson(
           return false;
         }
         effects->virtual_background.mode = m;
-        if (m != VirtualBackgroundMode::none) {
-          effects->auto_frame.enabled = false;
-        }
       }
     }
 
@@ -633,8 +621,6 @@ bool ApplyBroadcastCameraEffectsPatchJson(
       return false;
     if (found) {
       effects->auto_frame.enabled = en;
-      if (en)
-        effects->virtual_background.mode = VirtualBackgroundMode::none;
     }
 
     int strength = effects->auto_frame.strength;

@@ -1223,10 +1223,8 @@ bool VideoPage::SyncFromDaemonConfig() {
 
   const bool autoFrame = effects_.auto_frame.enabled;
   const int autoFrameStrength = effects_.auto_frame.strength;
-  const QString vbMode =
-      autoFrame ? QStringLiteral("auto_frame")
-                : QString::fromStdString(studiocast::video::effects::ToString(
-                      effects_.virtual_background.mode));
+  const QString vbMode = QString::fromStdString(
+      studiocast::video::effects::ToString(effects_.virtual_background.mode));
   const int vbStrength = effects_.virtual_background.strength;
   const QString vbRemoveColor =
       QString::fromStdString(effects_.virtual_background.remove_color);
@@ -1487,7 +1485,8 @@ bool VideoPage::SendDaemonVideoEffects() {
       backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
   const bool bgIsAutoFrame = (bg == "auto_frame");
 
-  // Auto Frame vs Virtual Background are mutually exclusive in the current UX.
+  // Auto Frame is controlled independently from Virtual Background.
+  // (The background combo may still expose an "auto_frame" sentinel for legacy UX.)
   effects_.auto_frame.enabled =
       (autoFrameCheck_ && autoFrameCheck_->isChecked()) || bgIsAutoFrame;
   if (autoFrameZoomSlider_) {
@@ -1499,7 +1498,9 @@ bool VideoPage::SendDaemonVideoEffects() {
   }
 
   // Virtual background mode.
-  if (bgIsAutoFrame || effects_.auto_frame.enabled) {
+  // Allow Virtual Background and Auto Frame simultaneously. If the background mode
+  // combo is set to the legacy "auto_frame" sentinel, treat it as "none".
+  if (bgIsAutoFrame) {
     effects_.virtual_background.mode =
         studiocast::video::effects::VirtualBackgroundMode::none;
   } else {

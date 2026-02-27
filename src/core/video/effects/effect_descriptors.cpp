@@ -60,8 +60,7 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     d.id = std::string(contract::kEffectIdVirtualBackgroundBlur);
     d.display_name = "Virtual Background — Blur";
     d.required_components = {RequiredComponent::maxine_vfx};
-    d.mutex_groups = {std::string(contract::kMutexGroupVirtualBackgroundMode),
-                      std::string(contract::kMutexGroupBackgroundOrAutoFrame)};
+    d.mutex_groups = {std::string(contract::kMutexGroupVirtualBackgroundMode)};
     d.pipeline_order = 40;
     d.params = {
         ParamDescriptor{.id = std::string(contract::param::kEnabled),
@@ -85,8 +84,7 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     d.id = std::string(contract::kEffectIdVirtualBackgroundRemove);
     d.display_name = "Virtual Background — Remove";
     d.required_components = {RequiredComponent::maxine_vfx};
-    d.mutex_groups = {std::string(contract::kMutexGroupVirtualBackgroundMode),
-                      std::string(contract::kMutexGroupBackgroundOrAutoFrame)};
+    d.mutex_groups = {std::string(contract::kMutexGroupVirtualBackgroundMode)};
     d.pipeline_order = 40;
     d.params = {
         ParamDescriptor{.id = std::string(contract::param::kEnabled),
@@ -128,8 +126,7 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     d.id = std::string(contract::kEffectIdVirtualBackgroundReplace);
     d.display_name = "Virtual Background — Replace";
     d.required_components = {RequiredComponent::maxine_vfx};
-    d.mutex_groups = {std::string(contract::kMutexGroupVirtualBackgroundMode),
-                      std::string(contract::kMutexGroupBackgroundOrAutoFrame)};
+    d.mutex_groups = {std::string(contract::kMutexGroupVirtualBackgroundMode)};
     d.pipeline_order = 40;
     d.params = {
         ParamDescriptor{.id = std::string(contract::param::kEnabled),
@@ -179,7 +176,6 @@ std::vector<VideoEffectDescriptor> VideoEffectDescriptors() {
     // Auto Frame can run either via Maxine AR (when available) or via the Open
     // CUDA fallback. We only require the generic GPU utility component here.
     d.required_components = {RequiredComponent::gpu_utility};
-    d.mutex_groups = {std::string(contract::kMutexGroupBackgroundOrAutoFrame)};
     d.pipeline_order = 20;
     d.params = {
         ParamDescriptor{.id = std::string(contract::param::kEnabled),

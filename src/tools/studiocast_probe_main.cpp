@@ -1706,8 +1706,7 @@ int RunSelfTest() {
                                        kEffectIdVirtualBackgroundReplace));
     }
 
-    // Auto Frame and Virtual Background are mutually exclusive; Auto Frame
-    // wins.
+    // Auto Frame and Virtual Background can be enabled simultaneously.
     {
       BroadcastCameraEffects fx;
       fx.auto_frame.enabled = true;
@@ -1715,12 +1714,15 @@ int RunSelfTest() {
 
       const auto plan = BuildBroadcastEffectsPlan(fx);
       expectVecEq(
-          "EffectPlan: auto_frame wins over vb.blur", plan.ordered_effect_ids,
-          {std::string(
-              studiocast::video::effects::contract::kEffectIdAutoFrame)});
-      expectTrue("EffectPlan: vb.blur disabled when auto_frame enabled",
-                 disabledHas(plan, studiocast::video::effects::contract::
-                                       kEffectIdVirtualBackgroundBlur));
+          "EffectPlan: vb.blur + auto_frame are both scheduled",
+          plan.ordered_effect_ids,
+          {std::string(studiocast::video::effects::contract::
+                           kEffectIdVirtualBackgroundBlur),
+           std::string(
+               studiocast::video::effects::contract::kEffectIdAutoFrame)});
+      expectTrue("EffectPlan: vb.blur is not disabled when auto_frame enabled",
+                 !disabledHas(plan, studiocast::video::effects::contract::
+                                        kEffectIdVirtualBackgroundBlur));
     }
 
     // Ordering + vignette attachment target.
@@ -2428,9 +2430,10 @@ int RunSelfTest() {
     } else {
       expectTrue("effects patch auto_frame enabled", fx.auto_frame.enabled);
       expectIntEq("effects patch auto_frame zoom", fx.auto_frame.strength, 77);
-      expectTrue("effects patch auto_frame disables vb",
-                 fx.virtual_background.mode ==
-                     studiocast::video::effects::VirtualBackgroundMode::none);
+      expectTrue(
+          "effects patch auto_frame does not clear vb mode",
+          fx.virtual_background.mode ==
+              studiocast::video::effects::VirtualBackgroundMode::replace);
     }
 
     const std::string blur =
@@ -2442,8 +2445,8 @@ int RunSelfTest() {
       std::printf("[FAIL] ApplyBroadcastCameraEffectsPatchJsonText blur: %s\n",
                   jerr.c_str());
     } else {
-      expectTrue("effects patch blur disables auto_frame",
-                 !fx.auto_frame.enabled);
+      expectTrue("effects patch blur keeps auto_frame enabled",
+                 fx.auto_frame.enabled);
       expectTrue("effects patch vb blur",
                  fx.virtual_background.mode ==
                      studiocast::video::effects::VirtualBackgroundMode::blur);
