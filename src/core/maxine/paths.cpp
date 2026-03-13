@@ -63,6 +63,25 @@ fs::path FindFirstExistingLib(const std::vector<fs::path> &dirs,
       }
     }
   }
+
+  for (const auto &d : dirs) {
+    if (!DirExists(d))
+      continue;
+    for (const auto &entry : fs::directory_iterator(d, ec)) {
+      if (ec) {
+        break;
+      }
+      if (!entry.is_regular_file(ec)) {
+        continue;
+      }
+      const auto file = entry.path().filename().string();
+      for (const auto &n : names) {
+        if (file.rfind(n, 0) == 0) {
+          return entry.path();
+        }
+      }
+    }
+  }
   return {};
 }
 
@@ -183,17 +202,20 @@ MaxinePathsReport ResolveMaxinePaths() {
 
   rep.vfx = ResolveComponent(
       "VFX", "STUDIOCAST_VFX_SDK_ROOT", util::DefaultVfxRoot(),
-      fs::path("/usr/local/VideoFX"), {"libnvvfx.so", "libNvVFX.so"},
+      fs::path("/usr/local/VideoFX"),
+      {"libVideoFX.so", "libnvvfx.so", "libNvVFX.so",
+       "libnvVideoEffects.so", "libNVVideoEffects.so"},
       /*require_models_dir=*/true,
       /*require_features_dir=*/true,
       /*extra_lib_dirs_relative=*/{});
 
-  rep.ar = ResolveComponent("AR", "STUDIOCAST_AR_SDK_ROOT",
-                            util::DefaultArRoot(), fs::path("/usr/local/ARSDK"),
-                            {"libnvar.so", "libNvAR.so"},
-                            /*require_models_dir=*/true,
-                            /*require_features_dir=*/true,
-                            /*extra_lib_dirs_relative=*/{});
+  rep.ar = ResolveComponent(
+      "AR", "STUDIOCAST_AR_SDK_ROOT", util::DefaultArRoot(),
+      fs::path("/usr/local/ARSDK"),
+      {"libnvARPose.so", "libnvar.so", "libNvAR.so"},
+      /*require_models_dir=*/true,
+      /*require_features_dir=*/true,
+      /*extra_lib_dirs_relative=*/{});
 
   rep.afx = ResolveComponent(
       "AFX", "STUDIOCAST_AFX_SDK_ROOT", util::DefaultAfxRoot(),

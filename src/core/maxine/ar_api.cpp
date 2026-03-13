@@ -72,6 +72,13 @@ std::vector<fs::path> CandidateLibDirs(const std::vector<fs::path> &roots) {
   return dedup;
 }
 
+bool LooksLikeArLibName(const fs::path &p) {
+  const auto s = p.filename().string();
+  return s.rfind("libnvARPose.so", 0) == 0 ||
+         s.rfind("libnvar.so", 0) == 0 ||
+         s.rfind("libNvAR.so", 0) == 0;
+}
+
 std::optional<SharedLibLoadResult>
 FindLibWithSymbol(const std::vector<fs::path> &lib_dirs,
                   const std::vector<std::string> &preferred_names,
@@ -120,6 +127,28 @@ FindLibWithSymbol(const std::vector<fs::path> &lib_dirs,
         if (auto r = try_file(full)) {
           return r;
         }
+      }
+    }
+  }
+
+  // 2) Scan for versioned variants of the known AR library names.
+  for (const auto &dir : lib_dirs) {
+    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
+      continue;
+    }
+    for (const auto &entry : fs::directory_iterator(dir, ec)) {
+      if (ec) {
+        break;
+      }
+      if (!entry.is_regular_file(ec)) {
+        continue;
+      }
+      const auto p = entry.path();
+      if (!LooksLikeArLibName(p)) {
+        continue;
+      }
+      if (auto r = try_file(p)) {
+        return r;
       }
     }
   }
@@ -174,8 +203,10 @@ bool ArApi::InitializeImpl(const std::vector<fs::path> &sdk_roots,
 
   std::string last;
   const std::vector<std::string> preferred = {
+      "libnvARPose.so",
       "libnvar.so",
       "libNvAR.so",
+      "libnvARPose.so.1",
       "libnvar.so.1",
       "libNvAR.so.1",
   };

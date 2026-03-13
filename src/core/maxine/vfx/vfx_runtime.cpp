@@ -50,9 +50,13 @@ std::vector<fs::path> CandidateLibDirs(const fs::path &root) {
   return dirs;
 }
 
-bool LooksLikeSharedObject(const fs::path &p) {
+bool LooksLikeVfxLibName(const fs::path &p) {
   const auto s = p.filename().string();
-  return s.find(".so") != std::string::npos;
+  return s.rfind("libVideoFX.so", 0) == 0 ||
+         s.rfind("libnvVideoEffects.so", 0) == 0 ||
+         s.rfind("libNVVideoEffects.so", 0) == 0 ||
+         s.rfind("libnvvfx.so", 0) == 0 ||
+         s.rfind("libNvVFX.so", 0) == 0;
 }
 
 std::optional<SharedLibLoadResult>
@@ -100,7 +104,7 @@ FindLibWithSymbol(const std::vector<fs::path> &lib_dirs,
     }
   }
 
-  // 2) Scan directory for anything with .so in the name.
+  // 2) Scan directory for versioned variants of the known VFX libraries.
   for (const auto &dir : lib_dirs) {
     if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
       continue;
@@ -113,7 +117,7 @@ FindLibWithSymbol(const std::vector<fs::path> &lib_dirs,
         continue;
       }
       const auto p = entry.path();
-      if (!LooksLikeSharedObject(p)) {
+      if (!LooksLikeVfxLibName(p)) {
         continue;
       }
       if (auto r = try_file(p)) {
@@ -189,6 +193,7 @@ bool VfxRuntime::Initialize(const config::GpuSelection &gpu_policy,
   {
     std::string last;
     const std::vector<std::string> preferred = {
+        "libVideoFX.so",
         "libnvVideoEffects.so",
         "libNVVideoEffects.so",
         "libnvvfx.so",

@@ -89,6 +89,11 @@ Use the helper tool to print authoritative paths and install commands:
 ./cmake-build-debug/studiocast-maxine install-hints
 ```
 
+Current Linux Maxine SDK builds typically expose `libVideoFX.so` for VFX and
+`libnvARPose.so` for AR. StudioCast now auto-detects those names directly, but
+you still need to run the SDK-provided `install_feature.sh` steps so the effect
+models and feature libraries are installed.
+
 ### Optional: automate extraction + feature install
 
 If you already downloaded the SDK tarballs, you can extract them into the expected layout and install

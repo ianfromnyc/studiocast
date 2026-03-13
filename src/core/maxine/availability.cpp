@@ -168,7 +168,8 @@ BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics &d, MaxineNeed need) {
       add_step("Run `studiocast-probe` to verify GPU/driver.");
       add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
                "install-hints`.");
-      add_step("Ensure `libnvvfx.so` is under `<VFX_ROOT>/lib/` and feature "
+      add_step("Ensure `libVideoFX.so` (or legacy `libnvvfx.so` / "
+               "`libNvVFX.so`) is under `<VFX_ROOT>/lib/` and feature "
                "installs exist under `<VFX_ROOT>/features/`.");
       return out;
     }
@@ -179,7 +180,8 @@ BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics &d, MaxineNeed need) {
           ").";
       add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
                "install-hints`.");
-      add_step("Ensure `libnvvfx.so` is under `<VFX_ROOT>/lib/` and feature "
+      add_step("Ensure `libVideoFX.so` (or legacy `libnvvfx.so` / "
+               "`libNvVFX.so`) is under `<VFX_ROOT>/lib/` and feature "
                "installs exist under `<VFX_ROOT>/features/`.");
       return out;
     }
@@ -196,6 +198,9 @@ BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics &d, MaxineNeed need) {
       add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
                "install-hints`.");
       add_step("Expected AR SDK root: " + expected + ".");
+      add_step("Ensure `libnvARPose.so` (or legacy `libnvar.so` / "
+               "`libNvAR.so`) is under `<AR_ROOT>/lib/` and feature "
+               "installs exist under `<AR_ROOT>/features/`.");
       return out;
     }
   }
@@ -245,7 +250,8 @@ BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics &d, MaxineNeed need) {
   add_step("Run `studiocast-probe` to verify GPU/driver.");
   add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
            "install-hints`.");
-  add_step("Ensure `libnvvfx.so` is under `<VFX_ROOT>/lib/` and feature "
+  add_step("Ensure `libVideoFX.so` (or legacy `libnvvfx.so` / "
+           "`libNvVFX.so`) is under `<VFX_ROOT>/lib/` and feature "
            "installs exist under `<VFX_ROOT>/features/`.");
   return out;
 }

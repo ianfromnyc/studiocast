@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <vector>
 
 namespace studiocast::maxine::vfx {
@@ -28,6 +29,15 @@ std::vector<fs::path> CandidateLibDirs(const fs::path &root) {
   dirs.push_back(root / "lib" / "x86_64-linux-gnu");
   dirs.push_back(root / "lib64" / "x86_64-linux-gnu");
   return dirs;
+}
+
+bool LooksLikeVfxLibName(const fs::path &p) {
+  const auto s = p.filename().string();
+  return s.rfind("libVideoFX.so", 0) == 0 ||
+         s.rfind("libnvVideoEffects.so", 0) == 0 ||
+         s.rfind("libNVVideoEffects.so", 0) == 0 ||
+         s.rfind("libnvvfx.so", 0) == 0 ||
+         s.rfind("libNvVFX.so", 0) == 0;
 }
 
 std::optional<SharedLibLoadResult>
@@ -60,6 +70,14 @@ FindLibWithSymbol(const std::vector<fs::path> &lib_dirs,
     return res;
   };
 
+  // 0) Try bare names via the system loader path.
+  for (const auto &name : preferred_names) {
+    if (auto r = try_file(fs::path(name))) {
+      return r;
+    }
+  }
+
+  // 1) Try preferred names under candidate directories.
   for (const auto &dir : lib_dirs) {
     if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
       continue;
@@ -70,6 +88,28 @@ FindLibWithSymbol(const std::vector<fs::path> &lib_dirs,
         if (auto r = try_file(full)) {
           return r;
         }
+      }
+    }
+  }
+
+  // 2) Scan for versioned variants of the known VFX library names.
+  for (const auto &dir : lib_dirs) {
+    if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
+      continue;
+    }
+    for (const auto &entry : fs::directory_iterator(dir, ec)) {
+      if (ec) {
+        break;
+      }
+      if (!entry.is_regular_file(ec)) {
+        continue;
+      }
+      const auto p = entry.path();
+      if (!LooksLikeVfxLibName(p)) {
+        continue;
+      }
+      if (auto r = try_file(p)) {
+        return r;
       }
     }
   }
@@ -139,9 +179,10 @@ bool VfxApi::InitializeImpl(const std::vector<std::filesystem::path> &sdk_roots,
 
     std::string last;
     const std::vector<std::string> preferred = {
-        "libnvvfx.so",
+        "libVideoFX.so",
         "libnvVideoEffects.so",
         "libNVVideoEffects.so",
+        "libnvvfx.so",
         "libNvVFX.so",
     };
 

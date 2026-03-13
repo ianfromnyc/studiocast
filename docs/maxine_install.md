@@ -28,6 +28,15 @@ And the canonical SDK roots are:
 
 `studiocast-maxine install-hints` prints these as absolute paths for your user.
 
+Recent Linux Maxine SDK releases typically ship the core shared libraries as
+`libVideoFX.so` (VFX) and `libnvARPose.so` (AR). StudioCast auto-detects those
+current names, while still accepting older aliases such as `libnvvfx.so`,
+`libNvVFX.so`, `libnvar.so`, and `libNvAR.so`.
+
+The core SDK tarballs are not sufficient by themselves to run effects. You also
+need to run the SDK-provided `install_feature.sh` scripts so that the required
+feature libraries and models are present under each SDK root.
+
 ## Commands (as printed by `install-hints`)
 
 ### VFX core

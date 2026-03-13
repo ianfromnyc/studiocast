@@ -270,6 +270,13 @@ int main(int argc, char **argv) {
     std::cout << "  cd \"" << base.string() << "\"\n";
     std::cout << "  tar xvf --one-top-level Audio_Effects_SDK.tar.gz\n\n";
 
+    std::cout << "Library naming note:\n";
+    std::cout << "  Current Linux Maxine SDKs typically ship `libVideoFX.so` "
+                 "(VFX) and `libnvARPose.so` (AR).\n";
+    std::cout << "  StudioCast also accepts legacy aliases such as "
+                 "`libnvvfx.so`, `libNvVFX.so`, `libnvar.so`, and "
+                 "`libNvAR.so`.\n\n";
+
     if (args.empty()) {
       std::cout << "VFX/AR feature install:\n";
       std::cout

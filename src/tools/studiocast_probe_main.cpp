@@ -2754,8 +2754,8 @@ int RunSelfTest() {
           "~/.local/share/studiocast/maxine/VideoFX or /usr/local/VideoFX).");
       const std::string s =
           studiocast::maxine::FormatCanonicalMaxineBlockedCopy(c);
-      expectContains("maxine_copy vfx_missing has libnvvfx hint", s,
-                     "Ensure `libnvvfx.so` is under `<VFX_ROOT>/lib/`");
+      expectContains("maxine_copy vfx_missing has libvideofx hint", s,
+                     "Ensure `libVideoFX.so` (or legacy `libnvvfx.so` /");
     }
 
     // 4) AR SDK missing.
