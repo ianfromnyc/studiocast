@@ -1,8 +1,8 @@
 #include "core/audio/audio_pipeline.h"
 
 #include <chrono>
-#include <cstdlib>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -381,7 +381,8 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
   }
 
   // Do not drain on shutdown: dropping queued audio keeps route switches
-  // responsive and avoids playing "late" buffered audio after disabling effects.
+  // responsive and avoids playing "late" buffered audio after disabling
+  // effects.
   (void)::pa_simple_flush(play, &pa_err);
   ::pa_simple_free(play);
   ::pa_simple_free(rec);

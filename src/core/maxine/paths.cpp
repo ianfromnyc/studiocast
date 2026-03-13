@@ -200,22 +200,21 @@ ResolveComponent(const std::string &component, const char *env_var,
 MaxinePathsReport ResolveMaxinePaths() {
   MaxinePathsReport rep;
 
-  rep.vfx = ResolveComponent(
-      "VFX", "STUDIOCAST_VFX_SDK_ROOT", util::DefaultVfxRoot(),
-      fs::path("/usr/local/VideoFX"),
-      {"libVideoFX.so", "libnvvfx.so", "libNvVFX.so",
-       "libnvVideoEffects.so", "libNVVideoEffects.so"},
-      /*require_models_dir=*/true,
-      /*require_features_dir=*/true,
-      /*extra_lib_dirs_relative=*/{});
+  rep.vfx =
+      ResolveComponent("VFX", "STUDIOCAST_VFX_SDK_ROOT", util::DefaultVfxRoot(),
+                       fs::path("/usr/local/VideoFX"),
+                       {"libVideoFX.so", "libnvvfx.so", "libNvVFX.so",
+                        "libnvVideoEffects.so", "libNVVideoEffects.so"},
+                       /*require_models_dir=*/true,
+                       /*require_features_dir=*/true,
+                       /*extra_lib_dirs_relative=*/{});
 
-  rep.ar = ResolveComponent(
-      "AR", "STUDIOCAST_AR_SDK_ROOT", util::DefaultArRoot(),
-      fs::path("/usr/local/ARSDK"),
-      {"libnvARPose.so", "libnvar.so", "libNvAR.so"},
-      /*require_models_dir=*/true,
-      /*require_features_dir=*/true,
-      /*extra_lib_dirs_relative=*/{});
+  rep.ar = ResolveComponent("AR", "STUDIOCAST_AR_SDK_ROOT",
+                            util::DefaultArRoot(), fs::path("/usr/local/ARSDK"),
+                            {"libnvARPose.so", "libnvar.so", "libNvAR.so"},
+                            /*require_models_dir=*/true,
+                            /*require_features_dir=*/true,
+                            /*extra_lib_dirs_relative=*/{});
 
   rep.afx = ResolveComponent(
       "AFX", "STUDIOCAST_AFX_SDK_ROOT", util::DefaultAfxRoot(),

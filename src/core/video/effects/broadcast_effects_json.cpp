@@ -165,7 +165,9 @@ bool ValidateNoBackgroundConflict(const BroadcastCameraEffects &fx,
   return true;
 }
 
-int ClampInt(int v, int lo, int hi) { return studiocast::util::ClampInt(v, lo, hi); }
+int ClampInt(int v, int lo, int hi) {
+  return studiocast::util::ClampInt(v, lo, hi);
+}
 
 bool TryGetFloat(const Value::Object &obj, std::string_view path,
                  std::string_view key, bool *found, float *out,

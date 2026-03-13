@@ -55,8 +55,7 @@ bool LooksLikeVfxLibName(const fs::path &p) {
   return s.rfind("libVideoFX.so", 0) == 0 ||
          s.rfind("libnvVideoEffects.so", 0) == 0 ||
          s.rfind("libNVVideoEffects.so", 0) == 0 ||
-         s.rfind("libnvvfx.so", 0) == 0 ||
-         s.rfind("libNvVFX.so", 0) == 0;
+         s.rfind("libnvvfx.so", 0) == 0 || s.rfind("libNvVFX.so", 0) == 0;
 }
 
 std::optional<SharedLibLoadResult>
@@ -193,11 +192,8 @@ bool VfxRuntime::Initialize(const config::GpuSelection &gpu_policy,
   {
     std::string last;
     const std::vector<std::string> preferred = {
-        "libVideoFX.so",
-        "libnvVideoEffects.so",
-        "libNVVideoEffects.so",
-        "libnvvfx.so",
-        "libNvVFX.so",
+        "libVideoFX.so", "libnvVideoEffects.so", "libNVVideoEffects.so",
+        "libnvvfx.so",   "libNvVFX.so",
     };
 
     auto found = FindLibWithSymbol(lib_dirs, preferred, "NvVFX_CreateEffect",

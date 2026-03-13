@@ -36,8 +36,7 @@ bool LooksLikeVfxLibName(const fs::path &p) {
   return s.rfind("libVideoFX.so", 0) == 0 ||
          s.rfind("libnvVideoEffects.so", 0) == 0 ||
          s.rfind("libNVVideoEffects.so", 0) == 0 ||
-         s.rfind("libnvvfx.so", 0) == 0 ||
-         s.rfind("libNvVFX.so", 0) == 0;
+         s.rfind("libnvvfx.so", 0) == 0 || s.rfind("libNvVFX.so", 0) == 0;
 }
 
 std::optional<SharedLibLoadResult>
@@ -179,11 +178,8 @@ bool VfxApi::InitializeImpl(const std::vector<std::filesystem::path> &sdk_roots,
 
     std::string last;
     const std::vector<std::string> preferred = {
-        "libVideoFX.so",
-        "libnvVideoEffects.so",
-        "libNVVideoEffects.so",
-        "libnvvfx.so",
-        "libNvVFX.so",
+        "libVideoFX.so", "libnvVideoEffects.so", "libNVVideoEffects.so",
+        "libnvvfx.so",   "libNvVFX.so",
     };
 
     const auto dirs = CandidateLibDirs(root);

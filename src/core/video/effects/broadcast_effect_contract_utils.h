@@ -35,7 +35,8 @@ inline std::optional<int> KelvinFromTemperaturePreset(const int preset) {
   }
 }
 
-inline std::optional<int> KelvinFromTemperaturePreset(const std::string_view preset) {
+inline std::optional<int>
+KelvinFromTemperaturePreset(const std::string_view preset) {
   if (preset == "neutral")
     return 4500;
   if (preset == "warm")

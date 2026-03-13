@@ -22,7 +22,8 @@ namespace studiocast::video::effects::contract {
 //
 // Mutual exclusion:
 //   - virtual_background.* are mutually exclusive with each other
-//   - auto_frame can run alongside virtual_background.* (daemon decides ordering)
+//   - auto_frame can run alongside virtual_background.* (daemon decides
+//   ordering)
 
 // ---- Effect IDs ----
 inline constexpr std::string_view kEffectIdMirror = "mirror";

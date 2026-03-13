@@ -371,17 +371,13 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"min_run_ms\":" << cfg.min_run_ms << ",";
   oss << "\"pipeline_start_attempts\":" << st.pipeline_start_attempts << ",";
   oss << "\"pipeline_starts\":" << st.pipeline_starts << ",";
-  oss << "\"pipeline_start_failures\":" << st.pipeline_start_failures
-      << ",";
+  oss << "\"pipeline_start_failures\":" << st.pipeline_start_failures << ",";
   oss << "\"pipeline_stops\":" << st.pipeline_stops << ",";
-  oss << "\"pipeline_config_restarts\":"
-      << st.pipeline_config_restarts << ",";
+  oss << "\"pipeline_config_restarts\":" << st.pipeline_config_restarts << ",";
   oss << "\"stabilizing\":" << BoolJson(st.stabilizing) << ",";
   oss << "\"thrash_events_10s\":" << st.thrash_events_10s << ",";
-  oss << "\"last_transition\":\""
-      << JsonEscape(st.last_transition) << "\",";
-  oss << "\"last_transition_ms_ago\":"
-      << st.last_transition_ms_ago << ",";
+  oss << "\"last_transition\":\"" << JsonEscape(st.last_transition) << "\",";
+  oss << "\"last_transition_ms_ago\":" << st.last_transition_ms_ago << ",";
   oss << "\"next_start_retry_ms\":" << st.next_start_retry_ms;
   oss << "},";
 
@@ -510,12 +506,9 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
         << st.pipeline.debug.pace_sleep_ms;
     oss << ",\"pace_late_ms\":" << std::setprecision(6)
         << st.pipeline.debug.pace_late_ms;
-    oss << ",\"pace_sleeps\":"
-        << st.pipeline.debug.pace_sleeps;
-    oss << ",\"pace_late_frames\":"
-        << st.pipeline.debug.pace_late_frames;
-    oss << ",\"pace_resyncs\":"
-        << st.pipeline.debug.pace_resyncs;
+    oss << ",\"pace_sleeps\":" << st.pipeline.debug.pace_sleeps;
+    oss << ",\"pace_late_frames\":" << st.pipeline.debug.pace_late_frames;
+    oss << ",\"pace_resyncs\":" << st.pipeline.debug.pace_resyncs;
 
     oss << "}";
   }
@@ -619,8 +612,7 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   if (std::getenv("STUDIOCAST_DEBUG_AUDIO_STATS")) {
     oss << ",\"debug\":{";
     oss << "\"pulse_capture_latency_ms\":"
-        << (ast.speakers_pipeline_pulse_capture_latency_us_last / 1000u)
-        << ",";
+        << (ast.speakers_pipeline_pulse_capture_latency_us_last / 1000u) << ",";
     oss << "\"pulse_playback_latency_ms\":"
         << (ast.speakers_pipeline_pulse_playback_latency_us_last / 1000u)
         << ",";

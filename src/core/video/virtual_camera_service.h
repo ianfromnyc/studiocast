@@ -1,8 +1,8 @@
 #pragma once
 
 #include <atomic>
-#include <cstdint>
 #include <chrono>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>

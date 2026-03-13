@@ -21,9 +21,10 @@ namespace {
 using studiocast::util::json::Value;
 namespace jsonh = studiocast::util::json::helpers;
 
-const studiocast::util::color::HexColorParseOptions kContractHexColorParseOptions{
-    studiocast::util::color::HexColorHashMode::required,
-    "expected '#RRGGBB'", "invalid hex digit"};
+const studiocast::util::color::HexColorParseOptions
+    kContractHexColorParseOptions{
+        studiocast::util::color::HexColorHashMode::required,
+        "expected '#RRGGBB'", "invalid hex digit"};
 using studiocast::video::effects::BroadcastCameraEffects;
 using studiocast::video::effects::EffectsEnginePreference;
 using studiocast::video::effects::ParseEffectsEnginePreference;
@@ -39,7 +40,9 @@ const Value *Find(const Value::Object &obj, const std::string &key) {
   return jsonh::Find(obj, key);
 }
 
-int ClampInt(int v, int lo, int hi) { return studiocast::util::ClampInt(v, lo, hi); }
+int ClampInt(int v, int lo, int hi) {
+  return studiocast::util::ClampInt(v, lo, hi);
+}
 
 float ClampFloat(float v, float lo, float hi) {
   return studiocast::util::ClampFloat(v, lo, hi);

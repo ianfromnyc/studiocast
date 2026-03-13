@@ -87,7 +87,8 @@ std::string FormatPidsWithNames(const std::vector<int> &pids) {
   return oss.str();
 }
 
-std::string DescribeConsumersHoldingDevice(const std::string &dev, int excludePid) {
+std::string DescribeConsumersHoldingDevice(const std::string &dev,
+                                           int excludePid) {
   if (dev.empty())
     return {};
 
@@ -310,8 +311,8 @@ VirtualCameraServiceStatus VirtualCameraService::Status() const {
 
   if (last_transition_at_ != std::chrono::steady_clock::time_point{}) {
     s.last_transition_ms_ago =
-        std::chrono::duration_cast<std::chrono::milliseconds>(now -
-                                                             last_transition_at_)
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_transition_at_)
             .count();
   }
 
@@ -320,8 +321,8 @@ VirtualCameraServiceStatus VirtualCameraService::Status() const {
       s.next_start_retry_ms = 0;
     } else {
       s.next_start_retry_ms =
-          std::chrono::duration_cast<std::chrono::milliseconds>(next_start_retry_ -
-                                                               now)
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              next_start_retry_ - now)
               .count();
     }
   }
@@ -559,10 +560,12 @@ void VirtualCameraService::ThreadMain() {
     // Self-stabilization mode: if we observe repeated start/stop flapping,
     // temporarily ignore consumer disconnects while enabled.
     const bool stabilizing =
-        cfg.enabled && (stabilizeUntil != std::chrono::steady_clock::time_point{} &&
-                        now < stabilizeUntil);
+        cfg.enabled &&
+        (stabilizeUntil != std::chrono::steady_clock::time_point{} &&
+         now < stabilizeUntil);
 
-    bool wantRun = cfg.enabled && (cfg.always_on || stabilizing || consumerStable);
+    bool wantRun =
+        cfg.enabled && (cfg.always_on || stabilizing || consumerStable);
 
     // Gate expensive capture/processing threads based on engine availability.
     // Keep loopback output alive (see EnsureOutputOpen above) so consumers
@@ -592,9 +595,9 @@ void VirtualCameraService::ThreadMain() {
       const bool wants_open_cuda_fx =
           wants_vb || wants_denoise || wants_auto_frame || wants_key_light;
 
-      // Effects that currently require Maxine (no Open CUDA/Open Video fallback).
-      // NOTE: Eye Contact has an Open Video fallback in AUTO engine mode, so it
-      // should not block the pipeline when Maxine is unavailable.
+      // Effects that currently require Maxine (no Open CUDA/Open Video
+      // fallback). NOTE: Eye Contact has an Open Video fallback in AUTO engine
+      // mode, so it should not block the pipeline when Maxine is unavailable.
       const bool wants_maxine_only = false;
 
       const auto ttl = std::chrono::seconds(2);
@@ -717,7 +720,8 @@ void VirtualCameraService::ThreadMain() {
               effectsSuppressed = true;
               suppressMsg = gate.message;
 
-              // Selectively suppress only the effects that Open CUDA reports as unavailable.
+              // Selectively suppress only the effects that Open CUDA reports as
+              // unavailable.
               const auto oc_has = [&](std::string_view id) {
                 const std::string sid(id);
                 return std::find(openCudaDiag->available_effects.begin(),
@@ -841,7 +845,8 @@ void VirtualCameraService::ThreadMain() {
             (void)what;
             thrashEvents.push_back(now);
             constexpr auto kWindow = std::chrono::seconds(10);
-            while (!thrashEvents.empty() && (now - thrashEvents.front()) > kWindow) {
+            while (!thrashEvents.empty() &&
+                   (now - thrashEvents.front()) > kWindow) {
               thrashEvents.pop_front();
             }
             constexpr std::size_t kThreshold = 6;
@@ -909,18 +914,19 @@ void VirtualCameraService::ThreadMain() {
       }
     } else {
       if (pst.running || pst.starting) {
-        const int graceMs =
-            cfg.enabled ? std::max(0, cfg.stop_grace_ms) : 0;
+        const int graceMs = cfg.enabled ? std::max(0, cfg.stop_grace_ms) : 0;
         const auto grace = std::chrono::milliseconds(graceMs);
 
         const int minRunMs = std::max(0, cfg.min_run_ms);
         const bool withinMinRun =
             cfg.enabled && minRunMs > 0 &&
-            (pipelineBecameRunningAt != std::chrono::steady_clock::time_point{} &&
+            (pipelineBecameRunningAt !=
+                 std::chrono::steady_clock::time_point{} &&
              (now - pipelineBecameRunningAt) <
                  std::chrono::milliseconds(minRunMs));
 
-        if (!withinMinRun && (graceMs == 0 || (now - lastConsumerSeen) >= grace)) {
+        if (!withinMinRun &&
+            (graceMs == 0 || (now - lastConsumerSeen) >= grace)) {
           if (dbg) {
             const auto idleMs =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -936,7 +942,8 @@ void VirtualCameraService::ThreadMain() {
           // Record stop as a thrash event.
           thrashEvents.push_back(now);
           constexpr auto kWindow = std::chrono::seconds(10);
-          while (!thrashEvents.empty() && (now - thrashEvents.front()) > kWindow) {
+          while (!thrashEvents.empty() &&
+                 (now - thrashEvents.front()) > kWindow) {
             thrashEvents.pop_front();
           }
           constexpr std::size_t kThreshold = 6;

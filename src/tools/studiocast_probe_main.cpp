@@ -3117,7 +3117,8 @@ int RunSelfTest() {
         return text;
       };
 
-      auto parseJsonFile = [&](const fs::path &p, studiocast::util::json::Value *out) -> bool {
+      auto parseJsonFile = [&](const fs::path &p,
+                               studiocast::util::json::Value *out) -> bool {
         const auto text = readTextFile(p);
         if (!text) {
           addFailure(std::string("model pack: failed to read ") + p.string());
@@ -3199,9 +3200,9 @@ int RunSelfTest() {
               }
             }
 
-            expectTrue((std::string(sub.name) + " has at least one pack")
-                           .c_str(),
-                       packCount > 0);
+            expectTrue(
+                (std::string(sub.name) + " has at least one pack").c_str(),
+                packCount > 0);
           }
         }
 
@@ -3209,12 +3210,15 @@ int RunSelfTest() {
         const fs::path openAudioRoot = packsRoot / "open_audio";
         if (expectPathExists("open_audio templates dir", openAudioRoot)) {
           std::map<std::string, bool> covered;
-          covered[std::string(studiocast::audio::effects::contract::
-                                  kEffectIdNoiseRemoval)] = false;
-          covered[std::string(studiocast::audio::effects::contract::
-                                  kEffectIdRoomEchoRemoval)] = false;
-          covered[std::string(studiocast::audio::effects::contract::
-                                  kEffectIdStudioVoice)] = false;
+          covered[std::string(
+              studiocast::audio::effects::contract::kEffectIdNoiseRemoval)] =
+              false;
+          covered[std::string(
+              studiocast::audio::effects::contract::kEffectIdRoomEchoRemoval)] =
+              false;
+          covered[std::string(
+              studiocast::audio::effects::contract::kEffectIdStudioVoice)] =
+              false;
 
           int packCount = 0;
           for (const auto &e : fs::directory_iterator(openAudioRoot)) {
@@ -3250,15 +3254,15 @@ int RunSelfTest() {
             }
             if (itName == o->end() || !itName->second.AsString() ||
                 itName->second.AsString()->empty()) {
-              addFailure(std::string(
-                             "model pack: missing/empty 'display_name' in ") +
-                         manifest.string());
+              addFailure(
+                  std::string("model pack: missing/empty 'display_name' in ") +
+                  manifest.string());
             }
             if (itOnnx == o->end() || !itOnnx->second.AsString() ||
                 itOnnx->second.AsString()->empty()) {
-              addFailure(std::string(
-                             "model pack: missing/empty 'onnx_filename' in ") +
-                         manifest.string());
+              addFailure(
+                  std::string("model pack: missing/empty 'onnx_filename' in ") +
+                  manifest.string());
             }
             if (itEffects == o->end() || !itEffects->second.AsArray()) {
               addFailure(
@@ -3279,10 +3283,10 @@ int RunSelfTest() {
           expectTrue("open_audio templates has at least one pack",
                      packCount > 0);
           for (const auto &kv : covered) {
-            expectTrue((std::string("open_audio templates cover effect ") +
-                        kv.first)
-                           .c_str(),
-                       kv.second);
+            expectTrue(
+                (std::string("open_audio templates cover effect ") + kv.first)
+                    .c_str(),
+                kv.second);
           }
         }
       }

@@ -45,8 +45,8 @@ inline LookupStatus TryGetBool(const Value::Object &obj, std::string_view key,
   return LookupStatus::found;
 }
 
-inline LookupStatus TryGetString(const Value::Object &obj,
-                                 std::string_view key, std::string *out) {
+inline LookupStatus TryGetString(const Value::Object &obj, std::string_view key,
+                                 std::string *out) {
   const Value *v = Find(obj, key);
   if (!v)
     return LookupStatus::missing;
@@ -58,8 +58,8 @@ inline LookupStatus TryGetString(const Value::Object &obj,
   return LookupStatus::found;
 }
 
-inline LookupStatus TryGetNumber(const Value::Object &obj,
-                                 std::string_view key, double *out) {
+inline LookupStatus TryGetNumber(const Value::Object &obj, std::string_view key,
+                                 double *out) {
   const Value *v = Find(obj, key);
   if (!v)
     return LookupStatus::missing;
@@ -71,8 +71,7 @@ inline LookupStatus TryGetNumber(const Value::Object &obj,
   return LookupStatus::found;
 }
 
-inline LookupStatus TryGetObject(const Value::Object &obj,
-                                 std::string_view key,
+inline LookupStatus TryGetObject(const Value::Object &obj, std::string_view key,
                                  const Value::Object **out) {
   const Value *v = Find(obj, key);
   if (!v)

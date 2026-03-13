@@ -251,8 +251,8 @@ std::string CameraEffectsToJson(const CameraEffects &effects) {
   using studiocast::video::effects::contract::param::kVbRemoveColor;
   using studiocast::video::effects::contract::param::kVbReplacePath;
 
-  const std::string removeColor =
-      studiocast::util::color::RgbToHexColor(effects.background_remove_color_rgb);
+  const std::string removeColor = studiocast::util::color::RgbToHexColor(
+      effects.background_remove_color_rgb);
 
   const bool autoFrameEnabled =
       (effects.background ==

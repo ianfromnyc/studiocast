@@ -74,8 +74,7 @@ std::vector<fs::path> CandidateLibDirs(const std::vector<fs::path> &roots) {
 
 bool LooksLikeArLibName(const fs::path &p) {
   const auto s = p.filename().string();
-  return s.rfind("libnvARPose.so", 0) == 0 ||
-         s.rfind("libnvar.so", 0) == 0 ||
+  return s.rfind("libnvARPose.so", 0) == 0 || s.rfind("libnvar.so", 0) == 0 ||
          s.rfind("libNvAR.so", 0) == 0;
 }
 
@@ -203,12 +202,8 @@ bool ArApi::InitializeImpl(const std::vector<fs::path> &sdk_roots,
 
   std::string last;
   const std::vector<std::string> preferred = {
-      "libnvARPose.so",
-      "libnvar.so",
-      "libNvAR.so",
-      "libnvARPose.so.1",
-      "libnvar.so.1",
-      "libNvAR.so.1",
+      "libnvARPose.so",   "libnvar.so",   "libNvAR.so",
+      "libnvARPose.so.1", "libnvar.so.1", "libNvAR.so.1",
   };
 
   auto found = FindLibWithSymbol(dirs, preferred, "NvAR_Create",

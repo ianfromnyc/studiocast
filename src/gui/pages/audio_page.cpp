@@ -900,10 +900,9 @@ void AudioPage::UpdateEngineUiVisibility() {
     activeIsOpen =
         (active == "open_source") || (active == "open_audio") ||
         (active == "open_cuda") || (active == "open_video") ||
-        (active == "open source") ||
-        active.contains("open_source") || active.contains("open_audio") ||
-        active.contains("open_cuda") || active.contains("open_video") ||
-        active.contains("open source");
+        (active == "open source") || active.contains("open_source") ||
+        active.contains("open_audio") || active.contains("open_cuda") ||
+        active.contains("open_video") || active.contains("open source");
   }
 
   const bool showOpen =
@@ -1014,8 +1013,8 @@ void AudioPage::RefreshDaemonAudioStatus() {
   const QString backendActive = pipeline.value("backend_active").toString();
   const QString effectsNote = pipeline.value("effects_note").toString();
 
-  // Tab-specific summary: in Speakers mode, prefer the speakers pipeline backend
-  // and note rather than the microphone pipeline.
+  // Tab-specific summary: in Speakers mode, prefer the speakers pipeline
+  // backend and note rather than the microphone pipeline.
   QString backendForUi = backendActive;
   QString noteForUi = effectsNote;
   if (mode_ == AudioPageMode::Speakers) {
@@ -1243,8 +1242,7 @@ void AudioPage::RefreshDaemonAudioStatus() {
         const QString name = m.value("display_name").toString();
         if (id.isEmpty())
           continue;
-        const QString label =
-            name.isEmpty() ? id : (name + " (" + id + ")");
+        const QString label = name.isEmpty() ? id : (name + " (" + id + ")");
         combo->addItem(label, id);
       }
     }
@@ -1306,12 +1304,11 @@ void AudioPage::RefreshDaemonAudioStatus() {
       return;
     }
     const int insertAt = std::min(1, combo->count());
-    combo->insertItem(insertAt,
-                      QStringLiteral("<missing: %1>").arg(want), want);
+    combo->insertItem(insertAt, QStringLiteral("<missing: %1>").arg(want),
+                      want);
     combo->setCurrentIndex(insertAt);
     combo->blockSignals(false);
   };
-
 
   if (micEffectCombo_) {
     QString id = "off";

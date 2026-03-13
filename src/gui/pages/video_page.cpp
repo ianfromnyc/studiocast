@@ -587,7 +587,6 @@ QString FriendlyBackendLabel(const QString &id) {
   return id;
 }
 
-
 QString SanitizeBackendNote(QString note) {
   note.replace(QStringLiteral("Open CUDA"), QStringLiteral("Open Source"),
                Qt::CaseInsensitive);
@@ -635,7 +634,6 @@ QString SummarizeEffectsBackends(const QString &raw) {
     return labels[0];
   return QStringLiteral("Mixed (%1)").arg(labels.join(QStringLiteral(" + ")));
 }
-
 
 bool DaemonRequest(const std::string &request, std::string *outJson,
                    QString *outErr) {
@@ -1486,7 +1484,8 @@ bool VideoPage::SendDaemonVideoEffects() {
   const bool bgIsAutoFrame = (bg == "auto_frame");
 
   // Auto Frame is controlled independently from Virtual Background.
-  // (The background combo may still expose an "auto_frame" sentinel for legacy UX.)
+  // (The background combo may still expose an "auto_frame" sentinel for legacy
+  // UX.)
   effects_.auto_frame.enabled =
       (autoFrameCheck_ && autoFrameCheck_->isChecked()) || bgIsAutoFrame;
   if (autoFrameZoomSlider_) {
@@ -1498,8 +1497,8 @@ bool VideoPage::SendDaemonVideoEffects() {
   }
 
   // Virtual background mode.
-  // Allow Virtual Background and Auto Frame simultaneously. If the background mode
-  // combo is set to the legacy "auto_frame" sentinel, treat it as "none".
+  // Allow Virtual Background and Auto Frame simultaneously. If the background
+  // mode combo is set to the legacy "auto_frame" sentinel, treat it as "none".
   if (bgIsAutoFrame) {
     effects_.virtual_background.mode =
         studiocast::video::effects::VirtualBackgroundMode::none;
@@ -2558,7 +2557,8 @@ void VideoPage::UpdateUiEnabled() {
 
     auto isOpenBackend = [](const QString &backend) -> bool {
       const QString b = backend.trimmed().toLower();
-      return b == QStringLiteral("open_cuda") || b == QStringLiteral("open_video") ||
+      return b == QStringLiteral("open_cuda") ||
+             b == QStringLiteral("open_video") ||
              b == QStringLiteral("open_source") || b == QStringLiteral("open");
     };
 
@@ -2567,8 +2567,8 @@ void VideoPage::UpdateUiEnabled() {
       if (enginePref ==
           studiocast::video::effects::EffectsEnginePreference::open_cuda) {
         showModelRow = true;
-      } else if (enginePref ==
-                 studiocast::video::effects::EffectsEnginePreference::auto_select) {
+      } else if (enginePref == studiocast::video::effects::
+                                   EffectsEnginePreference::auto_select) {
         const bool maxAvail =
             maxineSupported && st.maxine_available_effects.contains(vbEffectId);
         const bool openAvail =
@@ -2614,11 +2614,13 @@ void VideoPage::UpdateUiEnabled() {
 
     auto isOpenBackend = [](const QString &backend) -> bool {
       const QString b = backend.trimmed().toLower();
-      return b == QStringLiteral("open_cuda") || b == QStringLiteral("open_video") ||
+      return b == QStringLiteral("open_cuda") ||
+             b == QStringLiteral("open_video") ||
              b == QStringLiteral("open_source") || b == QStringLiteral("open");
     };
 
-    auto showOpenModelRow = [&](const QString &effectId, bool effectEnabled) -> bool {
+    auto showOpenModelRow = [&](const QString &effectId,
+                                bool effectEnabled) -> bool {
       if (!effectEnabled)
         return false;
 
@@ -2649,7 +2651,6 @@ void VideoPage::UpdateUiEnabled() {
 
       return false;
     };
-
 
     auto update_open_video_model_combo = [&](const char *task, QLabel *label,
                                              QComboBox *combo,
@@ -2751,8 +2752,9 @@ void VideoPage::UpdateUiEnabled() {
       combo->setEnabled(daemonReachable_ && has_models);
       label->setEnabled(daemonReachable_);
       if (!has_models) {
-        const QString tip =
-            QString("No models installed for task '%1'.\nRun: studiocast-open video-install-hints").arg(task);
+        const QString tip = QString("No models installed for task '%1'.\nRun: "
+                                    "studiocast-open video-install-hints")
+                                .arg(task);
         combo->setToolTip(tip);
         label->setToolTip(tip);
       } else {
@@ -2765,17 +2767,17 @@ void VideoPage::UpdateUiEnabled() {
         "face_detection", autoFrameModelLabel_, autoFrameModelCombo_,
         &autoFrameModelItemsSig_, effects_.auto_frame.model_id,
         showOpenModelRow(QStringLiteral("auto_frame"),
-                        effects_.auto_frame.enabled));
+                         effects_.auto_frame.enabled));
     update_open_video_model_combo(
         "eye_contact", eyeContactModelLabel_, eyeContactModelCombo_,
         &eyeContactModelItemsSig_, effects_.eye_contact.model_id,
         showOpenModelRow(QStringLiteral("eye_contact"),
-                        effects_.eye_contact.enabled));
-    update_open_video_model_combo("video_denoise", denoiseModelLabel_,
-                                  denoiseModelCombo_, &denoiseModelItemsSig_,
-                                  effects_.video_noise_removal.model_id,
-                                  showOpenModelRow(QStringLiteral("video_noise_removal"),
-                                                  effects_.video_noise_removal.enabled));
+                         effects_.eye_contact.enabled));
+    update_open_video_model_combo(
+        "video_denoise", denoiseModelLabel_, denoiseModelCombo_,
+        &denoiseModelItemsSig_, effects_.video_noise_removal.model_id,
+        showOpenModelRow(QStringLiteral("video_noise_removal"),
+                         effects_.video_noise_removal.enabled));
   }
 
   // Auto Frame

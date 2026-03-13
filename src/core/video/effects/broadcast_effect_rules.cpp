@@ -92,9 +92,9 @@ BuildBroadcastEffectsPlan(const BroadcastCameraEffects &fx) {
   //  - Eye Contact operates on facial features; run before background/key-light
   //  composites.
   //  - Virtual Background and Key Light both depend on segmentation; run before
-  //    framing. Prefer Virtual Background before Key Light so the matting output
-  //    can be reused (avoids redundant matting work and extra transfers on the
-  //    Open CUDA path).
+  //    framing. Prefer Virtual Background before Key Light so the matting
+  //    output can be reused (avoids redundant matting work and extra transfers
+  //    on the Open CUDA path).
   //  - Auto Frame last so it frames the final composite.
   //  - Vignette after framing.
 
