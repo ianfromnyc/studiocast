@@ -8,13 +8,22 @@
 #include <sstream>
 #include <string_view>
 
+#include "core/util/color.h"
+#include "core/util/json_helpers.h"
+#include "core/util/math.h"
 #include "core/video/effects/broadcast_effect_contract.h"
+#include "core/video/effects/broadcast_effect_contract_utils.h"
 #include "core/video/legacy_camera_effects.h"
 
 namespace studiocast::video {
 namespace {
 
 using studiocast::util::json::Value;
+namespace jsonh = studiocast::util::json::helpers;
+
+const studiocast::util::color::HexColorParseOptions kContractHexColorParseOptions{
+    studiocast::util::color::HexColorHashMode::required,
+    "expected '#RRGGBB'", "invalid hex digit"};
 using studiocast::video::effects::BroadcastCameraEffects;
 using studiocast::video::effects::EffectsEnginePreference;
 using studiocast::video::effects::ParseEffectsEnginePreference;
@@ -23,171 +32,126 @@ using studiocast::video::effects::ToString;
 using studiocast::video::effects::VirtualBackgroundMode;
 
 const Value::Object *AsObjectOrNull(const Value *v) {
-  return v ? v->AsObject() : nullptr;
+  return jsonh::AsObjectOrNull(v);
 }
 
 const Value *Find(const Value::Object &obj, const std::string &key) {
-  auto it = obj.find(key);
-  if (it == obj.end())
-    return nullptr;
-  return &it->second;
+  return jsonh::Find(obj, key);
 }
 
-int ClampInt(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
+int ClampInt(int v, int lo, int hi) { return studiocast::util::ClampInt(v, lo, hi); }
 
 float ClampFloat(float v, float lo, float hi) {
-  return std::max(lo, std::min(hi, v));
+  return studiocast::util::ClampFloat(v, lo, hi);
 }
 
 bool ParseHexColorRgb(const std::string &s, std::uint32_t *outRgb,
                       std::string *error) {
-  if (!outRgb)
-    return false;
-  *outRgb = 0;
-  if (s.size() != 7 || s[0] != '#') {
-    if (error)
-      *error = "expected '#RRGGBB'";
-    return false;
-  }
-  std::uint32_t rgb = 0;
-  for (std::size_t i = 1; i < 7; ++i) {
-    const char c = s[i];
-    std::uint32_t v = 0;
-    if (c >= '0' && c <= '9')
-      v = static_cast<std::uint32_t>(c - '0');
-    else if (c >= 'a' && c <= 'f')
-      v = static_cast<std::uint32_t>(10 + (c - 'a'));
-    else if (c >= 'A' && c <= 'F')
-      v = static_cast<std::uint32_t>(10 + (c - 'A'));
-    else {
-      if (error)
-        *error = "invalid hex digit";
-      return false;
-    }
-    rgb = (rgb << 4u) | v;
-  }
-  *outRgb = rgb;
-  return true;
+  return studiocast::util::color::ParseHexColorRgb(
+      s, outRgb, error, kContractHexColorParseOptions);
 }
 
 std::string RgbToHexColor(std::uint32_t rgb) {
-  std::ostringstream oss;
-  oss << '#';
-  oss << std::hex << std::setw(6) << std::setfill('0') << (rgb & 0x00ffffffu);
-  return oss.str();
+  return studiocast::util::color::RgbToHexColor(rgb);
 }
 
 std::optional<int> KelvinFromPreset(int preset) {
-  switch (preset) {
-  case 1:
-    return 3200;
-  case 2:
-    return 6500;
-  default:
-    return 4500;
-  }
+  return studiocast::video::effects::contract::KelvinFromTemperaturePreset(
+      preset);
 }
 
 int TemperaturePresetFromString(const std::string &s) {
-  if (s == "warm")
-    return 1;
-  if (s == "cool")
-    return 2;
-  return 0;
+  return studiocast::video::effects::contract::TemperaturePresetFromString(s);
 }
 
 std::string TemperaturePresetToString(int preset) {
-  switch (preset) {
-  case 1:
-    return "warm";
-  case 2:
-    return "cool";
-  default:
-    return "neutral";
-  }
+  return std::string(
+      studiocast::video::effects::contract::TemperaturePresetToString(preset));
 }
 
 bool TryGetBool(const Value::Object &obj, const std::string &key, bool *found,
                 bool *out, std::string *error) {
-  *found = false;
-  const Value *v = Find(obj, key);
-  if (!v)
+  const auto status = jsonh::TryGetBool(obj, key, out);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const bool *b = v->AsBool();
-  if (!b) {
+  }
+  if (status == jsonh::LookupStatus::wrong_type) {
     if (error)
       *error = "expected boolean for '" + key + "'";
     return false;
   }
   *found = true;
-  *out = *b;
   return true;
 }
 
 bool TryGetString(const Value::Object &obj, const std::string &key, bool *found,
                   std::string *out, std::string *error) {
-  *found = false;
-  const Value *v = Find(obj, key);
-  if (!v)
+  const auto status = jsonh::TryGetString(obj, key, out);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const std::string *s = v->AsString();
-  if (!s) {
+  }
+  if (status == jsonh::LookupStatus::wrong_type) {
     if (error)
       *error = "expected string for '" + key + "'";
     return false;
   }
   *found = true;
-  *out = *s;
   return true;
 }
 
 bool TryGetInt(const Value::Object &obj, const std::string &key, bool *found,
                int *out, std::string *error) {
-  *found = false;
-  const Value *v = Find(obj, key);
-  if (!v)
+  double n = 0.0;
+  const auto status = jsonh::TryGetNumber(obj, key, &n);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const double *n = v->AsNumber();
-  if (!n) {
+  }
+  if (status == jsonh::LookupStatus::wrong_type) {
     if (error)
       *error = "expected number for '" + key + "'";
     return false;
   }
-  const double r = std::round(*n);
-  if (std::fabs(*n - r) > 1e-9) {
+
+  if (!jsonh::ConvertNumberToInt(n, jsonh::IntConversionMode::strict_integer,
+                                 out)) {
     if (error)
       *error = "expected integer for '" + key + "'";
     return false;
   }
+
   *found = true;
-  *out = static_cast<int>(r);
   return true;
 }
 
 bool TryGetFloat(const Value::Object &obj, const std::string &key, bool *found,
                  float *out, std::string *error) {
-  *found = false;
-  const Value *v = Find(obj, key);
-  if (!v)
+  double n = 0.0;
+  const auto status = jsonh::TryGetNumber(obj, key, &n);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const double *n = v->AsNumber();
-  if (!n) {
+  }
+  if (status == jsonh::LookupStatus::wrong_type) {
     if (error)
       *error = "expected number for '" + key + "'";
     return false;
   }
+
   *found = true;
-  *out = static_cast<float>(*n);
+  *out = static_cast<float>(n);
   return true;
 }
 
 const Value::Object *GetObj(const Value::Object &obj, const std::string &key,
                             std::string *error) {
-  const Value *v = Find(obj, key);
-  if (!v)
+  const Value::Object *o = nullptr;
+  const auto status = jsonh::TryGetObject(obj, key, &o);
+  if (status == jsonh::LookupStatus::missing)
     return nullptr;
-  const auto *o = v->AsObject();
-  if (!o) {
+  if (status == jsonh::LookupStatus::wrong_type) {
     if (error)
       *error = "expected object for '" + key + "'";
     return nullptr;

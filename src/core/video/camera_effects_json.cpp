@@ -8,7 +8,11 @@
 #include <sstream>
 #include <string_view>
 
+#include "core/util/color.h"
+#include "core/util/json_helpers.h"
+#include "core/util/math.h"
 #include "core/video/effects/broadcast_effect_contract.h"
+#include "core/video/effects/broadcast_effect_contract_utils.h"
 #include "core/video/effects/effect_types.h"
 
 namespace studiocast::video {
@@ -23,121 +27,89 @@ namespace studiocast::video {
 
 namespace {
 using studiocast::util::json::Value;
+namespace jsonh = studiocast::util::json::helpers;
+using studiocast::util::ClampFloat;
+using studiocast::util::ClampInt;
+
+const studiocast::util::color::HexColorParseOptions kLegacyHexColorParseOptions{
+    studiocast::util::color::HexColorHashMode::optional,
+    "expected color like '#RRGGBB'", "invalid hex in color"};
 
 const Value::Object *AsObjectOrNull(const Value *v) {
-  return v ? v->AsObject() : nullptr;
+  return jsonh::AsObjectOrNull(v);
 }
 
 const Value *Find(const Value::Object &obj, const std::string &key) {
-  auto it = obj.find(key);
-  if (it == obj.end())
-    return nullptr;
-  return &it->second;
+  return jsonh::Find(obj, key);
 }
 
 bool TryGetBool(const Value::Object &obj, const std::string &key, bool *found,
                 bool *out, std::string *err) {
-  *found = false;
-  const Value *v = Find(obj, key);
-  if (!v)
+  const auto status = jsonh::TryGetBool(obj, key, out);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const bool *b = v->AsBool();
-  if (!b) {
+  }
+  if (status == jsonh::LookupStatus::wrong_type) {
     if (err)
       *err = "expected boolean for '" + key + "'";
     return false;
   }
   *found = true;
-  *out = *b;
   return true;
 }
 
 bool TryGetString(const Value::Object &obj, const std::string &key, bool *found,
                   std::string *out, std::string *err) {
-  *found = false;
-  const Value *v = Find(obj, key);
-  if (!v)
+  const auto status = jsonh::TryGetString(obj, key, out);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const std::string *s = v->AsString();
-  if (!s) {
+  }
+  if (status == jsonh::LookupStatus::wrong_type) {
     if (err)
       *err = "expected string for '" + key + "'";
     return false;
   }
   *found = true;
-  *out = *s;
   return true;
 }
 
 bool TryGetInt(const Value::Object &obj, const std::string &key, bool *found,
                int *out, std::string *err) {
-  *found = false;
-  const Value *v = Find(obj, key);
-  if (!v)
+  double n = 0.0;
+  const auto status = jsonh::TryGetNumber(obj, key, &n);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const double *n = v->AsNumber();
-  if (!n) {
+  }
+  if (status == jsonh::LookupStatus::wrong_type) {
     if (err)
       *err = "expected number for '" + key + "'";
     return false;
   }
+
+  (void)jsonh::ConvertNumberToInt(n, jsonh::IntConversionMode::round, out);
   *found = true;
-  *out = static_cast<int>(std::lround(*n));
   return true;
 }
 
 bool TryGetFloat(const Value::Object &obj, const std::string &key, bool *found,
                  float *out, std::string *err) {
-  *found = false;
-  const Value *v = Find(obj, key);
-  if (!v)
+  double n = 0.0;
+  const auto status = jsonh::TryGetNumber(obj, key, &n);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const double *n = v->AsNumber();
-  if (!n) {
+  }
+  if (status == jsonh::LookupStatus::wrong_type) {
     if (err)
       *err = "expected number for '" + key + "'";
     return false;
   }
+
   *found = true;
-  *out = static_cast<float>(*n);
-  return true;
-}
-
-int ClampInt(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
-float ClampFloat(float v, float lo, float hi) {
-  return std::max(lo, std::min(hi, v));
-}
-
-bool ParseHexColorRgb(const std::string &s, std::uint32_t *out,
-                      std::string *err) {
-  std::string_view v = s;
-  if (!v.empty() && v.front() == '#')
-    v.remove_prefix(1);
-  if (v.size() != 6) {
-    if (err)
-      *err = "expected color like '#RRGGBB'";
-    return false;
-  }
-  auto hex = [](char c) -> std::optional<int> {
-    if (c >= '0' && c <= '9')
-      return c - '0';
-    if (c >= 'a' && c <= 'f')
-      return 10 + (c - 'a');
-    if (c >= 'A' && c <= 'F')
-      return 10 + (c - 'A');
-    return std::nullopt;
-  };
-  std::uint32_t rgb = 0;
-  for (char c : v) {
-    const auto n = hex(c);
-    if (!n) {
-      if (err)
-        *err = "invalid hex in color";
-      return false;
-    }
-    rgb = (rgb << 4) | static_cast<std::uint32_t>(*n);
-  }
-  *out = rgb;
+  *out = static_cast<float>(n);
   return true;
 }
 
@@ -182,32 +154,13 @@ float PercentToFloat01(int v) {
                     1.0f);
 }
 
-std::string TemperaturePresetToString(int preset) {
-  switch (preset) {
-  case 1:
-    return "warm";
-  case 2:
-    return "cool";
-  default:
-    return "neutral";
-  }
-}
-
-int TemperaturePresetFromString(const std::string &s) {
-  if (s == "warm")
-    return 1;
-  if (s == "cool")
-    return 2;
-  return 0;
-}
-
 const Value::Object *GetObj(const Value::Object &obj, const std::string &key,
                             std::string *err) {
-  const Value *v = Find(obj, key);
-  if (!v)
+  const Value::Object *o = nullptr;
+  const auto status = jsonh::TryGetObject(obj, key, &o);
+  if (status == jsonh::LookupStatus::missing)
     return nullptr;
-  const auto *o = v->AsObject();
-  if (!o) {
+  if (status == jsonh::LookupStatus::wrong_type) {
     if (err)
       *err = "expected object for '" + key + "'";
     return nullptr;
@@ -252,7 +205,8 @@ bool ApplyVirtualBackgroundPatch(
     return false;
   if (found) {
     std::uint32_t rgb = 0;
-    if (!ParseHexColorRgb(removeColor, &rgb, err)) {
+    if (!studiocast::util::color::ParseHexColorRgb(
+            removeColor, &rgb, err, kLegacyHexColorParseOptions)) {
       if (err && err->empty())
         *err = "invalid virtual_background.remove_color";
       return false;
@@ -297,13 +251,8 @@ std::string CameraEffectsToJson(const CameraEffects &effects) {
   using studiocast::video::effects::contract::param::kVbRemoveColor;
   using studiocast::video::effects::contract::param::kVbReplacePath;
 
-  std::ostringstream cs;
-  cs << "#";
-  cs.setf(std::ios::hex, std::ios::basefield);
-  cs.width(6);
-  cs.fill('0');
-  cs << static_cast<unsigned>(effects.background_remove_color_rgb & 0xFFFFFFu);
-  const std::string removeColor = cs.str();
+  const std::string removeColor =
+      studiocast::util::color::RgbToHexColor(effects.background_remove_color_rgb);
 
   const bool autoFrameEnabled =
       (effects.background ==
@@ -438,8 +387,9 @@ std::string CameraEffectsToJson(const CameraEffects &effects) {
   oss << "\""
       << studiocast::util::json::EscapeString(std::string(kTemperaturePreset))
       << "\":\""
-      << studiocast::util::json::EscapeString(TemperaturePresetToString(
-             effects.virtual_key_light.temperature_preset))
+      << studiocast::util::json::EscapeString(std::string(
+             studiocast::video::effects::contract::TemperaturePresetToString(
+                 effects.virtual_key_light.temperature_preset)))
       << "\",";
   oss << "\""
       << studiocast::util::json::EscapeString(std::string(kDirectionPanDegrees))
@@ -613,7 +563,8 @@ bool ApplyCameraEffectsPatchJson(const studiocast::util::json::Value &root,
         return false;
       if (found) {
         std::uint32_t rgb = 0;
-        if (!ParseHexColorRgb(removeColor, &rgb, error))
+        if (!studiocast::util::color::ParseHexColorRgb(
+                removeColor, &rgb, error, kLegacyHexColorParseOptions))
           return false;
         effects->background_remove_color_rgb = rgb;
       }
@@ -690,7 +641,8 @@ bool ApplyCameraEffectsPatchJson(const studiocast::util::json::Value &root,
       return false;
     if (found) {
       std::uint32_t rgb = 0;
-      if (!ParseHexColorRgb(c, &rgb, error))
+      if (!studiocast::util::color::ParseHexColorRgb(
+              c, &rgb, error, kLegacyHexColorParseOptions))
         return false;
       effects->background_remove_color_rgb = rgb;
     }
@@ -842,7 +794,8 @@ bool ApplyCameraEffectsPatchJson(const studiocast::util::json::Value &root,
     }
     if (found)
       effects->virtual_key_light.temperature_preset =
-          TemperaturePresetFromString(temp);
+          studiocast::video::effects::contract::TemperaturePresetFromString(
+              temp);
 
     int pan = 0;
     if (!TryGetInt(*vkl, std::string(kDirectionPanDegrees), &found, &pan,
@@ -880,7 +833,8 @@ bool ApplyCameraEffectsPatchJson(const studiocast::util::json::Value &root,
     return false;
   if (found)
     effects->virtual_key_light.temperature_preset =
-        TemperaturePresetFromString(vklTemp);
+        studiocast::video::effects::contract::TemperaturePresetFromString(
+            vklTemp);
   int vklPan = 0;
   if (!TryGetInt(*obj, "virtual_key_light_pan", &found, &vklPan, error))
     return false;

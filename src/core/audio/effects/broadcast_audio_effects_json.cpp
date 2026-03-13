@@ -4,37 +4,28 @@
 #include <sstream>
 #include <string_view>
 
+#include "core/util/json_helpers.h"
+
 namespace studiocast::audio::effects {
 
 using studiocast::util::json::Value;
 
 namespace {
+namespace jsonh = studiocast::util::json::helpers;
 
 constexpr int kStrengthMin = 0;
 constexpr int kStrengthMax = 100;
 
-const Value *Find(const Value::Object &obj, const std::string &key) {
-  const auto it = obj.find(key);
-  if (it == obj.end())
-    return nullptr;
-  return &it->second;
-}
-
 std::string JoinPath(std::string_view parent, std::string_view key) {
-  if (parent.empty())
-    return std::string(key);
-  return std::string(parent) + "." + std::string(key);
+  return jsonh::JoinPath(parent, key);
 }
 
 void AddWarning(std::vector<std::string> *warnings, const std::string &s) {
-  if (warnings)
-    warnings->push_back(s);
+  jsonh::AddWarning(warnings, s);
 }
 
 bool Fail(std::string *error, const std::string &msg) {
-  if (error)
-    *error = msg;
-  return false;
+  return jsonh::Fail(error, msg);
 }
 
 bool CheckUnknownKeys(const Value::Object &obj,
@@ -58,55 +49,57 @@ bool CheckUnknownKeys(const Value::Object &obj,
 bool TryGetBool(const Value::Object &obj, std::string_view path,
                 std::string_view key, bool *found, bool *out,
                 std::string *error) {
-  *found = false;
-  const Value *v = Find(obj, std::string(key));
-  if (!v)
+  const auto status = jsonh::TryGetBool(obj, key, out);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const bool *b = v->AsBool();
-  if (!b)
+  }
+  if (status == jsonh::LookupStatus::wrong_type)
     return Fail(error, JoinPath(path, key) + " must be a boolean");
+
   *found = true;
-  *out = *b;
   return true;
 }
 
 bool TryGetInt(const Value::Object &obj, std::string_view path,
                std::string_view key, bool *found, int *out,
                std::string *error) {
-  *found = false;
-  const Value *v = Find(obj, std::string(key));
-  if (!v)
+  double n = 0.0;
+  const auto status = jsonh::TryGetNumber(obj, key, &n);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const double *n = v->AsNumber();
-  if (!n)
+  }
+  if (status == jsonh::LookupStatus::wrong_type)
     return Fail(error, JoinPath(path, key) + " must be a number");
+
+  (void)jsonh::ConvertNumberToInt(n, jsonh::IntConversionMode::truncate, out);
   *found = true;
-  *out = static_cast<int>(*n);
   return true;
 }
 
 bool TryGetString(const Value::Object &obj, std::string_view path,
                   std::string_view key, bool *found, std::string *out,
                   std::string *error) {
-  *found = false;
-  const Value *v = Find(obj, std::string(key));
-  if (!v)
+  const auto status = jsonh::TryGetString(obj, key, out);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const std::string *s = v->AsString();
-  if (!s)
+  }
+  if (status == jsonh::LookupStatus::wrong_type)
     return Fail(error, JoinPath(path, key) + " must be a string");
+
   *found = true;
-  *out = *s;
   return true;
 }
 
 const Value::Object *GetObj(const Value::Object &obj, std::string_view path,
                             std::string_view key, std::string *error) {
-  const Value *v = Find(obj, std::string(key));
-  if (!v)
+  const Value::Object *o = nullptr;
+  const auto status = jsonh::TryGetObject(obj, key, &o);
+  if (status == jsonh::LookupStatus::missing)
     return nullptr;
-  const Value::Object *o = v->AsObject();
-  if (!o) {
+  if (status == jsonh::LookupStatus::wrong_type) {
     Fail(error, JoinPath(path, key) + " must be an object");
     return nullptr;
   }

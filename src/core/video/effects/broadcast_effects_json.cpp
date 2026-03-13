@@ -7,39 +7,35 @@
 #include <sstream>
 #include <string_view>
 
+#include "core/util/json_helpers.h"
+#include "core/util/math.h"
 #include "core/video/effects/broadcast_effect_contract.h"
+#include "core/video/effects/broadcast_effect_contract_utils.h"
 
 namespace studiocast::video::effects {
 namespace {
 
 using studiocast::util::json::Value;
+namespace jsonh = studiocast::util::json::helpers;
 
 const Value::Object *AsObjectOrNull(const Value *v) {
-  return v ? v->AsObject() : nullptr;
+  return jsonh::AsObjectOrNull(v);
 }
 
 const Value *Find(const Value::Object &obj, const std::string &key) {
-  auto it = obj.find(key);
-  if (it == obj.end())
-    return nullptr;
-  return &it->second;
+  return jsonh::Find(obj, key);
 }
 
 std::string JoinPath(std::string_view parent, std::string_view key) {
-  if (parent.empty())
-    return std::string(key);
-  return std::string(parent) + "." + std::string(key);
+  return jsonh::JoinPath(parent, key);
 }
 
 void AddWarning(std::vector<std::string> *warnings, const std::string &s) {
-  if (warnings)
-    warnings->push_back(s);
+  jsonh::AddWarning(warnings, s);
 }
 
 bool Fail(std::string *error, const std::string &msg) {
-  if (error)
-    *error = msg;
-  return false;
+  return jsonh::Fail(error, msg);
 }
 
 bool CheckUnknownKeys(const Value::Object &obj,
@@ -62,61 +58,61 @@ bool CheckUnknownKeys(const Value::Object &obj,
 bool TryGetBool(const Value::Object &obj, std::string_view path,
                 std::string_view key, bool *found, bool *out,
                 std::string *error) {
-  *found = false;
-  const Value *v = Find(obj, std::string(key));
-  if (!v)
+  const auto status = jsonh::TryGetBool(obj, key, out);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const bool *b = v->AsBool();
-  if (!b)
+  }
+  if (status == jsonh::LookupStatus::wrong_type)
     return Fail(error, JoinPath(path, key) + " must be a boolean");
+
   *found = true;
-  *out = *b;
   return true;
 }
 
 bool TryGetString(const Value::Object &obj, std::string_view path,
                   std::string_view key, bool *found, std::string *out,
                   std::string *error) {
-  *found = false;
-  const Value *v = Find(obj, std::string(key));
-  if (!v)
+  const auto status = jsonh::TryGetString(obj, key, out);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const std::string *s = v->AsString();
-  if (!s)
+  }
+  if (status == jsonh::LookupStatus::wrong_type)
     return Fail(error, JoinPath(path, key) + " must be a string");
+
   *found = true;
-  *out = *s;
   return true;
 }
 
 bool TryGetInt(const Value::Object &obj, std::string_view path,
                std::string_view key, bool *found, int *out,
                std::string *error) {
-  *found = false;
-  const Value *v = Find(obj, std::string(key));
-  if (!v)
+  double n = 0.0;
+  const auto status = jsonh::TryGetNumber(obj, key, &n);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const double *n = v->AsNumber();
-  if (!n)
+  }
+  if (status == jsonh::LookupStatus::wrong_type)
     return Fail(error, JoinPath(path, key) + " must be a number");
 
-  const double r = std::round(*n);
-  if (std::fabs(*n - r) > 1e-9) {
+  if (!jsonh::ConvertNumberToInt(n, jsonh::IntConversionMode::strict_integer,
+                                 out)) {
     return Fail(error, JoinPath(path, key) + " must be an integer");
   }
 
   *found = true;
-  *out = static_cast<int>(r);
   return true;
 }
 
 const Value::Object *GetObj(const Value::Object &obj, std::string_view path,
                             std::string_view key, std::string *error) {
-  const Value *v = Find(obj, std::string(key));
-  if (!v)
+  const Value::Object *o = nullptr;
+  const auto status = jsonh::TryGetObject(obj, key, &o);
+  if (status == jsonh::LookupStatus::missing)
     return nullptr;
-  const auto *o = v->AsObject();
-  if (!o) {
+  if (status == jsonh::LookupStatus::wrong_type) {
     if (error)
       *error = JoinPath(path, key) + " must be an object";
     return nullptr;
@@ -135,13 +131,7 @@ bool RequireRangeInt(std::string_view path, int v, int lo, int hi,
 
 // Compatibility: map legacy temperature preset names to an approximate Kelvin.
 std::optional<int> KelvinFromPreset(const std::string &s) {
-  if (s == "neutral")
-    return 4500;
-  if (s == "warm")
-    return 3200;
-  if (s == "cool")
-    return 6500;
-  return std::nullopt;
+  return contract::KelvinFromTemperaturePreset(s);
 }
 
 bool ParseRootObject(const Value &root, const Value::Object **out,
@@ -175,20 +165,22 @@ bool ValidateNoBackgroundConflict(const BroadcastCameraEffects &fx,
   return true;
 }
 
-int ClampInt(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
+int ClampInt(int v, int lo, int hi) { return studiocast::util::ClampInt(v, lo, hi); }
 
 bool TryGetFloat(const Value::Object &obj, std::string_view path,
                  std::string_view key, bool *found, float *out,
                  std::string *error) {
-  *found = false;
-  const Value *v = Find(obj, std::string(key));
-  if (!v)
+  double n = 0.0;
+  const auto status = jsonh::TryGetNumber(obj, key, &n);
+  if (status == jsonh::LookupStatus::missing) {
+    *found = false;
     return true;
-  const double *n = v->AsNumber();
-  if (!n)
+  }
+  if (status == jsonh::LookupStatus::wrong_type)
     return Fail(error, JoinPath(path, key) + " must be a number");
+
   *found = true;
-  *out = static_cast<float>(*n);
+  *out = static_cast<float>(n);
   return true;
 }
 
