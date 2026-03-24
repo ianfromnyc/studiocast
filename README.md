@@ -4,6 +4,10 @@ StudioCast is an open-source Linux application that provides a virtual camera an
 
 Status: early preview / proof-of-concept. It is usable on Ubuntu 22.04+ and is still under active development.
 
+> **Project status note:** Further improvements from the repository author are currently paused due to work commitments. Contributions are very welcome.
+
+> **Open-source eye tracking disclaimer:** The eye-contact/eye-tracking portion of the open-source models is currently glitchy and best-effort.
+
 ## Not affiliated with NVIDIA
 
 StudioCast is independent and does not ship or redistribute NVIDIA Broadcast binaries.
@@ -190,8 +194,10 @@ systemctl --user status studiocastd.service
 
   * The GUI should not try to guess availability client-side.
 
-## Next steps
+## TODO
 
+* Test all open-source models end-to-end
 * Improve stability under load and consumer connect/disconnect behavior
 * Improve packaging and install flow for non-developers
 * Adaptive streaming (e.g. adaptive bitrates/frame sizes to reduce latency on the fly)
+* Add additional open-source models
