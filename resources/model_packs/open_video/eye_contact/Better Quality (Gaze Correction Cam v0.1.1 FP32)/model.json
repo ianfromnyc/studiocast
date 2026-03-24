@@ -1,0 +1,86 @@
+{
+  "schema_version": 2,
+  "id": "gaze_correction_cam_flx_v0_1_1",
+  "display_name": "Eye Contact (gaze-correction-cam, FLX v0.1.1, FP32)",
+  "task": "eye_contact",
+  "depends_on": [
+    "face_landmarks:dlib_68_ibug_300w"
+  ],
+  "files": [
+    {
+      "name": "gaze_flx_left.onnx",
+      "kind": "onnx",
+      "role": "left",
+      "sha256": "1a5129972dbc2ace9170d79ad4986e8c5130a79ac2180c01c826ef242d8e3d00"
+    },
+    {
+      "name": "gaze_flx_right.onnx",
+      "kind": "onnx",
+      "role": "right",
+      "sha256": "736b7c6b91d1475d45083b00325d54d380ae1c51767e1f7ef69a3d14083cfcf1"
+    }
+  ],
+  "onnx": {
+    "models": [
+      {
+        "role": "left",
+        "file": "gaze_flx_left.onnx"
+      },
+      {
+        "role": "right",
+        "file": "gaze_flx_right.onnx"
+      }
+    ],
+    "inputs": [
+      {
+        "name": "eye_rgb",
+        "layout": "nchw",
+        "dtype": "float32",
+        "width": 64,
+        "height": 48,
+        "channels": 3,
+        "note": "Normalized eye crop (48x64)."
+      },
+      {
+        "name": "anchors",
+        "layout": "nchw",
+        "dtype": "float32",
+        "width": 64,
+        "height": 48,
+        "channels": 1,
+        "note": "Anchor map / pictorial guidance (see upstream FacePredictor)."
+      },
+      {
+        "name": "angles",
+        "layout": "nc",
+        "dtype": "float32",
+        "dim": 2,
+        "note": "Yaw/pitch target delta. Exact convention matches the upstream FLX model conversion."
+      }
+    ],
+    "outputs": [
+      {
+        "name": "flow",
+        "kind": "flow_field",
+        "dtype": "float32",
+        "width": 64,
+        "height": 48,
+        "channels": 2,
+        "note": "Dense 2D flow used to warp the eye crop. Warping/compositing happens in StudioCast."
+      }
+    ]
+  },
+  "runtime_hints": {
+    "preferred_execution_provider": "auto",
+    "note": "FP32 pack; compatible with CPU EP and GPU EP."
+  },
+  "origin": {
+    "upstream_repo": "https://github.com/WangWilly/gaze-correction-cam",
+    "upstream_tag": "v0.1.1",
+    "release_assets": [
+      "weights.zip"
+    ],
+    "license": "BSD-3-Clause",
+    "notes": "Upstream ships TensorFlow checkpoints (L/R eye). StudioCast expects C++-friendly ONNX exports hosted separately.\nThis pack is the reference FP32 template (no binaries are committed)."
+  }
+}

@@ -19,9 +19,10 @@ struct MaxineGateDecision {
 
 // Returns true when the locally-planned effect chain includes at least one
 // Maxine-backed effect.
-inline bool WantsMaxineForPlannedEffects(const BroadcastCameraEffects& fx) {
+inline bool WantsMaxineForPlannedEffects(const BroadcastCameraEffects &fx) {
   const auto plan = BuildBroadcastEffectsPlan(fx);
-  const std::set<std::string> planned(plan.ordered_effect_ids.begin(), plan.ordered_effect_ids.end());
+  const std::set<std::string> planned(plan.ordered_effect_ids.begin(),
+                                      plan.ordered_effect_ids.end());
 
   const auto has = [&](std::string_view id) {
     return planned.count(std::string(id)) != 0;
@@ -40,36 +41,40 @@ inline bool WantsMaxineForPlannedEffects(const BroadcastCameraEffects& fx) {
 // are runnable on this system (as described by `MaxineDiagnostics`).
 //
 // This is a pure decision helper: it does not probe the system.
-inline MaxineGateDecision EvaluateMaxineGate(const BroadcastCameraEffects& fx,
-                                             const studiocast::maxine::MaxineDiagnostics& diag) {
+inline MaxineGateDecision
+EvaluateMaxineGate(const BroadcastCameraEffects &fx,
+                   const studiocast::maxine::MaxineDiagnostics &diag) {
   MaxineGateDecision out;
 
   const auto plan = BuildBroadcastEffectsPlan(fx);
-  const std::set<std::string> planned(plan.ordered_effect_ids.begin(), plan.ordered_effect_ids.end());
+  const std::set<std::string> planned(plan.ordered_effect_ids.begin(),
+                                      plan.ordered_effect_ids.end());
 
   const auto has = [&](std::string_view id) {
     return planned.count(std::string(id)) != 0;
   };
 
-  const bool wants_vfx =
-      has(contract::kEffectIdVirtualBackgroundBlur) ||
-      has(contract::kEffectIdVirtualBackgroundRemove) ||
-      has(contract::kEffectIdVirtualBackgroundReplace) ||
-      has(contract::kEffectIdVideoNoiseRemoval) ||
-      has(contract::kEffectIdVirtualKeyLight);
+  const bool wants_vfx = has(contract::kEffectIdVirtualBackgroundBlur) ||
+                         has(contract::kEffectIdVirtualBackgroundRemove) ||
+                         has(contract::kEffectIdVirtualBackgroundReplace) ||
+                         has(contract::kEffectIdVideoNoiseRemoval) ||
+                         has(contract::kEffectIdVirtualKeyLight);
 
-  const bool wants_ar = has(contract::kEffectIdEyeContact) || has(contract::kEffectIdAutoFrame);
+  const bool wants_ar =
+      has(contract::kEffectIdEyeContact) || has(contract::kEffectIdAutoFrame);
 
   if (!wants_vfx && !wants_ar) {
     return out;
   }
 
-  const std::set<std::string> avail(diag.available_effects.begin(), diag.available_effects.end());
+  const std::set<std::string> avail(diag.available_effects.begin(),
+                                    diag.available_effects.end());
 
   const auto set_blocked = [&](studiocast::maxine::MaxineNeed need) {
     out.ok = false;
     out.need = need;
-    const auto c = studiocast::maxine::BuildCanonicalMaxineBlockedCopy(diag, need);
+    const auto c =
+        studiocast::maxine::BuildCanonicalMaxineBlockedCopy(diag, need);
     out.message = studiocast::maxine::FormatCanonicalMaxineBlockedCopy(c);
     if (out.message.empty()) {
       out.message = c.summary;
@@ -82,7 +87,8 @@ inline MaxineGateDecision EvaluateMaxineGate(const BroadcastCameraEffects& fx,
     set_blocked(studiocast::maxine::MaxineNeed::ar);
     return out;
   }
-  if (has(contract::kEffectIdAutoFrame) && !avail.count(std::string(contract::kEffectIdAutoFrame))) {
+  if (has(contract::kEffectIdAutoFrame) &&
+      !avail.count(std::string(contract::kEffectIdAutoFrame))) {
     set_blocked(studiocast::maxine::MaxineNeed::ar);
     return out;
   }
@@ -117,4 +123,4 @@ inline MaxineGateDecision EvaluateMaxineGate(const BroadcastCameraEffects& fx,
   return out;
 }
 
-}  // namespace studiocast::video::effects
+} // namespace studiocast::video::effects

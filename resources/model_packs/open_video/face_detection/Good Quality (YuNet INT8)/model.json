@@ -1,0 +1,105 @@
+{
+  "schema_version": 2,
+  "id": "yunet_opencv_zoo_2023mar_int8",
+  "display_name": "YuNet Face Detection (OpenCV Zoo, 2023mar, int8)",
+  "task": "face_detection",
+  "files": [
+    {
+      "name": "model.onnx",
+      "kind": "onnx",
+      "role": "main",
+      "sha256": "321aa5a6afabf7ecc46a3d06bfab2b579dc96eb5c3be7edd365fa04502ad9294"
+    }
+  ],
+  "onnx": {
+    "main": "model.onnx",
+    "inputs": [
+      {
+        "name": "input",
+        "layout": "nchw",
+        "dtype": "float32",
+        "width": 320,
+        "height": 320,
+        "channels": 3
+      }
+    ],
+    "outputs": [
+      {
+        "name": "cls_8",
+        "kind": "scores",
+        "dtype": "float32"
+      },
+      {
+        "name": "cls_16",
+        "kind": "scores",
+        "dtype": "float32"
+      },
+      {
+        "name": "cls_32",
+        "kind": "scores",
+        "dtype": "float32"
+      },
+      {
+        "name": "obj_8",
+        "kind": "objectness",
+        "dtype": "float32"
+      },
+      {
+        "name": "obj_16",
+        "kind": "objectness",
+        "dtype": "float32"
+      },
+      {
+        "name": "obj_32",
+        "kind": "objectness",
+        "dtype": "float32"
+      },
+      {
+        "name": "bbox_8",
+        "kind": "boxes",
+        "dtype": "float32"
+      },
+      {
+        "name": "bbox_16",
+        "kind": "boxes",
+        "dtype": "float32"
+      },
+      {
+        "name": "bbox_32",
+        "kind": "boxes",
+        "dtype": "float32"
+      },
+      {
+        "name": "kps_8",
+        "kind": "keypoints",
+        "dtype": "float32"
+      },
+      {
+        "name": "kps_16",
+        "kind": "keypoints",
+        "dtype": "float32"
+      },
+      {
+        "name": "kps_32",
+        "kind": "keypoints",
+        "dtype": "float32"
+      }
+    ],
+    "preprocess": {
+      "kind": "opencv_yunet",
+      "note": "Quantized YuNet variant. StudioCast will follow OpenCV's YuNet preprocessing and decode logic when implementing task=face_detection."
+    },
+    "postprocess": {
+      "decoder": "yunet_opencv",
+      "score_threshold": 0.9,
+      "nms_threshold": 0.3,
+      "top_k": 5000
+    }
+  },
+  "origin": {
+    "upstream_repo": "https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet",
+    "upstream_model": "model.onnx",
+    "license": "MIT",
+    "notes": "This is the int8 quantized YuNet variant (\"YuNet quant\" in the upstream README accuracy table)."
+  }
+}

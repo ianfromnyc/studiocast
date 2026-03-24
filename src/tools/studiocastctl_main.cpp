@@ -1,7 +1,7 @@
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
-#include <cctype>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -21,15 +21,17 @@
 #include "core/util/fs.h"
 #include "core/util/json.h"
 #include "core/video/effects/broadcast_effect_contract.h"
+#include "core/video/effects/broadcast_effects.h"
 #include "studiocast/version.h"
 
 namespace {
 
 namespace fs = std::filesystem;
 
-std::string ShellQuote(const std::string& s) {
-  // Minimal POSIX shell quoting: wrap in single quotes, escape embedded single quotes.
-  // Result can be safely concatenated into a `/bin/sh -c` command string.
+std::string ShellQuote(const std::string &s) {
+  // Minimal POSIX shell quoting: wrap in single quotes, escape embedded single
+  // quotes. Result can be safely concatenated into a `/bin/sh -c` command
+  // string.
   std::string out;
   out.reserve(s.size() + 2);
   out.push_back('\'');
@@ -44,11 +46,12 @@ std::string ShellQuote(const std::string& s) {
   return out;
 }
 
-std::string BuildShellCommand(const std::vector<std::string>& argv) {
+std::string BuildShellCommand(const std::vector<std::string> &argv) {
   std::ostringstream oss;
   bool first = true;
-  for (const auto& a : argv) {
-    if (!first) oss << ' ';
+  for (const auto &a : argv) {
+    if (!first)
+      oss << ' ';
     first = false;
     oss << ShellQuote(a);
   }
@@ -61,7 +64,7 @@ struct CommandCaptureResult {
   std::string error;
 };
 
-CommandCaptureResult RunCommandCapture(const std::vector<std::string>& argv) {
+CommandCaptureResult RunCommandCapture(const std::vector<std::string> &argv) {
   CommandCaptureResult out;
   if (argv.empty()) {
     out.error = "empty argv";
@@ -69,7 +72,7 @@ CommandCaptureResult RunCommandCapture(const std::vector<std::string>& argv) {
   }
 
   const std::string cmd = BuildShellCommand(argv) + " 2>&1";
-  FILE* f = ::popen(cmd.c_str(), "r");
+  FILE *f = ::popen(cmd.c_str(), "r");
   if (!f) {
     out.error = "popen failed";
     return out;
@@ -89,14 +92,16 @@ CommandCaptureResult RunCommandCapture(const std::vector<std::string>& argv) {
   return out;
 }
 
-std::string ResolveSiblingToolPath(const char* argv0, const char* toolName) {
-  if (!argv0 || !toolName) return toolName ? std::string(toolName) : std::string();
+std::string ResolveSiblingToolPath(const char *argv0, const char *toolName) {
+  if (!argv0 || !toolName)
+    return toolName ? std::string(toolName) : std::string();
 
   try {
     const fs::path exe = fs::path(argv0);
     if (exe.has_parent_path()) {
       const fs::path candidate = exe.parent_path() / toolName;
-      if (fs::exists(candidate)) return candidate.string();
+      if (fs::exists(candidate))
+        return candidate.string();
     }
   } catch (...) {
     // Fall back to PATH.
@@ -107,34 +112,41 @@ std::string ResolveSiblingToolPath(const char* argv0, const char* toolName) {
 std::string LocalTimestampForFilename() {
   const std::time_t t = std::time(nullptr);
   std::tm tm{};
-  if (!::localtime_r(&t, &tm)) return "unknown-time";
+  if (!::localtime_r(&t, &tm))
+    return "unknown-time";
   char buf[64];
-  if (std::strftime(buf, sizeof(buf), "%Y%m%d-%H%M%S", &tm) == 0) return "unknown-time";
+  if (std::strftime(buf, sizeof(buf), "%Y%m%d-%H%M%S", &tm) == 0)
+    return "unknown-time";
   return std::string(buf);
 }
 
 std::string LocalTimestampForHumans() {
   const std::time_t t = std::time(nullptr);
   std::tm tm{};
-  if (!::localtime_r(&t, &tm)) return "unknown";
+  if (!::localtime_r(&t, &tm))
+    return "unknown";
   char buf[64];
-  if (std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %z", &tm) == 0) return "unknown";
+  if (std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %z", &tm) == 0)
+    return "unknown";
   return std::string(buf);
 }
 
 using studiocast::util::json::Value;
 
 std::optional<double> ParseDouble(std::string_view s) {
-  if (s.empty()) return std::nullopt;
+  if (s.empty())
+    return std::nullopt;
   std::string tmp(s);
-  char* end = nullptr;
+  char *end = nullptr;
   const double v = std::strtod(tmp.c_str(), &end);
-  if (!end || *end != '\0') return std::nullopt;
+  if (!end || *end != '\0')
+    return std::nullopt;
   return v;
 }
 
-bool ParseBoolArg(std::string_view s, bool* out) {
-  if (!out) return false;
+bool ParseBoolArg(std::string_view s, bool *out) {
+  if (!out)
+    return false;
   if (s == "1" || s == "true" || s == "TRUE" || s == "True") {
     *out = true;
     return true;
@@ -147,15 +159,16 @@ bool ParseBoolArg(std::string_view s, bool* out) {
 }
 
 std::string ToLower(std::string s) {
-  for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  for (char &c : s)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   return s;
 }
 
-std::string MaxineReasonToEnglish(const std::string& code) {
+std::string MaxineReasonToEnglish(const std::string &code) {
   return studiocast::maxine::reasons::ToEnglish(code);
 }
 
-void PrintMaxinePrettyFromStatusJson(const std::string& statusJson) {
+void PrintMaxinePrettyFromStatusJson(const std::string &statusJson) {
   Value root;
   std::string err;
   if (!studiocast::util::json::Parse(statusJson, &root, &err)) {
@@ -163,7 +176,7 @@ void PrintMaxinePrettyFromStatusJson(const std::string& statusJson) {
     return;
   }
 
-  const auto* o = root.AsObject();
+  const auto *o = root.AsObject();
   if (!o) {
     std::cerr << "ERROR: status root is not an object\n";
     return;
@@ -173,30 +186,36 @@ void PrintMaxinePrettyFromStatusJson(const std::string& statusJson) {
   // Maxine (effects)
   // ----------------
   if (auto itMax = o->find("maxine"); itMax != o->end()) {
-    const auto* max = itMax->second.AsObject();
+    const auto *max = itMax->second.AsObject();
     if (!max) {
       std::cout << "Maxine: (invalid maxine object)\n";
     } else {
       bool supported = false;
       if (auto it = max->find("supported"); it != max->end()) {
-        if (const auto* b = it->second.AsBool()) supported = *b;
+        if (const auto *b = it->second.AsBool())
+          supported = *b;
       }
 
       std::string blockedReason;
       if (auto it = max->find("blocked_reason"); it != max->end()) {
-        if (const auto* s = it->second.AsString()) blockedReason = *s;
+        if (const auto *s = it->second.AsString())
+          blockedReason = *s;
       }
 
       std::string summary;
       if (auto it = max->find("summary"); it != max->end()) {
-        if (const auto* s = it->second.AsString()) summary = *s;
+        if (const auto *s = it->second.AsString())
+          summary = *s;
       }
 
       std::cout << "Maxine: "
-                << (supported ? std::string("OK")
-                              : MaxineReasonToEnglish(blockedReason.empty()
-                                                          ? std::string(studiocast::maxine::reasons::kUnknown)
-                                                          : blockedReason))
+                << (supported
+                        ? std::string("OK")
+                        : MaxineReasonToEnglish(
+                              blockedReason.empty()
+                                  ? std::string(
+                                        studiocast::maxine::reasons::kUnknown)
+                                  : blockedReason))
                 << "\n";
       if (!summary.empty()) {
         std::cout << "  " << summary << "\n";
@@ -204,10 +223,11 @@ void PrintMaxinePrettyFromStatusJson(const std::string& statusJson) {
 
       if (!supported) {
         if (auto it = max->find("blocked_details"); it != max->end()) {
-          if (const auto* arr = it->second.AsArray()) {
-            for (const auto& v : *arr) {
-              if (const auto* s = v.AsString()) {
-                if (!s->empty()) std::cout << "  - " << *s << "\n";
+          if (const auto *arr = it->second.AsArray()) {
+            for (const auto &v : *arr) {
+              if (const auto *s = v.AsString()) {
+                if (!s->empty())
+                  std::cout << "  - " << *s << "\n";
               }
             }
           }
@@ -221,29 +241,37 @@ void PrintMaxinePrettyFromStatusJson(const std::string& statusJson) {
   // ----------------
   // Video negotiated formats
   // ----------------
-  auto getString = [](const Value::Object* obj, const char* key) -> std::string {
-    if (!obj) return {};
+  auto getString = [](const Value::Object *obj,
+                      const char *key) -> std::string {
+    if (!obj)
+      return {};
     if (auto it = obj->find(key); it != obj->end()) {
-      if (const auto* s = it->second.AsString()) return *s;
+      if (const auto *s = it->second.AsString())
+        return *s;
     }
     return {};
   };
-  auto getInt = [](const Value::Object* obj, const char* key) -> int {
-    if (!obj) return 0;
+  auto getInt = [](const Value::Object *obj, const char *key) -> int {
+    if (!obj)
+      return 0;
     if (auto it = obj->find(key); it != obj->end()) {
-      if (const auto* n = it->second.AsNumber()) return static_cast<int>(*n);
+      if (const auto *n = it->second.AsNumber())
+        return static_cast<int>(*n);
     }
     return 0;
   };
-  auto getDouble = [](const Value::Object* obj, const char* key) -> std::optional<double> {
-    if (!obj) return std::nullopt;
+  auto getDouble = [](const Value::Object *obj,
+                      const char *key) -> std::optional<double> {
+    if (!obj)
+      return std::nullopt;
     if (auto it = obj->find(key); it != obj->end()) {
-      if (const auto* n = it->second.AsNumber()) return *n;
+      if (const auto *n = it->second.AsNumber())
+        return *n;
     }
     return std::nullopt;
   };
 
-  const Value::Object* video = nullptr;
+  const Value::Object *video = nullptr;
   if (auto it = o->find("video"); it != o->end()) {
     video = it->second.AsObject();
   }
@@ -256,14 +284,16 @@ void PrintMaxinePrettyFromStatusJson(const std::string& statusJson) {
   {
     std::string inDev = getString(video, "input_device");
     std::string outDev = getString(video, "output_device");
-    if (inDev.empty()) inDev = "(auto)";
-    if (outDev.empty()) outDev = "(auto)";
+    if (inDev.empty())
+      inDev = "(auto)";
+    if (outDev.empty())
+      outDev = "(auto)";
     std::cout << "  source_device: " << inDev << "\n";
     std::cout << "  loopback_device: " << outDev << "\n";
   }
 
-  auto printFmt = [&](const char* label, const char* key) {
-    const Value::Object* fmt = nullptr;
+  auto printFmt = [&](const char *label, const char *key) {
+    const Value::Object *fmt = nullptr;
     if (auto it = video->find(key); it != video->end()) {
       fmt = it->second.AsObject();
     }
@@ -308,73 +338,88 @@ void PrintMaxinePrettyFromStatusJson(const std::string& statusJson) {
   printFmt("output_format", "output_format");
 }
 
-bool IsKnownEffectId(const std::string& id) {
+bool IsKnownEffectId(const std::string &id) {
   using namespace studiocast::video::effects::contract;
-  return id == kEffectIdMirror ||
-         id == kEffectIdVirtualBackgroundBlur ||
+  return id == kEffectIdMirror || id == kEffectIdVirtualBackgroundBlur ||
          id == kEffectIdVirtualBackgroundRemove ||
-         id == kEffectIdVirtualBackgroundReplace ||
-         id == kEffectIdAutoFrame ||
-         id == kEffectIdEyeContact ||
-         id == kEffectIdVideoNoiseRemoval ||
-         id == kEffectIdVirtualKeyLight ||
-         id == kEffectIdVignette;
+         id == kEffectIdVirtualBackgroundReplace || id == kEffectIdAutoFrame ||
+         id == kEffectIdEyeContact || id == kEffectIdVideoNoiseRemoval ||
+         id == kEffectIdVirtualKeyLight || id == kEffectIdVignette;
 }
 
 std::string NormalizeEffectId(std::string id) {
   // Allow a few ergonomic aliases; keep contract IDs canonical.
-  if (id == "background_blur" || id == "vb_blur") return std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur);
-  if (id == "background_remove" || id == "vb_remove") return std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove);
-  if (id == "background_replace" || id == "vb_replace") return std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace);
+  if (id == "background_blur" || id == "vb_blur")
+    return std::string(
+        studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur);
+  if (id == "background_remove" || id == "vb_remove")
+    return std::string(
+        studiocast::video::effects::contract::kEffectIdVirtualBackgroundRemove);
+  if (id == "background_replace" || id == "vb_replace")
+    return std::string(studiocast::video::effects::contract::
+                           kEffectIdVirtualBackgroundReplace);
   return id;
 }
 
-const Value::Object* RootObjForEffectsPatch(const Value& root) {
-  const auto* o0 = root.AsObject();
-  if (!o0) return nullptr;
+const Value::Object *RootObjForEffectsPatch(const Value &root) {
+  const auto *o0 = root.AsObject();
+  if (!o0)
+    return nullptr;
   if (auto it = o0->find("video_effects"); it != o0->end()) {
-    if (const auto* o = it->second.AsObject()) return o;
+    if (const auto *o = it->second.AsObject())
+      return o;
   }
   if (auto it = o0->find("broadcast_effects"); it != o0->end()) {
-    if (const auto* o = it->second.AsObject()) return o;
+    if (const auto *o = it->second.AsObject())
+      return o;
   }
   return o0;
 }
 
-bool ValidateNoCpuOptions(const Value& root, std::vector<std::string>* warnings, std::string* error) {
-  const Value::Object* obj = RootObjForEffectsPatch(root);
-  if (!obj) return true;
+bool ValidateNoCpuOptions(const Value &root, std::vector<std::string> *warnings,
+                          std::string *error) {
+  const Value::Object *obj = RootObjForEffectsPatch(root);
+  if (!obj)
+    return true;
 
-  auto warn = [&](const std::string& w) {
-    if (warnings) warnings->push_back(w);
+  auto warn = [&](const std::string &w) {
+    if (warnings)
+      warnings->push_back(w);
   };
 
   // Canonical engine selector.
   if (auto it = obj->find("engine"); it != obj->end()) {
-    if (const auto* s = it->second.AsString()) {
+    if (const auto *s = it->second.AsString()) {
       const std::string v = ToLower(*s);
       if (v == "cpu") {
-        warn("backend 'cpu' is not supported; use engine=auto|maxine");
-        if (error) *error = "engine must be 'auto' or 'maxine'";
+        warn(
+            "backend 'cpu' is not supported; use engine=auto|maxine|open_cuda");
+        if (error)
+          *error = "engine must be one of: auto, maxine, open_cuda";
         return false;
       }
-      if (v != "auto" && v != "maxine") {
-        if (error) *error = "engine must be 'auto' or 'maxine'";
+      studiocast::video::effects::EffectsEnginePreference ep{};
+      if (!studiocast::video::effects::ParseEffectsEnginePreference(v, &ep)) {
+        if (error)
+          *error = "engine must be one of: auto, maxine, open_cuda";
         return false;
       }
     }
   }
 
   // Legacy/unknown keys that users might try.
-  for (const auto& [k, v] : *obj) {
+  for (const auto &[k, v] : *obj) {
     const std::string lk = ToLower(k);
-    if (lk == "background_backend" || lk == "background-backend" || lk == "backend") {
-      if (const auto* s = v.AsString()) {
+    if (lk == "background_backend" || lk == "background-backend" ||
+        lk == "backend") {
+      if (const auto *s = v.AsString()) {
         const std::string vv = ToLower(*s);
         if (vv == "cpu") {
-          warn("backend 'cpu' is not supported; use engine=auto|maxine");
+          warn("backend 'cpu' is not supported; use "
+               "engine=auto|maxine|open_cuda");
         } else {
-          warn("legacy backend key '" + k + "' is ignored; use engine=auto|maxine");
+          warn("legacy backend key '" + k +
+               "' is ignored; use engine=auto|maxine|open_cuda");
         }
       }
     }
@@ -383,8 +428,9 @@ bool ValidateNoCpuOptions(const Value& root, std::vector<std::string>* warnings,
   return true;
 }
 
-bool ReadTextFileOrStdin(const std::string& path, std::string* out) {
-  if (!out) return false;
+bool ReadTextFileOrStdin(const std::string &path, std::string *out) {
+  if (!out)
+    return false;
   out->clear();
   if (path == "-" || path.empty()) {
     std::ostringstream ss;
@@ -393,15 +439,19 @@ bool ReadTextFileOrStdin(const std::string& path, std::string* out) {
     return !out->empty();
   }
   const auto jsonTextOpt = studiocast::util::ReadTextFile(path);
-  if (!jsonTextOpt) return false;
+  if (!jsonTextOpt)
+    return false;
   *out = *jsonTextOpt;
   return true;
 }
 
-std::optional<int> ParseStrengthForEffectId(const std::string& effectId, std::string_view s, std::string* error) {
+std::optional<int> ParseStrengthForEffectId(const std::string &effectId,
+                                            std::string_view s,
+                                            std::string *error) {
   const auto dOpt = ParseDouble(s);
   if (!dOpt) {
-    if (error) *error = "invalid number for strength";
+    if (error)
+      *error = "invalid number for strength";
     return std::nullopt;
   }
   const double d = *dOpt;
@@ -410,66 +460,77 @@ std::optional<int> ParseStrengthForEffectId(const std::string& effectId, std::st
   if (isVb) {
     // VB strength uses the canonical 1..64 range.
     if (d < 0.0) {
-      if (error) *error = "strength must be >= 0";
+      if (error)
+        *error = "strength must be >= 0";
       return std::nullopt;
     }
     int v = 0;
     if (d <= 1.0) {
-      v = static_cast<int>(std::lround(1.0 + d * (studiocast::video::effects::contract::kVbStrengthMax - 1)));
+      v = static_cast<int>(std::lround(
+          1.0 +
+          d * (studiocast::video::effects::contract::kVbStrengthMax - 1)));
     } else {
       v = static_cast<int>(std::lround(d));
     }
-    v = std::max(studiocast::video::effects::contract::kVbStrengthMin,
-                 std::min(studiocast::video::effects::contract::kVbStrengthMax, v));
+    v = std::max(
+        studiocast::video::effects::contract::kVbStrengthMin,
+        std::min(studiocast::video::effects::contract::kVbStrengthMax, v));
     return v;
   }
 
   // Most other effects use 0..100-ish percent.
   if (d < 0.0) {
-    if (error) *error = "strength must be >= 0";
+    if (error)
+      *error = "strength must be >= 0";
     return std::nullopt;
   }
   int v = 0;
-  if (d <= 1.0) v = static_cast<int>(std::lround(d * 100.0));
-  else v = static_cast<int>(std::lround(d));
+  if (d <= 1.0)
+    v = static_cast<int>(std::lround(d * 100.0));
+  else
+    v = static_cast<int>(std::lround(d));
   v = std::max(0, std::min(100, v));
   return v;
 }
 
-std::optional<int> ParsePercent01Or100(std::string_view s, const char* what, std::string* error) {
+std::optional<int> ParsePercent01Or100(std::string_view s, const char *what,
+                                       std::string *error) {
   const auto dOpt = ParseDouble(s);
   if (!dOpt) {
-    if (error) *error = std::string("invalid number for ") + what;
+    if (error)
+      *error = std::string("invalid number for ") + what;
     return std::nullopt;
   }
   double d = *dOpt;
   if (d < 0.0) {
-    if (error) *error = std::string(what) + " must be >= 0";
+    if (error)
+      *error = std::string(what) + " must be >= 0";
     return std::nullopt;
   }
   int v = 0;
-  if (d <= 1.0) v = static_cast<int>(std::lround(d * 100.0));
-  else v = static_cast<int>(std::lround(d));
+  if (d <= 1.0)
+    v = static_cast<int>(std::lround(d * 100.0));
+  else
+    v = static_cast<int>(std::lround(d));
   v = std::max(0, std::min(100, v));
   return v;
 }
 
-std::string BuildEnablePatchJson(const std::string& effectId,
-                                 bool enabled,
-                                 const std::optional<std::string>& engine,
-                                 const std::optional<int>& strength,
-                                 const std::optional<int>& intensity,
-                                 const std::optional<int>& smoothing,
-                                 const std::optional<double>& headroom,
-                                 const std::optional<bool>& lookAway,
-                                 const std::optional<std::string>& removeColor,
-                                 const std::optional<std::string>& replacePath,
-                                 const std::optional<int>& greenscreenMode,
-                                 const std::optional<bool>& greenscreenTemporal,
-                                 const std::optional<std::string>& temperaturePreset,
-                                 const std::optional<int>& directionPanDegrees,
-                                 const std::optional<std::string>& hdriPath,
-                                 const std::optional<bool>& centerOnTrackedFace) {
+std::string BuildEnablePatchJson(
+    const std::string &effectId, bool enabled,
+    const std::optional<std::string> &engine,
+    const std::optional<std::string> &modelId,
+    const std::optional<int> &strength, const std::optional<int> &intensity,
+    const std::optional<int> &smoothing, const std::optional<double> &headroom,
+    const std::optional<bool> &lookAway,
+    const std::optional<std::string> &removeColor,
+    const std::optional<std::string> &replacePath,
+    const std::optional<int> &greenscreenMode,
+    const std::optional<bool> &greenscreenTemporal,
+    const std::optional<std::string> &temperaturePreset,
+    const std::optional<int> &directionPanDegrees,
+    const std::optional<std::string> &hdriPath,
+    const std::optional<bool> &centerOnTrackedFace) {
   using studiocast::util::json::EscapeString;
   using namespace studiocast::video::effects::contract;
   std::ostringstream oss;
@@ -481,32 +542,190 @@ std::string BuildEnablePatchJson(const std::string& effectId,
     first = false;
   }
 
-  if (!first) oss << ',';
+  if (!first)
+    oss << ',';
   oss << "\"" << EscapeString(effectId) << "\":{";
   oss << "\"" << param::kEnabled << "\":" << (enabled ? "true" : "false");
 
-  if (strength) oss << ",\"" << param::kStrength << "\":" << *strength;
-  if (intensity) oss << ",\"" << param::kIntensity << "\":" << *intensity;
-  if (smoothing) oss << ",\"" << param::kSmoothing << "\":" << *smoothing;
-  if (headroom) oss << ",\"" << param::kHeadroom << "\":" << *headroom;
-  if (lookAway) oss << ",\"" << param::kLookAwayEnabled << "\":" << (*lookAway ? "true" : "false");
+  if (modelId && !modelId->empty())
+    oss << ",\"" << param::kModelId << "\":\"" << EscapeString(*modelId)
+        << "\"";
 
-  if (removeColor) oss << ",\"" << param::kVbRemoveColor << "\":\"" << EscapeString(*removeColor) << "\"";
-  if (replacePath) oss << ",\"" << param::kVbReplacePath << "\":\"" << EscapeString(*replacePath) << "\"";
-  if (greenscreenMode) oss << ",\"" << param::kGreenscreenMode << "\":" << *greenscreenMode;
-  if (greenscreenTemporal) oss << ",\"" << param::kGreenscreenTemporal << "\":" << (*greenscreenTemporal ? "true" : "false");
+  if (strength)
+    oss << ",\"" << param::kStrength << "\":" << *strength;
+  if (intensity)
+    oss << ",\"" << param::kIntensity << "\":" << *intensity;
+  if (smoothing)
+    oss << ",\"" << param::kSmoothing << "\":" << *smoothing;
+  if (headroom)
+    oss << ",\"" << param::kHeadroom << "\":" << *headroom;
+  if (lookAway)
+    oss << ",\"" << param::kLookAwayEnabled
+        << "\":" << (*lookAway ? "true" : "false");
 
-  if (temperaturePreset) oss << ",\"" << param::kTemperaturePreset << "\":\"" << EscapeString(*temperaturePreset) << "\"";
-  if (directionPanDegrees) oss << ",\"" << param::kDirectionPanDegrees << "\":" << *directionPanDegrees;
-  if (hdriPath) oss << ",\"" << param::kHdriPath << "\":\"" << EscapeString(*hdriPath) << "\"";
+  if (removeColor)
+    oss << ",\"" << param::kVbRemoveColor << "\":\""
+        << EscapeString(*removeColor) << "\"";
+  if (replacePath)
+    oss << ",\"" << param::kVbReplacePath << "\":\""
+        << EscapeString(*replacePath) << "\"";
+  if (greenscreenMode)
+    oss << ",\"" << param::kGreenscreenMode << "\":" << *greenscreenMode;
+  if (greenscreenTemporal)
+    oss << ",\"" << param::kGreenscreenTemporal
+        << "\":" << (*greenscreenTemporal ? "true" : "false");
 
-  if (centerOnTrackedFace) oss << ",\"" << param::kCenterOnTrackedFace << "\":" << (*centerOnTrackedFace ? "true" : "false");
+  if (temperaturePreset)
+    oss << ",\"" << param::kTemperaturePreset << "\":\""
+        << EscapeString(*temperaturePreset) << "\"";
+  if (directionPanDegrees)
+    oss << ",\"" << param::kDirectionPanDegrees
+        << "\":" << *directionPanDegrees;
+  if (hdriPath)
+    oss << ",\"" << param::kHdriPath << "\":\"" << EscapeString(*hdriPath)
+        << "\"";
+
+  if (centerOnTrackedFace)
+    oss << ",\"" << param::kCenterOnTrackedFace
+        << "\":" << (*centerOnTrackedFace ? "true" : "false");
 
   oss << "}}";
   return oss.str();
 }
 
-void Usage(const char* argv0) {
+bool ExtractOpenCudaModelsFromStatusJson(
+    const std::string &statusJson,
+    std::vector<std::pair<std::string, std::string>> *outModels,
+    std::string *error) {
+  if (!outModels)
+    return false;
+  outModels->clear();
+
+  Value root;
+  std::string jerr;
+  if (!studiocast::util::json::Parse(statusJson, &root, &jerr)) {
+    if (error)
+      *error = "invalid JSON from daemon GET_STATUS: " + jerr;
+    return false;
+  }
+  const auto *rootObj = root.AsObject();
+  if (!rootObj) {
+    if (error)
+      *error = "invalid GET_STATUS payload (expected JSON object)";
+    return false;
+  }
+
+  const Value::Object *openCuda = nullptr;
+  if (auto it = rootObj->find("open_cuda"); it != rootObj->end()) {
+    openCuda = it->second.AsObject();
+  }
+  if (!openCuda) {
+    if (auto it = rootObj->find("engines"); it != rootObj->end()) {
+      if (const auto *engines = it->second.AsObject()) {
+        if (auto it2 = engines->find("open_cuda"); it2 != engines->end()) {
+          openCuda = it2->second.AsObject();
+        }
+      }
+    }
+  }
+  if (!openCuda) {
+    if (error)
+      *error = "GET_STATUS does not include open_cuda engine information";
+    return false;
+  }
+
+  // Preferred: full model objects.
+  if (auto it = openCuda->find("models"); it != openCuda->end()) {
+    if (const auto *a = it->second.AsArray()) {
+      for (const auto &v : *a) {
+        const auto *o = v.AsObject();
+        if (!o)
+          continue;
+        std::string id;
+        std::string display;
+        if (auto itId = o->find("id"); itId != o->end()) {
+          if (const auto *s = itId->second.AsString())
+            id = *s;
+        }
+        if (id.empty())
+          continue;
+        if (auto itDn = o->find("display_name"); itDn != o->end()) {
+          if (const auto *s = itDn->second.AsString())
+            display = *s;
+        }
+        if (display.empty())
+          display = id;
+        outModels->push_back({id, display});
+      }
+    }
+  }
+
+  // Back-compat: older daemons may only provide installed model IDs.
+  if (outModels->empty()) {
+    if (auto it = openCuda->find("installed_models"); it != openCuda->end()) {
+      if (const auto *a = it->second.AsArray()) {
+        for (const auto &v : *a) {
+          if (const auto *s = v.AsString()) {
+            if (!s->empty())
+              outModels->push_back({*s, *s});
+          }
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
+bool PrintOpenCudaModelsFromDaemon() {
+  studiocast::ipc::DaemonCallResult res;
+  std::string err;
+  if (!studiocast::ipc::DaemonCall("GET_STATUS", &res, &err)) {
+    std::cerr << "ERROR: " << err << "\n";
+    return false;
+  }
+  if (!res.ok) {
+    std::cerr << (res.error_json.empty()
+                      ? std::string("{\"error\":\"daemon_error\"}")
+                      : res.error_json)
+              << "\n";
+    return false;
+  }
+
+  std::vector<std::pair<std::string, std::string>> models;
+  std::string perr;
+  if (!ExtractOpenCudaModelsFromStatusJson(res.json, &models, &perr)) {
+    std::cerr << "ERROR: " << perr << "\n";
+    return false;
+  }
+  if (models.empty()) {
+    std::cerr << "ERROR: no Open CUDA models reported by daemon "
+                 "(open_cuda.models/installed_models is empty)\n";
+    return false;
+  }
+
+  using studiocast::util::json::EscapeString;
+  std::ostringstream oss;
+  oss << '[';
+  bool first = true;
+  for (const auto &[id, display] : models) {
+    if (id.empty())
+      continue;
+    if (!first)
+      oss << ',';
+    first = false;
+    oss << "{\"id\":\"" << EscapeString(id) << "\"";
+    if (!display.empty() && display != id) {
+      oss << ",\"display_name\":\"" << EscapeString(display) << "\"";
+    }
+    oss << '}';
+  }
+  oss << ']';
+  std::cout << oss.str() << "\n";
+  return true;
+}
+
+void Usage(const char *argv0) {
   std::cout
       << "studiocastctl - control StudioCast daemon (studiocastd)\n\n"
       << "Usage:\n"
@@ -519,26 +738,46 @@ void Usage(const char* argv0) {
       << "  " << argv0 << " audio set --file <audio.json|->\n"
       << "  " << argv0 << " audio start\n"
       << "  " << argv0 << " audio stop\n"
-      << "  " << argv0 << " effects enable <effect_id> [--engine auto|maxine] [--strength N|0..1] [--intensity N|0..1] ...\n"
+      << "  " << argv0
+      << " effects enable <effect_id> [--engine auto|maxine|open_cuda] "
+         "[--model <id>] [--strength N|0..1] [--intensity N|0..1] ...\n"
       << "  " << argv0 << " effects disable <effect_id>\n"
       << "  " << argv0 << " enable <0|1>\n"
-      << "  " << argv0 << " video set [input=/dev/videoX|auto] [output=/dev/videoY|auto] [width=N] [height=N] [fps=N]\n"
-      << "  " << argv0 << " video effects [mirror=0|1] [background=none|blur|remove|replace|auto_frame] "
-      << "[background_backend=auto|maxine] [background_strength=N] [background_remove_color=#RRGGBB] [background_replace_image=/path]\n"
+      << "  " << argv0
+      << " video set [input=/dev/videoX|auto] [output=/dev/videoY|auto] "
+         "[width=N] [height=N] [fps=N] [always_on=0|1]\n"
+      << "  " << argv0
+      << " video vb --model <id> [--mode blur|remove|replace] [--engine "
+         "auto|maxine|open_cuda]\n"
+      << "  " << argv0 << " video vb --list-models\n"
+      << "  " << argv0
+      << " video effects [mirror=0|1] "
+         "[background=none|blur|remove|replace|auto_frame] "
+      << "[background_backend=auto|maxine|open_cuda] [background_strength=N] "
+         "[background_remove_color=#RRGGBB] [background_replace_image=/path]\n"
       << "  " << argv0 << " video effects --from <effects.json>\n\n"
       << "Examples:\n"
       << "  " << argv0 << " status\n"
       << "  " << argv0 << " status --pretty\n"
       << "  " << argv0 << " debug-report --out studiocast-debug-report.txt\n"
       << "  " << argv0 << " enable 1\n"
-      << "  " << argv0 << " video set input=/dev/video0 output=/dev/video10 width=1280 height=720 fps=30\n"
-      << "  " << argv0 << " video effects mirror=1 background=blur background_strength=10\n"
+      << "  " << argv0
+      << " video set input=/dev/video0 output=/dev/video10 width=1280 "
+         "height=720 fps=30\n"
+      << "  " << argv0 << " video vb --list-models\n"
+      << "  " << argv0
+      << " video vb --model modnet-webnn-256-fp32 --mode remove\n"
+      << "  " << argv0
+      << " video effects mirror=1 background=blur background_strength=10\n"
       << "  " << argv0 << " video effects --from effects.json\n\n"
       << "Notes:\n"
-      << "- 'effects get' prints the canonical Broadcast effects JSON (GET_CONFIG).\n"
+      << "- 'effects get' prints the canonical Broadcast effects JSON "
+         "(GET_CONFIG).\n"
       << "- 'config' is an alias for 'effects get'.\n"
-      << "- 'effects set' expects a JSON patch (file-based, avoids shell quoting issues).\n"
-      << "- 'video effects' key=value flags are deprecated and mapped server-side; expect a warning.\n\n"
+      << "- 'effects set' expects a JSON patch (file-based, avoids shell "
+         "quoting issues).\n"
+      << "- 'video effects' key=value flags are deprecated and mapped "
+         "server-side; expect a warning.\n\n"
       << "The canonical effects JSON schema uses effect IDs as keys, e.g.:\n"
       << "  {\n"
       << "    \"mirror\":{\"enabled\":true},\n"
@@ -548,7 +787,7 @@ void Usage(const char* argv0) {
       << "  }\n";
 }
 
-bool CallOrDie(const std::string& req) {
+bool CallOrDie(const std::string &req) {
   studiocast::ipc::DaemonCallResult res;
   std::string err;
   if (!studiocast::ipc::DaemonCall(req, &res, &err)) {
@@ -558,15 +797,16 @@ bool CallOrDie(const std::string& req) {
 
   if (res.ok) {
     if (!res.json.empty()) {
-      // Print warnings cleanly to stderr, while keeping stdout machine-readable.
+      // Print warnings cleanly to stderr, while keeping stdout
+      // machine-readable.
       Value v;
       std::string jerr;
       if (studiocast::util::json::Parse(res.json, &v, &jerr)) {
-        if (const auto* o = v.AsObject()) {
+        if (const auto *o = v.AsObject()) {
           if (auto it = o->find("warnings"); it != o->end()) {
-            if (const auto* a = it->second.AsArray()) {
-              for (const auto& wv : *a) {
-                if (const auto* ws = wv.AsString()) {
+            if (const auto *a = it->second.AsArray()) {
+              for (const auto &wv : *a) {
+                if (const auto *ws = wv.AsString()) {
                   std::cerr << "WARNING: " << *ws << "\n";
                 }
               }
@@ -579,13 +819,15 @@ bool CallOrDie(const std::string& req) {
     return true;
   }
 
-  std::cerr << (res.error_json.empty() ? std::string("{\"error\":\"unknown\"}") : res.error_json) << "\n";
+  std::cerr << (res.error_json.empty() ? std::string("{\"error\":\"unknown\"}")
+                                       : res.error_json)
+            << "\n";
   return false;
 }
 
-}  // namespace
+} // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   if (argc < 2) {
     Usage(argv[0]);
     return 2;
@@ -593,7 +835,8 @@ int main(int argc, char** argv) {
 
   const std::string cmd = argv[1];
   if (cmd == "--version" || cmd == "-v") {
-    std::printf("studiocastctl %s (%s)\n", STUDIOCAST_VERSION, STUDIOCAST_GIT_SHA);
+    std::printf("studiocastctl %s (%s)\n", STUDIOCAST_VERSION,
+                STUDIOCAST_GIT_SHA);
     return 0;
   }
   if (cmd == "--help" || cmd == "-h" || cmd == "help") {
@@ -604,8 +847,10 @@ int main(int argc, char** argv) {
   if (cmd == "status") {
     bool pretty = false;
     for (int i = 2; i < argc; ++i) {
-      const std::string_view a = argv[i] ? std::string_view(argv[i]) : std::string_view();
-      if (a == "--pretty") pretty = true;
+      const std::string_view a =
+          argv[i] ? std::string_view(argv[i]) : std::string_view();
+      if (a == "--pretty")
+        pretty = true;
     }
     if (!pretty) {
       return CallOrDie("GET_STATUS") ? 0 : 1;
@@ -618,8 +863,9 @@ int main(int argc, char** argv) {
       return 1;
     }
     if (!res.ok) {
-      std::cerr << (res.error_json.empty() ? std::string("{\"error\":\"daemon_error\"}")
-                                           : res.error_json)
+      std::cerr << (res.error_json.empty()
+                        ? std::string("{\"error\":\"daemon_error\"}")
+                        : res.error_json)
                 << "\n";
       return 1;
     }
@@ -631,7 +877,8 @@ int main(int argc, char** argv) {
   if (cmd == "debug-report") {
     std::string outPath;
     for (int i = 2; i < argc; ++i) {
-      const std::string_view a = argv[i] ? std::string_view(argv[i]) : std::string_view();
+      const std::string_view a =
+          argv[i] ? std::string_view(argv[i]) : std::string_view();
       if (a == "--out" || a == "-o") {
         if (i + 1 >= argc || !argv[i + 1]) {
           std::cerr << "ERROR: --out requires a path\n";
@@ -647,7 +894,8 @@ int main(int argc, char** argv) {
       }
     }
     if (outPath.empty()) {
-      outPath = std::string("studiocast-debug-report-") + LocalTimestampForFilename() + ".txt";
+      outPath = std::string("studiocast-debug-report-") +
+                LocalTimestampForFilename() + ".txt";
     }
 
     std::ofstream out(outPath, std::ios::out | std::ios::trunc);
@@ -656,16 +904,19 @@ int main(int argc, char** argv) {
       return 1;
     }
 
-    auto section = [&](const std::string& name) {
+    auto section = [&](const std::string &name) {
       out << "\n";
-      out << "================================================================================\n";
+      out << "================================================================="
+             "===============\n";
       out << name << "\n";
-      out << "================================================================================\n";
+      out << "================================================================="
+             "===============\n";
     };
 
     out << "StudioCast debug report\n";
     out << "Generated: " << LocalTimestampForHumans() << "\n";
-    out << "studiocastctl: " << STUDIOCAST_VERSION << " (" << STUDIOCAST_GIT_SHA << ")\n";
+    out << "studiocastctl: " << STUDIOCAST_VERSION << " (" << STUDIOCAST_GIT_SHA
+        << ")\n";
 
     bool okAll = true;
 
@@ -679,14 +930,19 @@ int main(int argc, char** argv) {
       } else if (!res.ok) {
         okAll = false;
         out << "Daemon returned ok=false\n";
-        out << (res.error_json.empty() ? std::string("{\"error\":\"daemon_error\"}") : res.error_json) << "\n";
+        out << (res.error_json.empty()
+                    ? std::string("{\"error\":\"daemon_error\"}")
+                    : res.error_json)
+            << "\n";
       } else {
         out << res.json << "\n";
       }
     }
 
-    const std::string probePath = ResolveSiblingToolPath(argv[0], "studiocast-probe");
-    const std::string maxinePath = ResolveSiblingToolPath(argv[0], "studiocast-maxine");
+    const std::string probePath =
+        ResolveSiblingToolPath(argv[0], "studiocast-probe");
+    const std::string maxinePath =
+        ResolveSiblingToolPath(argv[0], "studiocast-maxine");
 
     section(std::string("Exec: ") + probePath + " --json");
     {
@@ -696,9 +952,11 @@ int main(int argc, char** argv) {
         out << "spawn error: " << r.error << "\n";
       }
       out << "exit_code: " << r.exit_code << "\n";
-      if (r.exit_code != 0) okAll = false;
+      if (r.exit_code != 0)
+        okAll = false;
       out << r.output;
-      if (!r.output.empty() && r.output.back() != '\n') out << "\n";
+      if (!r.output.empty() && r.output.back() != '\n')
+        out << "\n";
     }
 
     section(std::string("Exec: ") + maxinePath + " paths");
@@ -709,9 +967,11 @@ int main(int argc, char** argv) {
         out << "spawn error: " << r.error << "\n";
       }
       out << "exit_code: " << r.exit_code << "\n";
-      if (r.exit_code != 0) okAll = false;
+      if (r.exit_code != 0)
+        okAll = false;
       out << r.output;
-      if (!r.output.empty() && r.output.back() != '\n') out << "\n";
+      if (!r.output.empty() && r.output.back() != '\n')
+        out << "\n";
     }
 
     section(std::string("Exec: ") + maxinePath + " install-hints");
@@ -722,9 +982,11 @@ int main(int argc, char** argv) {
         out << "spawn error: " << r.error << "\n";
       }
       out << "exit_code: " << r.exit_code << "\n";
-      if (r.exit_code != 0) okAll = false;
+      if (r.exit_code != 0)
+        okAll = false;
       out << r.output;
-      if (!r.output.empty() && r.output.back() != '\n') out << "\n";
+      if (!r.output.empty() && r.output.back() != '\n')
+        out << "\n";
     }
 
     out.flush();
@@ -749,7 +1011,8 @@ int main(int argc, char** argv) {
     if (sub == "set") {
       std::string file;
       for (int i = 3; i < argc; ++i) {
-        const std::string_view a = argv[i] ? std::string_view(argv[i]) : std::string_view();
+        const std::string_view a =
+            argv[i] ? std::string_view(argv[i]) : std::string_view();
         if (a == "--file" || a == "--from") {
           if (i + 1 >= argc) {
             std::cerr << "ERROR: --file requires a path (or '-' for stdin)\n";
@@ -766,7 +1029,8 @@ int main(int argc, char** argv) {
 
       std::string jsonText;
       if (!ReadTextFileOrStdin(file, &jsonText)) {
-        std::cerr << "ERROR: failed to read effects JSON from: " << file << "\n";
+        std::cerr << "ERROR: failed to read effects JSON from: " << file
+                  << "\n";
         return 2;
       }
 
@@ -780,11 +1044,13 @@ int main(int argc, char** argv) {
       std::vector<std::string> warnings;
       std::string verr;
       if (!ValidateNoCpuOptions(root, &warnings, &verr)) {
-        for (const auto& w : warnings) std::cerr << "WARNING: " << w << "\n";
+        for (const auto &w : warnings)
+          std::cerr << "WARNING: " << w << "\n";
         std::cerr << "ERROR: " << verr << "\n";
         return 2;
       }
-      for (const auto& w : warnings) std::cerr << "WARNING: " << w << "\n";
+      for (const auto &w : warnings)
+        std::cerr << "WARNING: " << w << "\n";
 
       const std::string minified = studiocast::util::json::Minify(jsonText);
       const std::string req = std::string("SET_VIDEO_EFFECTS_JSON ") + minified;
@@ -797,13 +1063,15 @@ int main(int argc, char** argv) {
         return 2;
       }
       const bool enabled = (sub == "enable");
-      std::string effectId = NormalizeEffectId(argv[3] ? std::string(argv[3]) : std::string());
+      std::string effectId =
+          NormalizeEffectId(argv[3] ? std::string(argv[3]) : std::string());
       if (!IsKnownEffectId(effectId)) {
         std::cerr << "ERROR: unknown effect_id: " << effectId << "\n";
         return 2;
       }
 
       std::optional<std::string> engine;
+      std::optional<std::string> modelId;
       std::optional<int> strength;
       std::optional<int> intensity;
       std::optional<int> smoothing;
@@ -819,9 +1087,12 @@ int main(int argc, char** argv) {
       std::optional<bool> centerOnTrackedFace;
 
       for (int i = 4; i < argc; ++i) {
-        const std::string_view a = argv[i] ? std::string_view(argv[i]) : std::string_view();
-        auto needValue = [&](const char* flag) -> std::optional<std::string_view> {
-          if (a != flag) return std::nullopt;
+        const std::string_view a =
+            argv[i] ? std::string_view(argv[i]) : std::string_view();
+        auto needValue =
+            [&](const char *flag) -> std::optional<std::string_view> {
+          if (a != flag)
+            return std::nullopt;
           if (i + 1 >= argc || !argv[i + 1]) {
             std::cerr << "ERROR: " << flag << " requires a value\n";
             return std::nullopt;
@@ -833,15 +1104,22 @@ int main(int argc, char** argv) {
         if (auto v = needValue("--engine")) {
           const std::string vv = ToLower(std::string(*v));
           if (vv == "cpu") {
-            std::cerr << "WARNING: backend 'cpu' is not supported; use engine=auto|maxine\n";
-            std::cerr << "ERROR: engine must be auto|maxine\n";
+            std::cerr << "WARNING: backend 'cpu' is not supported; use "
+                         "engine=auto|maxine|open_cuda\n";
+            std::cerr << "ERROR: engine must be auto|maxine|open_cuda\n";
             return 2;
           }
-          if (vv != "auto" && vv != "maxine") {
-            std::cerr << "ERROR: engine must be auto|maxine\n";
+          studiocast::video::effects::EffectsEnginePreference ep{};
+          if (!studiocast::video::effects::ParseEffectsEnginePreference(vv,
+                                                                        &ep)) {
+            std::cerr << "ERROR: engine must be auto|maxine|open_cuda\n";
             return 2;
           }
-          engine = vv;
+          engine = studiocast::video::effects::ToString(ep);
+          continue;
+        }
+        if (auto v = needValue("--model")) {
+          modelId = std::string(*v);
           continue;
         }
         if (auto v = needValue("--strength")) {
@@ -870,7 +1148,8 @@ int main(int argc, char** argv) {
             std::cerr << "ERROR: invalid number for smoothing\n";
             return 2;
           }
-          smoothing = std::max(0, std::min(100, static_cast<int>(std::lround(*d))));
+          smoothing =
+              std::max(0, std::min(100, static_cast<int>(std::lround(*d))));
           continue;
         }
         if (auto v = needValue("--headroom")) {
@@ -911,7 +1190,8 @@ int main(int argc, char** argv) {
         if (auto v = needValue("--greenscreen-temporal")) {
           bool b = false;
           if (!ParseBoolArg(*v, &b)) {
-            std::cerr << "ERROR: --greenscreen-temporal must be 0|1|true|false\n";
+            std::cerr
+                << "ERROR: --greenscreen-temporal must be 0|1|true|false\n";
             return 2;
           }
           greenscreenTemporal = b;
@@ -937,7 +1217,8 @@ int main(int argc, char** argv) {
         if (auto v = needValue("--center-on-tracked-face")) {
           bool b = false;
           if (!ParseBoolArg(*v, &b)) {
-            std::cerr << "ERROR: --center-on-tracked-face must be 0|1|true|false\n";
+            std::cerr
+                << "ERROR: --center-on-tracked-face must be 0|1|true|false\n";
             return 2;
           }
           centerOnTrackedFace = b;
@@ -945,14 +1226,19 @@ int main(int argc, char** argv) {
         }
       }
 
-      if (enabled && effectId == std::string(studiocast::video::effects::contract::kEffectIdVirtualBackgroundReplace) &&
+      if (enabled &&
+          effectId == std::string(studiocast::video::effects::contract::
+                                      kEffectIdVirtualBackgroundReplace) &&
           !replacePath) {
-        std::cerr << "WARNING: virtual_background.replace requires --replace-path; daemon will reject if empty\n";
+        std::cerr << "WARNING: virtual_background.replace requires "
+                     "--replace-path; daemon will reject if empty\n";
       }
 
-      const std::string patch = BuildEnablePatchJson(effectId, enabled, engine, strength, intensity, smoothing, headroom,
-                                                     lookAway, removeColor, replacePath, greenscreenMode, greenscreenTemporal,
-                                                     temperaturePreset, directionPanDegrees, hdriPath, centerOnTrackedFace);
+      const std::string patch = BuildEnablePatchJson(
+          effectId, enabled, engine, modelId, strength, intensity, smoothing,
+          headroom, lookAway, removeColor, replacePath, greenscreenMode,
+          greenscreenTemporal, temperaturePreset, directionPanDegrees, hdriPath,
+          centerOnTrackedFace);
       const std::string req = std::string("SET_VIDEO_EFFECTS_JSON ") + patch;
       return CallOrDie(req) ? 0 : 1;
     }
@@ -987,7 +1273,8 @@ int main(int argc, char** argv) {
     if (sub == "set") {
       std::string path;
       for (int i = 3; i < argc; ++i) {
-        const std::string_view a = argv[i] ? std::string_view(argv[i]) : std::string_view();
+        const std::string_view a =
+            argv[i] ? std::string_view(argv[i]) : std::string_view();
         if (a == "--file") {
           if (i + 1 >= argc) {
             std::cerr << "--file requires a file path (or - for stdin)\n";
@@ -1030,10 +1317,114 @@ int main(int argc, char** argv) {
       }
       return CallOrDie(req) ? 0 : 1;
     }
+
+    if (sub == "vb") {
+      bool listModels = false;
+      std::optional<std::string> modelId;
+      std::optional<std::string> engine;
+      std::string effectId = std::string(studiocast::video::effects::contract::
+                                             kEffectIdVirtualBackgroundRemove);
+
+      for (int i = 3; i < argc; ++i) {
+        const std::string_view a =
+            argv[i] ? std::string_view(argv[i]) : std::string_view();
+        auto needValue =
+            [&](const char *flag) -> std::optional<std::string_view> {
+          if (a != flag)
+            return std::nullopt;
+          if (i + 1 >= argc || !argv[i + 1]) {
+            std::cerr << "ERROR: " << flag << " requires a value\n";
+            return std::nullopt;
+          }
+          ++i;
+          return std::string_view(argv[i]);
+        };
+
+        if (a == "--list-models" || a == "--models") {
+          listModels = true;
+          continue;
+        }
+        if (auto v = needValue("--model")) {
+          modelId = std::string(*v);
+          continue;
+        }
+        if (auto v = needValue("--mode")) {
+          const std::string m = ToLower(std::string(*v));
+          if (m == "blur")
+            effectId = std::string(studiocast::video::effects::contract::
+                                       kEffectIdVirtualBackgroundBlur);
+          else if (m == "remove")
+            effectId = std::string(studiocast::video::effects::contract::
+                                       kEffectIdVirtualBackgroundRemove);
+          else if (m == "replace")
+            effectId = std::string(studiocast::video::effects::contract::
+                                       kEffectIdVirtualBackgroundReplace);
+          else {
+            std::cerr << "ERROR: --mode must be blur|remove|replace\n";
+            return 2;
+          }
+          continue;
+        }
+        if (auto v = needValue("--engine")) {
+          const std::string vv = ToLower(std::string(*v));
+          if (vv == "cpu") {
+            std::cerr << "WARNING: backend 'cpu' is not supported; use "
+                         "engine=auto|maxine|open_cuda\n";
+            std::cerr << "ERROR: engine must be auto|maxine|open_cuda\n";
+            return 2;
+          }
+          studiocast::video::effects::EffectsEnginePreference ep{};
+          if (!studiocast::video::effects::ParseEffectsEnginePreference(vv,
+                                                                        &ep)) {
+            std::cerr << "ERROR: engine must be auto|maxine|open_cuda\n";
+            return 2;
+          }
+          engine = studiocast::video::effects::ToString(ep);
+          continue;
+        }
+        if (a == "--help" || a == "-h") {
+          Usage(argv[0]);
+          return 0;
+        }
+
+        std::cerr << "ERROR: unknown flag for 'video vb': " << a << "\n";
+        return 2;
+      }
+
+      if (listModels) {
+        return PrintOpenCudaModelsFromDaemon() ? 0 : 1;
+      }
+
+      if (!modelId || modelId->empty()) {
+        std::cerr
+            << "ERROR: video vb requires --model <id> (or --list-models)\n";
+        return 2;
+      }
+
+      const std::string patch =
+          BuildEnablePatchJson(effectId,
+                               /*enabled=*/true, engine, modelId,
+                               /*strength=*/std::nullopt,
+                               /*intensity=*/std::nullopt,
+                               /*smoothing=*/std::nullopt,
+                               /*headroom=*/std::nullopt,
+                               /*lookAway=*/std::nullopt,
+                               /*removeColor=*/std::nullopt,
+                               /*replacePath=*/std::nullopt,
+                               /*greenscreenMode=*/std::nullopt,
+                               /*greenscreenTemporal=*/std::nullopt,
+                               /*temperaturePreset=*/std::nullopt,
+                               /*directionPanDegrees=*/std::nullopt,
+                               /*hdriPath=*/std::nullopt,
+                               /*centerOnTrackedFace=*/std::nullopt);
+      const std::string req = std::string("SET_VIDEO_EFFECTS_JSON ") + patch;
+      return CallOrDie(req) ? 0 : 1;
+    }
     if (sub == "effects") {
       std::string fromPath;
       for (int i = 3; i < argc; ++i) {
-        const std::string_view a = argv[i] ? std::string_view(argv[i]) : std::string_view();
+        const std::string_view a =
+            argv[i] ? std::string_view(argv[i]) : std::string_view();
         if (a == "--from") {
           if (i + 1 >= argc) {
             std::cerr << "--from requires a file path\n";
@@ -1050,15 +1441,19 @@ int main(int argc, char** argv) {
           std::cerr << "ERROR: failed to read file: " << fromPath << "\n";
           return 2;
         }
-        const std::string minified = studiocast::util::json::Minify(*jsonTextOpt);
-        const std::string req = std::string("SET_VIDEO_EFFECTS_JSON ") + minified;
+        const std::string minified =
+            studiocast::util::json::Minify(*jsonTextOpt);
+        const std::string req =
+            std::string("SET_VIDEO_EFFECTS_JSON ") + minified;
         return CallOrDie(req) ? 0 : 1;
       }
 
-      // Legacy key=value flags (server maps into canonical effects and returns a warning).
+      // Legacy key=value flags (server maps into canonical effects and returns
+      // a warning).
       std::string req = "SET_VIDEO_EFFECTS";
       for (int i = 3; i < argc; ++i) {
-        if (!argv[i]) continue;
+        if (!argv[i])
+          continue;
         req.push_back(' ');
         req.append(argv[i]);
       }

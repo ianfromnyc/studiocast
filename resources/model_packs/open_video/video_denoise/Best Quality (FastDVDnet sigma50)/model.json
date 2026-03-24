@@ -1,0 +1,65 @@
+{
+  "schema_version": 2,
+  "id": "fastdvdnet_sigma50",
+  "display_name": "FastDVDnet Video Denoise (sigma=50)",
+  "task": "video_denoise",
+  "files": [
+    {
+      "name": "model.onnx",
+      "kind": "onnx",
+      "role": "main",
+      "sha256": "500517e2706130ab84d140add26353ded2afb1317b6ab747c6417fa7134963dc"
+    }
+  ],
+  "onnx": {
+    "main": "model.onnx",
+    "inputs": [
+      {
+        "name": "noisy",
+        "layout": "nchw",
+        "dtype": "float32",
+        "channels": 15,
+        "dynamic_hw": true,
+        "note": "5-frame patch concatenated on channels: [t-2|t-1|t|t+1|t+2] (RGB each)"
+      },
+      {
+        "name": "noise_map",
+        "layout": "nchw",
+        "dtype": "float32",
+        "channels": 1,
+        "dynamic_hw": true,
+        "note": "noise map; expected to be constant over the frame for a fixed sigma (sigma/255)"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "denoised",
+        "kind": "rgb",
+        "dtype": "float32",
+        "channels": 3,
+        "dynamic_hw": true
+      }
+    ],
+    "preprocess": {
+      "color": "rgb",
+      "range": "0..1"
+    },
+    "postprocess": {
+      "clamp": [
+        0.0,
+        1.0
+      ]
+    }
+  },
+  "runtime_hints": {
+    "preferred_execution_provider": "auto",
+    "default_sigma": 50,
+    "note": "FastDVDnet supports a range of noise levels; this pack represents a strong sigma preset."
+  },
+  "origin": {
+    "upstream_repo": "https://github.com/m-tassano/fastdvdnet",
+    "paper": "https://arxiv.org/abs/1907.01361",
+    "license": "MIT",
+    "notes": "This ONNX file is expected to be a StudioCast-compatible export of the upstream PyTorch model (FastDVDnet forward(x, noise_map)).\n\nInput expectations:\n- noisy: [N, 15, H, W] float32 RGB in [0..1] (5 contiguous frames concatenated)\n- noise_map: [N, 1, H, W] float32 in [0..1] (sigma/255)\n- H and W should be multiples of 4 (or pad/crop like upstream temp_denoise).\n\nThis pack is a template (no binaries are committed)."
+  }
+}

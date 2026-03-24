@@ -3,10 +3,10 @@
 #include <filesystem>
 #include <string>
 
-#include "core/audio/virtual_audio_service.h"
 #include "core/audio/effects/broadcast_audio_effects.h"
-#include "core/video/virtual_camera_service.h"
+#include "core/audio/virtual_audio_service.h"
 #include "core/video/effects/broadcast_effects.h"
+#include "core/video/virtual_camera_service.h"
 
 namespace studiocast::config {
 
@@ -15,8 +15,16 @@ namespace studiocast::config {
 struct DaemonConfig {
   // Video
   bool video_enabled = true;
-  std::string video_input_device;   // empty = auto
-  std::string video_output_device;  // empty = auto
+  std::string video_input_device;  // empty = auto
+  std::string video_output_device; // empty = auto
+
+  // Capture mode:
+  // - requested: use `video_width`/`video_height`
+  // - auto_best: choose a good capture mode automatically; width/height may be
+  // <= 0 (sentinel)
+  studiocast::video::CaptureMode video_capture_mode =
+      studiocast::video::CaptureMode::requested;
+
   int video_width = 1280;
   int video_height = 720;
   int video_fps = 30;
@@ -26,9 +34,28 @@ struct DaemonConfig {
   // "auto" = use GPU scaling when available; otherwise CPU.
   std::string video_scaling_backend = "auto";
 
+  // Hard guard to prevent silent expensive CPU resize/scale paths.
+  // When false (default), output size mismatches must be resolved via GPU
+  // resize.
+  bool video_allow_cpu_resize = false;
+
   // Audio
   bool audio_enabled = false;
   bool audio_create_virtual_mic = true;
+
+  // Keep a virtual sink named "studiocast_speakers" available (daemon-owned).
+  // When enabled, other apps can select this as their output device.
+  bool audio_create_virtual_speakers = false;
+
+  // Pass-through speakers routing toggle (Phase 9): routes
+  // studiocast_speakers.monitor -> physical sink.
+  bool audio_speakers_enabled = false;
+
+  // Optional target sink name for speakers routing. Empty = Pulse default sink.
+  std::string audio_speaker_target_sink;
+
+  // Latency (ms) for speakers module-loopback.
+  int audio_speaker_latency_ms = 10;
   std::string audio_source; // empty = Pulse default
 
   // Canonical Broadcast-style audio effects.
@@ -42,7 +69,9 @@ struct DaemonConfig {
 
   // Service behavior
   int consumer_poll_ms = 250;
+  int start_grace_ms = 300;
   int stop_grace_ms = 1000;
+  int min_run_ms = 1500;
   bool always_on = false;
 };
 
@@ -50,20 +79,27 @@ struct DaemonConfig {
 std::filesystem::path DaemonConfigPath();
 
 DaemonConfig LoadDaemonConfig();
-bool SaveDaemonConfig(const DaemonConfig& s, std::string* error);
+bool SaveDaemonConfig(const DaemonConfig &s, std::string *error);
 
-// Convert persisted settings into the runtime VirtualCameraServiceConfig used by the daemon.
-studiocast::video::VirtualCameraServiceConfig ToVideoServiceConfig(const DaemonConfig& s);
+// Convert persisted settings into the runtime VirtualCameraServiceConfig used
+// by the daemon.
+studiocast::video::VirtualCameraServiceConfig
+ToVideoServiceConfig(const DaemonConfig &s);
 
-// Update a DaemonConfig from a runtime service config (useful for persistence on IPC changes).
-void ApplyVideoServiceConfigToDaemonConfig(const studiocast::video::VirtualCameraServiceConfig& cfg,
-                                          DaemonConfig* out);
+// Update a DaemonConfig from a runtime service config (useful for persistence
+// on IPC changes).
+void ApplyVideoServiceConfigToDaemonConfig(
+    const studiocast::video::VirtualCameraServiceConfig &cfg,
+    DaemonConfig *out);
 
-// Convert persisted settings into the runtime VirtualAudioServiceConfig used by the daemon.
-studiocast::audio::VirtualAudioServiceConfig ToAudioServiceConfig(const DaemonConfig& s);
+// Convert persisted settings into the runtime VirtualAudioServiceConfig used by
+// the daemon.
+studiocast::audio::VirtualAudioServiceConfig
+ToAudioServiceConfig(const DaemonConfig &s);
 
-// Update a DaemonConfig from a runtime audio service config (useful for persistence on IPC changes).
-void ApplyAudioServiceConfigToDaemonConfig(const studiocast::audio::VirtualAudioServiceConfig& cfg,
-                                          DaemonConfig* out);
+// Update a DaemonConfig from a runtime audio service config (useful for
+// persistence on IPC changes).
+void ApplyAudioServiceConfigToDaemonConfig(
+    const studiocast::audio::VirtualAudioServiceConfig &cfg, DaemonConfig *out);
 
-}  // namespace studiocast::config
+} // namespace studiocast::config

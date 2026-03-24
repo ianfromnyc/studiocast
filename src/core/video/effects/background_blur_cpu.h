@@ -15,20 +15,20 @@ namespace studiocast::video::effects {
 //
 // Later, the mask will come from an AI segmentation model (e.g. Maxine).
 class BackgroundBlurCpuEffect final : public IVideoEffect {
- public:
+public:
   explicit BackgroundBlurCpuEffect(int strength);
 
-  const char* Id() const override { return "background_blur"; }
-  const char* DisplayName() const override { return "Background Blur"; }
-  const char* Backend() const override { return "cpu"; }
+  const char *Id() const override { return "background_blur"; }
+  const char *DisplayName() const override { return "Background Blur"; }
+  const char *Backend() const override { return "cpu"; }
 
-  void Apply(const Rgb24FrameView& frame, EffectContext* ctx) override;
+  void Apply(const Rgb24FrameView &frame, EffectContext *ctx) override;
 
- private:
-  int strength_ = 8;  // blur radius
+private:
+  int strength_ = 8; // blur radius
 
-  std::vector<std::uint8_t> blurred_;   // tight RGB24 copy
-  std::vector<std::uint8_t> scratch_;   // used by box blur
+  std::vector<std::uint8_t> blurred_; // tight RGB24 copy
+  std::vector<std::uint8_t> scratch_; // used by box blur
 };
 
-}  // namespace studiocast::video::effects
+} // namespace studiocast::video::effects

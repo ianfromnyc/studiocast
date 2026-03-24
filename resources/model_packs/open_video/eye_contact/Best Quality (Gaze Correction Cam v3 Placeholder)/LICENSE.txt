@@ -1,0 +1,12 @@
+Gaze Correction Camera (Eye Contact) — v3 Placeholder Pack
+
+Upstream source:
+- https://github.com/WangWilly/gaze-correction-cam
+
+License:
+- BSD-3-Clause (see upstream LICENSE)
+
+Notes:
+- This pack is a placeholder intended for upcoming "v3" model updates in the upstream project.
+- StudioCast does not ship model binaries in git; installers should download the appropriate ONNX exports into this directory.
+- This pack depends on the dlib 68-point landmark predictor pack (trained on iBUG 300-W).

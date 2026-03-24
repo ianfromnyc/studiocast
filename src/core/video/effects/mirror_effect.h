@@ -5,11 +5,11 @@
 namespace studiocast::video::effects {
 
 class MirrorEffect final : public IVideoEffect {
- public:
-  const char* Id() const override { return "mirror"; }
-  const char* DisplayName() const override { return "Mirror"; }
+public:
+  const char *Id() const override { return "mirror"; }
+  const char *DisplayName() const override { return "Mirror"; }
 
-  void Apply(const Rgb24FrameView& frame, EffectContext* ctx) override;
+  void Apply(const Rgb24FrameView &frame, EffectContext *ctx) override;
 };
 
-}  // namespace studiocast::video::effects
+} // namespace studiocast::video::effects

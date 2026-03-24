@@ -11,16 +11,18 @@ namespace studiocast::video {
 // CPU-accessible frame view used as a staging buffer for v4l2loopback output.
 // The pipeline owns the backing memory; effects must not reallocate it.
 struct CpuFrameView {
-  std::uint8_t* data = nullptr;
+  std::uint8_t *data = nullptr;
   int width = 0;
   int height = 0;
-  std::size_t stride_bytes = 0;  // bytes per row
+  std::size_t stride_bytes = 0; // bytes per row
   PixelFormat format = PixelFormat::rgb24;
 
   std::size_t MinStrideBytes() const {
     switch (format) {
-      case PixelFormat::yuyv: return static_cast<std::size_t>(width) * 2u;
-      case PixelFormat::rgb24: return static_cast<std::size_t>(width) * 3u;
+    case PixelFormat::yuyv:
+      return static_cast<std::size_t>(width) * 2u;
+    case PixelFormat::rgb24:
+      return static_cast<std::size_t>(width) * 3u;
     }
     return 0;
   }
@@ -44,24 +46,27 @@ struct GpuFrame {
   // CPU staging buffer for loopback write (typically RGB24).
   CpuFrameView cpu{};
 
-  // Optional: GPU image view for Maxine operations (commonly `memSpace = NVCV_GPU`).
-  // The image may be used as input and/or output depending on the effect.
-  studiocast::maxine::NvCVImage* nvcv_gpu = nullptr;
+  // Optional: GPU image view for Maxine operations (commonly `memSpace =
+  // NVCV_GPU`). The image may be used as input and/or output depending on the
+  // effect.
+  studiocast::maxine::NvCVImage *nvcv_gpu = nullptr;
 
   // Optional: matte image (Au8) on GPU used by effects that consume a mask
   // (e.g. VFX Background Blur). The pipeline/effect graph is responsible for
   // ensuring the pointed-to image outlives the `Process()` call.
-  const studiocast::maxine::NvCVImage* matte_gpu = nullptr;
+  const studiocast::maxine::NvCVImage *matte_gpu = nullptr;
 
-  // Optional: CPU-side NvCVImage view (commonly `memSpace = NVCV_CPU`) describing
-  // the same backing memory as `cpu` (useful for NvCV transfers).
-  studiocast::maxine::NvCVImage* nvcv_cpu = nullptr;
+  // Optional: CPU-side NvCVImage view (commonly `memSpace = NVCV_CPU`)
+  // describing the same backing memory as `cpu` (useful for NvCV transfers).
+  studiocast::maxine::NvCVImage *nvcv_cpu = nullptr;
 
-  // Optional: scratch image storage (used by some NvCV transfer/conversion paths).
-  studiocast::maxine::NvCVImage* nvcv_tmp = nullptr;
+  // Optional: scratch image storage (used by some NvCV transfer/conversion
+  // paths).
+  studiocast::maxine::NvCVImage *nvcv_tmp = nullptr;
 
-  // Optional raw CUDA device pointer view for pipelines that do not use NvCVImage.
-  void* device_ptr = nullptr;
+  // Optional raw CUDA device pointer view for pipelines that do not use
+  // NvCVImage.
+  void *device_ptr = nullptr;
   std::size_t device_pitch_bytes = 0;
 
   // Optional stream for async GPU work.
@@ -69,7 +74,9 @@ struct GpuFrame {
 
   bool ValidDimensions() const { return width > 0 && height > 0; }
   bool HasCpuStaging() const { return cpu.Valid(); }
-  bool HasGpuImage() const { return nvcv_gpu != nullptr || device_ptr != nullptr; }
+  bool HasGpuImage() const {
+    return nvcv_gpu != nullptr || device_ptr != nullptr;
+  }
 };
 
-}  // namespace studiocast::video
+} // namespace studiocast::video

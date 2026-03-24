@@ -7,7 +7,7 @@ Planned components:
 - GUI (Qt)
 - Audio Service (PipeWire graph node)
 - Video Service (V4L2 input + v4l2loopback output)
-- Effects Engine abstraction layer (Maxine backends loaded at runtime)
+- Effects Engine abstraction layer (multiple GPU engines: Maxine + Open CUDA)
 - SDK Manager (downloads/installs user-obtained Maxine assets)
 
 ## Canonical effect model: `BroadcastCameraEffects`
@@ -41,17 +41,82 @@ CLI helpers:
 - `studiocastctl effects get` → `GET_CONFIG`
 - `studiocastctl effects set --file <effects.json|->` → `SET_VIDEO_EFFECTS_JSON` (file-based to avoid shell quoting)
 
-## Availability: daemon `MaxineManager` is authoritative
+## Effects engines: `auto_select`, `maxine`, `open_cuda`
+
+The canonical effect schema includes an engine selector:
+
+- `BroadcastCameraEffects.engine`
+
+Accepted JSON values:
+
+- `"auto"` / `"auto_select"`: prefer Maxine when available; otherwise fall back to Open CUDA for supported effects
+- `"maxine"`: force Maxine (unsupported effects remain blocked/unavailable)
+- `"open_cuda"`: force Open CUDA (GPU-only; requires ONNX Runtime + CUDA EP + model packs)
+
+Installation docs:
+
+- Maxine: `docs/maxine_install.md`
+- Open CUDA: `docs/open_cuda_install.md`
+
+## Availability: daemon diagnostics are authoritative
 
 Effect availability must be computed **only** by the daemon and exposed via `GET_STATUS`.
 
-- The daemon calls `MaxineManager::Diagnose(...)` and includes the diagnostics JSON in status.
+- The daemon includes per-engine diagnostics in `GET_STATUS` under:
+  - `engines.maxine` (and a legacy top-level `maxine` alias)
+  - `engines.open_cuda` (and a convenience top-level `open_cuda` alias)
 - The GUI should treat daemon status as the single source of truth for:
-  - whether Maxine is usable on this machine
+  - whether each engine is usable on this machine
   - which effects are available vs blocked (with reason codes)
   - what remediation/install hints to show
+
+## Open CUDA model packs (XDG)
+
+The `open_cuda` backend (ONNX Runtime CUDA EP) discovers user-supplied model packs at runtime.
+
+Default root:
+
+- `~/.local/share/studiocast/models/open_video/<subject>/<pack_dir>/`
+
+Where:
+
+- `<subject>` is a functional category like `matting` (legacy name: `segmentation`).
+- `<pack_dir>` is any directory name (it does not need to match `model.json:id`).
+
+Each pack contains:
+
+- `model.json` (matting packs include v1-style fields; multi-task packs use schema v2 with `files[]`)
+- model artifact files (e.g. `model.onnx`, `shape_predictor_68_face_landmarks.dat`)
+- `LICENSE.txt`
+
+Helper tool:
+
+- `studiocast-open paths` / `studiocast-open install-hints` / `studiocast-open list-models`
+
+### `model.json` schema v1 (draft)
+
+Required top-level fields:
+
+- `id`, `display_name`
+- `task`: currently only `"matting"`
+- `onnx_filename`
+- `input`: `{ name, layout, dtype, width, height, channels }`
+- `output`: `{ name, kind, dtype }` where `kind` is `"alpha"`
+- `preprocess`: `{ mean[3], std[3], color, range }` where `color` is `"rgb"` and `range` is `"0..1"`
 
 ## No CPU fallback (product rule)
 
 Effects are GPU-only (Maxine + small CUDA post-process where needed). If Maxine, drivers, supported GPU, or feature
 models are missing, the pipeline must not run effects and the UI must communicate the “unavailable” state.
+
+
+## Open Audio (microphone ML) model packs
+
+The Open Audio backend (`open_audio`) uses ONNX Runtime and user-supplied model packs to run streaming
+microphone enhancement (noise removal + “studio voice”). Model packs live under:
+
+```
+${XDG_DATA_HOME:-~/.local/share}/studiocast/models/open_audio/<model_id>/
+```
+
+See `docs/open_audio_install.md` for the installer script, pack schema, and validation tooling.

@@ -1,0 +1,11 @@
+Model pack: modnet-webnn-256-fp32
+
+Upstream ONNX model:
+  onnx-community/modnet-webnn (duplicated from Xenova/modnet)
+  https://huggingface.co/onnx-community/modnet-webnn
+
+License indicated by upstream model repo: Apache-2.0
+Full license text:
+  https://www.apache.org/licenses/LICENSE-2.0.txt
+
+This file is provided to satisfy StudioCast Open CUDA model pack requirements.

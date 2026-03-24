@@ -17,7 +17,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/setup_maxine.sh [options]
+  scripts/setup/maxine.sh [options]
 
 Options:
   --base DIR            Base directory (default: $XDG_DATA_HOME/studiocast/maxine or ~/.local/share/studiocast/maxine)
@@ -29,31 +29,31 @@ Options:
   --install-afx-features  Download AFX features needed for the MVP (requires NGC_API_KEY)
   --afx-effects CSV     AFX effect list to pass to download_features.sh --effects (default: MVP AEC + Superres)
   --gpu ARG             Maxine --gpu argument to pass to install_feature.sh. Can be repeated.
-  --build-dir DIR       Build dir containing studiocast-maxine (default: ./build). Used to auto-detect --gpu args.
+  --build-dir DIR       Build dir containing studiocast-maxine (default: ./cmake-build-debug). Used to auto-detect --gpu args.
   --ngc-org ORG         NGC org (default: nvidia)
   --ngc-team TEAM       NGC team (default: maxine)
   -h, --help            Show help.
 
 Examples:
   # Extract VFX + AR SDKs into the default XDG location:
-  ./scripts/setup_maxine.sh --vfx-tar ~/Downloads/NVIDIA_VFX_SDK_linux_*.tar.gz \
+  ./scripts/setup/maxine.sh --vfx-tar ~/Downloads/NVIDIA_VFX_SDK_linux_*.tar.gz \
                             --ar-tar  ~/Downloads/NVIDIA_AR_SDK_linux_*.tar.gz
 
   # Install features (requires NGC_CLI_API_KEY). Auto-detect --gpu args from studiocast-maxine:
   export NGC_CLI_API_KEY="..."
-  ./scripts/setup_maxine.sh --install-features --build-dir ./build
+  ./scripts/setup/maxine.sh --install-features --build-dir ./cmake-build-debug
 
   # Install features with explicit GPU arg(s):
   export NGC_CLI_API_KEY="..."
-  ./scripts/setup_maxine.sh --install-features --gpu turing
+  ./scripts/setup/maxine.sh --install-features --gpu turing
 
   # Download AFX features for the audio MVP (does not require --gpu):
   export NGC_API_KEY="..."
-  ./scripts/setup_maxine.sh --afx-tar ~/Downloads/Audio_Effects_SDK.tar.gz --install-afx-features
+  ./scripts/setup/maxine.sh --afx-tar ~/Downloads/Audio_Effects_SDK.tar.gz --install-afx-features
 
   # Download a custom AFX feature set:
   export NGC_API_KEY="..."
-  ./scripts/setup_maxine.sh --install-afx-features --afx-effects "superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
+  ./scripts/setup/maxine.sh --install-afx-features --afx-effects "superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
 EOF
 }
 
@@ -71,7 +71,7 @@ DO_INSTALL_FEATURES=0
 DO_INSTALL_AFX_FEATURES=0
 AFX_EFFECTS_CSV=""
 declare -a GPU_ARGS=()
-BUILD_DIR="./build"
+BUILD_DIR="./cmake-build-debug"
 NGC_ORG="nvidia"
 NGC_TEAM="maxine"
 
@@ -161,7 +161,7 @@ if [[ "$DO_INSTALL_FEATURES" -eq 1 ]]; then
   if [[ "${#GPU_ARGS[@]}" -eq 0 ]]; then
     echo "[maxine] ERROR: No --gpu args detected."
     echo "[maxine] Either:"
-    echo "  - Build and run ./build/studiocast-maxine gpu list, then re-run this script, OR"
+    echo "  - Build and run ${BUILD_DIR}/studiocast-maxine gpu list, then re-run this script, OR"
     echo "  - Provide --gpu manually (e.g. --gpu turing / ampere / ada depending on your system)."
     exit 1
   fi

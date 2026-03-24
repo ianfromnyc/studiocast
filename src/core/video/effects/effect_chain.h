@@ -9,26 +9,26 @@
 namespace studiocast::video::effects {
 
 class EffectChain final {
- public:
+public:
   EffectChain() = default;
   ~EffectChain() = default;
 
-  EffectChain(const EffectChain&) = delete;
-  EffectChain& operator=(const EffectChain&) = delete;
+  EffectChain(const EffectChain &) = delete;
+  EffectChain &operator=(const EffectChain &) = delete;
 
   void Clear();
 
   void Add(std::unique_ptr<IVideoEffect> effect);
 
   // Applies all effects in order.
-  void Apply(const Rgb24FrameView& frame);
+  void Apply(const Rgb24FrameView &frame);
 
   // Debug/status helpers.
   std::string BackendSummary() const;
 
- private:
+private:
   std::vector<std::unique_ptr<IVideoEffect>> effects_;
   mutable EffectContext ctx_;
 };
 
-}  // namespace studiocast::video::effects
+} // namespace studiocast::video::effects

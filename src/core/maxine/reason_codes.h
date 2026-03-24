@@ -38,9 +38,12 @@ inline constexpr std::string_view kSymbolMissing = "symbol_missing";
 //   missing_vfx_feature:<feature_id>
 //   missing_ar_feature:<feature_id>
 //   missing_afx_feature:<feature_id>
-inline constexpr std::string_view kMissingVfxFeaturePrefix = "missing_vfx_feature:";
-inline constexpr std::string_view kMissingArFeaturePrefix = "missing_ar_feature:";
-inline constexpr std::string_view kMissingAfxFeaturePrefix = "missing_afx_feature:";
+inline constexpr std::string_view kMissingVfxFeaturePrefix =
+    "missing_vfx_feature:";
+inline constexpr std::string_view kMissingArFeaturePrefix =
+    "missing_ar_feature:";
+inline constexpr std::string_view kMissingAfxFeaturePrefix =
+    "missing_afx_feature:";
 
 // Fallback.
 inline constexpr std::string_view kUnknown = "unknown";

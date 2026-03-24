@@ -1,0 +1,21 @@
+dlib 68-point face landmark predictor
+
+File:
+- shape_predictor_68_face_landmarks.dat
+
+Upstream download:
+- http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2
+
+Important licensing note:
+- This predictor is trained on the iBUG 300-W dataset.
+- The iBUG 300-W dataset license excludes commercial use.
+  (dlib notes this in the face landmark example docs.)
+
+References:
+- https://dlib.net/face_landmark_detection.py.html
+- https://github.com/davisking/dlib/blob/master/examples/face_landmark_detection_ex.cpp
+
+Notes:
+- StudioCast is intended to be non-commercial.
+- StudioCast does not ship this model binary in git.
+- This directory only contains metadata used by StudioCast's model installer/runtime.

@@ -18,7 +18,7 @@ namespace studiocast::maxine::effects {
 //   - Output: Au8 (matte)
 //   - Optional temporal consistency: state handles + NVVFX_TEMPORAL.
 class VfxGreenScreenEffect final : public IVfxEffect {
- public:
+public:
   struct Config {
     // NVVFX_MODE values come from NVIDIA headers. StudioCast does not vendor
     // those headers, so this is treated as a raw numeric.
@@ -33,45 +33,49 @@ class VfxGreenScreenEffect final : public IVfxEffect {
     std::uint32_t state_count = 1;
   };
 
-  VfxGreenScreenEffect(maxine::vfx::VfxApi* vfx,
-                       maxine::NvcvApi* nvcv,
+  VfxGreenScreenEffect(maxine::vfx::VfxApi *vfx, maxine::NvcvApi *nvcv,
                        std::filesystem::path model_dir);
   ~VfxGreenScreenEffect() override;
 
-  VfxGreenScreenEffect(const VfxGreenScreenEffect&) = delete;
-  VfxGreenScreenEffect& operator=(const VfxGreenScreenEffect&) = delete;
+  VfxGreenScreenEffect(const VfxGreenScreenEffect &) = delete;
+  VfxGreenScreenEffect &operator=(const VfxGreenScreenEffect &) = delete;
 
-  const char* Id() const override { return "greenscreen"; }
-  const char* DisplayName() const override { return "Green Screen"; }
+  const char *Id() const override { return "greenscreen"; }
+  const char *DisplayName() const override { return "Green Screen"; }
 
   // Initializes the underlying NvVFX effect (lazy; also called by Process).
-  bool Initialize(std::string* error);
+  bool Initialize(std::string *error);
 
   // Configure from canonical settings.
-  bool Configure(const studiocast::video::effects::BroadcastCameraEffects& settings, std::string* error) override;
+  bool
+  Configure(const studiocast::video::effects::BroadcastCameraEffects &settings,
+            std::string *error) override;
 
   // Runs green-screen matte generation on `frame.nvcv_gpu`.
   // Output matte is stored in an internal GPU `NvCVImage`.
-  NvCV_Status Process(studiocast::video::GpuFrame& frame, std::string* error) override;
+  NvCV_Status Process(studiocast::video::GpuFrame &frame,
+                      std::string *error) override;
 
   // Returns the most recent matte GPU image. Valid after a successful Process.
-  const maxine::NvCVImage* MatteGpu() const { return matte_ready_ ? &matte_gpu_ : nullptr; }
+  const maxine::NvCVImage *MatteGpu() const {
+    return matte_ready_ ? &matte_gpu_ : nullptr;
+  }
 
   maxine::CUstream cuda_stream() const { return stream_; }
 
-  const Config& config() const { return cfg_; }
-  void SetConfig(const Config& cfg);
+  const Config &config() const { return cfg_; }
+  void SetConfig(const Config &cfg);
 
- private:
-  bool EnsureEffectCreated(std::string* error);
-  bool ApplyConfigLocked(std::string* error);
-  bool EnsureTemporalStateLocked(std::string* error);
-  bool EnsureMatteImage(unsigned width, unsigned height, std::string* error);
+private:
+  bool EnsureEffectCreated(std::string *error);
+  bool ApplyConfigLocked(std::string *error);
+  bool EnsureTemporalStateLocked(std::string *error);
+  bool EnsureMatteImage(unsigned width, unsigned height, std::string *error);
 
   void Destroy();
 
-  maxine::vfx::VfxApi* vfx_ = nullptr;
-  maxine::NvcvApi* nvcv_ = nullptr;
+  maxine::vfx::VfxApi *vfx_ = nullptr;
+  maxine::NvcvApi *nvcv_ = nullptr;
   std::filesystem::path model_dir_;
 
   maxine::vfx::NvVFX_Handle handle_ = nullptr;
@@ -92,4 +96,4 @@ class VfxGreenScreenEffect final : public IVfxEffect {
   bool matte_allocated_ = false;
 };
 
-}  // namespace studiocast::maxine::effects
+} // namespace studiocast::maxine::effects

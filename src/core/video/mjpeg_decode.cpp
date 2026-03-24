@@ -17,40 +17,40 @@ struct JpegErr {
 };
 
 void JpegErrorExit(j_common_ptr cinfo) {
-  auto* err = reinterpret_cast<JpegErr*>(cinfo->err);
+  auto *err = reinterpret_cast<JpegErr *>(cinfo->err);
   (*cinfo->err->format_message)(cinfo, err->msg);
   longjmp(err->jmp, 1);
 }
 
 void JpegEmitMessage(j_common_ptr /*cinfo*/, int /*msg_level*/) {
-  // Silence libjpeg warnings/trace messages (stderr) to keep logs and self-tests deterministic.
+  // Silence libjpeg warnings/trace messages (stderr) to keep logs and
+  // self-tests deterministic.
 }
 
 void JpegOutputMessage(j_common_ptr /*cinfo*/) {
   // Silence libjpeg formatted output (stderr).
 }
 
-}  // namespace
+} // namespace
 
 void Rgb24Frame::ResizeTight(int w, int h) {
   width = w;
   height = h;
   stride_bytes = (w > 0) ? (static_cast<std::size_t>(w) * 3u) : 0u;
-  const std::size_t total = stride_bytes * static_cast<std::size_t>(std::max(0, h));
+  const std::size_t total =
+      stride_bytes * static_cast<std::size_t>(std::max(0, h));
   buf.resize(total);
 }
 
-bool DecodeMjpegToRgb24(const std::uint8_t* mjpg,
-                        std::size_t len,
-                        Rgb24Frame& out,
-                        int& w,
-                        int& h,
-                        std::string* error) {
-  if (error) error->clear();
+bool DecodeMjpegToRgb24(const std::uint8_t *mjpg, std::size_t len,
+                        Rgb24Frame &out, int &w, int &h, std::string *error) {
+  if (error)
+    error->clear();
   w = 0;
   h = 0;
   if (!mjpg || len == 0) {
-    if (error) *error = "Empty MJPEG buffer.";
+    if (error)
+      *error = "Empty MJPEG buffer.";
     return false;
   }
 
@@ -63,17 +63,21 @@ bool DecodeMjpegToRgb24(const std::uint8_t* mjpg,
   jerr.pub.output_message = JpegOutputMessage;
 
   if (setjmp(jerr.jmp) != 0) {
-    if (error) *error = jerr.msg;
+    if (error)
+      *error = jerr.msg;
     jpeg_destroy_decompress(&cinfo);
     return false;
   }
 
   jpeg_create_decompress(&cinfo);
-  jpeg_mem_src(&cinfo, const_cast<unsigned char*>(reinterpret_cast<const unsigned char*>(mjpg)),
+  jpeg_mem_src(&cinfo,
+               const_cast<unsigned char *>(
+                   reinterpret_cast<const unsigned char *>(mjpg)),
                static_cast<unsigned long>(len));
 
   if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
-    if (error) *error = "jpeg_read_header failed.";
+    if (error)
+      *error = "jpeg_read_header failed.";
     jpeg_destroy_decompress(&cinfo);
     return false;
   }
@@ -81,7 +85,8 @@ bool DecodeMjpegToRgb24(const std::uint8_t* mjpg,
   cinfo.out_color_space = JCS_RGB;
 
   if (jpeg_start_decompress(&cinfo) != TRUE) {
-    if (error) *error = "jpeg_start_decompress failed.";
+    if (error)
+      *error = "jpeg_start_decompress failed.";
     jpeg_destroy_decompress(&cinfo);
     return false;
   }
@@ -92,7 +97,8 @@ bool DecodeMjpegToRgb24(const std::uint8_t* mjpg,
   if (w <= 0 || h <= 0 || comps != 3) {
     if (error) {
       std::ostringstream oss;
-      oss << "Unexpected decompressor output (w=" << w << ", h=" << h << ", comps=" << comps << ").";
+      oss << "Unexpected decompressor output (w=" << w << ", h=" << h
+          << ", comps=" << comps << ").";
       *error = oss.str();
     }
     jpeg_finish_decompress(&cinfo);
@@ -111,7 +117,8 @@ bool DecodeMjpegToRgb24(const std::uint8_t* mjpg,
     row[0] = reinterpret_cast<JSAMPROW>(out.data() + y * row_stride);
     const JDIMENSION n = jpeg_read_scanlines(&cinfo, row, 1);
     if (n != 1) {
-      if (error) *error = "jpeg_read_scanlines failed.";
+      if (error)
+        *error = "jpeg_read_scanlines failed.";
       jpeg_finish_decompress(&cinfo);
       jpeg_destroy_decompress(&cinfo);
       w = 0;
@@ -125,4 +132,4 @@ bool DecodeMjpegToRgb24(const std::uint8_t* mjpg,
   return true;
 }
 
-}  // namespace studiocast::video
+} // namespace studiocast::video

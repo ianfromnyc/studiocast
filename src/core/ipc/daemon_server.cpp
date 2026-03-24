@@ -1,8 +1,8 @@
 #include "daemon_server.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <sstream>
 
@@ -14,18 +14,21 @@
 namespace studiocast::ipc {
 namespace {
 
-bool WriteAll(int fd, const void* data, std::size_t bytes, std::string* error) {
-  const char* p = static_cast<const char*>(data);
+bool WriteAll(int fd, const void *data, std::size_t bytes, std::string *error) {
+  const char *p = static_cast<const char *>(data);
   std::size_t n = 0;
   while (n < bytes) {
     const ssize_t w = ::write(fd, p + n, bytes - n);
     if (w < 0) {
-      if (errno == EINTR) continue;
-      if (error) *error = std::string("write failed: ") + std::strerror(errno);
+      if (errno == EINTR)
+        continue;
+      if (error)
+        *error = std::string("write failed: ") + std::strerror(errno);
       return false;
     }
     if (w == 0) {
-      if (error) *error = "write returned 0";
+      if (error)
+        *error = "write returned 0";
       return false;
     }
     n += static_cast<std::size_t>(w);
@@ -33,26 +36,30 @@ bool WriteAll(int fd, const void* data, std::size_t bytes, std::string* error) {
   return true;
 }
 
-}  // namespace
+} // namespace
 
 DaemonServer::~DaemonServer() { Stop(); }
 
-bool DaemonServer::Start(const std::filesystem::path& socket_path, Handler handler, std::string* error) {
+bool DaemonServer::Start(const std::filesystem::path &socket_path,
+                         Handler handler, std::string *error) {
   Stop();
 
   if (!handler) {
-    if (error) *error = "DaemonServer handler is null";
+    if (error)
+      *error = "DaemonServer handler is null";
     return false;
   }
 
   const std::string pathStr = socket_path.string();
   if (pathStr.empty()) {
-    if (error) *error = "socket_path is empty";
+    if (error)
+      *error = "socket_path is empty";
     return false;
   }
 
   if (pathStr.size() >= sizeof(sockaddr_un::sun_path)) {
-    if (error) *error = "Socket path too long: " + pathStr;
+    if (error)
+      *error = "Socket path too long: " + pathStr;
     return false;
   }
 
@@ -61,7 +68,8 @@ bool DaemonServer::Start(const std::filesystem::path& socket_path, Handler handl
 
   const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0) {
-    if (error) *error = std::string("socket() failed: ") + std::strerror(errno);
+    if (error)
+      *error = std::string("socket() failed: ") + std::strerror(errno);
     return false;
   }
 
@@ -69,7 +77,7 @@ bool DaemonServer::Start(const std::filesystem::path& socket_path, Handler handl
   addr.sun_family = AF_UNIX;
   std::strncpy(addr.sun_path, pathStr.c_str(), sizeof(addr.sun_path) - 1);
 
-  if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+  if (::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
     const int e = errno;
     ::close(fd);
     if (error) {
@@ -128,12 +136,14 @@ void DaemonServer::Stop() {
     client_fds_.clear();
   }
 
-  if (accept_th_.joinable()) accept_th_.join();
+  if (accept_th_.joinable())
+    accept_th_.join();
 
   {
     std::lock_guard<std::mutex> lock(mu_);
-    for (auto& t : client_threads_) {
-      if (t.joinable()) t.join();
+    for (auto &t : client_threads_) {
+      if (t.joinable())
+        t.join();
     }
     client_threads_.clear();
   }
@@ -152,8 +162,10 @@ void DaemonServer::AcceptThread() {
   while (!stop_.load()) {
     const int fd = ::accept4(listen_fd_, nullptr, nullptr, SOCK_CLOEXEC);
     if (fd < 0) {
-      if (errno == EINTR) continue;
-      if (stop_.load()) break;
+      if (errno == EINTR)
+        continue;
+      if (stop_.load())
+        break;
       // If listen fd was closed, accept will fail.
       std::this_thread::sleep_for(std::chrono::milliseconds(50));
       continue;
@@ -171,7 +183,8 @@ void DaemonServer::ClientThread(int fd) {
   auto removeFd = [&]() {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = std::find(client_fds_.begin(), client_fds_.end(), fd);
-    if (it != client_fds_.end()) client_fds_.erase(it);
+    if (it != client_fds_.end())
+      client_fds_.erase(it);
   };
 
   std::string buffer;
@@ -182,26 +195,31 @@ void DaemonServer::ClientThread(int fd) {
   while (!stop_.load()) {
     const ssize_t r = ::read(fd, tmp, sizeof(tmp));
     if (r < 0) {
-      if (errno == EINTR) continue;
+      if (errno == EINTR)
+        continue;
       break;
     }
-    if (r == 0) break;
+    if (r == 0)
+      break;
 
     buffer.append(tmp, tmp + r);
 
     for (;;) {
       const auto pos = buffer.find('\n');
-      if (pos == std::string::npos) break;
+      if (pos == std::string::npos)
+        break;
 
       std::string line = buffer.substr(0, pos);
       buffer.erase(0, pos + 1);
 
       // Ignore empty lines.
-      if (line.empty()) continue;
+      if (line.empty())
+        continue;
 
       std::string reply;
       try {
-        reply = handler_ ? handler_(line) : std::string("ERR {\"error\":\"no_handler\"}");
+        reply = handler_ ? handler_(line)
+                         : std::string("ERR {\"error\":\"no_handler\"}");
       } catch (...) {
         reply = "ERR {\"error\":\"exception\"}";
       }
@@ -219,4 +237,4 @@ void DaemonServer::ClientThread(int fd) {
   removeFd();
 }
 
-}  // namespace studiocast::ipc
+} // namespace studiocast::ipc

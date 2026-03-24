@@ -13,7 +13,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/setup_v4l2loopback.sh [options]
+  scripts/setup/v4l2loopback.sh [options]
 
 Options:
   --install             Install v4l2loopback DKMS + dependencies via apt.
@@ -28,10 +28,10 @@ Options:
 
 Examples:
   # Install packages, load module now, and persist across reboot:
-  ./scripts/setup_v4l2loopback.sh --install --load --persist
+  ./scripts/setup/v4l2loopback.sh --install --load --persist
 
   # Just load a device at /dev/video20 (no persistence):
-  ./scripts/setup_v4l2loopback.sh --load --video-nr 20
+  ./scripts/setup/v4l2loopback.sh --load --video-nr 20
 EOF
 }
 

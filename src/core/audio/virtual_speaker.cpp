@@ -11,10 +11,10 @@
 namespace studiocast::audio {
 namespace {
 
-constexpr const char* kSpeakersSinkName = "studiocast_speakers";
-constexpr const char* kVirtualMicSinkName = "studiocast_sink";
+constexpr const char *kSpeakersSinkName = "studiocast_speakers";
+constexpr const char *kVirtualMicSinkName = "studiocast_sink";
 
-bool Contains(const std::string& hay, const std::string& needle) {
+bool Contains(const std::string &hay, const std::string &needle) {
   return hay.find(needle) != std::string::npos;
 }
 
@@ -25,13 +25,12 @@ std::string MonitorSourceName() {
 void BestEffortSetFriendlyNames() {
   // Best-effort; ignore failures (older servers may reject unknown props).
   std::string err;
-  (void)pulse::UpdateSinkProplist(
-      kSpeakersSinkName,
-      {
-          "device.description=StudioCast Speakers",
-          "node.description=StudioCast Speakers",
-      },
-      &err);
+  (void)pulse::UpdateSinkProplist(kSpeakersSinkName,
+                                  {
+                                      "device.description=StudioCast Speakers",
+                                      "node.description=StudioCast Speakers",
+                                  },
+                                  &err);
 }
 
 VirtualSpeakerState DetectLoaded() {
@@ -39,12 +38,15 @@ VirtualSpeakerState DetectLoaded() {
   const auto mods = pulse::ListModules(&err);
 
   VirtualSpeakerState s;
-  for (const auto& m : mods) {
-    if (m.name == "module-null-sink" && Contains(m.args, std::string("sink_name=") + kSpeakersSinkName)) {
+  for (const auto &m : mods) {
+    if (m.name == "module-null-sink" &&
+        Contains(m.args, std::string("sink_name=") + kSpeakersSinkName)) {
       s.null_sink_module_id = m.id;
     }
-    if (m.name == "module-loopback" && Contains(m.args, std::string("source=") + MonitorSourceName())) {
-      if (!s.loopback_module_id) s.loopback_module_id = m.id;
+    if (m.name == "module-loopback" &&
+        Contains(m.args, std::string("source=") + MonitorSourceName())) {
+      if (!s.loopback_module_id)
+        s.loopback_module_id = m.id;
     }
   }
   return s;
@@ -55,24 +57,26 @@ std::vector<int> DetectAllLoopbacksFromStudioCastSpeakersMonitor() {
   const auto mods = pulse::ListModules(&err);
 
   std::vector<int> ids;
-  for (const auto& m : mods) {
-    if (m.name == "module-loopback" && Contains(m.args, std::string("source=") + MonitorSourceName())) {
+  for (const auto &m : mods) {
+    if (m.name == "module-loopback" &&
+        Contains(m.args, std::string("source=") + MonitorSourceName())) {
       ids.push_back(m.id);
     }
   }
   return ids;
 }
 
-}  // namespace
+} // namespace
 
 std::string VirtualSpeakerMonitorSourceName() { return MonitorSourceName(); }
 
 VirtualSpeakerState DetectVirtualSpeakerLoaded() { return DetectLoaded(); }
 
-bool CreateVirtualSpeaker(std::string* error) {
+bool CreateVirtualSpeaker(std::string *error) {
   std::string details;
   if (!pulse::PactlAvailable(&details)) {
-    if (error) *error = "pactl not available: " + details;
+    if (error)
+      *error = "pactl not available: " + details;
     return false;
   }
 
@@ -80,8 +84,9 @@ bool CreateVirtualSpeaker(std::string* error) {
   auto state = LoadVirtualSpeakerState();
 
   if (!loaded.null_sink_module_id) {
-    // NOTE: Keep quotes *inside* the value so Pulse/PipeWire module parsing can handle spaces.
-    // The outer single quotes are for the shell; the inner double quotes survive into pactl.
+    // NOTE: Keep quotes *inside* the value so Pulse/PipeWire module parsing can
+    // handle spaces. The outer single quotes are for the shell; the inner
+    // double quotes survive into pactl.
     std::string err;
     const std::string argsWithDesc =
         std::string("sink_name=") + kSpeakersSinkName +
@@ -90,13 +95,17 @@ bool CreateVirtualSpeaker(std::string* error) {
     auto id = pulse::LoadModule("module-null-sink", argsWithDesc, &err);
     if (!id) {
       std::string err2;
-      const std::string argsMinimal = std::string("sink_name=") + kSpeakersSinkName;
+      const std::string argsMinimal =
+          std::string("sink_name=") + kSpeakersSinkName;
       id = pulse::LoadModule("module-null-sink", argsMinimal, &err2);
       if (!id) {
         if (error) {
           *error = "Failed to load module-null-sink for virtual speakers.\n"
-                   "Attempt 1 (with description): " + err + "\n"
-                   "Attempt 2 (minimal): " + err2;
+                   "Attempt 1 (with description): " +
+                   err +
+                   "\n"
+                   "Attempt 2 (minimal): " +
+                   err2;
         }
         return false;
       }
@@ -110,17 +119,19 @@ bool CreateVirtualSpeaker(std::string* error) {
   // Loopback is an operational mode; don't auto-start it on create.
   std::string err;
   if (!SaveVirtualSpeakerState(state, &err)) {
-    if (error) *error = err;
+    if (error)
+      *error = err;
     return false;
   }
 
   return true;
 }
 
-bool StopSpeakerLoopback(std::string* error) {
+bool StopSpeakerLoopback(std::string *error) {
   std::string details;
   if (!pulse::PactlAvailable(&details)) {
-    if (error) *error = "pactl not available: " + details;
+    if (error)
+      *error = "pactl not available: " + details;
     return false;
   }
 
@@ -136,24 +147,28 @@ bool StopSpeakerLoopback(std::string* error) {
 
   std::string err;
   if (!SaveVirtualSpeakerState(state, &err)) {
-    if (error) *error = err;
+    if (error)
+      *error = err;
     return false;
   }
 
   return true;
 }
 
-bool StartSpeakerLoopback(const std::string& target_sink_name, int latency_ms, std::string* error) {
+bool StartSpeakerLoopback(const std::string &target_sink_name, int latency_ms,
+                          std::string *error) {
   std::string details;
   if (!pulse::PactlAvailable(&details)) {
-    if (error) *error = "pactl not available: " + details;
+    if (error)
+      *error = "pactl not available: " + details;
     return false;
   }
 
   {
     std::string err;
     if (!CreateVirtualSpeaker(&err)) {
-      if (error) *error = err;
+      if (error)
+        *error = err;
       return false;
     }
   }
@@ -171,10 +186,10 @@ bool StartSpeakerLoopback(const std::string& target_sink_name, int latency_ms, s
     if (def && *def != kSpeakersSinkName && *def != kVirtualMicSinkName) {
       chosen = *def;
     } else {
-      // If the user's default sink is our virtual device (common when testing), pick the first
-      // non-virtual sink as a best-effort physical target.
+      // If the user's default sink is our virtual device (common when testing),
+      // pick the first non-virtual sink as a best-effort physical target.
       const auto sinks = pulse::ListSinks(&err);
-      for (const auto& s : sinks) {
+      for (const auto &s : sinks) {
         if (s.name != kSpeakersSinkName && s.name != kVirtualMicSinkName) {
           chosen = s.name;
           break;
@@ -182,8 +197,10 @@ bool StartSpeakerLoopback(const std::string& target_sink_name, int latency_ms, s
       }
       if (chosen.empty()) {
         if (error) {
-          *error = "Failed to choose a target sink. Default sink is virtual or missing.";
-          if (!err.empty()) *error += " (note) " + err;
+          *error = "Failed to choose a target sink. Default sink is virtual or "
+                   "missing.";
+          if (!err.empty())
+            *error += " (note) " + err;
         }
         return false;
       }
@@ -191,7 +208,8 @@ bool StartSpeakerLoopback(const std::string& target_sink_name, int latency_ms, s
   }
 
   if (chosen == kSpeakersSinkName || chosen == kVirtualMicSinkName) {
-    if (error) *error = "Refusing to loop back to '" + chosen + "' (feedback loop).";
+    if (error)
+      *error = "Refusing to loop back to '" + chosen + "' (feedback loop).";
     return false;
   }
 
@@ -203,7 +221,8 @@ bool StartSpeakerLoopback(const std::string& target_sink_name, int latency_ms, s
   std::string err;
   auto id = pulse::LoadModule("module-loopback", args.str(), &err);
   if (!id) {
-    if (error) *error = "Failed to load module-loopback: " + err;
+    if (error)
+      *error = "Failed to load module-loopback: " + err;
     return false;
   }
 
@@ -212,17 +231,19 @@ bool StartSpeakerLoopback(const std::string& target_sink_name, int latency_ms, s
   state.loopback_target_sink_name = chosen;
 
   if (!SaveVirtualSpeakerState(state, &err)) {
-    if (error) *error = err;
+    if (error)
+      *error = err;
     return false;
   }
 
   return true;
 }
 
-bool DestroyVirtualSpeaker(std::string* error) {
+bool DestroyVirtualSpeaker(std::string *error) {
   std::string details;
   if (!pulse::PactlAvailable(&details)) {
-    if (error) *error = "pactl not available: " + details;
+    if (error)
+      *error = "pactl not available: " + details;
     return false;
   }
 
@@ -239,11 +260,12 @@ bool DestroyVirtualSpeaker(std::string* error) {
 
   std::string err;
   if (!ClearVirtualSpeakerState(&err)) {
-    if (error) *error = err;
+    if (error)
+      *error = err;
     return false;
   }
 
   return true;
 }
 
-}  // namespace studiocast::audio
+} // namespace studiocast::audio

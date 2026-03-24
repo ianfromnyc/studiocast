@@ -20,42 +20,46 @@ namespace studiocast::maxine::effects {
 // Denoising is temporal and requires a persistent state buffer.
 // The state buffer is allocated on the GPU and bound via NVVFX_STATE.
 class VfxDenoiseEffect final : public IVfxEffect {
- public:
-  VfxDenoiseEffect(maxine::vfx::VfxApi* vfx,
-                   maxine::NvcvApi* nvcv,
+public:
+  VfxDenoiseEffect(maxine::vfx::VfxApi *vfx, maxine::NvcvApi *nvcv,
                    std::filesystem::path model_dir);
   ~VfxDenoiseEffect() override;
 
-  VfxDenoiseEffect(const VfxDenoiseEffect&) = delete;
-  VfxDenoiseEffect& operator=(const VfxDenoiseEffect&) = delete;
+  VfxDenoiseEffect(const VfxDenoiseEffect &) = delete;
+  VfxDenoiseEffect &operator=(const VfxDenoiseEffect &) = delete;
 
-  const char* Id() const override { return "denoise"; }
-  const char* DisplayName() const override { return "Denoise"; }
+  const char *Id() const override { return "denoise"; }
+  const char *DisplayName() const override { return "Denoise"; }
 
-  bool Initialize(std::string* error);
+  bool Initialize(std::string *error);
 
-  bool Configure(const studiocast::video::effects::BroadcastCameraEffects& settings, std::string* error) override;
+  bool
+  Configure(const studiocast::video::effects::BroadcastCameraEffects &settings,
+            std::string *error) override;
 
-  NvCV_Status Process(studiocast::video::GpuFrame& frame, std::string* error) override;
+  NvCV_Status Process(studiocast::video::GpuFrame &frame,
+                      std::string *error) override;
 
-  maxine::NvCVImage* OutputGpu() { return output_ready_ ? &out_gpu_ : nullptr; }
-  const maxine::NvCVImage* OutputGpu() const { return output_ready_ ? &out_gpu_ : nullptr; }
+  maxine::NvCVImage *OutputGpu() { return output_ready_ ? &out_gpu_ : nullptr; }
+  const maxine::NvCVImage *OutputGpu() const {
+    return output_ready_ ? &out_gpu_ : nullptr;
+  }
 
   maxine::CUstream cuda_stream() const { return stream_; }
 
- private:
-  bool EnsureEffectCreated(std::string* error);
-  bool ApplyConfigLocked(std::string* error);
-  bool EnsureOutputImage(unsigned width, unsigned height, std::string* error);
-  bool EnsureStateBufferLocked(std::string* error);
-  bool QueryStateBytesLocked(std::size_t* out_bytes, std::string* error);
+private:
+  bool EnsureEffectCreated(std::string *error);
+  bool ApplyConfigLocked(std::string *error);
+  bool EnsureOutputImage(unsigned width, unsigned height, std::string *error);
+  bool EnsureStateBufferLocked(std::string *error);
+  bool QueryStateBytesLocked(std::size_t *out_bytes, std::string *error);
   void Destroy();
 
   static float QuantizeStrength01(float strength01);
   std::string CudaErrorToString(maxine::vfx::VfxApi::cudaError_t err) const;
 
-  maxine::vfx::VfxApi* vfx_ = nullptr;
-  maxine::NvcvApi* nvcv_ = nullptr;
+  maxine::vfx::VfxApi *vfx_ = nullptr;
+  maxine::NvcvApi *nvcv_ = nullptr;
   std::filesystem::path model_dir_;
 
   maxine::vfx::NvVFX_Handle handle_ = nullptr;
@@ -63,15 +67,15 @@ class VfxDenoiseEffect final : public IVfxEffect {
   bool own_stream_ = false;
 
   bool cfg_dirty_ = true;
-  float strength_ = 0.5f;  // [0..1]
+  float strength_ = 0.5f; // [0..1]
 
   maxine::NvCVImage out_gpu_{};
   bool out_allocated_ = false;
   bool output_ready_ = false;
 
-  void* state_device_ = nullptr;
+  void *state_device_ = nullptr;
   std::size_t state_bytes_ = 0;
   bool state_bound_ = false;
 };
 
-}  // namespace studiocast::maxine::effects
+} // namespace studiocast::maxine::effects

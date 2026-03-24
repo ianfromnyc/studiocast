@@ -1,40 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# StudioCast setup for Ubuntu 22.04+ (dev + MVP tester convenience).
+# StudioCast Ubuntu-family setup helper.
 #
-# Robust across Ubuntu versions by:
-# - Preferring kernel-provided v4l2loopback if available
-# - Falling back to DKMS only if module isn't present
-# - Persisting module load + options across reboot via /etc/modules-load.d and /etc/modprobe.d
-#
-# Also self-heals a common Ubuntu 24.04+ situation:
-# - v4l2loopback-dkms is installed/half-installed but kernel already has newer v4l2loopback,
-#   causing dpkg to fail on every future apt operation.
+# This script is invoked via ./scripts/setup.sh.
+# It installs build/runtime prerequisites and configures v4l2loopback.
 
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/setup_ubuntu22.sh [options]
+  ./scripts/setup.sh [options]
 
 Options:
-  --deps               Install build/runtime deps via apt.
-  --v4l2loopback       Ensure v4l2loopback is available (prefer kernel module; DKMS fallback).
-  --load-loopback      Load v4l2loopback now (creates /dev/videoN).
-  --persist-loopback   Persist v4l2loopback module + options across reboot.
-  --video-nr N         Loopback device number (default: 10).
-  --label TEXT         Loopback device label (default: "StudioCast Camera").
-  --exclusive-caps 0|1 exclusive_caps module option (default: 1).
-  --build              Configure + build (Ninja) into --build-dir.
-  --build-dir DIR      Build directory (default: ./build).
-  --build-type TYPE    CMake build type (default: Release).
-  --maxine             Run Maxine setup helper (see scripts/setup_maxine.sh).
-  -y, --yes            Assume yes for apt installs.
-  -h, --help           Show help.
+  --deps                 Install build/runtime deps (Qt/CMake/Ninja/etc + Pulse utils).
+  --v4l2loopback          Ensure v4l2loopback module is available (kernel module or DKMS).
+  --load-loopback         Load v4l2loopback now (creates /dev/videoN).
+  --persist-loopback      Persist module load/options across reboot.
+
+  --video-nr N            v4l2loopback device number (default: 10).
+  --label TEXT            v4l2loopback card label (default: "StudioCast Camera").
+  --exclusive-caps 0|1    v4l2loopback exclusive_caps (default: 1).
+
+  --onnxruntime-version V ONNX Runtime version to install (default: 1.17.3).
+  --onnxruntime-flavor    cpu|gpu (default: auto; gpu if nvidia-smi works, else cpu).
+  --onnxruntime-arch A    x64|aarch64 (default: auto from uname -m).
+
+  --build                 Configure + build StudioCast (dev convenience).
+  --build-dir DIR         Build directory (default: ./cmake-build-debug).
+  --build-type TYPE       CMake build type (default: Debug).
+
+  --maxine                Run Maxine helper (see scripts/setup/maxine.sh).
+  -y, --yes               Assume yes for apt installs.
+  -h, --help              Show help.
 
 Examples:
-  ./scripts/setup_ubuntu22.sh --deps --v4l2loopback --load-loopback --persist-loopback
-  ./scripts/setup_ubuntu22.sh --build --build-type Release
+  ./scripts/setup.sh --deps --v4l2loopback --load-loopback --persist-loopback
+  ./scripts/setup.sh --deps --onnxruntime-flavor gpu
 EOF
 }
 
@@ -47,11 +48,32 @@ VIDEO_NR=10
 LABEL="StudioCast Camera"
 EXCLUSIVE_CAPS=1
 DO_BUILD=0
-BUILD_DIR="./build"
-BUILD_TYPE="Release"
+BUILD_DIR="./cmake-build-debug"
+BUILD_TYPE="Debug"
 DO_MAXINE=0
 MAXINE_ARGS=()
 PARSE_MAXINE_ARGS=0
+
+# ONNX Runtime install defaults.
+# - Prefer GPU flavor if an NVIDIA driver is present.
+# - Let users override via CLI flags.
+ORT_VERSION="${ORT_VERSION:-1.17.3}"
+
+if [[ -z "${ORT_ARCH:-}" ]]; then
+  case "$(uname -m)" in
+    x86_64|amd64) ORT_ARCH="x64" ;;
+    aarch64|arm64) ORT_ARCH="aarch64" ;;
+    *) ORT_ARCH="x64" ;;
+  esac
+fi
+
+if [[ -z "${ORT_FLAVOR:-}" ]]; then
+  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    ORT_FLAVOR="gpu"
+  else
+    ORT_FLAVOR="cpu"
+  fi
+fi
 
 log() { echo "[setup] $*"; }
 
@@ -66,6 +88,82 @@ apt_install() {
   local pkgs=("$@")
   sudo apt update
   sudo apt install "${APT_ARGS[@]}" "${pkgs[@]}"
+}
+
+ensure_onnxruntime_available() {
+  require_cmd curl
+  require_cmd pkg-config
+  require_cmd tar
+
+  if pkg-config --exists onnxruntime; then
+    log "onnxruntime already available via pkg-config; skipping ONNX Runtime install."
+    return 0
+  fi
+
+  local ort_tgz="onnxruntime-linux-${ORT_ARCH}-${ORT_FLAVOR}-${ORT_VERSION}.tgz"
+  local ort_url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ort_tgz}"
+
+  # Install location for the extracted upstream tarball.
+  local ort_prefix="/opt/studiocast/onnxruntime/${ORT_VERSION}"
+  local ort_root="${ort_prefix}/onnxruntime-linux-${ORT_ARCH}-${ORT_FLAVOR}-${ORT_VERSION}"
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  trap 'rm -rf "${tmpdir}"' EXIT
+
+  log "Installing ONNX Runtime ${ORT_VERSION} (${ORT_FLAVOR}) from: ${ort_url}"
+  log "  -> ${ort_root}"
+  if [[ "${ORT_FLAVOR}" == "gpu" ]]; then
+    log "Note: ORT flavor 'gpu' requires a working NVIDIA driver/CUDA runtime stack at runtime."
+  fi
+
+  curl -fsSL "${ort_url}" -o "${tmpdir}/${ort_tgz}"
+
+  sudo mkdir -p "${ort_prefix}"
+  sudo tar -xzf "${tmpdir}/${ort_tgz}" -C "${ort_prefix}"
+
+  if [[ ! -f "${ort_root}/include/onnxruntime_cxx_api.h" ]]; then
+    echo "[setup] ERROR: ONNX Runtime headers not found at ${ort_root}/include/onnxruntime_cxx_api.h"
+    exit 1
+  fi
+
+  local ort_libdir="${ort_root}/lib"
+  if [[ -d "${ort_root}/lib64" ]]; then
+    ort_libdir="${ort_root}/lib64"
+  fi
+
+  if [[ ! -e "${ort_libdir}/libonnxruntime.so" ]]; then
+    local sofile
+    sofile="$(ls -1 "${ort_libdir}"/libonnxruntime.so.* 2>/dev/null | head -n 1 || true)"
+    if [[ -z "${sofile}" ]]; then
+      echo "[setup] ERROR: libonnxruntime.so not found under ${ort_libdir}"
+      exit 1
+    fi
+    sudo ln -sf "$(basename "${sofile}")" "${ort_libdir}/libonnxruntime.so"
+  fi
+
+  # Make the shared library discoverable for runtime linking.
+  sudo tee /etc/ld.so.conf.d/studiocast-onnxruntime.conf >/dev/null <<EOF
+${ort_libdir}
+EOF
+  sudo ldconfig
+
+  # Provide a pkg-config file so our CMake can pick it up via pkg_check_modules(onnxruntime).
+  sudo mkdir -p /usr/local/lib/pkgconfig
+  sudo tee /usr/local/lib/pkgconfig/onnxruntime.pc >/dev/null <<EOF
+prefix=${ort_root}
+exec_prefix=\${prefix}
+libdir=${ort_libdir}
+includedir=\${prefix}/include
+
+Name: onnxruntime
+Description: ONNX Runtime
+Version: ${ORT_VERSION}
+Libs: -L\${libdir} -lonnxruntime
+Cflags: -I\${includedir}
+EOF
+
+  log "ONNX Runtime installed; pkg-config reports: $(pkg-config --modversion onnxruntime)"
 }
 
 have_module() {
@@ -207,6 +305,9 @@ while [[ $# -gt 0 ]]; do
     --video-nr) VIDEO_NR="${2:-}"; shift 2 ;;
     --label) LABEL="${2:-}"; shift 2 ;;
     --exclusive-caps) EXCLUSIVE_CAPS="${2:-}"; shift 2 ;;
+    --onnxruntime-version) ORT_VERSION="${2:-}"; shift 2 ;;
+    --onnxruntime-flavor) ORT_FLAVOR="${2:-}"; shift 2 ;;
+    --onnxruntime-arch) ORT_ARCH="${2:-}"; shift 2 ;;
     --build) DO_BUILD=1; shift ;;
     --build-dir) BUILD_DIR="${2:-}"; shift 2 ;;
     --build-type) BUILD_TYPE="${2:-}"; shift 2 ;;
@@ -217,6 +318,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown argument: $1"; usage; exit 2 ;;
   esac
 done
+
+if [[ "${ORT_FLAVOR}" != "cpu" && "${ORT_FLAVOR}" != "gpu" ]]; then
+  echo "[setup] ERROR: --onnxruntime-flavor must be one of: cpu|gpu (got: '${ORT_FLAVOR}')" >&2
+  exit 2
+fi
 
 if [[ -f /etc/os-release ]]; then
   # shellcheck disable=SC1091
@@ -241,14 +347,17 @@ if [[ "$DO_DEPS" -eq 1 ]]; then
   log "Installing build/runtime dependencies..."
   apt_install \
     build-essential cmake ninja-build pkg-config \
-    git curl ca-certificates \
+    git curl ca-certificates tar \
     qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \
     qtbase5-dev \
     libxkbcommon-dev \
     libpulse-dev libpulse0 pulseaudio-utils \
     clang clang-format clang-tidy \
     v4l-utils \
+    libdlib-dev libsqlite3-dev \
     libjpeg-turbo8 libjpeg-turbo8-dev
+
+  ensure_onnxruntime_available
 fi
 
 if [[ "$DO_V4L2" -eq 1 ]]; then
@@ -282,7 +391,7 @@ fi
 
 if [[ "$DO_MAXINE" -eq 1 ]]; then
   log "Running Maxine setup helper..."
-  ./scripts/setup_maxine.sh --build-dir "$BUILD_DIR" "${MAXINE_ARGS[@]}"
+  ./scripts/setup/maxine.sh --build-dir "$BUILD_DIR" "${MAXINE_ARGS[@]}"
 fi
 
 log "Done."

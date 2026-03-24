@@ -1,0 +1,16 @@
+FastDVDnet Video Denoising Model (sigma=25)
+
+Upstream source:
+- https://github.com/m-tassano/fastdvdnet
+
+License:
+- MIT (see upstream LICENSE)
+
+Paper:
+- "FastDVDnet: Towards Real-Time Deep Video Denoising Without Flow Estimation" (Tassano et al.)
+  https://arxiv.org/abs/1907.01361
+
+Notes:
+- StudioCast does not ship the model binary in git.
+- This directory only contains metadata used by StudioCast's model installer/runtime.
+- This pack represents a sigma preset (strength baseline). StudioCast may still map user "strength" to sigma at runtime.

@@ -21,6 +21,7 @@ include(ProjectOptions)
 include(CompilerWarnings)
 include(Sanitizers)
 include(GenerateVersionHeader)
+include(OnnxRuntime)
 
 studiocast_setup_options()
 studiocast_global_options()
@@ -42,6 +43,55 @@ if (NOT JPEG_FOUND)
             "On Ubuntu 22.04: sudo apt install libjpeg-turbo8 libjpeg-turbo8-dev")
 endif ()
 
+# PNG decode (libpng) for virtual background replace images.
+find_package(PNG QUIET)
+if (NOT PNG_FOUND)
+    message(FATAL_ERROR
+            "PNG (libpng) development files not found. Virtual background replace images require PNG support. "
+            "On Ubuntu 22.04: sudo apt install libpng-dev")
+endif ()
+
+# dlib (optional) for face landmark detection used by Open Video Eye Contact.
+set(_studiocast_have_dlib FALSE)
+if (STUDIOCAST_ENABLE_DLIB)
+    # Prefer CMake config packages (common on modern distros), but allow module lookup.
+    find_package(dlib CONFIG QUIET)
+    if (dlib_FOUND)
+        set(_studiocast_have_dlib TRUE)
+    else()
+        find_package(dlib QUIET)
+        if (dlib_FOUND)
+            set(_studiocast_have_dlib TRUE)
+        endif()
+    endif()
+
+    if (_studiocast_have_dlib)
+        message(STATUS "dlib found; Open Video Eye Contact (dlib landmarks) enabled.")
+    else()
+        message(STATUS "dlib not found; Open Video Eye Contact will be unavailable. Install dlib (e.g., libdlib-dev) or set dlib_DIR.")
+    endif()
+endif()
+
+set(_studiocast_onnxruntime_found FALSE)
+set(_studiocast_onnxruntime_target "")
+studiocast_configure_onnxruntime(_studiocast_onnxruntime_found _studiocast_onnxruntime_target)
+if (STUDIOCAST_ENABLE_OPEN_CUDA)
+    if (_studiocast_onnxruntime_found)
+        message(STATUS "ONNX Runtime found (${_studiocast_onnxruntime_target}); Open CUDA backend enabled.")
+    else()
+        message(STATUS "ONNX Runtime not found; disabling Open CUDA backend. Install onnxruntime or set ONNXRUNTIME_ROOT.")
+        set(STUDIOCAST_ENABLE_OPEN_CUDA OFF CACHE BOOL "Enable Open CUDA backend (requires ONNX Runtime + CUDA EP)" FORCE)
+    endif()
+endif()
+
+if (STUDIOCAST_ENABLE_OPEN_AUDIO)
+    if (_studiocast_onnxruntime_found)
+        message(STATUS "ONNX Runtime found (${_studiocast_onnxruntime_target}); Open Audio backend enabled.")
+    else()
+        message(STATUS "ONNX Runtime not found; Open Audio backend will be unavailable. Install onnxruntime or set ONNXRUNTIME_ROOT.")
+    endif()
+endif()
+
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
@@ -58,6 +108,36 @@ studiocast_generate_version_header(
 add_library(studiocast_core
         src/core/probe/probe.h
         src/core/probe/probe.cpp
+        src/core/onnx/ort_session.h
+        src/core/onnx/ort_session.cpp
+        src/core/open_video/model_pack_registry.h
+        src/core/open_video/model_pack_registry.cpp
+        src/core/open_video/frame_analysis_cache.h
+        src/core/open_video/yunet_face_detector.h
+        src/core/open_video/yunet_face_detector.cpp
+        src/core/open_video/fastdvdnet_denoiser.h
+        src/core/open_video/fastdvdnet_denoiser.cpp
+        src/core/open_video/dlib_face_landmarks.h
+        src/core/open_video/dlib_face_landmarks.cpp
+        src/core/open_video/gaze_correction_eye_contact.h
+        src/core/open_video/gaze_correction_eye_contact.cpp
+        src/core/open_video/diagnostics.h
+        src/core/open_video/diagnostics.cpp
+        src/core/open_video/diagnose.h
+        src/core/open_video/diagnose.cpp
+        src/core/open_video/matting_session.h
+        src/core/open_video/matting_session.cpp
+        src/core/open_audio/open_audio_diagnostics.h
+        src/core/open_audio/open_audio_diagnostics.cpp
+        src/core/open_audio/open_audio_diagnose.h
+        src/core/open_audio/open_audio_diagnose.cpp
+        src/core/open_audio/model_pack_registry.h
+        src/core/open_audio/model_pack_registry.cpp
+        src/core/open_audio/open_audio_audio_processor.h
+        src/core/open_audio/open_audio_audio_processor.cpp
+        src/core/open_audio/open_audio_onnx_session.h
+        src/core/open_audio/open_audio_onnx_session.cpp
+        src/core/audio/effects/broadcast_audio_effect_contract.h
         src/core/util/dynlib.h
         src/core/util/dynlib.cpp
         src/core/util/json.h
@@ -99,10 +179,21 @@ add_library(studiocast_core
         src/core/maxine/afx_api.cpp
         src/core/maxine/afx/afx_effect.h
         src/core/maxine/afx/afx_effect.cpp
+        src/core/maxine/afx/afx_audio_processor.h
         src/core/maxine/ar_api.h
         src/core/maxine/ar_api.cpp
         src/core/maxine/cuda_driver_api.h
         src/core/maxine/cuda_driver_api.cpp
+        src/core/cuda/cuda_image.h
+        src/core/cuda/cuda_image.cpp
+        src/core/cuda/cuda_tensor.h
+        src/core/cuda/cuda_tensor.cpp
+        src/core/cuda/kernels/resize_bilinear.h
+        src/core/cuda/kernels/resize_bilinear_ptx.cpp
+        src/core/cuda/kernels/preprocess_to_nchw.h
+        src/core/cuda/kernels/preprocess_to_nchw_ptx.cpp
+        src/core/cuda/kernels/open_cuda_vb_kernels.h
+        src/core/cuda/kernels/open_cuda_vb_kernels_ptx.cpp
         src/core/maxine/cuda_crop_scale.h
         src/core/maxine/cuda_crop_scale.cpp
         src/core/maxine/cuda_vignette.h
@@ -125,6 +216,12 @@ add_library(studiocast_core
         src/core/maxine/effects/ar_auto_frame_tracker.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
+        src/core/audio/audio_backend_resolver.h
+        src/core/audio/audio_backend_resolver.cpp
+        src/core/audio/audio_processor.h
+        src/core/audio/audio_processor.cpp
+        src/core/audio/dsp/post_dsp_chain.h
+        src/core/audio/dsp/post_dsp_chain.cpp
         src/core/audio/effects/broadcast_audio_effects.h
         src/core/audio/effects/broadcast_audio_effects_plan.h
         src/core/audio/effects/broadcast_audio_effects_plan.cpp
@@ -153,6 +250,8 @@ add_library(studiocast_core
         src/core/video/feed.cpp
         src/core/video/convert.h
         src/core/video/convert.cpp
+        src/core/video/scaling_policy.h
+        src/core/video/scaling_policy.cpp
         src/core/video/mjpeg_decode.h
         src/core/video/mjpeg_decode.cpp
         src/core/video/effects/effect_types.h
@@ -204,6 +303,12 @@ set_target_properties(studiocast_core PROPERTIES
         AUTORCC OFF
 )
 
+# Video color conversion is extremely hot (runs every frame). In Debug builds the lack of
+# optimization can make the virtual camera feel laggy. Force optimization for this TU.
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set_source_files_properties(src/core/video/convert.cpp PROPERTIES COMPILE_OPTIONS "-O3")
+endif()
+
 target_include_directories(studiocast_core PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${STUDIOCAST_GENERATED_DIR}"
@@ -218,6 +323,13 @@ else()
     target_link_libraries(studiocast_core PUBLIC ${JPEG_LIBRARIES})
 endif()
 
+if (TARGET PNG::PNG)
+    target_link_libraries(studiocast_core PUBLIC PNG::PNG)
+else()
+    target_include_directories(studiocast_core PUBLIC ${PNG_INCLUDE_DIRS})
+    target_link_libraries(studiocast_core PUBLIC ${PNG_LIBRARIES})
+endif()
+
 if (PULSE_SIMPLE_FOUND)
     target_sources(studiocast_core PRIVATE
             src/core/audio/audio_pipeline.h
@@ -230,6 +342,29 @@ else()
     message(STATUS "libpulse-simple not found via pkg-config; audio pipeline is disabled. Install libpulse-dev to enable.")
 endif()
 
+target_compile_definitions(studiocast_core PUBLIC
+    STUDIOCAST_ENABLE_OPEN_CUDA=$<BOOL:${STUDIOCAST_ENABLE_OPEN_CUDA}>
+    STUDIOCAST_ENABLE_OPEN_AUDIO=$<BOOL:${STUDIOCAST_ENABLE_OPEN_AUDIO}>
+    STUDIOCAST_HAVE_DLIB=$<BOOL:${_studiocast_have_dlib}>
+)
+
+if (_studiocast_have_dlib)
+    if (TARGET dlib::dlib)
+        target_link_libraries(studiocast_core PUBLIC dlib::dlib)
+    elseif (TARGET dlib)
+        target_link_libraries(studiocast_core PUBLIC dlib)
+    else()
+        message(WARNING "dlib found but no CMake target was provided; linking may fail.")
+    endif()
+endif()
+
+if ((_studiocast_onnxruntime_found) AND (STUDIOCAST_ENABLE_OPEN_CUDA OR STUDIOCAST_ENABLE_OPEN_AUDIO))
+    target_link_libraries(studiocast_core PUBLIC ${_studiocast_onnxruntime_target})
+    target_compile_definitions(studiocast_core PUBLIC STUDIOCAST_HAVE_ONNXRUNTIME=1)
+else()
+    target_compile_definitions(studiocast_core PUBLIC STUDIOCAST_HAVE_ONNXRUNTIME=0)
+endif()
+
 studiocast_set_project_warnings(studiocast_core)
 studiocast_enable_sanitizers(studiocast_core)
 
@@ -240,6 +375,7 @@ add_executable(studiocast
         src/main.cpp
         src/gui/theme.h
         src/gui/theme.cpp
+        src/gui/resources/gui_resources.qrc
         src/gui/main_window.h
         src/gui/main_window.cpp
         src/gui/pages/audio_page.h
@@ -307,6 +443,25 @@ target_include_directories(studiocast-maxine PRIVATE
 
 studiocast_set_project_warnings(studiocast-maxine)
 studiocast_enable_sanitizers(studiocast-maxine)
+
+# -----------------------------
+# Open CUDA helper tool
+# -----------------------------
+add_executable(studiocast-open
+        src/tools/studiocast_open_main.cpp
+)
+
+set_target_properties(studiocast-open PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+
+target_link_libraries(studiocast-open PRIVATE studiocast_core)
+
+target_include_directories(studiocast-open PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${STUDIOCAST_GENERATED_DIR}"
+)
+
+studiocast_set_project_warnings(studiocast-open)
+studiocast_enable_sanitizers(studiocast-open)
 
 # -----------------------------
 # Audio tool 
@@ -409,7 +564,7 @@ set_target_properties(studiocastd PROPERTIES
 # Install step
 # -----------------------------
 include(GNUInstallDirs)
-install(TARGETS studiocast studiocast-probe studiocast-maxine studiocast-audio studiocast-video studiocastctl
+install(TARGETS studiocast studiocast-probe studiocast-maxine studiocast-open studiocast-audio studiocast-video studiocastctl
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
 

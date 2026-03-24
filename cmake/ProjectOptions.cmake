@@ -3,6 +3,25 @@ include_guard(GLOBAL)
 option(STUDIOCAST_ENABLE_WERROR "Treat warnings as errors" OFF)
 option(STUDIOCAST_ENABLE_SANITIZERS "Enable sanitizers (ASan/UBSan) on supported compilers" OFF)
 option(STUDIOCAST_ENABLE_LTO "Enable link-time optimization (IPO/LTO) if supported" OFF)
+option(STUDIOCAST_ENABLE_CUDA_KERNELS "Build optional CUDA .cu kernels (requires CUDA toolkit)" OFF)
+
+set(_studiocast_default_open_cuda OFF)
+if(UNIX AND NOT APPLE)
+  set(_studiocast_default_open_cuda ON)
+endif()
+option(STUDIOCAST_ENABLE_OPEN_CUDA "Enable Open CUDA backend (requires ONNX Runtime + CUDA EP)" ${_studiocast_default_open_cuda})
+
+set(_studiocast_default_open_audio OFF)
+if(UNIX AND NOT APPLE)
+  set(_studiocast_default_open_audio ON)
+endif()
+option(STUDIOCAST_ENABLE_OPEN_AUDIO "Enable Open Audio backend (requires ONNX Runtime; CPU EP baseline)" ${_studiocast_default_open_audio})
+
+# Optional dependency used for Open Video Eye Contact (face landmarks via dlib).
+#
+# If disabled or dlib is not found, the open-source Eye Contact backend will be
+# unavailable (Maxine AR may still provide Eye Contact when present).
+option(STUDIOCAST_ENABLE_DLIB "Enable dlib support (face landmarks)" ON)
 
 function(studiocast_setup_options)
   # Intentionally light for now; expand later

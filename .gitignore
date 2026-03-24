@@ -3,3 +3,8 @@
 /.junie
 /*.zip
 /build/
+**/*.onnx
+/scripts/models/build_open_video_eye_contact_models.py
+/scripts/models/build_open_video_face_detection_models.py
+/scripts/models/build_open_video_video_denoise_models.py
+/scripts/models/build_open_audio_fastenhancer_models.py

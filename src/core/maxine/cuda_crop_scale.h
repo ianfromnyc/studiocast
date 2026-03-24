@@ -13,23 +13,18 @@ namespace studiocast::maxine {
 // improved later (e.g. bilinear, lanczos, etc.).
 class CudaBgrCropScale {
 public:
-  bool Initialize(CudaDriverApi* cuda, std::string* error_out);
+  bool Initialize(CudaDriverApi *cuda, std::string *error_out);
 
   // Crop rectangle is expressed in source pixel coordinates.
   // Destination image must already be allocated and be BGR/U8/GPU.
-  bool CropScale(const NvCVImage& src_bgr_gpu,
-                 NvCVImage* dst_bgr_gpu,
-                 float crop_x,
-                 float crop_y,
-                 float crop_w,
-                 float crop_h,
-                 CUstream stream,
-                 std::string* error_out);
+  bool CropScale(const NvCVImage &src_bgr_gpu, NvCVImage *dst_bgr_gpu,
+                 float crop_x, float crop_y, float crop_w, float crop_h,
+                 CUstream stream, std::string *error_out);
 
 private:
-  bool EnsureKernelLoaded(std::string* error_out);
+  bool EnsureKernelLoaded(std::string *error_out);
 
-  CudaDriverApi* cuda_ = nullptr; // non-owning
+  CudaDriverApi *cuda_ = nullptr; // non-owning
   CUmodule module_ = nullptr;
   CUfunction fn_ = nullptr;
   bool loaded_ = false;
@@ -40,21 +35,19 @@ private:
 // The kernel uses image pitch (bytes per row) from the NvCVImage plane.
 class CudaBgrResizeBilinear {
 public:
-  bool Initialize(CudaDriverApi* cuda, std::string* error_out);
+  bool Initialize(CudaDriverApi *cuda, std::string *error_out);
 
   // Source/destination images must already be allocated and be BGR/U8/GPU.
-  bool Resize(const NvCVImage& src_bgr_gpu,
-              NvCVImage* dst_bgr_gpu,
-              CUstream stream,
-              std::string* error_out);
+  bool Resize(const NvCVImage &src_bgr_gpu, NvCVImage *dst_bgr_gpu,
+              CUstream stream, std::string *error_out);
 
 private:
-  bool EnsureKernelLoaded(std::string* error_out);
+  bool EnsureKernelLoaded(std::string *error_out);
 
-  CudaDriverApi* cuda_ = nullptr; // non-owning
+  CudaDriverApi *cuda_ = nullptr; // non-owning
   CUmodule module_ = nullptr;
   CUfunction fn_ = nullptr;
   bool loaded_ = false;
 };
 
-}  // namespace studiocast::maxine
+} // namespace studiocast::maxine
