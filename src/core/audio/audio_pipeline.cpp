@@ -2,9 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstring>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <utility>
@@ -70,6 +70,7 @@ public:
     Shutdown();
     stop_requested_.store(false, std::memory_order_release);
     capture_pending_.clear();
+    capture_pending_size_ = 0;
     capture_pending_offset_ = 0;
     pending_silence_bytes_ = 0;
 
@@ -133,8 +134,8 @@ public:
       return false;
     }
 
-    ::pa_context_set_state_callback(context_, &PulseAsyncAudioIo::ContextStateCb,
-                                    this);
+    ::pa_context_set_state_callback(context_,
+                                    &PulseAsyncAudioIo::ContextStateCb, this);
     if (::pa_context_connect(context_, nullptr, PA_CONTEXT_NOFLAGS, nullptr) <
         0) {
       if (error) {
@@ -203,7 +204,8 @@ public:
       return false;
     }
 
-    capture_pending_.reserve(bytes_per_frame * 2);
+    capture_pending_.resize(rec_attr.maxlength);
+    capture_pending_size_ = 0;
     ::pa_threaded_mainloop_unlock(mainloop_);
     return true;
   }
@@ -222,15 +224,15 @@ public:
       }
 
       const std::size_t pending_bytes =
-          capture_pending_.size() - capture_pending_offset_;
+          capture_pending_size_ - capture_pending_offset_;
       if (pending_bytes > 0) {
         const std::size_t chunk = std::min(bytes - copied, pending_bytes);
         std::memcpy(dst_bytes + copied,
                     capture_pending_.data() + capture_pending_offset_, chunk);
         copied += chunk;
         capture_pending_offset_ += chunk;
-        if (capture_pending_offset_ == capture_pending_.size()) {
-          capture_pending_.clear();
+        if (capture_pending_offset_ == capture_pending_size_) {
+          capture_pending_size_ = 0;
           capture_pending_offset_ = 0;
         }
         continue;
@@ -268,10 +270,19 @@ public:
       if (data) {
         std::memcpy(dst_bytes + copied, data, chunk);
         if (nbytes > chunk) {
-          capture_pending_.resize(nbytes - chunk);
+          const std::size_t remaining = nbytes - chunk;
+          if (remaining > capture_pending_.size()) {
+            if (error) {
+              *error = "Pulse capture read exceeded reserved buffer.";
+            }
+            (void)::pa_stream_drop(rec_);
+            ::pa_threaded_mainloop_unlock(mainloop_);
+            return false;
+          }
           std::memcpy(capture_pending_.data(),
                       static_cast<const std::uint8_t *>(data) + chunk,
-                      nbytes - chunk);
+                      remaining);
+          capture_pending_size_ = remaining;
           capture_pending_offset_ = 0;
         }
       } else {
@@ -295,8 +306,7 @@ public:
     return true;
   }
 
-  bool Write(const void *src, std::size_t bytes,
-             std::string *error) override {
+  bool Write(const void *src, std::size_t bytes, std::string *error) override {
     auto *src_bytes = static_cast<const std::uint8_t *>(src);
     std::size_t written = 0;
 
@@ -350,7 +360,7 @@ public:
       return;
 
     ::pa_threaded_mainloop_lock(mainloop_);
-    capture_pending_.clear();
+    capture_pending_size_ = 0;
     capture_pending_offset_ = 0;
     pending_silence_bytes_ = 0;
     FlushStreamLocked(rec_);
@@ -555,8 +565,8 @@ private:
       return;
 
     OperationState state{this};
-    pa_operation *op =
-        ::pa_stream_flush(stream, &PulseAsyncAudioIo::StreamOperationCb, &state);
+    pa_operation *op = ::pa_stream_flush(
+        stream, &PulseAsyncAudioIo::StreamOperationCb, &state);
     if (!op)
       return;
 
@@ -629,6 +639,7 @@ private:
     mainloop_ = nullptr;
 
     capture_pending_.clear();
+    capture_pending_size_ = 0;
     capture_pending_offset_ = 0;
     pending_silence_bytes_ = 0;
   }
@@ -639,6 +650,7 @@ private:
   pa_stream *play_ = nullptr;
   std::atomic<bool> stop_requested_{false};
   std::vector<std::uint8_t> capture_pending_;
+  std::size_t capture_pending_size_ = 0;
   std::size_t capture_pending_offset_ = 0;
   std::size_t pending_silence_bytes_ = 0;
 };

@@ -574,7 +574,7 @@ install(TARGETS studiocastd
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
 
-if (BUILD_TESTING)
+if (BUILD_TESTING AND PULSE_SIMPLE_FOUND)
     add_executable(studiocast-audio-tests
             tests/audio_service_tests.cpp
     )
@@ -596,4 +596,6 @@ if (BUILD_TESTING)
     )
 
     add_test(NAME studiocast-audio-tests COMMAND studiocast-audio-tests)
+elseif (BUILD_TESTING)
+    message(STATUS "Skipping studiocast-audio-tests because libpulse-simple was not found.")
 endif()

@@ -727,8 +727,18 @@ void VirtualAudioService::ThreadMain() {
           const bool speakerEffectsChanged =
               (!lastSpeakerFx.has_value() ||
                *lastSpeakerFx != cfg.effects.speaker);
+          std::optional<AudioPipelineStats> spkStatsBeforeRestart;
+          if (spk_pipeline) {
+            spkStatsBeforeRestart = spk_pipeline->GetStats();
+          }
           const bool spkPipelineDead =
-              (spk_pipeline && !spk_pipeline->GetStats().running);
+              (spkStatsBeforeRestart && !spkStatsBeforeRestart->running);
+          std::string spkTerminalError;
+          if (spkPipelineDead) {
+            spkTerminalError = spkStatsBeforeRestart->last_error.empty()
+                                   ? "Speaker audio pipeline stopped."
+                                   : spkStatsBeforeRestart->last_error;
+          }
           const bool needSpkRestart =
               (!spk_pipeline) || spkPipelineDead ||
               (lastSpeakerBackend != desiredSpkBackend) ||
@@ -763,7 +773,7 @@ void VirtualAudioService::ThreadMain() {
                   std::string(ToString(speakerDecision.backend));
               st_.speakers_effects_note = speakerDecision.note;
               st_.speakers_intensity = speakerPlan.intensity;
-              st_.speakers_pipeline_last_error.clear();
+              st_.speakers_pipeline_last_error = spkTerminalError;
             }
 
             // Build the processor (Maxine/Open Audio/Passthrough), with
@@ -955,7 +965,9 @@ void VirtualAudioService::ThreadMain() {
                 st_.speaker_target_sink_active = sinkName;
                 // Preserve st_.speakers_effects_note (decision/fallback
                 // message).
-                st_.speakers_pipeline_last_error.clear();
+                if (!spkPipelineDead) {
+                  st_.speakers_pipeline_last_error.clear();
+                }
               }
             }
           }
@@ -1102,7 +1114,19 @@ void VirtualAudioService::ThreadMain() {
     }
 
     const bool effectsChanged = (!lastFx.has_value() || *lastFx != cfg.effects);
-    const bool pipelineDead = (pipeline && !pipeline->GetStats().running);
+    std::optional<AudioPipelineStats> statsBeforeRestart;
+    if (pipeline) {
+      statsBeforeRestart = pipeline->GetStats();
+    }
+    const bool pipelineDead =
+        (statsBeforeRestart && !statsBeforeRestart->running);
+    std::string terminalError;
+    if (pipelineDead) {
+      terminalError = statsBeforeRestart->last_error.empty()
+                          ? "Audio pipeline stopped."
+                          : statsBeforeRestart->last_error;
+      SetLastError(terminalError);
+    }
     const bool needRestart = (!pipeline) || pipelineDead ||
                              (lastBackend != desiredBackend) ||
                              (lastSource != cfg.source_name) ||
@@ -1197,7 +1221,9 @@ void VirtualAudioService::ThreadMain() {
           std::lock_guard<std::mutex> lock(mu_);
           st_.pipeline_starting = false;
           st_.pipeline_running = true;
-          st_.last_error.clear();
+          if (!pipelineDead) {
+            st_.last_error.clear();
+          }
         }
       }
 
@@ -1270,7 +1296,9 @@ void VirtualAudioService::ThreadMain() {
           std::lock_guard<std::mutex> lock(mu_);
           st_.pipeline_starting = false;
           st_.pipeline_running = true;
-          st_.last_error.clear();
+          if (!pipelineDead) {
+            st_.last_error.clear();
+          }
         }
       }
 
@@ -1420,7 +1448,9 @@ void VirtualAudioService::ThreadMain() {
         std::lock_guard<std::mutex> lock(mu_);
         st_.pipeline_starting = false;
         st_.pipeline_running = true;
-        st_.last_error.clear();
+        if (!pipelineDead) {
+          st_.last_error.clear();
+        }
       }
     }
 
