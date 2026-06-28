@@ -574,7 +574,8 @@ private:
     if (!op)
       return;
 
-    while (!state.done && !ShouldStop()) {
+    while (!state.done && !ShouldStop() &&
+           ::pa_stream_get_state(stream) == PA_STREAM_READY) {
       ::pa_threaded_mainloop_wait(mainloop_);
     }
     ::pa_operation_unref(op);
