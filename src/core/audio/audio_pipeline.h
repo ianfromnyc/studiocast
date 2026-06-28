@@ -28,6 +28,9 @@ class AudioPipelineIo {
 public:
   virtual ~AudioPipelineIo() = default;
 
+  virtual void SetStopRequestedFlag(const std::atomic<bool> *stop_requested) {
+    (void)stop_requested;
+  }
   virtual bool Open(const AudioPipelineConfig &cfg, std::string *error) = 0;
   virtual bool Read(void *dst, std::size_t bytes, std::string *error) = 0;
   virtual bool Write(const void *src, std::size_t bytes,

@@ -63,12 +63,22 @@ class PulseAsyncAudioIo final : public AudioPipelineIo {
 public:
   ~PulseAsyncAudioIo() override { Shutdown(); }
 
+  void SetStopRequestedFlag(const std::atomic<bool> *stop_requested) override {
+    external_stop_requested_ = stop_requested;
+  }
+
   bool Open(const AudioPipelineConfig &cfg, std::string *error) override {
     if (error)
       error->clear();
 
     Shutdown();
+    if (ExternalStopRequested()) {
+      return false;
+    }
     stop_requested_.store(false, std::memory_order_release);
+    if (ExternalStopRequested()) {
+      return false;
+    }
     capture_pending_.clear();
     capture_pending_size_ = 0;
     capture_pending_offset_ = 0;
@@ -216,7 +226,7 @@ public:
 
     ::pa_threaded_mainloop_lock(mainloop_);
     while (copied < bytes) {
-      if (stop_requested_.load(std::memory_order_acquire)) {
+      if (ShouldStop()) {
         if (error)
           error->clear();
         ::pa_threaded_mainloop_unlock(mainloop_);
@@ -312,16 +322,8 @@ public:
 
     ::pa_threaded_mainloop_lock(mainloop_);
     while (written < bytes) {
-      if (!WaitForWritableLocked(error)) {
-        ::pa_threaded_mainloop_unlock(mainloop_);
-        return false;
-      }
-
-      const std::size_t writable = ::pa_stream_writable_size(play_);
-      if (writable == static_cast<std::size_t>(-1)) {
-        if (error) {
-          *error = "Pulse playback write failed: " + StreamErrorLocked(play_);
-        }
+      std::size_t writable = 0;
+      if (!WaitForWritableLocked(&writable, error)) {
         ::pa_threaded_mainloop_unlock(mainloop_);
         return false;
       }
@@ -428,7 +430,7 @@ private:
 
   bool WaitForContextReadyLocked(std::string *error) {
     while (true) {
-      if (stop_requested_.load(std::memory_order_acquire)) {
+      if (ShouldStop()) {
         if (error)
           error->clear();
         return false;
@@ -453,7 +455,7 @@ private:
   bool WaitForStreamReadyLocked(pa_stream *stream, const char *label,
                                 std::string *error) {
     while (true) {
-      if (stop_requested_.load(std::memory_order_acquire)) {
+      if (ShouldStop()) {
         if (error)
           error->clear();
         return false;
@@ -478,7 +480,7 @@ private:
 
   bool WaitForReadableLocked(std::string *error) {
     while (true) {
-      if (stop_requested_.load(std::memory_order_acquire)) {
+      if (ShouldStop()) {
         if (error)
           error->clear();
         return false;
@@ -506,9 +508,9 @@ private:
     }
   }
 
-  bool WaitForWritableLocked(std::string *error) {
+  bool WaitForWritableLocked(std::size_t *writable_out, std::string *error) {
     while (true) {
-      if (stop_requested_.load(std::memory_order_acquire)) {
+      if (ShouldStop()) {
         if (error)
           error->clear();
         return false;
@@ -529,6 +531,9 @@ private:
         return false;
       }
       if (writable > 0) {
+        if (writable_out) {
+          *writable_out = writable;
+        }
         return true;
       }
 
@@ -541,8 +546,7 @@ private:
       return false;
 
     ::pa_threaded_mainloop_lock(mainloop_);
-    if (::pa_stream_get_state(stream) != PA_STREAM_READY ||
-        stop_requested_.load(std::memory_order_acquire)) {
+    if (::pa_stream_get_state(stream) != PA_STREAM_READY || ShouldStop()) {
       ::pa_threaded_mainloop_unlock(mainloop_);
       return false;
     }
@@ -555,12 +559,12 @@ private:
       return false;
     }
 
-    *latency_us = static_cast<std::uint64_t>(latency);
+    *latency_us = negative ? 0u : static_cast<std::uint64_t>(latency);
     return true;
   }
 
   void FlushStreamLocked(pa_stream *stream) {
-    if (!stream || stop_requested_.load(std::memory_order_acquire) ||
+    if (!stream || ShouldStop() ||
         ::pa_stream_get_state(stream) != PA_STREAM_READY)
       return;
 
@@ -570,7 +574,7 @@ private:
     if (!op)
       return;
 
-    while (!state.done && !stop_requested_.load(std::memory_order_acquire)) {
+    while (!state.done && !ShouldStop()) {
       ::pa_threaded_mainloop_wait(mainloop_);
     }
     ::pa_operation_unref(op);
@@ -598,6 +602,16 @@ private:
     if (mainloop_) {
       ::pa_threaded_mainloop_signal(mainloop_, 0);
     }
+  }
+
+  bool ExternalStopRequested() const {
+    return external_stop_requested_ &&
+           external_stop_requested_->load(std::memory_order_acquire);
+  }
+
+  bool ShouldStop() const {
+    return stop_requested_.load(std::memory_order_acquire) ||
+           ExternalStopRequested();
   }
 
   void Shutdown() {
@@ -648,6 +662,7 @@ private:
   pa_context *context_ = nullptr;
   pa_stream *rec_ = nullptr;
   pa_stream *play_ = nullptr;
+  const std::atomic<bool> *external_stop_requested_ = nullptr;
   std::atomic<bool> stop_requested_{false};
   std::vector<std::uint8_t> capture_pending_;
   std::size_t capture_pending_size_ = 0;
@@ -671,6 +686,9 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
     if (error)
       *error = "Audio pipeline is already running.";
     return false;
+  }
+  if (thread_.joinable()) {
+    thread_.join();
   }
 
   // Reset stats.
@@ -709,6 +727,7 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
     return false;
   }
 
+  stop_.store(false, std::memory_order_release);
   {
     std::lock_guard<std::mutex> lock(io_mu_);
     io_ = CreateIo();
@@ -718,10 +737,10 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
         *error = GetStats().last_error;
       return false;
     }
+    io_->SetStopRequestedFlag(&stop_);
   }
 
   running_.store(true, std::memory_order_release);
-  stop_.store(false, std::memory_order_release);
   thread_ = std::thread([this, cfg] { ThreadMain(cfg); });
   return true;
 }

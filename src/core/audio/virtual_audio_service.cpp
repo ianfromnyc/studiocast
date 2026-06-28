@@ -343,6 +343,17 @@ void VirtualAudioService::ThreadMain() {
   steady_clock::time_point speakerOpenAudioCooldownUntil{};
   std::string speakerOpenAudioCooldownReason;
 
+  constexpr auto availabilityProbeTtl = seconds(2);
+  std::optional<AudioBackendAvailability> cachedMicAvailability;
+  std::optional<studiocast::audio::effects::BroadcastAudioEffects>
+      cachedMicAvailabilityEffects;
+  steady_clock::time_point nextMicAvailabilityProbe{};
+
+  std::optional<AudioBackendAvailability> cachedSpeakerAvailability;
+  std::optional<studiocast::audio::effects::BroadcastAudioEffects>
+      cachedSpeakerAvailabilityEffects;
+  steady_clock::time_point nextSpeakerAvailabilityProbe{};
+
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
   std::unique_ptr<studiocast::maxine::afx::AfxApi> api;
   std::unique_ptr<studiocast::maxine::afx::AfxEffect> fx;
@@ -652,8 +663,18 @@ void VirtualAudioService::ThreadMain() {
           speakerPlan.intensity = 0.0f;
 
         // Availability + backend selection.
-        AudioBackendAvailability speakerAvail =
-            ProbeAudioBackendAvailabilityForSpeaker(cfg);
+        const bool speakerAvailabilityExpired =
+            !cachedSpeakerAvailability ||
+            !cachedSpeakerAvailabilityEffects.has_value() ||
+            *cachedSpeakerAvailabilityEffects != cfg.effects ||
+            now >= nextSpeakerAvailabilityProbe;
+        if (speakerAvailabilityExpired) {
+          cachedSpeakerAvailability =
+              ProbeAudioBackendAvailabilityForSpeaker(cfg);
+          cachedSpeakerAvailabilityEffects = cfg.effects;
+          nextSpeakerAvailabilityProbe = now + availabilityProbeTtl;
+        }
+        AudioBackendAvailability speakerAvail = *cachedSpeakerAvailability;
         if (now < speakerOpenAudioCooldownUntil) {
           speakerAvail.open_source_ok = false;
           speakerAvail.open_source_reason =
@@ -1066,8 +1087,17 @@ void VirtualAudioService::ThreadMain() {
     // Backend selection.
     AudioBackendAvailability avail;
     if (AnyMicrophoneEffectRequested(cfg.effects)) {
-      avail = ProbeAudioBackendAvailabilityForMicrophone(cfg);
       const auto now2 = steady_clock::now();
+      const bool micAvailabilityExpired =
+          !cachedMicAvailability || !cachedMicAvailabilityEffects.has_value() ||
+          *cachedMicAvailabilityEffects != cfg.effects ||
+          now2 >= nextMicAvailabilityProbe;
+      if (micAvailabilityExpired) {
+        cachedMicAvailability = ProbeAudioBackendAvailabilityForMicrophone(cfg);
+        cachedMicAvailabilityEffects = cfg.effects;
+        nextMicAvailabilityProbe = now2 + availabilityProbeTtl;
+      }
+      avail = *cachedMicAvailability;
       if (now2 < openAudioCooldownUntil) {
         avail.open_source_ok = false;
         avail.open_source_reason = openAudioCooldownReason.empty()

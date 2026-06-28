@@ -201,6 +201,93 @@ private:
   std::chrono::milliseconds block_timeout_;
 };
 
+struct ResettingOpenIoState {
+  std::mutex mu;
+  std::condition_variable cv;
+  bool stop_requested = false;
+  int request_stop_calls = 0;
+};
+
+class ResettingOpenIo final : public AudioPipelineIo {
+public:
+  ResettingOpenIo(std::shared_ptr<ResettingOpenIoState> state,
+                  std::chrono::milliseconds reset_delay,
+                  std::chrono::milliseconds block_timeout)
+      : state_(std::move(state)), reset_delay_(reset_delay),
+        block_timeout_(block_timeout) {}
+
+  void SetStopRequestedFlag(const std::atomic<bool> *stop_requested) override {
+    external_stop_requested_ = stop_requested;
+  }
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    std::this_thread::sleep_for(reset_delay_);
+
+    std::unique_lock<std::mutex> lock(state_->mu);
+    state_->stop_requested = false;
+    const bool stopped = state_->cv.wait_for(lock, block_timeout_, [&] {
+      return state_->stop_requested ||
+             (external_stop_requested_ &&
+              external_stop_requested_->load(std::memory_order_acquire));
+    });
+    if (stopped) {
+      if (error)
+        error->clear();
+      return false;
+    }
+
+    if (error)
+      *error = "open remained blocked after stop";
+    return false;
+  }
+
+  bool Read(void *, std::size_t, std::string *) override { return false; }
+  bool Write(const void *, std::size_t, std::string *) override {
+    return false;
+  }
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+
+  void RequestStop() override {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    state_->stop_requested = true;
+    ++state_->request_stop_calls;
+    state_->cv.notify_all();
+  }
+
+private:
+  std::shared_ptr<ResettingOpenIoState> state_;
+  const std::atomic<bool> *external_stop_requested_ = nullptr;
+  std::chrono::milliseconds reset_delay_;
+  std::chrono::milliseconds block_timeout_;
+};
+
+class OpenFailIo final : public AudioPipelineIo {
+public:
+  explicit OpenFailIo(std::atomic<int> *open_calls) : open_calls_(open_calls) {}
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (open_calls_)
+      open_calls_->fetch_add(1, std::memory_order_relaxed);
+    if (error)
+      *error = "synthetic open failure";
+    return false;
+  }
+
+  bool Read(void *, std::size_t, std::string *) override { return false; }
+  bool Write(const void *, std::size_t, std::string *) override {
+    return false;
+  }
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+  void RequestStop() override {}
+
+private:
+  std::atomic<int> *open_calls_ = nullptr;
+};
+
 bool TestMicrophonePipelineRestartsWhenWorkerDies() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<int> pipeline_stops{0};
@@ -375,6 +462,98 @@ bool TestStatusDoesNotBlockDuringRetrySleep() {
   return true;
 }
 
+bool TestStopInterruptsOpenAfterEarlyStopReset() {
+  auto state = std::make_shared<ResettingOpenIoState>();
+  CopyProcessor processor;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [state] {
+    return std::make_unique<ResettingOpenIo>(state, 25ms, 200ms);
+  };
+
+  AudioPipeline pipeline(&processor, std::move(hooks));
+  AudioPipelineConfig cfg;
+
+  std::string err;
+  if (!pipeline.Start(cfg, &err)) {
+    std::cerr << "pipeline.Start failed: " << err << "\n";
+    return false;
+  }
+
+  auto stop_future = std::async(std::launch::async, [&] {
+    pipeline.Stop();
+    return true;
+  });
+  const bool stop_ready =
+      (stop_future.wait_for(100ms) == std::future_status::ready);
+  (void)stop_future.get();
+
+  int request_stop_calls = 0;
+  {
+    std::lock_guard<std::mutex> lock(state->mu);
+    request_stop_calls = state->request_stop_calls;
+  }
+
+  if (!stop_ready) {
+    std::cerr << "Stop() stayed blocked while Open() reset an early stop\n";
+    return false;
+  }
+
+  if (request_stop_calls == 0) {
+    std::cerr << "Stop() never signaled Open() to stop\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestStartReusesPipelineAfterWorkerExit() {
+  std::atomic<int> open_calls{0};
+  CopyProcessor processor;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [&] { return std::make_unique<OpenFailIo>(&open_calls); };
+
+  AudioPipeline pipeline(&processor, std::move(hooks));
+  AudioPipelineConfig cfg;
+
+  std::string err;
+  if (!pipeline.Start(cfg, &err)) {
+    std::cerr << "first pipeline.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            return open_calls.load(std::memory_order_relaxed) >= 1 &&
+                   !pipeline.GetStats().running;
+          },
+          250ms)) {
+    std::cerr << "first worker did not exit after open failure\n";
+    pipeline.Stop();
+    return false;
+  }
+
+  if (!pipeline.Start(cfg, &err)) {
+    std::cerr << "second pipeline.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            return open_calls.load(std::memory_order_relaxed) >= 2 &&
+                   !pipeline.GetStats().running;
+          },
+          250ms)) {
+    std::cerr << "second worker did not exit after open failure\n";
+    pipeline.Stop();
+    return false;
+  }
+
+  pipeline.Stop();
+  return true;
+}
+
 bool TestStopInterruptsBlockedCaptureRead() {
   auto state = std::make_shared<BlockingIoState>();
   CopyProcessor processor;
@@ -500,6 +679,10 @@ int main() {
        &TestMicrophonePipelinePreservesWorkerDeathError},
       {"status remains responsive during retry sleep",
        &TestStatusDoesNotBlockDuringRetrySleep},
+      {"stop interrupts open after early stop reset",
+       &TestStopInterruptsOpenAfterEarlyStopReset},
+      {"start reuses pipeline after worker exit",
+       &TestStartReusesPipelineAfterWorkerExit},
       {"stop interrupts blocked capture read",
        &TestStopInterruptsBlockedCaptureRead},
       {"stop interrupts blocked playback write",
