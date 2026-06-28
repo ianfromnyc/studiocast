@@ -1,7 +1,9 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <future>
 #include <iostream>
 #include <memory>
@@ -16,6 +18,8 @@
 #include "core/audio/audio_processor.h"
 #include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_audio_service.h"
+#include "core/audio/virtual_speaker.h"
+#include "core/audio/virtual_speaker_state.h"
 
 namespace {
 
@@ -30,6 +34,7 @@ using studiocast::audio::AudioProcessor;
 using studiocast::audio::VirtualAudioService;
 using studiocast::audio::VirtualAudioServiceConfig;
 using studiocast::audio::VirtualAudioServiceHooks;
+using studiocast::audio::VirtualSpeakerState;
 
 using namespace std::chrono_literals;
 
@@ -48,6 +53,70 @@ public:
   ScopedPactlExecHook(const ScopedPactlExecHook &) = delete;
   ScopedPactlExecHook &operator=(const ScopedPactlExecHook &) = delete;
 };
+
+class ScopedXdgStateHome final {
+public:
+  ScopedXdgStateHome() {
+    if (const char *old = std::getenv("XDG_STATE_HOME")) {
+      had_old_ = true;
+      old_ = old;
+    }
+
+    std::error_code ec;
+    auto base = std::filesystem::temp_directory_path(ec);
+    if (ec)
+      base = "/tmp";
+
+    static std::atomic<int> counter{0};
+    path_ = base / ("studiocast-audio-tests-" +
+                    std::to_string(
+                        std::chrono::steady_clock::now()
+                            .time_since_epoch()
+                            .count()) +
+                    "-" +
+                    std::to_string(counter.fetch_add(
+                        1, std::memory_order_relaxed)));
+
+    std::filesystem::create_directories(path_, ec);
+    ::setenv("XDG_STATE_HOME", path_.string().c_str(), 1);
+  }
+
+  ~ScopedXdgStateHome() {
+    if (had_old_) {
+      ::setenv("XDG_STATE_HOME", old_.c_str(), 1);
+    } else {
+      ::unsetenv("XDG_STATE_HOME");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(path_, ec);
+  }
+
+  ScopedXdgStateHome(const ScopedXdgStateHome &) = delete;
+  ScopedXdgStateHome &operator=(const ScopedXdgStateHome &) = delete;
+
+private:
+  bool had_old_ = false;
+  std::string old_;
+  std::filesystem::path path_;
+};
+
+studiocast::util::ExecResult ExecResult(int exit_code,
+                                        std::string stdout_str = {}) {
+  studiocast::util::ExecResult result;
+  result.exit_code = exit_code;
+  result.stdout_str = std::move(stdout_str);
+  return result;
+}
+
+bool CommandWasRun(const std::vector<std::string> &commands,
+                   const std::string &needle) {
+  for (const auto &command : commands) {
+    if (command.find(needle) != std::string::npos)
+      return true;
+  }
+  return false;
+}
 
 bool WaitUntil(const std::function<bool()> &pred,
                std::chrono::milliseconds timeout) {
@@ -576,6 +645,330 @@ bool TestPactlLoadModuleStringCompatibilitySplitter() {
               << expected << "\nactual:   "
               << (commands.empty() ? std::string("<none>") : commands[0])
               << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestPactlDefaultSourceAndSinkFallbackToInfo() {
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl get-default-source 2>&1")
+      return ExecResult(1, "unknown command\n");
+    if (command == "pactl get-default-sink 2>&1")
+      return ExecResult(1, "unknown command\n");
+    if (command == "pactl info 2>&1") {
+      return ExecResult(
+          0,
+          "Server String: /run/user/1000/pulse/native\n"
+          "Default Source: alsa_input.usb_test_mic\n"
+          "Default Sink: alsa_output.pci_test_speakers\n");
+    }
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  std::string err;
+  const auto source = studiocast::audio::pulse::GetDefaultSourceName(&err);
+  const auto sink = studiocast::audio::pulse::GetDefaultSinkName(&err);
+
+  const std::vector<std::string> expected = {
+      "pactl get-default-source 2>&1",
+      "pactl info 2>&1",
+      "pactl get-default-sink 2>&1",
+      "pactl info 2>&1",
+  };
+
+  if (!source || *source != "alsa_input.usb_test_mic" || !sink ||
+      *sink != "alsa_output.pci_test_speakers") {
+    std::cerr << "default source/sink fallback returned source='"
+              << (source ? *source : std::string("<none>")) << "' sink='"
+              << (sink ? *sink : std::string("<none>")) << "' error='" << err
+              << "'\n";
+    return false;
+  }
+
+  if (commands != expected) {
+    std::cerr << "unexpected default source/sink command sequence\n";
+    for (const auto &command : commands)
+      std::cerr << "  " << command << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestPactlProplistCommandsQuoteArgumentsAndDetectFailures() {
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (commands.size() == 1)
+      return ExecResult(0);
+    return ExecResult(0, "Failure: No such entity\n");
+  });
+
+  std::string err;
+  const bool sink_ok = studiocast::audio::pulse::UpdateSinkProplist(
+      "sink's name",
+      {
+          "device.description=StudioCast Speakers",
+          "node.description=StudioCast Speakers",
+      },
+      &err);
+  if (!sink_ok) {
+    std::cerr << "expected sink proplist update to succeed; error='" << err
+              << "'\n";
+    return false;
+  }
+
+  err.clear();
+  const bool source_ok = studiocast::audio::pulse::UpdateSourceProplist(
+      "source name",
+      {
+          "device.description=StudioCast Microphone",
+          "node.description=StudioCast Microphone",
+      },
+      &err);
+  if (source_ok || err.find("Failure: No such entity") == std::string::npos) {
+    std::cerr << "expected source proplist failure to be detected; ok="
+              << source_ok << " error='" << err << "'\n";
+    return false;
+  }
+
+  const std::vector<std::string> expected = {
+      "pactl update-sink-proplist 'sink'\"'\"'s name' "
+      "'device.description=StudioCast Speakers' "
+      "'node.description=StudioCast Speakers' 2>&1",
+      "pactl update-source-proplist 'source name' "
+      "'device.description=StudioCast Microphone' "
+      "'node.description=StudioCast Microphone' 2>&1",
+  };
+
+  if (commands != expected) {
+    std::cerr << "unexpected proplist command sequence\nexpected:\n";
+    for (const auto &command : expected)
+      std::cerr << "  " << command << "\n";
+    std::cerr << "actual:\n";
+    for (const auto &command : commands)
+      std::cerr << "  " << command << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestVirtualSpeakerLoopbackFallsBackFromVirtualDefaultSink() {
+  ScopedXdgStateHome state_home;
+  std::vector<std::string> commands;
+  const std::string expected_loopback =
+      "pactl load-module 'module-loopback' "
+      "'source=studiocast_speakers.monitor' 'sink=physical_test_sink' "
+      "'latency_msec=12' 2>&1";
+
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl --version 2>&1")
+      return ExecResult(0, "pactl 16.1\n");
+    if (command == "pactl list short modules 2>&1")
+      return ExecResult(0);
+    if (command.find("pactl load-module 'module-null-sink'") == 0)
+      return ExecResult(0, "10\n");
+    if (command.find(
+            "pactl update-sink-proplist 'studiocast_speakers'") == 0)
+      return ExecResult(0);
+    if (command == "pactl get-default-sink 2>&1")
+      return ExecResult(0, "studiocast_speakers\n");
+    if (command == "pactl list short sinks 2>&1") {
+      return ExecResult(
+          0,
+          "0\tstudiocast_speakers\tmodule-null-sink.c\t"
+          "s16le 2ch 48000Hz\tRUNNING\n"
+          "1\tstudiocast_sink\tmodule-null-sink.c\t"
+          "s16le 2ch 48000Hz\tRUNNING\n"
+          "2\tphysical_test_sink\tmodule-alsa-card.c\t"
+          "s16le 2ch 48000Hz\tRUNNING\n");
+    }
+    if (command == expected_loopback)
+      return ExecResult(0, "20\n");
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  std::string err;
+  const bool ok = studiocast::audio::StartSpeakerLoopback("", 12, &err);
+  if (!ok) {
+    std::cerr << "expected speaker loopback fallback to succeed; error='" << err
+              << "'\n";
+    return false;
+  }
+
+  const auto state = studiocast::audio::LoadVirtualSpeakerState();
+  if (!state.loopback_module_id || *state.loopback_module_id != 20 ||
+      !state.loopback_target_sink_name ||
+      *state.loopback_target_sink_name != "physical_test_sink") {
+    std::cerr << "speaker loopback state did not record fallback sink; id="
+              << (state.loopback_module_id
+                      ? std::to_string(*state.loopback_module_id)
+                      : std::string("<none>"))
+              << " target='"
+              << (state.loopback_target_sink_name
+                      ? *state.loopback_target_sink_name
+                      : std::string("<none>"))
+              << "'\n";
+    return false;
+  }
+
+  if (!CommandWasRun(commands, expected_loopback) ||
+      CommandWasRun(commands, "'sink=studiocast_speakers'")) {
+    std::cerr << "speaker loopback did not use the physical fallback sink\n";
+    for (const auto &command : commands)
+      std::cerr << "  " << command << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestVirtualSpeakerLoopbackRejectsVirtualTarget() {
+  ScopedXdgStateHome state_home;
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl --version 2>&1")
+      return ExecResult(0, "pactl 16.1\n");
+    if (command == "pactl list short modules 2>&1")
+      return ExecResult(0);
+    if (command.find("pactl load-module 'module-null-sink'") == 0)
+      return ExecResult(0, "10\n");
+    if (command.find(
+            "pactl update-sink-proplist 'studiocast_speakers'") == 0)
+      return ExecResult(0);
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  std::string err;
+  const bool ok =
+      studiocast::audio::StartSpeakerLoopback("studiocast_sink", 10, &err);
+  if (ok || err.find("feedback loop") == std::string::npos) {
+    std::cerr << "expected virtual speaker target to be rejected; ok=" << ok
+              << " error='" << err << "'\n";
+    return false;
+  }
+
+  if (CommandWasRun(commands, "pactl load-module 'module-loopback'")) {
+    std::cerr << "module-loopback was loaded for an invalid virtual target\n";
+    for (const auto &command : commands)
+      std::cerr << "  " << command << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestVirtualSpeakerLoopbackRestartPropagatesStopFailure() {
+  ScopedXdgStateHome state_home;
+  VirtualSpeakerState initial;
+  initial.null_sink_module_id = 10;
+  initial.loopback_module_id = 42;
+  initial.loopback_target_sink_name = "old_physical_sink";
+  std::string err;
+  if (!studiocast::audio::SaveVirtualSpeakerState(initial, &err)) {
+    std::cerr << "failed to seed virtual speaker state: " << err << "\n";
+    return false;
+  }
+
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl --version 2>&1")
+      return ExecResult(0, "pactl 16.1\n");
+    if (command == "pactl list short modules 2>&1") {
+      return ExecResult(
+          0,
+          "10\tmodule-null-sink\tsink_name=studiocast_speakers\n"
+          "42\tmodule-loopback\tsource=studiocast_speakers.monitor "
+          "sink=old_physical_sink\n");
+    }
+    if (command.find(
+            "pactl update-sink-proplist 'studiocast_speakers'") == 0)
+      return ExecResult(0);
+    if (command == "pactl unload-module 42 2>&1")
+      return ExecResult(1, "Failure: synthetic unload failure\n");
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  err.clear();
+  const bool ok = studiocast::audio::StartSpeakerLoopback(
+      "new_physical_sink", 10, &err);
+  if (ok || err.find("synthetic unload failure") == std::string::npos) {
+    std::cerr << "expected loopback restart to fail on unload failure; ok="
+              << ok << " error='" << err << "'\n";
+    return false;
+  }
+
+  const auto state = studiocast::audio::LoadVirtualSpeakerState();
+  if (!state.loopback_module_id || *state.loopback_module_id != 42 ||
+      !state.loopback_target_sink_name ||
+      *state.loopback_target_sink_name != "old_physical_sink") {
+    std::cerr << "failed loopback stop did not preserve active state; id="
+              << (state.loopback_module_id
+                      ? std::to_string(*state.loopback_module_id)
+                      : std::string("<none>"))
+              << " target='"
+              << (state.loopback_target_sink_name
+                      ? *state.loopback_target_sink_name
+                      : std::string("<none>"))
+              << "'\n";
+    return false;
+  }
+
+  if (CommandWasRun(commands, "pactl load-module 'module-loopback'")) {
+    std::cerr << "new module-loopback was loaded after stop failure\n";
+    for (const auto &command : commands)
+      std::cerr << "  " << command << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestDestroyVirtualSpeakerPropagatesNullSinkUnloadFailure() {
+  ScopedXdgStateHome state_home;
+  VirtualSpeakerState initial;
+  initial.null_sink_module_id = 10;
+  initial.loopback_module_id = 42;
+  initial.loopback_target_sink_name = "old_physical_sink";
+  std::string err;
+  if (!studiocast::audio::SaveVirtualSpeakerState(initial, &err)) {
+    std::cerr << "failed to seed virtual speaker state: " << err << "\n";
+    return false;
+  }
+
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl --version 2>&1")
+      return ExecResult(0, "pactl 16.1\n");
+    if (command == "pactl list short modules 2>&1") {
+      return ExecResult(
+          0, "10\tmodule-null-sink\tsink_name=studiocast_speakers\n");
+    }
+    if (command == "pactl unload-module 10 2>&1")
+      return ExecResult(1, "Failure: synthetic null unload failure\n");
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  err.clear();
+  const bool ok = studiocast::audio::DestroyVirtualSpeaker(&err);
+  if (ok || err.find("synthetic null unload failure") == std::string::npos) {
+    std::cerr << "expected virtual speaker destroy to fail on unload failure; "
+              << "ok=" << ok << " error='" << err << "'\n";
+    return false;
+  }
+
+  const auto state = studiocast::audio::LoadVirtualSpeakerState();
+  if (!state.null_sink_module_id || *state.null_sink_module_id != 10) {
+    std::cerr << "failed virtual speaker destroy cleared null sink state\n";
     return false;
   }
 
@@ -1978,6 +2371,18 @@ int main() {
        &TestPactlLoadModuleQuotesVectorArguments},
       {"pactl load-module string compatibility splitter",
        &TestPactlLoadModuleStringCompatibilitySplitter},
+      {"pactl default source/sink fallback to info",
+       &TestPactlDefaultSourceAndSinkFallbackToInfo},
+      {"pactl proplist commands quote args and detect failures",
+       &TestPactlProplistCommandsQuoteArgumentsAndDetectFailures},
+      {"virtual speaker loopback falls back from virtual default sink",
+       &TestVirtualSpeakerLoopbackFallsBackFromVirtualDefaultSink},
+      {"virtual speaker loopback rejects virtual target",
+       &TestVirtualSpeakerLoopbackRejectsVirtualTarget},
+      {"virtual speaker loopback restart propagates stop failure",
+       &TestVirtualSpeakerLoopbackRestartPropagatesStopFailure},
+      {"destroy virtual speaker propagates null sink unload failure",
+       &TestDestroyVirtualSpeakerPropagatesNullSinkUnloadFailure},
       {"mic pipeline restarts after worker death",
        &TestMicrophonePipelineRestartsWhenWorkerDies},
       {"mic pipeline preserves worker death error",
