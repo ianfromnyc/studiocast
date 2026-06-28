@@ -1393,6 +1393,12 @@ bool OpenAudioAudioProcessor::InitializeBindings(std::string *error) {
   // Allocate model I/O buffers (mono waveform).
   model_in_.assign(model_frame_samples_, 0.0f);
   model_out_.assign(model_frame_samples_, 0.0f);
+  // Allocate pipeline-rate scratch buffers up front. The realtime Process()
+  // path should not grow vectors; AudioPipeline enforces 480-frame blocks.
+  constexpr std::uint32_t kPipelineFrameSamples = 480;
+  mono_in_.assign(kPipelineFrameSamples, 0.0f);
+  mono_out_.assign(kPipelineFrameSamples, 0.0f);
+  side_.assign(kPipelineFrameSamples, 0.0f);
 
   // Configure resampler for 48k <-> 16k.
   decim3_.reset();
@@ -1531,15 +1537,19 @@ bool OpenAudioAudioProcessor::Process(const float *in, float *out,
   const bool use_mid_side_stereo =
       (channels == 2) && (mode == StrengthMode::kSpeakerNoiseRemoval ||
                           mode == StrengthMode::kSpeakerRoomEchoRemoval);
+  if (mono_in_.size() < frames || mono_out_.size() < frames ||
+      (use_mid_side_stereo && side_.size() < frames)) {
+    sticky_warning_ = "Open Audio: unexpected pipeline frame size; bypassing.";
+    std::copy_n(in, samples, out);
+    return true;
+  }
 
   // Convert interleaved audio to mono.
   //  - Mic path: mono input.
   //  - Speaker path (stereo): process Mid only, preserve Side.
-  mono_in_.resize(frames);
   if (channels == 1) {
     std::copy_n(in, frames, mono_in_.data());
   } else if (use_mid_side_stereo) {
-    side_.resize(frames);
     for (std::uint32_t f = 0; f < frames; ++f) {
       const float l = in[static_cast<std::size_t>(f) * 2 + 0];
       const float r = in[static_cast<std::size_t>(f) * 2 + 1];
@@ -1641,7 +1651,6 @@ bool OpenAudioAudioProcessor::Process(const float *in, float *out,
   state_toggle_ = 1 - state_toggle_;
 
   // Resample back to pipeline rate.
-  mono_out_.resize(frames);
   if (model_sample_rate_ == 16000) {
     if (!interp3_->Process(model_out_.data(), model_out_.size(),
                            mono_out_.data(), mono_out_.size())) {

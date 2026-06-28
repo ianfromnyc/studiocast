@@ -10,12 +10,14 @@
 #include <thread>
 #include <utility>
 
+#include "core/audio/audio_backend_resolver.h"
 #include "core/audio/audio_pipeline.h"
 #include "core/audio/audio_processor.h"
 #include "core/audio/virtual_audio_service.h"
 
 namespace {
 
+using studiocast::audio::AudioBackendAvailability;
 using studiocast::audio::AudioPipeline;
 using studiocast::audio::AudioPipelineConfig;
 using studiocast::audio::AudioPipelineHooks;
@@ -120,6 +122,29 @@ public:
                 static_cast<std::size_t>(frames) * channels * sizeof(float));
     return true;
   }
+};
+
+class CountingCopyProcessor final : public AudioProcessor {
+public:
+  explicit CountingCopyProcessor(std::atomic<int> *reset_calls)
+      : reset_calls_(reset_calls) {}
+
+  bool Process(const float *in, float *out, std::uint32_t frames,
+               std::uint32_t channels, std::string *error) override {
+    if (error)
+      error->clear();
+    std::memcpy(out, in,
+                static_cast<std::size_t>(frames) * channels * sizeof(float));
+    return true;
+  }
+
+  void Reset() override {
+    if (reset_calls_)
+      reset_calls_->fetch_add(1, std::memory_order_relaxed);
+  }
+
+private:
+  std::atomic<int> *reset_calls_ = nullptr;
 };
 
 enum class BlockMode {
@@ -286,6 +311,115 @@ public:
 
 private:
   std::atomic<int> *open_calls_ = nullptr;
+};
+
+class ReadFailIo final : public AudioPipelineIo {
+public:
+  explicit ReadFailIo(std::atomic<int> *read_calls) : read_calls_(read_calls) {}
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool Read(void *, std::size_t, std::string *error) override {
+    if (read_calls_)
+      read_calls_->fetch_add(1, std::memory_order_relaxed);
+    if (error)
+      *error = "synthetic Pulse capture stream disconnected";
+    return false;
+  }
+
+  bool Write(const void *, std::size_t, std::string *) override {
+    return false;
+  }
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+  void RequestStop() override {}
+
+private:
+  std::atomic<int> *read_calls_ = nullptr;
+};
+
+struct LatencyIoState {
+  std::atomic<bool> stop_requested{false};
+  std::atomic<int> flush_calls{0};
+  std::atomic<int> capture_latency_queries{0};
+  std::atomic<int> playback_latency_queries{0};
+};
+
+class HighLatencyIo final : public AudioPipelineIo {
+public:
+  explicit HighLatencyIo(std::shared_ptr<LatencyIoState> state)
+      : state_(std::move(state)) {}
+
+  void SetStopRequestedFlag(const std::atomic<bool> *stop_requested) override {
+    external_stop_requested_ = stop_requested;
+  }
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool Read(void *dst, std::size_t bytes, std::string *error) override {
+    if (ShouldStop()) {
+      if (error)
+        error->clear();
+      return false;
+    }
+    std::memset(dst, 0, bytes);
+    std::this_thread::sleep_for(1ms);
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (ShouldStop()) {
+      if (error)
+        error->clear();
+      return false;
+    }
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *latency_us) override {
+    state_->capture_latency_queries.fetch_add(1, std::memory_order_relaxed);
+    if (latency_us)
+      *latency_us = 80000;
+    return true;
+  }
+
+  bool GetPlaybackLatencyUs(std::uint64_t *latency_us) override {
+    state_->playback_latency_queries.fetch_add(1, std::memory_order_relaxed);
+    if (latency_us)
+      *latency_us = 80000;
+    return true;
+  }
+
+  void Flush() override {
+    state_->flush_calls.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void RequestStop() override {
+    state_->stop_requested.store(true, std::memory_order_release);
+  }
+
+private:
+  bool ShouldStop() const {
+    return state_->stop_requested.load(std::memory_order_acquire) ||
+           (external_stop_requested_ &&
+            external_stop_requested_->load(std::memory_order_acquire));
+  }
+
+  std::shared_ptr<LatencyIoState> state_;
+  const std::atomic<bool> *external_stop_requested_ = nullptr;
 };
 
 bool TestMicrophonePipelineRestartsWhenWorkerDies() {
@@ -462,6 +596,189 @@ bool TestStatusDoesNotBlockDuringRetrySleep() {
   return true;
 }
 
+bool TestMicrophoneNullPipelineFactoryFailsWithoutCrash() {
+  VirtualAudioServiceHooks hooks;
+  hooks.create_pipeline =
+      [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    return nullptr;
+  };
+  hooks.sleep_for = [&](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.poll_ms = 1;
+  cfg.start_retry_ms = 250;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool saw_error = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return !status.pipeline_running &&
+               status.last_error.find("pipeline factory returned null") !=
+                   std::string::npos;
+      },
+      250ms);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!saw_error) {
+    std::cerr << "expected null microphone pipeline factory to surface an "
+                 "error; got '"
+              << status.last_error << "' running=" << status.pipeline_running
+              << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestSpeakerPipelineStartFailureClearsRouteState() {
+  std::atomic<int> pipeline_creates{0};
+
+  VirtualAudioServiceHooks hooks;
+  hooks.create_virtual_speaker = [](std::string *error) {
+    if (error)
+      error->clear();
+    return true;
+  };
+  hooks.probe_speaker_backend_availability =
+      [](const VirtualAudioServiceConfig &) {
+        AudioBackendAvailability avail;
+        avail.maxine_reason = "synthetic maxine unavailable";
+        avail.open_source_reason = "synthetic open audio unavailable";
+        return avail;
+      };
+  hooks.create_pipeline =
+      [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    pipeline_creates.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<StartFailPipeline>();
+  };
+  hooks.sleep_for = [&](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = false;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.speakers_enabled = true;
+  cfg.speaker_target_sink = "physical_test_sink";
+  cfg.effects.speaker.noise_removal_enabled = true;
+  cfg.poll_ms = 1;
+  cfg.start_retry_ms = 250;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool saw_failure = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return status.speakers_pipeline_last_error.find(
+                   "synthetic start failure") != std::string::npos;
+      },
+      250ms);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!saw_failure) {
+    std::cerr << "expected speaker pipeline start failure; creates="
+              << pipeline_creates.load() << " error='"
+              << status.speakers_pipeline_last_error << "'\n";
+    return false;
+  }
+
+  if (status.speakers_routing_active ||
+      !status.speaker_target_sink_active.empty()) {
+    std::cerr << "speaker route looked active after pipeline start failure; "
+              << "routing=" << status.speakers_routing_active << " target='"
+              << status.speaker_target_sink_active << "'\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestOpenAudioFailureCooldownAvoidsRestartChurn() {
+  std::atomic<int> pipeline_creates{0};
+
+  VirtualAudioServiceHooks hooks;
+  hooks.probe_microphone_backend_availability =
+      [](const VirtualAudioServiceConfig &) {
+        AudioBackendAvailability avail;
+        avail.open_source_ok = true;
+        return avail;
+      };
+  hooks.create_pipeline =
+      [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    pipeline_creates.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<FixedStatsPipeline>(true, "");
+  };
+  hooks.sleep_for = [&](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.effects.engine =
+      studiocast::audio::effects::AudioEffectsEnginePreference::kOpenSource;
+  cfg.effects.microphone.noise_removal_enabled = true;
+  cfg.effects.microphone.model_path =
+      "/tmp/studiocast-definitely-missing-open-audio-model.onnx";
+  cfg.poll_ms = 1;
+  cfg.start_retry_ms = 1000;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool started_fallback =
+      WaitUntil([&] { return pipeline_creates.load() >= 1; }, 250ms);
+  std::this_thread::sleep_for(75ms);
+  const int creates_after_cooldown_window = pipeline_creates.load();
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!started_fallback) {
+    std::cerr
+        << "expected fallback pipeline to start after Open Audio failure\n";
+    return false;
+  }
+
+  if (creates_after_cooldown_window != 1) {
+    std::cerr << "Open Audio cooldown did not prevent restart churn; creates="
+              << creates_after_cooldown_window << "\n";
+    return false;
+  }
+
+  if (status.effects_backend_active != "passthrough") {
+    std::cerr
+        << "expected passthrough backend during Open Audio cooldown; got '"
+        << status.effects_backend_active << "'\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestStopInterruptsOpenAfterEarlyStopReset() {
   auto state = std::make_shared<ResettingOpenIoState>();
   CopyProcessor processor;
@@ -551,6 +868,97 @@ bool TestStartReusesPipelineAfterWorkerExit() {
   }
 
   pipeline.Stop();
+  return true;
+}
+
+bool TestPipelineSurfacesCaptureDisconnectError() {
+  std::atomic<int> read_calls{0};
+  CopyProcessor processor;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [&] { return std::make_unique<ReadFailIo>(&read_calls); };
+
+  AudioPipeline pipeline(&processor, std::move(hooks));
+  AudioPipelineConfig cfg;
+
+  std::string err;
+  if (!pipeline.Start(cfg, &err)) {
+    std::cerr << "pipeline.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool saw_disconnect = WaitUntil(
+      [&] {
+        const auto stats = pipeline.GetStats();
+        return read_calls.load(std::memory_order_relaxed) > 0 &&
+               !stats.running &&
+               stats.last_error.find("capture stream disconnected") !=
+                   std::string::npos;
+      },
+      250ms);
+  const auto stats = pipeline.GetStats();
+  pipeline.Stop();
+
+  if (!saw_disconnect) {
+    std::cerr << "expected capture disconnect error; reads="
+              << read_calls.load() << " running=" << stats.running << " error='"
+              << stats.last_error << "'\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestLatencyGuardSumsCaptureAndPlaybackBeforeResync() {
+  auto state = std::make_shared<LatencyIoState>();
+  std::atomic<int> reset_calls{0};
+  CountingCopyProcessor processor(&reset_calls);
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [state] { return std::make_unique<HighLatencyIo>(state); };
+
+  AudioPipeline pipeline(&processor, std::move(hooks));
+  AudioPipelineConfig cfg;
+
+  std::string err;
+  if (!pipeline.Start(cfg, &err)) {
+    std::cerr << "pipeline.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool resynced =
+      WaitUntil([&] { return pipeline.GetStats().resync_events >= 1; }, 1700ms);
+  const auto stats = pipeline.GetStats();
+  pipeline.Stop();
+
+  if (!resynced) {
+    std::cerr << "expected latency guard to resync when capture+playback "
+                 "latency exceeded threshold; max_us="
+              << stats.pulse_latency_us_max
+              << " capture_queries=" << state->capture_latency_queries.load()
+              << " playback_queries=" << state->playback_latency_queries.load()
+              << "\n";
+    return false;
+  }
+
+  if (stats.pulse_capture_latency_us_last != 80000 ||
+      stats.pulse_playback_latency_us_last != 80000 ||
+      stats.pulse_latency_us_max < 160000) {
+    std::cerr << "latency stats did not account for capture+playback sum; "
+              << "capture=" << stats.pulse_capture_latency_us_last
+              << " playback=" << stats.pulse_playback_latency_us_last
+              << " max=" << stats.pulse_latency_us_max << "\n";
+    return false;
+  }
+
+  if (reset_calls.load(std::memory_order_relaxed) < 2 ||
+      state->flush_calls.load(std::memory_order_relaxed) < 2) {
+    std::cerr << "resync did not flush/reset pipeline state; resets="
+              << reset_calls.load() << " flushes=" << state->flush_calls.load()
+              << "\n";
+    return false;
+  }
+
   return true;
 }
 
@@ -679,10 +1087,20 @@ int main() {
        &TestMicrophonePipelinePreservesWorkerDeathError},
       {"status remains responsive during retry sleep",
        &TestStatusDoesNotBlockDuringRetrySleep},
+      {"mic null pipeline factory fails without crash",
+       &TestMicrophoneNullPipelineFactoryFailsWithoutCrash},
+      {"speaker pipeline start failure clears route state",
+       &TestSpeakerPipelineStartFailureClearsRouteState},
+      {"open audio failure cooldown avoids restart churn",
+       &TestOpenAudioFailureCooldownAvoidsRestartChurn},
       {"stop interrupts open after early stop reset",
        &TestStopInterruptsOpenAfterEarlyStopReset},
       {"start reuses pipeline after worker exit",
        &TestStartReusesPipelineAfterWorkerExit},
+      {"pipeline surfaces capture disconnect",
+       &TestPipelineSurfacesCaptureDisconnectError},
+      {"latency guard sums capture and playback before resync",
+       &TestLatencyGuardSumsCaptureAndPlaybackBeforeResync},
       {"stop interrupts blocked capture read",
        &TestStopInterruptsBlockedCaptureRead},
       {"stop interrupts blocked playback write",

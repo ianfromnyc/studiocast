@@ -9,6 +9,7 @@
 #include <string>
 #include <thread>
 
+#include "core/audio/audio_backend_resolver.h"
 #include "core/audio/effects/broadcast_audio_effects.h"
 
 namespace studiocast::audio {
@@ -135,6 +136,12 @@ struct VirtualAudioServiceHooks {
   std::function<void(std::chrono::milliseconds)> sleep_for;
   std::function<std::unique_ptr<AudioPipelineRunner>(AudioProcessor *)>
       create_pipeline;
+  std::function<bool(std::string *)> create_virtual_mic;
+  std::function<bool(std::string *)> create_virtual_speaker;
+  std::function<AudioBackendAvailability(const VirtualAudioServiceConfig &)>
+      probe_microphone_backend_availability;
+  std::function<AudioBackendAvailability(const VirtualAudioServiceConfig &)>
+      probe_speaker_backend_availability;
 };
 
 // Minimal daemon-friendly owner of StudioCast virtual audio devices and
@@ -170,6 +177,12 @@ private:
   void SleepFor(std::chrono::milliseconds d) const;
   std::unique_ptr<AudioPipelineRunner>
   CreatePipeline(AudioProcessor *processor) const;
+  bool CreateVirtualMicDevice(std::string *error) const;
+  bool CreateVirtualSpeakerDevice(std::string *error) const;
+  AudioBackendAvailability ProbeMicrophoneBackendAvailability(
+      const VirtualAudioServiceConfig &cfg) const;
+  AudioBackendAvailability
+  ProbeSpeakerBackendAvailability(const VirtualAudioServiceConfig &cfg) const;
   void SetLastError(std::string msg);
 
   mutable std::mutex mu_;

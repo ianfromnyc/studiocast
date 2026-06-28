@@ -322,6 +322,37 @@ VirtualAudioService::CreatePipeline(AudioProcessor *processor) const {
 #endif
 }
 
+bool VirtualAudioService::CreateVirtualMicDevice(std::string *error) const {
+  if (hooks_.create_virtual_mic) {
+    return hooks_.create_virtual_mic(error);
+  }
+  return studiocast::audio::CreateVirtualMic(error);
+}
+
+bool VirtualAudioService::CreateVirtualSpeakerDevice(std::string *error) const {
+  if (hooks_.create_virtual_speaker) {
+    return hooks_.create_virtual_speaker(error);
+  }
+  return studiocast::audio::CreateVirtualSpeaker(error);
+}
+
+AudioBackendAvailability
+VirtualAudioService::ProbeMicrophoneBackendAvailability(
+    const VirtualAudioServiceConfig &cfg) const {
+  if (hooks_.probe_microphone_backend_availability) {
+    return hooks_.probe_microphone_backend_availability(cfg);
+  }
+  return ProbeAudioBackendAvailabilityForMicrophone(cfg);
+}
+
+AudioBackendAvailability VirtualAudioService::ProbeSpeakerBackendAvailability(
+    const VirtualAudioServiceConfig &cfg) const {
+  if (hooks_.probe_speaker_backend_availability) {
+    return hooks_.probe_speaker_backend_availability(cfg);
+  }
+  return ProbeAudioBackendAvailabilityForSpeaker(cfg);
+}
+
 void VirtualAudioService::SetLastError(std::string msg) {
   std::lock_guard<std::mutex> lock(mu_);
   st_.last_error = std::move(msg);
@@ -379,6 +410,20 @@ void VirtualAudioService::ThreadMain() {
   std::filesystem::path lastSpeakerAfxLib;
 #endif
 
+#if STUDIOCAST_HAVE_PULSE_SIMPLE
+  auto clearMicPipelineStatsLocked = [this]() {
+    st_.pipeline_frames_processed = 0;
+    st_.pipeline_process_time_us_sum = 0;
+    st_.pipeline_process_time_us_max = 0;
+    st_.pipeline_process_time_us_last = 0;
+    st_.pipeline_process_overruns = 0;
+    st_.pipeline_pulse_capture_latency_us_last = 0;
+    st_.pipeline_pulse_playback_latency_us_last = 0;
+    st_.pipeline_pulse_latency_us_max = 0;
+    st_.pipeline_resync_events = 0;
+  };
+#endif
+
   while (!stop_.load(std::memory_order_acquire)) {
     VirtualAudioServiceConfig cfg;
     {
@@ -410,7 +455,7 @@ void VirtualAudioService::ThreadMain() {
       // Mic device.
       if (cfg.create_virtual_mic && !mic_created_) {
         std::string err;
-        if (studiocast::audio::CreateVirtualMic(&err)) {
+        if (CreateVirtualMicDevice(&err)) {
           std::lock_guard<std::mutex> lock(mu_);
           mic_created_ = true;
           st_.mic_present = true;
@@ -434,7 +479,7 @@ void VirtualAudioService::ThreadMain() {
 
       if (wantSpeakersDevice && !speakers_created_) {
         std::string err;
-        if (studiocast::audio::CreateVirtualSpeaker(&err)) {
+        if (CreateVirtualSpeakerDevice(&err)) {
           speakers_created_ = true;
           {
             std::lock_guard<std::mutex> lock(mu_);
@@ -669,8 +714,7 @@ void VirtualAudioService::ThreadMain() {
             *cachedSpeakerAvailabilityEffects != cfg.effects ||
             now >= nextSpeakerAvailabilityProbe;
         if (speakerAvailabilityExpired) {
-          cachedSpeakerAvailability =
-              ProbeAudioBackendAvailabilityForSpeaker(cfg);
+          cachedSpeakerAvailability = ProbeSpeakerBackendAvailability(cfg);
           cachedSpeakerAvailabilityEffects = cfg.effects;
           nextSpeakerAvailabilityProbe = now + availabilityProbeTtl;
         }
@@ -789,7 +833,7 @@ void VirtualAudioService::ThreadMain() {
               st_.speakers_pipeline_starting = true;
               st_.speakers_pipeline_running = false;
               st_.speakers_routing_active = false;
-              st_.speaker_target_sink_active = sinkName;
+              st_.speaker_target_sink_active.clear();
               st_.speakers_backend_active =
                   std::string(ToString(speakerDecision.backend));
               st_.speakers_effects_note = speakerDecision.note;
@@ -941,20 +985,49 @@ void VirtualAudioService::ThreadMain() {
             // Start pipeline (even in pass-through mode; this replaces
             // module-loopback when speaker effects are enabled).
             spk_pipeline = CreatePipeline(spk_processor.get());
-            studiocast::audio::AudioPipelineConfig pcfg;
-            pcfg.source_name =
-                studiocast::audio::VirtualSpeakerMonitorSourceName();
-            pcfg.sink_name = sinkName;
-            // Speaker processing should preserve stereo.
-            pcfg.channels = 2;
-
             std::string perr;
-            if (!spk_pipeline->Start(pcfg, &perr)) {
+            bool spkStartOk = false;
+            if (!spk_pipeline) {
+              perr = "speaker audio pipeline factory returned null";
+            } else {
+              studiocast::audio::AudioPipelineConfig pcfg;
+              pcfg.source_name =
+                  studiocast::audio::VirtualSpeakerMonitorSourceName();
+              pcfg.sink_name = sinkName;
+              // Speaker processing should preserve stereo.
+              pcfg.channels = 2;
+              spkStartOk = spk_pipeline->Start(pcfg, &perr);
+              if (spkStartOk) {
+                lastSpeakerBackend = desiredSpkBackend;
+                lastSpeakerTargetSink = sinkName;
+                lastSpeakerFx = cfg.effects.speaker;
+
+                {
+                  std::lock_guard<std::mutex> lock(mu_);
+                  st_.speakers_pipeline_starting = false;
+                  st_.speakers_pipeline_running = true;
+                  st_.speakers_routing_active = true;
+                  st_.speakers_backend_active = desiredSpkBackend;
+                  st_.speaker_target_sink_active = sinkName;
+                  // Preserve st_.speakers_effects_note (decision/fallback
+                  // message).
+                  if (!spkPipelineDead) {
+                    st_.speakers_pipeline_last_error.clear();
+                  }
+                }
+              }
+            }
+
+            if (!spkStartOk) {
+              if (perr.empty()) {
+                perr = "speaker audio pipeline failed to start";
+              }
               {
                 std::lock_guard<std::mutex> lock(mu_);
                 st_.speakers_pipeline_starting = false;
                 st_.speakers_pipeline_running = false;
                 st_.speakers_routing_active = false;
+                st_.speaker_target_sink_active.clear();
                 st_.speakers_pipeline_frames_processed = 0;
                 st_.speakers_pipeline_process_time_us_sum = 0;
                 st_.speakers_pipeline_process_time_us_max = 0;
@@ -972,24 +1045,6 @@ void VirtualAudioService::ThreadMain() {
               spk_processor.reset();
               nextSpeakerStartRetry =
                   now + milliseconds(std::max(250, cfg.start_retry_ms));
-            } else {
-              lastSpeakerBackend = desiredSpkBackend;
-              lastSpeakerTargetSink = sinkName;
-              lastSpeakerFx = cfg.effects.speaker;
-
-              {
-                std::lock_guard<std::mutex> lock(mu_);
-                st_.speakers_pipeline_starting = false;
-                st_.speakers_pipeline_running = true;
-                st_.speakers_routing_active = true;
-                st_.speakers_backend_active = desiredSpkBackend;
-                st_.speaker_target_sink_active = sinkName;
-                // Preserve st_.speakers_effects_note (decision/fallback
-                // message).
-                if (!spkPipelineDead) {
-                  st_.speakers_pipeline_last_error.clear();
-                }
-              }
             }
           }
 
@@ -999,7 +1054,11 @@ void VirtualAudioService::ThreadMain() {
               std::lock_guard<std::mutex> lock(mu_);
               st_.speakers_pipeline_running = stats.running;
               st_.speakers_routing_active = stats.running;
-              st_.speaker_target_sink_active = sinkName;
+              if (stats.running) {
+                st_.speaker_target_sink_active = sinkName;
+              } else {
+                st_.speaker_target_sink_active.clear();
+              }
               st_.speakers_pipeline_frames_processed = stats.frames_processed;
               st_.speakers_pipeline_process_time_us_sum =
                   stats.process_time_us_sum;
@@ -1093,7 +1152,7 @@ void VirtualAudioService::ThreadMain() {
           *cachedMicAvailabilityEffects != cfg.effects ||
           now2 >= nextMicAvailabilityProbe;
       if (micAvailabilityExpired) {
-        cachedMicAvailability = ProbeAudioBackendAvailabilityForMicrophone(cfg);
+        cachedMicAvailability = ProbeMicrophoneBackendAvailability(cfg);
         cachedMicAvailabilityEffects = cfg.effects;
         nextMicAvailabilityProbe = now2 + availabilityProbeTtl;
       }
@@ -1127,6 +1186,34 @@ void VirtualAudioService::ThreadMain() {
 
     const auto now = steady_clock::now();
     if (now < nextStartRetry) {
+      if (pipeline) {
+        const auto stats = pipeline->GetStats();
+        if (!stats.last_error.empty()) {
+          SetLastError(stats.last_error);
+        }
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          st_.pipeline_running = stats.running;
+          st_.pipeline_frames_processed = stats.frames_processed;
+          st_.pipeline_process_time_us_sum = stats.process_time_us_sum;
+          st_.pipeline_process_time_us_max = stats.process_time_us_max;
+          st_.pipeline_process_time_us_last = stats.process_time_us_last;
+          st_.pipeline_process_overruns = stats.process_overruns;
+          st_.pipeline_pulse_capture_latency_us_last =
+              stats.pulse_capture_latency_us_last;
+          st_.pipeline_pulse_playback_latency_us_last =
+              stats.pulse_playback_latency_us_last;
+          st_.pipeline_pulse_latency_us_max = stats.pulse_latency_us_max;
+          st_.pipeline_resync_events = stats.resync_events;
+          if (!stats.running) {
+            st_.pipeline_starting = false;
+          }
+        }
+      } else {
+        std::lock_guard<std::mutex> lock(mu_);
+        st_.pipeline_running = false;
+        st_.pipeline_starting = false;
+      }
       SleepFor(milliseconds(pollMs));
       continue;
     }
@@ -1229,7 +1316,16 @@ void VirtualAudioService::ThreadMain() {
         pcfg.sink_name = "studiocast_sink";
 
         std::string perr;
-        if (!pipeline->Start(pcfg, &perr)) {
+        bool pipelineStartOk = false;
+        if (!pipeline) {
+          perr = "audio pipeline factory returned null";
+        } else {
+          pipelineStartOk = pipeline->Start(pcfg, &perr);
+        }
+        if (!pipelineStartOk) {
+          if (perr.empty()) {
+            perr = "audio pipeline failed to start";
+          }
           SetLastError("Failed to start audio pipeline: " + perr);
           pipeline.reset();
           processor.reset();
@@ -1238,6 +1334,8 @@ void VirtualAudioService::ThreadMain() {
           {
             std::lock_guard<std::mutex> lock(mu_);
             st_.pipeline_starting = false;
+            st_.pipeline_running = false;
+            clearMicPipelineStatsLocked();
           }
           SleepFor(milliseconds(pollMs));
           continue;
@@ -1305,7 +1403,16 @@ void VirtualAudioService::ThreadMain() {
         pcfg.sink_name = "studiocast_sink";
 
         std::string perr;
-        if (!pipeline->Start(pcfg, &perr)) {
+        bool pipelineStartOk = false;
+        if (!pipeline) {
+          perr = "audio pipeline factory returned null";
+        } else {
+          pipelineStartOk = pipeline->Start(pcfg, &perr);
+        }
+        if (!pipelineStartOk) {
+          if (perr.empty()) {
+            perr = "audio pipeline failed to start";
+          }
           SetLastError("Failed to start audio pipeline: " + perr);
           pipeline.reset();
           processor.reset();
@@ -1314,6 +1421,8 @@ void VirtualAudioService::ThreadMain() {
           {
             std::lock_guard<std::mutex> lock(mu_);
             st_.pipeline_starting = false;
+            st_.pipeline_running = false;
+            clearMicPipelineStatsLocked();
           }
           SleepFor(milliseconds(pollMs));
           continue;
@@ -1423,6 +1532,7 @@ void VirtualAudioService::ThreadMain() {
       {
         std::lock_guard<std::mutex> lock(mu_);
         st_.pipeline_starting = true;
+        st_.pipeline_running = false;
       }
 
       std::string ferr;
@@ -1434,6 +1544,8 @@ void VirtualAudioService::ThreadMain() {
         {
           std::lock_guard<std::mutex> lock(mu_);
           st_.pipeline_starting = false;
+          st_.pipeline_running = false;
+          clearMicPipelineStatsLocked();
         }
         SleepFor(milliseconds(pollMs));
         continue;
@@ -1446,6 +1558,8 @@ void VirtualAudioService::ThreadMain() {
         {
           std::lock_guard<std::mutex> lock(mu_);
           st_.pipeline_starting = false;
+          st_.pipeline_running = false;
+          clearMicPipelineStatsLocked();
         }
         SleepFor(milliseconds(pollMs));
         continue;
@@ -1459,13 +1573,25 @@ void VirtualAudioService::ThreadMain() {
       pcfg.sink_name = "studiocast_sink";
 
       std::string perr;
-      if (!pipeline->Start(pcfg, &perr)) {
+      bool pipelineStartOk = false;
+      if (!pipeline) {
+        perr = "audio pipeline factory returned null";
+      } else {
+        pipelineStartOk = pipeline->Start(pcfg, &perr);
+      }
+      if (!pipelineStartOk) {
+        if (perr.empty()) {
+          perr = "audio pipeline failed to start";
+        }
         SetLastError("Failed to start audio pipeline: " + perr);
         pipeline.reset();
+        processor.reset();
         nextStartRetry = now + milliseconds(std::max(250, cfg.start_retry_ms));
         {
           std::lock_guard<std::mutex> lock(mu_);
           st_.pipeline_starting = false;
+          st_.pipeline_running = false;
+          clearMicPipelineStatsLocked();
         }
         SleepFor(milliseconds(pollMs));
         continue;
