@@ -8,6 +8,8 @@
 #include <thread>
 
 #include "core/audio/audio_backend_resolver.h"
+#include "core/audio/audio_pipeline.h"
+#include "core/audio/audio_processor.h"
 #include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_mic.h"
 #include "core/audio/virtual_speaker.h"
@@ -22,8 +24,6 @@
 #include "core/maxine/afx/afx_effect.h"
 
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
-#include "core/audio/audio_pipeline.h"
-#include "core/audio/audio_processor.h"
 #include "core/maxine/afx/afx_audio_processor.h"
 #include "core/maxine/afx/afx_stereo_audio_processor.h"
 #include "core/maxine/afx_api.h"
@@ -195,6 +195,9 @@ ProbeAudioBackendAvailabilityForSpeaker(const VirtualAudioServiceConfig &cfg) {
 
 } // namespace
 
+VirtualAudioService::VirtualAudioService(VirtualAudioServiceHooks hooks)
+    : hooks_(std::move(hooks)) {}
+
 VirtualAudioService::~VirtualAudioService() { Stop(); }
 
 bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
@@ -298,6 +301,27 @@ VirtualAudioServiceStatus VirtualAudioService::Status() const {
   return st_;
 }
 
+void VirtualAudioService::SleepFor(std::chrono::milliseconds d) const {
+  if (hooks_.sleep_for) {
+    hooks_.sleep_for(d);
+    return;
+  }
+  std::this_thread::sleep_for(d);
+}
+
+std::unique_ptr<AudioPipelineRunner>
+VirtualAudioService::CreatePipeline(AudioProcessor *processor) const {
+  if (hooks_.create_pipeline) {
+    return hooks_.create_pipeline(processor);
+  }
+#if STUDIOCAST_HAVE_PULSE_SIMPLE
+  return std::make_unique<studiocast::audio::AudioPipeline>(processor);
+#else
+  (void)processor;
+  return nullptr;
+#endif
+}
+
 void VirtualAudioService::SetLastError(std::string msg) {
   std::lock_guard<std::mutex> lock(mu_);
   st_.last_error = std::move(msg);
@@ -323,14 +347,14 @@ void VirtualAudioService::ThreadMain() {
   std::unique_ptr<studiocast::maxine::afx::AfxApi> api;
   std::unique_ptr<studiocast::maxine::afx::AfxEffect> fx;
   std::unique_ptr<AudioProcessor> processor;
-  std::unique_ptr<studiocast::audio::AudioPipeline> pipeline;
+  std::unique_ptr<AudioPipelineRunner> pipeline;
 
   // Independent speaker processing pipeline (virtual speakers -> physical
   // sink).
   std::unique_ptr<studiocast::maxine::afx::AfxApi> spk_api;
   std::unique_ptr<studiocast::maxine::afx::AfxEffect> spk_fx;
   std::unique_ptr<AudioProcessor> spk_processor;
-  std::unique_ptr<studiocast::audio::AudioPipeline> spk_pipeline;
+  std::unique_ptr<AudioPipelineRunner> spk_pipeline;
 
   std::string lastBackend;
   std::optional<studiocast::audio::effects::BroadcastAudioEffects> lastFx;
@@ -885,8 +909,7 @@ void VirtualAudioService::ThreadMain() {
 
             // Start pipeline (even in pass-through mode; this replaces
             // module-loopback when speaker effects are enabled).
-            spk_pipeline = std::make_unique<studiocast::audio::AudioPipeline>(
-                spk_processor.get());
+            spk_pipeline = CreatePipeline(spk_processor.get());
             studiocast::audio::AudioPipelineConfig pcfg;
             pcfg.source_name =
                 studiocast::audio::VirtualSpeakerMonitorSourceName();
@@ -1005,7 +1028,7 @@ void VirtualAudioService::ThreadMain() {
         st_.effects_backend_active.clear();
         st_.effects_note.clear();
       }
-      std::this_thread::sleep_for(milliseconds(pollMs));
+      SleepFor(milliseconds(pollMs));
       continue;
     }
 
@@ -1056,13 +1079,13 @@ void VirtualAudioService::ThreadMain() {
       st_.pipeline_running = false;
       st_.pipeline_starting = false;
     }
-    std::this_thread::sleep_for(milliseconds(pollMs));
+    SleepFor(milliseconds(pollMs));
     continue;
 #else
 
     const auto now = steady_clock::now();
     if (now < nextStartRetry) {
-      std::this_thread::sleep_for(milliseconds(pollMs));
+      SleepFor(milliseconds(pollMs));
       continue;
     }
 
@@ -1079,7 +1102,9 @@ void VirtualAudioService::ThreadMain() {
     }
 
     const bool effectsChanged = (!lastFx.has_value() || *lastFx != cfg.effects);
-    const bool needRestart = (!pipeline) || (lastBackend != desiredBackend) ||
+    const bool pipelineDead = (pipeline && !pipeline->GetStats().running);
+    const bool needRestart = (!pipeline) || pipelineDead ||
+                             (lastBackend != desiredBackend) ||
                              (lastSource != cfg.source_name) ||
                              ((wantMaxine || wantOpenAudio) && effectsChanged);
 
@@ -1143,8 +1168,7 @@ void VirtualAudioService::ThreadMain() {
           processor = std::move(oa);
         }
 
-        pipeline =
-            std::make_unique<studiocast::audio::AudioPipeline>(processor.get());
+        pipeline = CreatePipeline(processor.get());
 
         studiocast::audio::AudioPipelineConfig pcfg;
         pcfg.source_name = cfg.source_name;
@@ -1157,9 +1181,11 @@ void VirtualAudioService::ThreadMain() {
           processor.reset();
           nextStartRetry =
               now + milliseconds(std::max(250, cfg.start_retry_ms));
-          std::lock_guard<std::mutex> lock(mu_);
-          st_.pipeline_starting = false;
-          std::this_thread::sleep_for(milliseconds(pollMs));
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            st_.pipeline_starting = false;
+          }
+          SleepFor(milliseconds(pollMs));
           continue;
         }
 
@@ -1197,7 +1223,7 @@ void VirtualAudioService::ThreadMain() {
         }
       }
 
-      std::this_thread::sleep_for(milliseconds(pollMs));
+      SleepFor(milliseconds(pollMs));
       continue;
     }
 
@@ -1216,8 +1242,7 @@ void VirtualAudioService::ThreadMain() {
         }
 
         processor = std::make_unique<PassthroughAudioProcessor>();
-        pipeline =
-            std::make_unique<studiocast::audio::AudioPipeline>(processor.get());
+        pipeline = CreatePipeline(processor.get());
 
         studiocast::audio::AudioPipelineConfig pcfg;
         pcfg.source_name = cfg.source_name;
@@ -1230,9 +1255,11 @@ void VirtualAudioService::ThreadMain() {
           processor.reset();
           nextStartRetry =
               now + milliseconds(std::max(250, cfg.start_retry_ms));
-          std::lock_guard<std::mutex> lock(mu_);
-          st_.pipeline_starting = false;
-          std::this_thread::sleep_for(milliseconds(pollMs));
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            st_.pipeline_starting = false;
+          }
+          SleepFor(milliseconds(pollMs));
           continue;
         }
 
@@ -1269,7 +1296,7 @@ void VirtualAudioService::ThreadMain() {
         }
       }
 
-      std::this_thread::sleep_for(milliseconds(pollMs));
+      SleepFor(milliseconds(pollMs));
       continue;
     }
 
@@ -1287,7 +1314,7 @@ void VirtualAudioService::ThreadMain() {
     if (!sel.selected || !sel.selected->compute_capability) {
       SetLastError("Failed to select a supported NVIDIA GPU: " + sel.error);
       nextStartRetry = now + milliseconds(std::max(250, cfg.start_retry_ms));
-      std::this_thread::sleep_for(milliseconds(pollMs));
+      SleepFor(milliseconds(pollMs));
       continue;
     }
 
@@ -1300,7 +1327,7 @@ void VirtualAudioService::ThreadMain() {
       }
       SetLastError(msg);
       nextStartRetry = now + milliseconds(std::max(250, cfg.start_retry_ms));
-      std::this_thread::sleep_for(milliseconds(pollMs));
+      SleepFor(milliseconds(pollMs));
       continue;
     }
 
@@ -1311,7 +1338,7 @@ void VirtualAudioService::ThreadMain() {
         SetLastError("Failed to initialize AFX runtime: " + aerr);
         api.reset();
         nextStartRetry = now + milliseconds(std::max(250, cfg.start_retry_ms));
-        std::this_thread::sleep_for(milliseconds(pollMs));
+        SleepFor(milliseconds(pollMs));
         continue;
       }
       lastAfxLib = paths.afx.library;
@@ -1346,9 +1373,11 @@ void VirtualAudioService::ThreadMain() {
         fx->Destroy();
         fx.reset();
         nextStartRetry = now + milliseconds(std::max(250, cfg.start_retry_ms));
-        std::lock_guard<std::mutex> lock(mu_);
-        st_.pipeline_starting = false;
-        std::this_thread::sleep_for(milliseconds(pollMs));
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          st_.pipeline_starting = false;
+        }
+        SleepFor(milliseconds(pollMs));
         continue;
       }
       if (!fx->Load(&ferr)) {
@@ -1356,16 +1385,17 @@ void VirtualAudioService::ThreadMain() {
         fx->Destroy();
         fx.reset();
         nextStartRetry = now + milliseconds(std::max(250, cfg.start_retry_ms));
-        std::lock_guard<std::mutex> lock(mu_);
-        st_.pipeline_starting = false;
-        std::this_thread::sleep_for(milliseconds(pollMs));
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          st_.pipeline_starting = false;
+        }
+        SleepFor(milliseconds(pollMs));
         continue;
       }
 
       processor = std::make_unique<studiocast::maxine::afx::AfxAudioProcessor>(
           fx.get());
-      pipeline =
-          std::make_unique<studiocast::audio::AudioPipeline>(processor.get());
+      pipeline = CreatePipeline(processor.get());
       studiocast::audio::AudioPipelineConfig pcfg;
       pcfg.source_name = cfg.source_name;
       pcfg.sink_name = "studiocast_sink";
@@ -1375,9 +1405,11 @@ void VirtualAudioService::ThreadMain() {
         SetLastError("Failed to start audio pipeline: " + perr);
         pipeline.reset();
         nextStartRetry = now + milliseconds(std::max(250, cfg.start_retry_ms));
-        std::lock_guard<std::mutex> lock(mu_);
-        st_.pipeline_starting = false;
-        std::this_thread::sleep_for(milliseconds(pollMs));
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          st_.pipeline_starting = false;
+        }
+        SleepFor(milliseconds(pollMs));
         continue;
       }
 
@@ -1414,7 +1446,7 @@ void VirtualAudioService::ThreadMain() {
       }
     }
 
-    std::this_thread::sleep_for(milliseconds(pollMs));
+    SleepFor(milliseconds(pollMs));
 #endif
   }
 

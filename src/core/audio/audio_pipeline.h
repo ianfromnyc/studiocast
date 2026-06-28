@@ -1,7 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -9,6 +12,35 @@
 namespace studiocast::audio {
 
 class AudioProcessor;
+struct AudioPipelineConfig;
+struct AudioPipelineStats;
+
+class AudioPipelineRunner {
+public:
+  virtual ~AudioPipelineRunner() = default;
+
+  virtual bool Start(const AudioPipelineConfig &cfg, std::string *error) = 0;
+  virtual void Stop() = 0;
+  virtual AudioPipelineStats GetStats() const = 0;
+};
+
+class AudioPipelineIo {
+public:
+  virtual ~AudioPipelineIo() = default;
+
+  virtual bool Open(const AudioPipelineConfig &cfg, std::string *error) = 0;
+  virtual bool Read(void *dst, std::size_t bytes, std::string *error) = 0;
+  virtual bool Write(const void *src, std::size_t bytes,
+                     std::string *error) = 0;
+  virtual bool GetCaptureLatencyUs(std::uint64_t *latency_us) = 0;
+  virtual bool GetPlaybackLatencyUs(std::uint64_t *latency_us) = 0;
+  virtual void Flush() = 0;
+  virtual void RequestStop() = 0;
+};
+
+struct AudioPipelineHooks {
+  std::function<std::unique_ptr<AudioPipelineIo>()> create_io;
+};
 
 struct AudioPipelineConfig {
   // Empty = Pulse default source.
@@ -55,28 +87,35 @@ struct AudioPipelineStats {
 //
 // MVP format: float32 @ 48kHz, 10ms frames (1ch for mic, 2ch supported for
 // speakers).
-class AudioPipeline {
+class AudioPipeline final : public AudioPipelineRunner {
 public:
-  explicit AudioPipeline(AudioProcessor *processor);
+  explicit AudioPipeline(AudioProcessor *processor,
+                         AudioPipelineHooks hooks = {});
   ~AudioPipeline();
 
   AudioPipeline(const AudioPipeline &) = delete;
   AudioPipeline &operator=(const AudioPipeline &) = delete;
 
-  bool Start(const AudioPipelineConfig &cfg, std::string *error);
-  void Stop();
+  bool Start(const AudioPipelineConfig &cfg, std::string *error) override;
+  void Stop() override;
 
-  AudioPipelineStats GetStats() const;
+  AudioPipelineStats GetStats() const override;
 
 private:
   void ThreadMain(AudioPipelineConfig cfg);
   void SetLastError(std::string msg);
+  std::unique_ptr<AudioPipelineIo> CreateIo() const;
+  AudioPipelineIo *GetActiveIo() const;
 
   AudioProcessor *processor_ = nullptr; // not owned
+  AudioPipelineHooks hooks_;
 
   // Only used to guard the last_error string.
   mutable std::mutex mu_;
   std::string last_error_;
+
+  mutable std::mutex io_mu_;
+  std::unique_ptr<AudioPipelineIo> io_;
 
   // Hot-path stats are atomics to avoid lock contention on the real-time
   // thread.

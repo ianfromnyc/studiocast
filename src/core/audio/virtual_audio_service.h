@@ -1,7 +1,10 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -125,6 +128,15 @@ struct VirtualAudioServiceStatus {
   std::string last_error;
 };
 
+class AudioPipelineRunner;
+class AudioProcessor;
+
+struct VirtualAudioServiceHooks {
+  std::function<void(std::chrono::milliseconds)> sleep_for;
+  std::function<std::unique_ptr<AudioPipelineRunner>(AudioProcessor *)>
+      create_pipeline;
+};
+
 // Minimal daemon-friendly owner of StudioCast virtual audio devices and
 // processing pipelines.
 //
@@ -137,6 +149,7 @@ struct VirtualAudioServiceStatus {
 class VirtualAudioService final {
 public:
   VirtualAudioService() = default;
+  explicit VirtualAudioService(VirtualAudioServiceHooks hooks);
   ~VirtualAudioService();
 
   VirtualAudioService(const VirtualAudioService &) = delete;
@@ -154,6 +167,9 @@ public:
 private:
   void ThreadMain();
 
+  void SleepFor(std::chrono::milliseconds d) const;
+  std::unique_ptr<AudioPipelineRunner>
+  CreatePipeline(AudioProcessor *processor) const;
   void SetLastError(std::string msg);
 
   mutable std::mutex mu_;
@@ -168,6 +184,7 @@ private:
   std::string speakers_loopback_target_;
   int speakers_loopback_latency_ms_ = 0;
 
+  VirtualAudioServiceHooks hooks_{};
   VirtualAudioServiceConfig cfg_{};
   VirtualAudioServiceStatus st_{};
 };

@@ -1,13 +1,20 @@
 #include "core/audio/audio_pipeline.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include <pulse/context.h>
 #include <pulse/error.h>
-#include <pulse/simple.h>
+#include <pulse/operation.h>
+#include <pulse/stream.h>
+#include <pulse/thread-mainloop.h>
 
 #include "core/audio/audio_processor.h"
 
@@ -52,10 +59,595 @@ void AtomicMax(std::atomic<std::uint64_t> *v, std::uint64_t candidate) {
   }
 }
 
+class PulseAsyncAudioIo final : public AudioPipelineIo {
+public:
+  ~PulseAsyncAudioIo() override { Shutdown(); }
+
+  bool Open(const AudioPipelineConfig &cfg, std::string *error) override {
+    if (error)
+      error->clear();
+
+    Shutdown();
+    stop_requested_.store(false, std::memory_order_release);
+    capture_pending_.clear();
+    capture_pending_offset_ = 0;
+    pending_silence_bytes_ = 0;
+
+    const pa_sample_spec ss{
+        .format = PA_SAMPLE_FLOAT32LE,
+        .rate = static_cast<uint32_t>(cfg.sample_rate),
+        .channels = static_cast<uint8_t>(cfg.channels),
+    };
+    if (!pa_sample_spec_valid(&ss)) {
+      if (error)
+        *error = "Invalid PulseAudio sample spec.";
+      return false;
+    }
+
+    const std::uint32_t samples_per_frame = cfg.frame_samples * cfg.channels;
+    const std::size_t bytes_per_frame =
+        static_cast<std::size_t>(samples_per_frame) * sizeof(float);
+
+    pa_buffer_attr rec_attr{};
+    rec_attr.maxlength = static_cast<uint32_t>(bytes_per_frame * 4);
+    rec_attr.fragsize = static_cast<uint32_t>(bytes_per_frame);
+    rec_attr.tlength = static_cast<uint32_t>(-1);
+    rec_attr.prebuf = static_cast<uint32_t>(-1);
+    rec_attr.minreq = static_cast<uint32_t>(-1);
+
+    pa_buffer_attr play_attr{};
+    play_attr.maxlength = static_cast<uint32_t>(bytes_per_frame * 4);
+    play_attr.tlength = static_cast<uint32_t>(bytes_per_frame * 3);
+    play_attr.prebuf = static_cast<uint32_t>(bytes_per_frame);
+    play_attr.minreq = static_cast<uint32_t>(bytes_per_frame);
+    play_attr.fragsize = static_cast<uint32_t>(-1);
+
+    const char *capture_dev =
+        cfg.source_name.empty() ? nullptr : cfg.source_name.c_str();
+    const char *playback_dev =
+        cfg.sink_name.empty() ? nullptr : cfg.sink_name.c_str();
+
+    mainloop_ = ::pa_threaded_mainloop_new();
+    if (!mainloop_) {
+      if (error)
+        *error = "PulseAudio threaded mainloop allocation failed.";
+      return false;
+    }
+    if (::pa_threaded_mainloop_start(mainloop_) < 0) {
+      if (error)
+        *error = "PulseAudio threaded mainloop start failed.";
+      ::pa_threaded_mainloop_free(mainloop_);
+      mainloop_ = nullptr;
+      return false;
+    }
+
+    ::pa_threaded_mainloop_lock(mainloop_);
+
+    context_ = ::pa_context_new(::pa_threaded_mainloop_get_api(mainloop_),
+                                "studiocast");
+    if (!context_) {
+      if (error)
+        *error = "PulseAudio context allocation failed.";
+      ::pa_threaded_mainloop_unlock(mainloop_);
+      Shutdown();
+      return false;
+    }
+
+    ::pa_context_set_state_callback(context_, &PulseAsyncAudioIo::ContextStateCb,
+                                    this);
+    if (::pa_context_connect(context_, nullptr, PA_CONTEXT_NOFLAGS, nullptr) <
+        0) {
+      if (error) {
+        *error = "PulseAudio context connect failed: " + ContextErrorLocked();
+      }
+      ::pa_threaded_mainloop_unlock(mainloop_);
+      Shutdown();
+      return false;
+    }
+    if (!WaitForContextReadyLocked(error)) {
+      ::pa_threaded_mainloop_unlock(mainloop_);
+      Shutdown();
+      return false;
+    }
+
+    rec_ = ::pa_stream_new(context_, "studiocast-capture", &ss, nullptr);
+    if (!rec_) {
+      if (error)
+        *error = "Pulse capture stream allocation failed.";
+      ::pa_threaded_mainloop_unlock(mainloop_);
+      Shutdown();
+      return false;
+    }
+    PrepareStream(rec_);
+    const auto stream_flags = static_cast<pa_stream_flags_t>(
+        PA_STREAM_ADJUST_LATENCY | PA_STREAM_AUTO_TIMING_UPDATE |
+        PA_STREAM_INTERPOLATE_TIMING);
+    if (::pa_stream_connect_record(rec_, capture_dev, &rec_attr, stream_flags) <
+        0) {
+      if (error) {
+        *error =
+            "Pulse capture stream connect failed: " + StreamErrorLocked(rec_);
+      }
+      ::pa_threaded_mainloop_unlock(mainloop_);
+      Shutdown();
+      return false;
+    }
+    if (!WaitForStreamReadyLocked(rec_, "capture", error)) {
+      ::pa_threaded_mainloop_unlock(mainloop_);
+      Shutdown();
+      return false;
+    }
+
+    play_ = ::pa_stream_new(context_, "studiocast-playback", &ss, nullptr);
+    if (!play_) {
+      if (error)
+        *error = "Pulse playback stream allocation failed.";
+      ::pa_threaded_mainloop_unlock(mainloop_);
+      Shutdown();
+      return false;
+    }
+    PrepareStream(play_);
+    if (::pa_stream_connect_playback(play_, playback_dev, &play_attr,
+                                     stream_flags, nullptr, nullptr) < 0) {
+      if (error) {
+        *error =
+            "Pulse playback stream connect failed: " + StreamErrorLocked(play_);
+      }
+      ::pa_threaded_mainloop_unlock(mainloop_);
+      Shutdown();
+      return false;
+    }
+    if (!WaitForStreamReadyLocked(play_, "playback", error)) {
+      ::pa_threaded_mainloop_unlock(mainloop_);
+      Shutdown();
+      return false;
+    }
+
+    capture_pending_.reserve(bytes_per_frame * 2);
+    ::pa_threaded_mainloop_unlock(mainloop_);
+    return true;
+  }
+
+  bool Read(void *dst, std::size_t bytes, std::string *error) override {
+    auto *dst_bytes = static_cast<std::uint8_t *>(dst);
+    std::size_t copied = 0;
+
+    ::pa_threaded_mainloop_lock(mainloop_);
+    while (copied < bytes) {
+      if (stop_requested_.load(std::memory_order_acquire)) {
+        if (error)
+          error->clear();
+        ::pa_threaded_mainloop_unlock(mainloop_);
+        return false;
+      }
+
+      const std::size_t pending_bytes =
+          capture_pending_.size() - capture_pending_offset_;
+      if (pending_bytes > 0) {
+        const std::size_t chunk = std::min(bytes - copied, pending_bytes);
+        std::memcpy(dst_bytes + copied,
+                    capture_pending_.data() + capture_pending_offset_, chunk);
+        copied += chunk;
+        capture_pending_offset_ += chunk;
+        if (capture_pending_offset_ == capture_pending_.size()) {
+          capture_pending_.clear();
+          capture_pending_offset_ = 0;
+        }
+        continue;
+      }
+
+      if (pending_silence_bytes_ > 0) {
+        const std::size_t chunk =
+            std::min(bytes - copied, pending_silence_bytes_);
+        std::memset(dst_bytes + copied, 0, chunk);
+        copied += chunk;
+        pending_silence_bytes_ -= chunk;
+        continue;
+      }
+
+      if (!WaitForReadableLocked(error)) {
+        ::pa_threaded_mainloop_unlock(mainloop_);
+        return false;
+      }
+
+      const void *data = nullptr;
+      std::size_t nbytes = 0;
+      if (::pa_stream_peek(rec_, &data, &nbytes) < 0) {
+        if (error) {
+          *error = "Pulse capture read failed: " + StreamErrorLocked(rec_);
+        }
+        ::pa_threaded_mainloop_unlock(mainloop_);
+        return false;
+      }
+
+      if (nbytes == 0) {
+        continue;
+      }
+
+      const std::size_t chunk = std::min(bytes - copied, nbytes);
+      if (data) {
+        std::memcpy(dst_bytes + copied, data, chunk);
+        if (nbytes > chunk) {
+          capture_pending_.resize(nbytes - chunk);
+          std::memcpy(capture_pending_.data(),
+                      static_cast<const std::uint8_t *>(data) + chunk,
+                      nbytes - chunk);
+          capture_pending_offset_ = 0;
+        }
+      } else {
+        std::memset(dst_bytes + copied, 0, chunk);
+        if (nbytes > chunk) {
+          pending_silence_bytes_ = nbytes - chunk;
+        }
+      }
+      copied += chunk;
+
+      if (::pa_stream_drop(rec_) < 0) {
+        if (error) {
+          *error = "Pulse capture read failed: " + StreamErrorLocked(rec_);
+        }
+        ::pa_threaded_mainloop_unlock(mainloop_);
+        return false;
+      }
+    }
+
+    ::pa_threaded_mainloop_unlock(mainloop_);
+    return true;
+  }
+
+  bool Write(const void *src, std::size_t bytes,
+             std::string *error) override {
+    auto *src_bytes = static_cast<const std::uint8_t *>(src);
+    std::size_t written = 0;
+
+    ::pa_threaded_mainloop_lock(mainloop_);
+    while (written < bytes) {
+      if (!WaitForWritableLocked(error)) {
+        ::pa_threaded_mainloop_unlock(mainloop_);
+        return false;
+      }
+
+      const std::size_t writable = ::pa_stream_writable_size(play_);
+      if (writable == static_cast<std::size_t>(-1)) {
+        if (error) {
+          *error = "Pulse playback write failed: " + StreamErrorLocked(play_);
+        }
+        ::pa_threaded_mainloop_unlock(mainloop_);
+        return false;
+      }
+
+      const std::size_t chunk = std::min(bytes - written, writable);
+      if (chunk == 0) {
+        ::pa_threaded_mainloop_wait(mainloop_);
+        continue;
+      }
+
+      if (::pa_stream_write(play_, src_bytes + written, chunk, nullptr, 0,
+                            PA_SEEK_RELATIVE) < 0) {
+        if (error) {
+          *error = "Pulse playback write failed: " + StreamErrorLocked(play_);
+        }
+        ::pa_threaded_mainloop_unlock(mainloop_);
+        return false;
+      }
+      written += chunk;
+    }
+
+    ::pa_threaded_mainloop_unlock(mainloop_);
+    return true;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *latency_us) override {
+    return QueryLatency(rec_, latency_us);
+  }
+
+  bool GetPlaybackLatencyUs(std::uint64_t *latency_us) override {
+    return QueryLatency(play_, latency_us);
+  }
+
+  void Flush() override {
+    if (!mainloop_)
+      return;
+
+    ::pa_threaded_mainloop_lock(mainloop_);
+    capture_pending_.clear();
+    capture_pending_offset_ = 0;
+    pending_silence_bytes_ = 0;
+    FlushStreamLocked(rec_);
+    FlushStreamLocked(play_);
+    ::pa_threaded_mainloop_unlock(mainloop_);
+  }
+
+  void RequestStop() override {
+    stop_requested_.store(true, std::memory_order_release);
+    if (!mainloop_)
+      return;
+
+    ::pa_threaded_mainloop_lock(mainloop_);
+    if (play_) {
+      (void)::pa_stream_disconnect(play_);
+    }
+    if (rec_) {
+      (void)::pa_stream_disconnect(rec_);
+    }
+    if (context_) {
+      ::pa_context_disconnect(context_);
+    }
+    ::pa_threaded_mainloop_signal(mainloop_, 0);
+    ::pa_threaded_mainloop_unlock(mainloop_);
+  }
+
+private:
+  struct OperationState {
+    PulseAsyncAudioIo *self = nullptr;
+    bool done = false;
+  };
+
+  static void ContextStateCb(pa_context *, void *userdata) {
+    static_cast<PulseAsyncAudioIo *>(userdata)->SignalLocked();
+  }
+
+  static void StreamStateCb(pa_stream *, void *userdata) {
+    static_cast<PulseAsyncAudioIo *>(userdata)->SignalLocked();
+  }
+
+  static void StreamRequestCb(pa_stream *, std::size_t, void *userdata) {
+    static_cast<PulseAsyncAudioIo *>(userdata)->SignalLocked();
+  }
+
+  static void StreamLatencyCb(pa_stream *, void *userdata) {
+    static_cast<PulseAsyncAudioIo *>(userdata)->SignalLocked();
+  }
+
+  static void StreamOperationCb(pa_stream *, int, void *userdata) {
+    auto *state = static_cast<OperationState *>(userdata);
+    state->done = true;
+    state->self->SignalLocked();
+  }
+
+  void PrepareStream(pa_stream *stream) {
+    ::pa_stream_set_state_callback(stream, &PulseAsyncAudioIo::StreamStateCb,
+                                   this);
+    ::pa_stream_set_read_callback(stream, &PulseAsyncAudioIo::StreamRequestCb,
+                                  this);
+    ::pa_stream_set_write_callback(stream, &PulseAsyncAudioIo::StreamRequestCb,
+                                   this);
+    ::pa_stream_set_latency_update_callback(
+        stream, &PulseAsyncAudioIo::StreamLatencyCb, this);
+  }
+
+  bool WaitForContextReadyLocked(std::string *error) {
+    while (true) {
+      if (stop_requested_.load(std::memory_order_acquire)) {
+        if (error)
+          error->clear();
+        return false;
+      }
+
+      switch (::pa_context_get_state(context_)) {
+      case PA_CONTEXT_READY:
+        return true;
+      case PA_CONTEXT_FAILED:
+      case PA_CONTEXT_TERMINATED:
+        if (error) {
+          *error = "PulseAudio context connect failed: " + ContextErrorLocked();
+        }
+        return false;
+      default:
+        ::pa_threaded_mainloop_wait(mainloop_);
+        break;
+      }
+    }
+  }
+
+  bool WaitForStreamReadyLocked(pa_stream *stream, const char *label,
+                                std::string *error) {
+    while (true) {
+      if (stop_requested_.load(std::memory_order_acquire)) {
+        if (error)
+          error->clear();
+        return false;
+      }
+
+      switch (::pa_stream_get_state(stream)) {
+      case PA_STREAM_READY:
+        return true;
+      case PA_STREAM_FAILED:
+      case PA_STREAM_TERMINATED:
+        if (error) {
+          *error = "Pulse " + std::string(label) +
+                   " stream connect failed: " + StreamErrorLocked(stream);
+        }
+        return false;
+      default:
+        ::pa_threaded_mainloop_wait(mainloop_);
+        break;
+      }
+    }
+  }
+
+  bool WaitForReadableLocked(std::string *error) {
+    while (true) {
+      if (stop_requested_.load(std::memory_order_acquire)) {
+        if (error)
+          error->clear();
+        return false;
+      }
+
+      if (::pa_stream_get_state(rec_) != PA_STREAM_READY) {
+        if (error) {
+          *error = "Pulse capture read failed: " + StreamErrorLocked(rec_);
+        }
+        return false;
+      }
+
+      const std::size_t readable = ::pa_stream_readable_size(rec_);
+      if (readable == static_cast<std::size_t>(-1)) {
+        if (error) {
+          *error = "Pulse capture read failed: " + StreamErrorLocked(rec_);
+        }
+        return false;
+      }
+      if (readable > 0) {
+        return true;
+      }
+
+      ::pa_threaded_mainloop_wait(mainloop_);
+    }
+  }
+
+  bool WaitForWritableLocked(std::string *error) {
+    while (true) {
+      if (stop_requested_.load(std::memory_order_acquire)) {
+        if (error)
+          error->clear();
+        return false;
+      }
+
+      if (::pa_stream_get_state(play_) != PA_STREAM_READY) {
+        if (error) {
+          *error = "Pulse playback write failed: " + StreamErrorLocked(play_);
+        }
+        return false;
+      }
+
+      const std::size_t writable = ::pa_stream_writable_size(play_);
+      if (writable == static_cast<std::size_t>(-1)) {
+        if (error) {
+          *error = "Pulse playback write failed: " + StreamErrorLocked(play_);
+        }
+        return false;
+      }
+      if (writable > 0) {
+        return true;
+      }
+
+      ::pa_threaded_mainloop_wait(mainloop_);
+    }
+  }
+
+  bool QueryLatency(pa_stream *stream, std::uint64_t *latency_us) {
+    if (!mainloop_ || !stream || !latency_us)
+      return false;
+
+    ::pa_threaded_mainloop_lock(mainloop_);
+    if (::pa_stream_get_state(stream) != PA_STREAM_READY ||
+        stop_requested_.load(std::memory_order_acquire)) {
+      ::pa_threaded_mainloop_unlock(mainloop_);
+      return false;
+    }
+
+    pa_usec_t latency = 0;
+    int negative = 0;
+    const int rc = ::pa_stream_get_latency(stream, &latency, &negative);
+    ::pa_threaded_mainloop_unlock(mainloop_);
+    if (rc < 0) {
+      return false;
+    }
+
+    *latency_us = static_cast<std::uint64_t>(latency);
+    return true;
+  }
+
+  void FlushStreamLocked(pa_stream *stream) {
+    if (!stream || stop_requested_.load(std::memory_order_acquire) ||
+        ::pa_stream_get_state(stream) != PA_STREAM_READY)
+      return;
+
+    OperationState state{this};
+    pa_operation *op =
+        ::pa_stream_flush(stream, &PulseAsyncAudioIo::StreamOperationCb, &state);
+    if (!op)
+      return;
+
+    while (!state.done && !stop_requested_.load(std::memory_order_acquire)) {
+      ::pa_threaded_mainloop_wait(mainloop_);
+    }
+    ::pa_operation_unref(op);
+  }
+
+  std::string ContextErrorLocked() const {
+    if (!context_) {
+      return "connection state is unavailable";
+    }
+    return PulseErrorString(::pa_context_errno(context_));
+  }
+
+  std::string StreamErrorLocked(pa_stream *stream) const {
+    if (!stream) {
+      return ContextErrorLocked();
+    }
+    pa_context *stream_context = ::pa_stream_get_context(stream);
+    if (!stream_context) {
+      return ContextErrorLocked();
+    }
+    return PulseErrorString(::pa_context_errno(stream_context));
+  }
+
+  void SignalLocked() {
+    if (mainloop_) {
+      ::pa_threaded_mainloop_signal(mainloop_, 0);
+    }
+  }
+
+  void Shutdown() {
+    if (!mainloop_)
+      return;
+
+    ::pa_threaded_mainloop_lock(mainloop_);
+    stop_requested_.store(true, std::memory_order_release);
+
+    if (play_) {
+      ::pa_stream_set_state_callback(play_, nullptr, nullptr);
+      ::pa_stream_set_read_callback(play_, nullptr, nullptr);
+      ::pa_stream_set_write_callback(play_, nullptr, nullptr);
+      ::pa_stream_set_latency_update_callback(play_, nullptr, nullptr);
+      (void)::pa_stream_disconnect(play_);
+      ::pa_stream_unref(play_);
+      play_ = nullptr;
+    }
+    if (rec_) {
+      ::pa_stream_set_state_callback(rec_, nullptr, nullptr);
+      ::pa_stream_set_read_callback(rec_, nullptr, nullptr);
+      ::pa_stream_set_write_callback(rec_, nullptr, nullptr);
+      ::pa_stream_set_latency_update_callback(rec_, nullptr, nullptr);
+      (void)::pa_stream_disconnect(rec_);
+      ::pa_stream_unref(rec_);
+      rec_ = nullptr;
+    }
+    if (context_) {
+      ::pa_context_set_state_callback(context_, nullptr, nullptr);
+      ::pa_context_disconnect(context_);
+      ::pa_context_unref(context_);
+      context_ = nullptr;
+    }
+
+    ::pa_threaded_mainloop_signal(mainloop_, 0);
+    ::pa_threaded_mainloop_unlock(mainloop_);
+    ::pa_threaded_mainloop_stop(mainloop_);
+    ::pa_threaded_mainloop_free(mainloop_);
+    mainloop_ = nullptr;
+
+    capture_pending_.clear();
+    capture_pending_offset_ = 0;
+    pending_silence_bytes_ = 0;
+  }
+
+  pa_threaded_mainloop *mainloop_ = nullptr;
+  pa_context *context_ = nullptr;
+  pa_stream *rec_ = nullptr;
+  pa_stream *play_ = nullptr;
+  std::atomic<bool> stop_requested_{false};
+  std::vector<std::uint8_t> capture_pending_;
+  std::size_t capture_pending_offset_ = 0;
+  std::size_t pending_silence_bytes_ = 0;
+};
+
 } // namespace
 
-AudioPipeline::AudioPipeline(AudioProcessor *processor)
-    : processor_(processor) {}
+AudioPipeline::AudioPipeline(AudioProcessor *processor,
+                             AudioPipelineHooks hooks)
+    : processor_(processor), hooks_(std::move(hooks)) {}
 
 AudioPipeline::~AudioPipeline() { Stop(); }
 
@@ -105,6 +697,17 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
     return false;
   }
 
+  {
+    std::lock_guard<std::mutex> lock(io_mu_);
+    io_ = CreateIo();
+    if (!io_) {
+      SetLastError("Audio pipeline I/O backend creation failed.");
+      if (error)
+        *error = GetStats().last_error;
+      return false;
+    }
+  }
+
   running_.store(true, std::memory_order_release);
   stop_.store(false, std::memory_order_release);
   thread_ = std::thread([this, cfg] { ThreadMain(cfg); });
@@ -113,8 +716,18 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
 
 void AudioPipeline::Stop() {
   stop_.store(true, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(io_mu_);
+    if (io_) {
+      io_->RequestStop();
+    }
+  }
   if (thread_.joinable()) {
     thread_.join();
+  }
+  {
+    std::lock_guard<std::mutex> lock(io_mu_);
+    io_.reset();
   }
   running_.store(false, std::memory_order_release);
 }
@@ -149,21 +762,23 @@ void AudioPipeline::SetLastError(std::string msg) {
   last_error_ = std::move(msg);
 }
 
+std::unique_ptr<AudioPipelineIo> AudioPipeline::CreateIo() const {
+  if (hooks_.create_io) {
+    return hooks_.create_io();
+  }
+  return std::make_unique<PulseAsyncAudioIo>();
+}
+
+AudioPipelineIo *AudioPipeline::GetActiveIo() const {
+  std::lock_guard<std::mutex> lock(io_mu_);
+  return io_.get();
+}
+
 void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
   struct Guard {
     AudioPipeline *self;
     ~Guard() { self->running_.store(false, std::memory_order_release); }
   } guard{this};
-
-  const pa_sample_spec ss{
-      .format = PA_SAMPLE_FLOAT32LE,
-      .rate = static_cast<uint32_t>(cfg.sample_rate),
-      .channels = static_cast<uint8_t>(cfg.channels),
-  };
-  if (!pa_sample_spec_valid(&ss)) {
-    SetLastError("Invalid PulseAudio sample spec.");
-    return;
-  }
 
   const std::uint32_t samples_per_frame = cfg.frame_samples * cfg.channels;
   const std::size_t bytes_per_frame =
@@ -174,61 +789,17 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
       static_cast<std::uint64_t>(cfg.frame_samples) * 1000000u /
       static_cast<std::uint64_t>(cfg.sample_rate);
 
-  pa_buffer_attr rec_attr{};
-  // Keep capture buffering modest to avoid silently "living in the past".
-  // The fragsize (read quantum) remains one frame (10ms).
-  rec_attr.maxlength = static_cast<uint32_t>(bytes_per_frame * 4);
-  rec_attr.fragsize = static_cast<uint32_t>(bytes_per_frame);
-  rec_attr.tlength = static_cast<uint32_t>(-1);
-  rec_attr.prebuf = static_cast<uint32_t>(-1);
-  rec_attr.minreq = static_cast<uint32_t>(-1);
-
-  pa_buffer_attr play_attr{};
-  // Tighten playback buffering to reduce end-to-end latency and limit how much
-  // queued audio can accumulate inside Pulse when StudioCast is under load.
-  play_attr.maxlength = static_cast<uint32_t>(bytes_per_frame * 4);
-  play_attr.tlength = static_cast<uint32_t>(bytes_per_frame * 3);
-  play_attr.prebuf = static_cast<uint32_t>(bytes_per_frame);
-  play_attr.minreq = static_cast<uint32_t>(bytes_per_frame);
-  play_attr.fragsize = static_cast<uint32_t>(-1);
-
-  int pa_err = 0;
-
-  const char *capture_dev =
-      cfg.source_name.empty() ? nullptr : cfg.source_name.c_str();
-  const char *playback_dev =
-      cfg.sink_name.empty() ? nullptr : cfg.sink_name.c_str();
-
-  pa_simple *rec = ::pa_simple_new(
-      /*server=*/nullptr,
-      /*name=*/"studiocast",
-      /*dir=*/PA_STREAM_RECORD,
-      /*dev=*/capture_dev,
-      /*stream_name=*/"studiocast-capture",
-      /*ss=*/&ss,
-      /*map=*/nullptr,
-      /*attr=*/&rec_attr,
-      /*error=*/&pa_err);
-  if (!rec) {
-    SetLastError("Pulse capture stream open failed: " +
-                 PulseErrorString(pa_err));
+  AudioPipelineIo *io = GetActiveIo();
+  if (!io) {
+    SetLastError("Audio pipeline I/O backend is not available.");
     return;
   }
 
-  pa_simple *play = ::pa_simple_new(
-      /*server=*/nullptr,
-      /*name=*/"studiocast",
-      /*dir=*/PA_STREAM_PLAYBACK,
-      /*dev=*/playback_dev,
-      /*stream_name=*/"studiocast-playback",
-      /*ss=*/&ss,
-      /*map=*/nullptr,
-      /*attr=*/&play_attr,
-      /*error=*/&pa_err);
-  if (!play) {
-    SetLastError("Pulse playback stream open failed: " +
-                 PulseErrorString(pa_err));
-    ::pa_simple_free(rec);
+  std::string io_err;
+  if (!io->Open(cfg, &io_err)) {
+    if (!stop_.load(std::memory_order_acquire) && !io_err.empty()) {
+      SetLastError(std::move(io_err));
+    }
     return;
   }
 
@@ -238,12 +809,7 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
   // Flush any stale buffered audio so the pipeline starts as close to "live" as
   // possible. This helps keep speaker/mic transitions from playing old queued
   // audio after toggling effects.
-  {
-    int ferr = 0;
-    (void)::pa_simple_flush(rec, &ferr);
-    ferr = 0;
-    (void)::pa_simple_flush(play, &ferr);
-  }
+  io->Flush();
 
   processor_->Reset();
 
@@ -277,29 +843,15 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
 
       std::uint64_t rec_lat_us = 0;
       std::uint64_t play_lat_us = 0;
-      bool rec_ok = false;
-      bool play_ok = false;
-
-      {
-        int lerr = 0;
-        const pa_usec_t v = ::pa_simple_get_latency(rec, &lerr);
-        if (v != static_cast<pa_usec_t>(-1)) {
-          rec_lat_us = static_cast<std::uint64_t>(v);
-          rec_ok = true;
-          pulse_capture_latency_us_last_.store(rec_lat_us,
-                                               std::memory_order_relaxed);
-        }
+      const bool rec_ok = io->GetCaptureLatencyUs(&rec_lat_us);
+      const bool play_ok = io->GetPlaybackLatencyUs(&play_lat_us);
+      if (rec_ok) {
+        pulse_capture_latency_us_last_.store(rec_lat_us,
+                                             std::memory_order_relaxed);
       }
-
-      {
-        int lerr = 0;
-        const pa_usec_t v = ::pa_simple_get_latency(play, &lerr);
-        if (v != static_cast<pa_usec_t>(-1)) {
-          play_lat_us = static_cast<std::uint64_t>(v);
-          play_ok = true;
-          pulse_playback_latency_us_last_.store(play_lat_us,
-                                                std::memory_order_relaxed);
-        }
+      if (play_ok) {
+        pulse_playback_latency_us_last_.store(play_lat_us,
+                                              std::memory_order_relaxed);
       }
 
       // Best-effort end-to-end estimate.
@@ -327,11 +879,7 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
       if (observed_us > max_latency_us && warmed_up && cooldown_ok) {
         resync_events_.fetch_add(1, std::memory_order_relaxed);
 
-        int ferr = 0;
-        (void)::pa_simple_flush(rec, &ferr);
-        ferr = 0;
-        (void)::pa_simple_flush(play, &ferr);
-
+        io->Flush();
         processor_->Reset();
         last_resync = now_check;
 
@@ -342,8 +890,11 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
       }
     }
 
-    if (::pa_simple_read(rec, in.data(), bytes_per_frame, &pa_err) < 0) {
-      SetLastError("Pulse capture read failed: " + PulseErrorString(pa_err));
+    io_err.clear();
+    if (!io->Read(in.data(), bytes_per_frame, &io_err)) {
+      if (!stop_.load(std::memory_order_acquire) && !io_err.empty()) {
+        SetLastError(std::move(io_err));
+      }
       break;
     }
 
@@ -372,8 +923,11 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
       last_proc_warning = proc_err;
     }
 
-    if (::pa_simple_write(play, out.data(), bytes_per_frame, &pa_err) < 0) {
-      SetLastError("Pulse playback write failed: " + PulseErrorString(pa_err));
+    io_err.clear();
+    if (!io->Write(out.data(), bytes_per_frame, &io_err)) {
+      if (!stop_.load(std::memory_order_acquire) && !io_err.empty()) {
+        SetLastError(std::move(io_err));
+      }
       break;
     }
 
@@ -383,9 +937,7 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
   // Do not drain on shutdown: dropping queued audio keeps route switches
   // responsive and avoids playing "late" buffered audio after disabling
   // effects.
-  (void)::pa_simple_flush(play, &pa_err);
-  ::pa_simple_free(play);
-  ::pa_simple_free(rec);
+  io->Flush();
 }
 
 } // namespace studiocast::audio

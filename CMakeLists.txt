@@ -6,6 +6,8 @@ project(StudioCast
         LANGUAGES CXX
 )
 
+include(CTest)
+
 foreach (var IN ITEMS CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH)
     if (DEFINED ENV{${var}} AND NOT "$ENV{${var}}" STREQUAL "")
         message(WARNING
@@ -571,3 +573,27 @@ install(TARGETS studiocast studiocast-probe studiocast-maxine studiocast-open st
 install(TARGETS studiocastd
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
+
+if (BUILD_TESTING)
+    add_executable(studiocast-audio-tests
+            tests/audio_service_tests.cpp
+    )
+
+    target_link_libraries(studiocast-audio-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-audio-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-audio-tests)
+    studiocast_enable_sanitizers(studiocast-audio-tests)
+
+    set_target_properties(studiocast-audio-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-audio-tests COMMAND studiocast-audio-tests)
+endif()
