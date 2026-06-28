@@ -138,6 +138,10 @@ struct VirtualAudioServiceHooks {
       create_pipeline;
   std::function<bool(std::string *)> create_virtual_mic;
   std::function<bool(std::string *)> create_virtual_speaker;
+  std::function<bool(const std::string &, int, std::string *)>
+      start_speaker_loopback;
+  std::function<bool(std::string *)> stop_speaker_loopback;
+  std::function<bool(std::string *)> destroy_virtual_speaker;
   std::function<AudioBackendAvailability(const VirtualAudioServiceConfig &)>
       probe_microphone_backend_availability;
   std::function<AudioBackendAvailability(const VirtualAudioServiceConfig &)>
@@ -179,6 +183,10 @@ private:
   CreatePipeline(AudioProcessor *processor) const;
   bool CreateVirtualMicDevice(std::string *error) const;
   bool CreateVirtualSpeakerDevice(std::string *error) const;
+  bool StartSpeakerLoopbackRoute(const std::string &target_sink_name,
+                                 int latency_ms, std::string *error) const;
+  bool StopSpeakerLoopbackRoute(std::string *error) const;
+  bool DestroyVirtualSpeakerDevice(std::string *error) const;
   AudioBackendAvailability ProbeMicrophoneBackendAvailability(
       const VirtualAudioServiceConfig &cfg) const;
   AudioBackendAvailability

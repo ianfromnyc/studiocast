@@ -1203,6 +1203,107 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
   return true;
 }
 
+bool TestSpeakerLoopbackRestartFailureClearsRouteState() {
+  std::atomic<int> loopback_start_calls{0};
+
+  VirtualAudioServiceHooks hooks;
+  hooks.create_virtual_speaker = [](std::string *error) {
+    if (error)
+      error->clear();
+    return true;
+  };
+  hooks.start_speaker_loopback =
+      [&](const std::string &, int, std::string *error) {
+    const int call =
+        loopback_start_calls.fetch_add(1, std::memory_order_relaxed);
+    if (call == 0) {
+      if (error)
+        error->clear();
+      return true;
+    }
+    if (error)
+      *error = "synthetic loopback load failure";
+    return false;
+  };
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = false;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = true;
+  cfg.speakers_enabled = true;
+  cfg.speaker_target_sink = "physical_test_sink";
+  cfg.poll_ms = 1;
+  cfg.start_retry_ms = 200;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool first_route_active = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return loopback_start_calls.load(std::memory_order_relaxed) >= 1 &&
+               status.speakers_routing_active &&
+               status.speakers_route_mode == "loopback";
+      },
+      250ms);
+  if (!first_route_active) {
+    const auto status = service.Status();
+    std::cerr << "speaker loopback route did not become active; starts="
+              << loopback_start_calls.load() << " active="
+              << status.speakers_routing_active << " route='"
+              << status.speakers_route_mode << "' error='"
+              << status.speakers_last_error << "'\n";
+    service.Stop();
+    return false;
+  }
+
+  cfg.speaker_target_sink = "other_physical_test_sink";
+  service.UpdateConfig(cfg);
+
+  const bool cleared_after_failure = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return loopback_start_calls.load(std::memory_order_relaxed) >= 2 &&
+               !status.speakers_routing_active &&
+               status.speaker_target_sink_active.empty() &&
+               status.speakers_last_error.find(
+                   "synthetic loopback load failure") != std::string::npos;
+      },
+      250ms);
+  const int starts_after_failure =
+      loopback_start_calls.load(std::memory_order_relaxed);
+  std::this_thread::sleep_for(50ms);
+  const int starts_during_backoff =
+      loopback_start_calls.load(std::memory_order_relaxed);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!cleared_after_failure) {
+    std::cerr << "speaker loopback failure left route active; starts="
+              << loopback_start_calls.load()
+              << " active=" << status.speakers_routing_active << " target='"
+              << status.speaker_target_sink_active << "' error='"
+              << status.speakers_last_error << "'\n";
+    return false;
+  }
+
+  if (starts_during_backoff != starts_after_failure) {
+    std::cerr << "speaker loopback failure retried before backoff elapsed; "
+              << "after_failure=" << starts_after_failure
+              << " during_backoff=" << starts_during_backoff << "\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestStopInterruptsOpenAfterEarlyStopReset() {
   auto state = std::make_shared<ResettingOpenIoState>();
   CopyProcessor processor;
@@ -1583,6 +1684,8 @@ int main() {
        &TestSpeakerDeadWorkerBacksOffAndClearsRoute},
       {"speaker pipeline stats clear when processing disabled",
        &TestSpeakerPipelineStatsClearWhenProcessingDisabled},
+      {"speaker loopback restart failure clears route state",
+       &TestSpeakerLoopbackRestartFailureClearsRouteState},
       {"stop interrupts open after early stop reset",
        &TestStopInterruptsOpenAfterEarlyStopReset},
       {"stop interrupts blocked flush", &TestStopInterruptsBlockedFlush},

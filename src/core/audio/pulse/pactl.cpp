@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <sstream>
+#include <vector>
 
 #include "core/util/exec.h"
 #include "core/util/strings.h"
@@ -27,6 +28,96 @@ std::vector<std::string> SplitTabs(const std::string &line) {
 
 std::string FirstLineOrEmpty(const std::string &s) {
   return util::FirstNonEmptyLine(s);
+}
+
+std::string ShellQuoteSingle(const std::string &s) {
+  // Safe single-quote for /bin/sh -c
+  std::string out;
+  out.reserve(s.size() + 2);
+  out.push_back('\'');
+  for (char c : s) {
+    if (c == '\'') {
+      out += "'\"'\"'"; // close, insert escaped quote, reopen
+    } else {
+      out.push_back(c);
+    }
+  }
+  out.push_back('\'');
+  return out;
+}
+
+std::vector<std::string> SplitModuleArgs(const std::string &args) {
+  std::vector<std::string> out;
+  std::string cur;
+  bool in_single = false;
+  bool in_double = false;
+
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const char c = args[i];
+    if (c == '\'' && !in_double) {
+      in_single = !in_single;
+      continue;
+    }
+    if (c == '"' && !in_single) {
+      in_double = !in_double;
+      continue;
+    }
+    if (c == '\\' && i + 1 < args.size()) {
+      cur.push_back(args[++i]);
+      continue;
+    }
+    if (!in_single && !in_double &&
+        (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
+      if (!cur.empty()) {
+        out.push_back(cur);
+        cur.clear();
+      }
+      continue;
+    }
+    cur.push_back(c);
+  }
+
+  if (!cur.empty())
+    out.push_back(cur);
+  return out;
+}
+
+std::string BuildLoadModuleCommand(const std::string &module,
+                                   const std::vector<std::string> &args) {
+  std::string cmd = "pactl load-module " + ShellQuoteSingle(module);
+  for (const auto &arg : args) {
+    cmd += " " + ShellQuoteSingle(arg);
+  }
+  cmd += " 2>&1";
+  return cmd;
+}
+
+std::optional<int> ParseLoadModuleResult(const util::ExecResult &res,
+                                         std::string *error) {
+  const std::string line = util::TrimCopy(FirstLineOrEmpty(res.stdout_str));
+
+  if (res.exit_code != 0) {
+    if (error)
+      *error = line.empty() ? "pactl load-module failed" : line;
+    return std::nullopt;
+  }
+
+  // pactl prints the module id as a number.
+  if (line.empty()) {
+    if (error)
+      *error = "pactl load-module returned no module id";
+    return std::nullopt;
+  }
+
+  char *end = nullptr;
+  const long id = std::strtol(line.c_str(), &end, 10);
+  if (!end || end == line.c_str()) {
+    if (error)
+      *error = "Failed to parse module id from pactl output: " + line;
+    return std::nullopt;
+  }
+
+  return static_cast<int>(id);
 }
 } // namespace
 
@@ -61,37 +152,15 @@ bool PactlAvailable(std::string *details) {
 
 std::optional<int> LoadModule(const std::string &module,
                               const std::string &args, std::string *error) {
+  return LoadModule(module, SplitModuleArgs(args), error);
+}
+
+std::optional<int> LoadModule(const std::string &module,
+                              const std::vector<std::string> &args,
+                              std::string *error) {
   // Use stderr->stdout so errors are captured.
-  std::string cmd = "pactl load-module " + module;
-  if (!args.empty())
-    cmd += " " + args;
-  cmd += " 2>&1";
-
-  auto res = util::ExecCapture(cmd);
-  const std::string line = util::TrimCopy(FirstLineOrEmpty(res.stdout_str));
-
-  if (res.exit_code != 0) {
-    if (error)
-      *error = line.empty() ? "pactl load-module failed" : line;
-    return std::nullopt;
-  }
-
-  // pactl prints the module id as a number.
-  if (line.empty()) {
-    if (error)
-      *error = "pactl load-module returned no module id";
-    return std::nullopt;
-  }
-
-  char *end = nullptr;
-  const long id = std::strtol(line.c_str(), &end, 10);
-  if (!end || end == line.c_str()) {
-    if (error)
-      *error = "Failed to parse module id from pactl output: " + line;
-    return std::nullopt;
-  }
-
-  return static_cast<int>(id);
+  auto res = util::ExecCapture(BuildLoadModuleCommand(module, args));
+  return ParseLoadModuleResult(res, error);
 }
 
 bool UnloadModule(int id, std::string *error) {
@@ -296,7 +365,8 @@ bool SetSourcePort(const std::string &source_name, const std::string &port_name,
     return true;
 
   std::string cmd =
-      "pactl set-source-port " + source_name + " " + port_name + " 2>&1";
+      "pactl set-source-port " + ShellQuoteSingle(source_name) + " " +
+      ShellQuoteSingle(port_name) + " 2>&1";
   auto res = util::ExecCapture(cmd);
   if (res.exit_code != 0) {
     if (error)
@@ -356,22 +426,6 @@ std::optional<std::string> GetDefaultSinkName(std::string *error) {
   if (error)
     *error = "Could not determine default sink";
   return std::nullopt;
-}
-
-static std::string ShellQuoteSingle(const std::string &s) {
-  // Safe single-quote for /bin/sh -c
-  std::string out;
-  out.reserve(s.size() + 2);
-  out.push_back('\'');
-  for (char c : s) {
-    if (c == '\'') {
-      out += "'\"'\"'"; // close, insert escaped quote, reopen
-    } else {
-      out.push_back(c);
-    }
-  }
-  out.push_back('\'');
-  return out;
 }
 
 static bool LooksLikeFailure(const std::string &out) {

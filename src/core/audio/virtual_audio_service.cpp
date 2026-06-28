@@ -107,6 +107,15 @@ MicrophoneRestartRelevantEffects(BroadcastMicrophoneEffects mic) {
   return mic;
 }
 
+BroadcastSpeakerEffects
+SpeakerRestartRelevantEffects(BroadcastSpeakerEffects speaker) {
+  // Open Audio speaker strength maps to an atomic runtime control. Maxine still
+  // restarts on strength changes because AFX intensity updates are not proven
+  // safe while the audio thread is processing.
+  speaker.strength = 0;
+  return speaker;
+}
+
 bool MicrophonePipelineEffectsRequireRestart(
     const BroadcastAudioEffects &oldFx, const BroadcastAudioEffects &newFx) {
   if (oldFx.schema_version != newFx.schema_version ||
@@ -115,6 +124,13 @@ bool MicrophonePipelineEffectsRequireRestart(
   }
   return MicrophoneRestartRelevantEffects(oldFx.microphone) !=
          MicrophoneRestartRelevantEffects(newFx.microphone);
+}
+
+bool SpeakerPipelineEffectsRequireRestart(
+    const BroadcastSpeakerEffects &oldSpeaker,
+    const BroadcastSpeakerEffects &newSpeaker) {
+  return SpeakerRestartRelevantEffects(oldSpeaker) !=
+         SpeakerRestartRelevantEffects(newSpeaker);
 }
 
 std::chrono::milliseconds
@@ -423,6 +439,30 @@ bool VirtualAudioService::CreateVirtualSpeakerDevice(std::string *error) const {
   return studiocast::audio::CreateVirtualSpeaker(error);
 }
 
+bool VirtualAudioService::StartSpeakerLoopbackRoute(
+    const std::string &target_sink_name, int latency_ms,
+    std::string *error) const {
+  if (hooks_.start_speaker_loopback) {
+    return hooks_.start_speaker_loopback(target_sink_name, latency_ms, error);
+  }
+  return studiocast::audio::StartSpeakerLoopback(target_sink_name, latency_ms,
+                                                error);
+}
+
+bool VirtualAudioService::StopSpeakerLoopbackRoute(std::string *error) const {
+  if (hooks_.stop_speaker_loopback) {
+    return hooks_.stop_speaker_loopback(error);
+  }
+  return studiocast::audio::StopSpeakerLoopback(error);
+}
+
+bool VirtualAudioService::DestroyVirtualSpeakerDevice(std::string *error) const {
+  if (hooks_.destroy_virtual_speaker) {
+    return hooks_.destroy_virtual_speaker(error);
+  }
+  return studiocast::audio::DestroyVirtualSpeaker(error);
+}
+
 AudioBackendAvailability
 VirtualAudioService::ProbeMicrophoneBackendAvailability(
     const VirtualAudioServiceConfig &cfg) const {
@@ -450,6 +490,7 @@ void VirtualAudioService::ThreadMain() {
 
   steady_clock::time_point nextStartRetry{};
   steady_clock::time_point nextSpeakerStartRetry{};
+  steady_clock::time_point nextSpeakerLoopbackStartRetry{};
 
   // If the Open Audio backend fails to initialize, latch-disable it for a short
   // cooldown to avoid rapid restart loops.
@@ -601,7 +642,7 @@ void VirtualAudioService::ThreadMain() {
           // Ensure loopback is stopped (avoid double-routing).
           if (speakers_loopback_running_) {
             std::string err;
-            if (studiocast::audio::StopSpeakerLoopback(&err)) {
+            if (StopSpeakerLoopbackRoute(&err)) {
               speakers_loopback_running_ = false;
               speakers_loopback_target_.clear();
               speakers_loopback_latency_ms_ = 0;
@@ -654,15 +695,18 @@ void VirtualAudioService::ThreadMain() {
               (!speakers_loopback_running_) ||
               (speakers_loopback_target_ != cfg.speaker_target_sink) ||
               (speakers_loopback_latency_ms_ != cfg.speaker_latency_ms);
-          if (needLoopbackRestart) {
+          const auto loopbackNow = steady_clock::now();
+          if (needLoopbackRestart &&
+              loopbackNow >= nextSpeakerLoopbackStartRetry) {
             std::string err;
-            if (studiocast::audio::StartSpeakerLoopback(
-                    cfg.speaker_target_sink,
-                    std::max(1, cfg.speaker_latency_ms), &err)) {
+            if (StartSpeakerLoopbackRoute(cfg.speaker_target_sink,
+                                          std::max(1, cfg.speaker_latency_ms),
+                                          &err)) {
               speakers_created_ = true;
               speakers_loopback_running_ = true;
               speakers_loopback_target_ = cfg.speaker_target_sink;
               speakers_loopback_latency_ms_ = cfg.speaker_latency_ms;
+              nextSpeakerLoopbackStartRetry = steady_clock::time_point{};
 
               const auto state = studiocast::audio::LoadVirtualSpeakerState();
               {
@@ -675,6 +719,17 @@ void VirtualAudioService::ThreadMain() {
               }
               clearSpeakersError();
             } else {
+              nextSpeakerLoopbackStartRetry =
+                  loopbackNow + StartFailureRetryDelay(cfg);
+              speakers_loopback_running_ = false;
+              speakers_loopback_target_.clear();
+              speakers_loopback_latency_ms_ = 0;
+              {
+                std::lock_guard<std::mutex> lock(mu_);
+                st_.speakers_route_mode = "loopback";
+                st_.speakers_routing_active = false;
+                st_.speaker_target_sink_active.clear();
+              }
               setSpeakersError("Failed to start speakers routing: " + err);
             }
           } else {
@@ -713,7 +768,7 @@ void VirtualAudioService::ThreadMain() {
 
         if (speakers_loopback_running_) {
           std::string err;
-          if (studiocast::audio::StopSpeakerLoopback(&err)) {
+          if (StopSpeakerLoopbackRoute(&err)) {
             speakers_loopback_running_ = false;
             speakers_loopback_target_.clear();
             speakers_loopback_latency_ms_ = 0;
@@ -738,7 +793,7 @@ void VirtualAudioService::ThreadMain() {
         // predictable.
         if (!cfg.create_virtual_speakers && speakers_created_) {
           std::string err;
-          if (studiocast::audio::DestroyVirtualSpeaker(&err)) {
+          if (DestroyVirtualSpeakerDevice(&err)) {
             speakers_created_ = false;
             speakers_loopback_running_ = false;
             speakers_loopback_target_.clear();
@@ -895,9 +950,16 @@ void VirtualAudioService::ThreadMain() {
           const std::string sinkName = *sinkOpt;
 
           // Start/restart the pipeline if needed.
-          const bool speakerEffectsChanged =
+          const bool speakerRestartKeyChanged =
               (!lastSpeakerFx.has_value() ||
-               *lastSpeakerFx != cfg.effects.speaker);
+               SpeakerPipelineEffectsRequireRestart(*lastSpeakerFx,
+                                                    cfg.effects.speaker));
+          const bool speakerStrengthChanged =
+              lastSpeakerFx.has_value() &&
+              lastSpeakerFx->strength != cfg.effects.speaker.strength;
+          const bool speakerEffectsChanged =
+              speakerRestartKeyChanged ||
+              (wantSpkMaxine && speakerStrengthChanged);
           std::optional<AudioPipelineStats> spkStatsBeforeRestart;
           if (spk_pipeline) {
             spkStatsBeforeRestart = spk_pipeline->GetStats();
@@ -1181,6 +1243,15 @@ void VirtualAudioService::ThreadMain() {
               spk_pipeline.reset();
               spk_processor.reset();
               nextSpeakerStartRetry = now + StartFailureRetryDelay(cfg);
+            }
+          } else if (wantSpkOpenAudio) {
+            if (auto *oa = dynamic_cast<
+                    studiocast::open_audio::OpenAudioAudioProcessor *>(
+                    spk_processor.get())) {
+              oa->UpdateFromSpeakerConfig(cfg.effects.speaker);
+              lastSpeakerFx = cfg.effects.speaker;
+              std::lock_guard<std::mutex> lock(mu_);
+              st_.speakers_intensity = speakerPlan.intensity;
             }
           }
 

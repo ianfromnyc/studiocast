@@ -84,20 +84,19 @@ bool CreateVirtualSpeaker(std::string *error) {
   auto state = LoadVirtualSpeakerState();
 
   if (!loaded.null_sink_module_id) {
-    // NOTE: Keep quotes *inside* the value so Pulse/PipeWire module parsing can
-    // handle spaces. The outer single quotes are for the shell; the inner
-    // double quotes survive into pactl.
     std::string err;
-    const std::string argsWithDesc =
-        std::string("sink_name=") + kSpeakersSinkName +
-        " sink_properties='device.description=\"StudioCast Speakers\"'";
-
-    auto id = pulse::LoadModule("module-null-sink", argsWithDesc, &err);
+    auto id = pulse::LoadModule(
+        "module-null-sink",
+        {
+            std::string("sink_name=") + kSpeakersSinkName,
+            "sink_properties=device.description=\"StudioCast Speakers\"",
+        },
+        &err);
     if (!id) {
       std::string err2;
-      const std::string argsMinimal =
-          std::string("sink_name=") + kSpeakersSinkName;
-      id = pulse::LoadModule("module-null-sink", argsMinimal, &err2);
+      id = pulse::LoadModule("module-null-sink",
+                             {std::string("sink_name=") + kSpeakersSinkName},
+                             &err2);
       if (!id) {
         if (error) {
           *error = "Failed to load module-null-sink for virtual speakers.\n"
@@ -213,13 +212,15 @@ bool StartSpeakerLoopback(const std::string &target_sink_name, int latency_ms,
     return false;
   }
 
-  std::ostringstream args;
-  args << "source=" << MonitorSourceName() << " "
-       << "sink=" << chosen << " "
-       << "latency_msec=" << latency_ms;
-
   std::string err;
-  auto id = pulse::LoadModule("module-loopback", args.str(), &err);
+  auto id = pulse::LoadModule(
+      "module-loopback",
+      {
+          "source=" + MonitorSourceName(),
+          "sink=" + chosen,
+          "latency_msec=" + std::to_string(latency_ms),
+      },
+      &err);
   if (!id) {
     if (error)
       *error = "Failed to load module-loopback: " + err;

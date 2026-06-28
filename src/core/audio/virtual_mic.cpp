@@ -94,20 +94,19 @@ bool CreateVirtualMic(std::string *error) {
 
   // Ensure null sink
   if (!loaded.null_sink_module_id) {
-    // NOTE: Keep quotes *inside* the value so Pulse/PipeWire module parsing can
-    // handle spaces. The outer single quotes are for the shell; the inner
-    // double quotes survive into pactl.
     std::string err;
-    const std::string argsWithDesc =
-        std::string("sink_name=") + kSinkName +
-        " sink_properties='device.description=\"StudioCast Sink\"'";
-
-    auto id = pulse::LoadModule("module-null-sink", argsWithDesc, &err);
+    auto id = pulse::LoadModule(
+        "module-null-sink",
+        {
+            std::string("sink_name=") + kSinkName,
+            "sink_properties=device.description=\"StudioCast Sink\"",
+        },
+        &err);
     if (!id) {
       // Fallback: try without sink_properties (some servers are picky)
       std::string err2;
-      const std::string argsMinimal = std::string("sink_name=") + kSinkName;
-      id = pulse::LoadModule("module-null-sink", argsMinimal, &err2);
+      id = pulse::LoadModule("module-null-sink",
+                             {std::string("sink_name=") + kSinkName}, &err2);
 
       if (!id) {
         if (error) {
@@ -127,20 +126,24 @@ bool CreateVirtualMic(std::string *error) {
   // Ensure remap source (virtual mic)
   if (!loaded.remap_source_module_id) {
     std::string err;
-    const std::string argsWithDesc =
-        std::string("master=") + kSinkName + ".monitor " +
-        "source_name=" + kSourceName + " " +
-        "source_properties='device.description=\"StudioCast Microphone\"'";
-
-    auto id = pulse::LoadModule("module-remap-source", argsWithDesc, &err);
+    auto id = pulse::LoadModule(
+        "module-remap-source",
+        {
+            std::string("master=") + kSinkName + ".monitor",
+            std::string("source_name=") + kSourceName,
+            "source_properties=device.description=\"StudioCast Microphone\"",
+        },
+        &err);
     if (!id) {
       // Fallback: try without source_properties
       std::string err2;
-      const std::string argsMinimal = std::string("master=") + kSinkName +
-                                      ".monitor " +
-                                      "source_name=" + kSourceName;
-
-      id = pulse::LoadModule("module-remap-source", argsMinimal, &err2);
+      id = pulse::LoadModule(
+          "module-remap-source",
+          {
+              std::string("master=") + kSinkName + ".monitor",
+              std::string("source_name=") + kSourceName,
+          },
+          &err2);
 
       if (!id) {
         if (error) {
@@ -253,13 +256,15 @@ bool StartLoopback(const std::string &source_name, int latency_ms,
     chosen = *def;
   }
 
-  std::ostringstream args;
-  args << "source=" << chosen << " "
-       << "sink=" << kSinkName << " "
-       << "latency_msec=" << latency_ms;
-
   std::string err;
-  auto id = pulse::LoadModule("module-loopback", args.str(), &err);
+  auto id = pulse::LoadModule(
+      "module-loopback",
+      {
+          "source=" + chosen,
+          std::string("sink=") + kSinkName,
+          "latency_msec=" + std::to_string(latency_ms),
+      },
+      &err);
   if (!id) {
     if (error)
       *error = "Failed to load module-loopback: " + err;

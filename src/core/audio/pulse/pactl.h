@@ -44,6 +44,9 @@ bool PactlAvailable(std::string *details);
 
 std::optional<int> LoadModule(const std::string &module,
                               const std::string &args, std::string *error);
+std::optional<int> LoadModule(const std::string &module,
+                              const std::vector<std::string> &args,
+                              std::string *error);
 bool UnloadModule(int id, std::string *error);
 
 std::vector<PactlModule> ListModules(std::string *error);
