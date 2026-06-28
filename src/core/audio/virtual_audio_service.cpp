@@ -592,6 +592,8 @@ void VirtualAudioService::ThreadMain() {
     //
     // Note: `enabled` controls the microphone processing pipeline; virtual
     // devices may be created and routed independently.
+    bool speakerLoopbackStopBlockedProcessing = false;
+    std::string speakerLoopbackStopError;
     {
       // Mic device.
       if (cfg.create_virtual_mic && !mic_created_) {
@@ -653,11 +655,21 @@ void VirtualAudioService::ThreadMain() {
               }
               clearSpeakersError();
             } else {
+              speakerLoopbackStopBlockedProcessing = true;
+              speakerLoopbackStopError = err;
+              {
+                std::lock_guard<std::mutex> lock(mu_);
+                st_.speakers_route_mode = "loopback";
+                st_.speakers_routing_active = true;
+                if (st_.speaker_target_sink_active.empty()) {
+                  st_.speaker_target_sink_active = speakers_loopback_target_;
+                }
+              }
               setSpeakersError("Failed to stop speakers routing: " + err);
             }
           }
 
-          {
+          if (!speakerLoopbackStopBlockedProcessing) {
             std::lock_guard<std::mutex> lock(mu_);
             st_.speakers_route_mode = "pipeline";
           }
@@ -779,19 +791,29 @@ void VirtualAudioService::ThreadMain() {
             }
             clearSpeakersError();
           } else {
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              st_.speakers_route_mode = "loopback";
+              st_.speakers_routing_active = true;
+              if (st_.speaker_target_sink_active.empty()) {
+                st_.speaker_target_sink_active = speakers_loopback_target_;
+              }
+            }
             setSpeakersError("Failed to stop speakers routing: " + err);
           }
         }
 
         {
           std::lock_guard<std::mutex> lock(mu_);
-          st_.speakers_route_mode = "off";
+          st_.speakers_route_mode =
+              speakers_loopback_running_ ? "loopback" : "off";
         }
 
         // Optional cleanup: if the user disables the device, and we previously
         // created it, destroy it. This keeps daemon-managed speaker state
         // predictable.
-        if (!cfg.create_virtual_speakers && speakers_created_) {
+        if (!cfg.create_virtual_speakers && speakers_created_ &&
+            !speakers_loopback_running_) {
           std::string err;
           if (DestroyVirtualSpeakerDevice(&err)) {
             speakers_created_ = false;
@@ -816,6 +838,7 @@ void VirtualAudioService::ThreadMain() {
       std::lock_guard<std::mutex> lock(mu_);
       st_.selected_source = cfg.source_name;
     }
+    (void)speakerLoopbackStopError;
 
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
     // Speaker processed pipeline supervisor.
@@ -823,7 +846,37 @@ void VirtualAudioService::ThreadMain() {
     // This runs independently from the microphone pipeline, allowing speaker
     // noise removal even when microphone effects are disabled.
     if (wantSpeakerProcessingEffective) {
-      if (!speakers_created_) {
+      if (speakerLoopbackStopBlockedProcessing) {
+        if (spk_pipeline) {
+          spk_pipeline->Stop();
+          spk_pipeline.reset();
+        }
+        spk_processor.reset();
+        if (spk_fx) {
+          spk_fx->Destroy();
+          spk_fx.reset();
+        }
+        spk_api.reset();
+        lastSpeakerFx.reset();
+        lastSpeakerBackend.clear();
+        lastSpeakerTargetSink.clear();
+        lastSpeakerAfxLib.clear();
+
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          st_.speakers_route_mode = "loopback";
+          st_.speakers_pipeline_running = false;
+          st_.speakers_pipeline_starting = false;
+          st_.speakers_routing_active = true;
+          if (st_.speaker_target_sink_active.empty()) {
+            st_.speaker_target_sink_active = speakers_loopback_target_;
+          }
+          st_.speakers_pipeline_last_error =
+              "Speaker processing blocked while stopping existing loopback: " +
+              speakerLoopbackStopError;
+          clearSpeakerPipelineStatsLocked();
+        }
+      } else if (!speakers_created_) {
         // We can't route/process speaker audio until the virtual speakers
         // device exists.
         if (spk_pipeline) {

@@ -9,10 +9,12 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "core/audio/audio_backend_resolver.h"
 #include "core/audio/audio_pipeline.h"
 #include "core/audio/audio_processor.h"
+#include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_audio_service.h"
 
 namespace {
@@ -30,6 +32,22 @@ using studiocast::audio::VirtualAudioServiceConfig;
 using studiocast::audio::VirtualAudioServiceHooks;
 
 using namespace std::chrono_literals;
+
+class ScopedPactlExecHook final {
+public:
+  explicit ScopedPactlExecHook(
+      studiocast::audio::pulse::PactlExecCaptureHook hook) {
+    studiocast::audio::pulse::SetPactlExecCaptureHookForTesting(
+        std::move(hook));
+  }
+
+  ~ScopedPactlExecHook() {
+    studiocast::audio::pulse::SetPactlExecCaptureHookForTesting(nullptr);
+  }
+
+  ScopedPactlExecHook(const ScopedPactlExecHook &) = delete;
+  ScopedPactlExecHook &operator=(const ScopedPactlExecHook &) = delete;
+};
 
 bool WaitUntil(const std::function<bool()> &pred,
                std::chrono::milliseconds timeout) {
@@ -485,6 +503,84 @@ private:
   std::shared_ptr<LatencyIoState> state_;
   const std::atomic<bool> *external_stop_requested_ = nullptr;
 };
+
+bool TestPactlLoadModuleQuotesVectorArguments() {
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    studiocast::util::ExecResult result;
+    result.exit_code = 0;
+    result.stdout_str = "123\n";
+    return result;
+  });
+
+  std::string err;
+  const auto id = studiocast::audio::pulse::LoadModule(
+      "module-null-sink",
+      {
+          "sink_name=studio cast",
+          "sink_properties=device.description=\"StudioCast Speakers\"",
+          "weird=a'b",
+      },
+      &err);
+
+  const std::string expected =
+      "pactl load-module 'module-null-sink' 'sink_name=studio cast' "
+      "'sink_properties=device.description=\"StudioCast Speakers\"' "
+      "'weird=a'\"'\"'b' 2>&1";
+
+  if (!id || *id != 123) {
+    std::cerr << "expected pactl module id 123; error='" << err << "'\n";
+    return false;
+  }
+
+  if (commands.size() != 1 || commands[0] != expected) {
+    std::cerr << "unexpected pactl load-module command\nexpected: " << expected
+              << "\nactual:   "
+              << (commands.empty() ? std::string("<none>") : commands[0])
+              << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestPactlLoadModuleStringCompatibilitySplitter() {
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    studiocast::util::ExecResult result;
+    result.exit_code = 0;
+    result.stdout_str = "124\n";
+    return result;
+  });
+
+  std::string err;
+  const auto id = studiocast::audio::pulse::LoadModule(
+      "module-loopback",
+      "source='studio cast.monitor' sink=\"physical sink\" latency_msec=10 "
+      "escaped=hello\\ world",
+      &err);
+
+  const std::string expected =
+      "pactl load-module 'module-loopback' 'source=studio cast.monitor' "
+      "'sink=physical sink' 'latency_msec=10' 'escaped=hello world' 2>&1";
+
+  if (!id || *id != 124) {
+    std::cerr << "expected pactl module id 124; error='" << err << "'\n";
+    return false;
+  }
+
+  if (commands.size() != 1 || commands[0] != expected) {
+    std::cerr << "unexpected pactl compatibility command\nexpected: "
+              << expected << "\nactual:   "
+              << (commands.empty() ? std::string("<none>") : commands[0])
+              << "\n";
+    return false;
+  }
+
+  return true;
+}
 
 bool TestMicrophonePipelineRestartsWhenWorkerDies() {
   std::atomic<int> pipeline_creates{0};
@@ -1304,6 +1400,222 @@ bool TestSpeakerLoopbackRestartFailureClearsRouteState() {
   return true;
 }
 
+bool TestSpeakerLoopbackStopFailureBlocksPipelineStart() {
+  std::atomic<int> loopback_start_calls{0};
+  std::atomic<int> loopback_stop_calls{0};
+  std::atomic<int> pipeline_creates{0};
+
+  VirtualAudioServiceHooks hooks;
+  hooks.create_virtual_speaker = [](std::string *error) {
+    if (error)
+      error->clear();
+    return true;
+  };
+  hooks.start_speaker_loopback =
+      [&](const std::string &, int, std::string *error) {
+    loopback_start_calls.fetch_add(1, std::memory_order_relaxed);
+    if (error)
+      error->clear();
+    return true;
+  };
+  hooks.stop_speaker_loopback = [&](std::string *error) {
+    loopback_stop_calls.fetch_add(1, std::memory_order_relaxed);
+    if (error)
+      *error = "synthetic loopback stop failure";
+    return false;
+  };
+  hooks.probe_speaker_backend_availability =
+      [](const VirtualAudioServiceConfig &) {
+        AudioBackendAvailability avail;
+        avail.maxine_reason = "synthetic maxine unavailable";
+        avail.open_source_reason = "synthetic open audio unavailable";
+        return avail;
+      };
+  hooks.create_pipeline =
+      [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    pipeline_creates.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<FixedStatsPipeline>(true, "");
+  };
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = false;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = true;
+  cfg.speakers_enabled = true;
+  cfg.speaker_target_sink = "physical_test_sink";
+  cfg.poll_ms = 1;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            const auto status = service.Status();
+            return loopback_start_calls.load(std::memory_order_relaxed) >= 1 &&
+                   status.speakers_route_mode == "loopback" &&
+                   status.speakers_routing_active;
+          },
+          250ms)) {
+    const auto status = service.Status();
+    std::cerr << "speaker loopback did not become active before processing "
+                 "transition; starts="
+              << loopback_start_calls.load() << " route='"
+              << status.speakers_route_mode << "' active="
+              << status.speakers_routing_active << "\n";
+    service.Stop();
+    return false;
+  }
+
+  cfg.effects.speaker.noise_removal_enabled = true;
+  service.UpdateConfig(cfg);
+
+  const bool stop_failed = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return loopback_stop_calls.load(std::memory_order_relaxed) >= 1 &&
+               status.speakers_route_mode == "loopback" &&
+               status.speakers_routing_active &&
+               !status.speakers_pipeline_running &&
+               !status.speakers_pipeline_starting &&
+               status.speakers_last_error.find("synthetic loopback stop "
+                                                "failure") != std::string::npos;
+      },
+      250ms);
+  std::this_thread::sleep_for(30ms);
+  const int creates_after_stop_failure =
+      pipeline_creates.load(std::memory_order_relaxed);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!stop_failed) {
+    std::cerr << "speaker stop failure did not keep loopback route active; "
+              << "stops=" << loopback_stop_calls.load() << " route='"
+              << status.speakers_route_mode << "' active="
+              << status.speakers_routing_active << " pipeline_running="
+              << status.speakers_pipeline_running << " pipeline_starting="
+              << status.speakers_pipeline_starting << " error='"
+              << status.speakers_last_error << "'\n";
+    return false;
+  }
+
+  if (creates_after_stop_failure != 0) {
+    std::cerr << "speaker pipeline started while loopback stop was failing; "
+              << "creates=" << creates_after_stop_failure << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestSpeakerLoopbackStopFailurePreventsDestroyAndKeepsRoute() {
+  std::atomic<int> loopback_start_calls{0};
+  std::atomic<int> loopback_stop_calls{0};
+  std::atomic<int> destroy_calls{0};
+
+  VirtualAudioServiceHooks hooks;
+  hooks.create_virtual_speaker = [](std::string *error) {
+    if (error)
+      error->clear();
+    return true;
+  };
+  hooks.start_speaker_loopback =
+      [&](const std::string &, int, std::string *error) {
+    loopback_start_calls.fetch_add(1, std::memory_order_relaxed);
+    if (error)
+      error->clear();
+    return true;
+  };
+  hooks.stop_speaker_loopback = [&](std::string *error) {
+    loopback_stop_calls.fetch_add(1, std::memory_order_relaxed);
+    if (error)
+      *error = "synthetic loopback stop failure";
+    return false;
+  };
+  hooks.destroy_virtual_speaker = [&](std::string *error) {
+    destroy_calls.fetch_add(1, std::memory_order_relaxed);
+    if (error)
+      error->clear();
+    return true;
+  };
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = false;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = true;
+  cfg.speakers_enabled = true;
+  cfg.speaker_target_sink = "physical_test_sink";
+  cfg.poll_ms = 1;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            const auto status = service.Status();
+            return loopback_start_calls.load(std::memory_order_relaxed) >= 1 &&
+                   status.speakers_route_mode == "loopback" &&
+                   status.speakers_routing_active;
+          },
+          250ms)) {
+    std::cerr << "speaker loopback did not become active before disable\n";
+    service.Stop();
+    return false;
+  }
+
+  cfg.speakers_enabled = false;
+  cfg.create_virtual_speakers = false;
+  service.UpdateConfig(cfg);
+
+  const bool stop_failed = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return loopback_stop_calls.load(std::memory_order_relaxed) >= 1 &&
+               status.speakers_route_mode == "loopback" &&
+               status.speakers_routing_active &&
+               status.speakers_present &&
+               status.speakers_last_error.find("synthetic loopback stop "
+                                                "failure") != std::string::npos;
+      },
+      250ms);
+  std::this_thread::sleep_for(30ms);
+  const int destroys_after_stop_failure =
+      destroy_calls.load(std::memory_order_relaxed);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!stop_failed) {
+    std::cerr << "speaker disable did not preserve failed loopback route; stops="
+              << loopback_stop_calls.load() << " route='"
+              << status.speakers_route_mode << "' active="
+              << status.speakers_routing_active << " present="
+              << status.speakers_present << " error='"
+              << status.speakers_last_error << "'\n";
+    return false;
+  }
+
+  if (destroys_after_stop_failure != 0) {
+    std::cerr << "virtual speakers were destroyed while loopback stop failed; "
+              << "destroys=" << destroys_after_stop_failure << "\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestStopInterruptsOpenAfterEarlyStopReset() {
   auto state = std::make_shared<ResettingOpenIoState>();
   CopyProcessor processor;
@@ -1662,6 +1974,10 @@ int main() {
     const char *name;
     bool (*fn)();
   } tests[] = {
+      {"pactl load-module quotes vector arguments",
+       &TestPactlLoadModuleQuotesVectorArguments},
+      {"pactl load-module string compatibility splitter",
+       &TestPactlLoadModuleStringCompatibilitySplitter},
       {"mic pipeline restarts after worker death",
        &TestMicrophonePipelineRestartsWhenWorkerDies},
       {"mic pipeline preserves worker death error",
@@ -1686,6 +2002,10 @@ int main() {
        &TestSpeakerPipelineStatsClearWhenProcessingDisabled},
       {"speaker loopback restart failure clears route state",
        &TestSpeakerLoopbackRestartFailureClearsRouteState},
+      {"speaker loopback stop failure blocks pipeline start",
+       &TestSpeakerLoopbackStopFailureBlocksPipelineStart},
+      {"speaker loopback stop failure prevents destroy and keeps route",
+       &TestSpeakerLoopbackStopFailurePreventsDestroyAndKeepsRoute},
       {"stop interrupts open after early stop reset",
        &TestStopInterruptsOpenAfterEarlyStopReset},
       {"stop interrupts blocked flush", &TestStopInterruptsBlockedFlush},

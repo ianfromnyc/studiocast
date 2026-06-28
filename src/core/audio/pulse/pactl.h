@@ -1,8 +1,11 @@
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "core/util/exec.h"
 
 namespace studiocast::audio::pulse {
 
@@ -41,6 +44,11 @@ bool SetSourcePort(const std::string &source_name, const std::string &port_name,
                    std::string *error);
 
 bool PactlAvailable(std::string *details);
+
+using PactlExecCaptureHook =
+    std::function<studiocast::util::ExecResult(const std::string &)>;
+
+void SetPactlExecCaptureHookForTesting(PactlExecCaptureHook hook);
 
 std::optional<int> LoadModule(const std::string &module,
                               const std::string &args, std::string *error);
