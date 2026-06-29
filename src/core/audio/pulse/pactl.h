@@ -25,6 +25,16 @@ struct PactlSink {
   std::string name;
 };
 
+struct PactlSourceOutput {
+  int id = -1;
+  std::string source;
+};
+
+struct PactlSinkInput {
+  int id = -1;
+  std::string sink;
+};
+
 struct PactlPort {
   std::string name;        // e.g. "analog-input-internal-mic"
   std::string description; // e.g. "Internal Microphone"
@@ -60,6 +70,8 @@ bool UnloadModule(int id, std::string *error);
 std::vector<PactlModule> ListModules(std::string *error);
 std::vector<PactlSource> ListSources(std::string *error);
 std::vector<PactlSink> ListSinks(std::string *error);
+std::vector<PactlSourceOutput> ListSourceOutputs(std::string *error);
+std::vector<PactlSinkInput> ListSinkInputs(std::string *error);
 
 std::optional<std::string> GetDefaultSourceName(std::string *error);
 std::optional<std::string> GetDefaultSinkName(std::string *error);

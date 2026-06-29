@@ -556,6 +556,11 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
                                              : acfg.source_name)
       << "\",";
   oss << "\"mic_present\":" << BoolJson(ast.mic_present) << ",";
+  oss << "\"mic_consumer_present\":" << BoolJson(ast.mic_consumer_present)
+      << ",";
+  oss << "\"mic_consumer_count\":" << ast.mic_consumer_count << ",";
+  oss << "\"mic_consumer_error\":\"" << JsonEscape(ast.mic_consumer_error)
+      << "\",";
 
   const double spk_proc_avg_ms =
       ast.speakers_pipeline_frames_processed
@@ -578,6 +583,11 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
       << "\",";
   oss << "\"latency_ms\":" << acfg.speaker_latency_ms << ",";
   oss << "\"present\":" << BoolJson(ast.speakers_present) << ",";
+  oss << "\"consumer_present\":" << BoolJson(ast.speakers_consumer_present)
+      << ",";
+  oss << "\"consumer_count\":" << ast.speakers_consumer_count << ",";
+  oss << "\"consumer_error\":\"" << JsonEscape(ast.speakers_consumer_error)
+      << "\",";
   oss << "\"routing_active\":" << BoolJson(ast.speakers_routing_active) << ",";
   oss << "\"route_mode\":\""
       << JsonEscape(ast.speakers_route_mode.empty() ? std::string("off")
@@ -587,6 +597,15 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
       << ",";
   oss << "\"pipeline_starting\":" << BoolJson(ast.speakers_pipeline_starting)
       << ",";
+  oss << "\"pipeline_active_needed\":"
+      << BoolJson(ast.speakers_pipeline_active_needed) << ",";
+  oss << "\"pipeline_state\":\""
+      << JsonEscape(ast.speakers_pipeline_state.empty()
+                        ? std::string("disabled")
+                        : ast.speakers_pipeline_state)
+      << "\",";
+  oss << "\"pipeline_idle_reason\":\""
+      << JsonEscape(ast.speakers_pipeline_idle_reason) << "\",";
   oss << "\"backend_active\":\"" << JsonEscape(ast.speakers_backend_active)
       << "\",";
   oss << "\"effects_note\":\"" << JsonEscape(ast.speakers_effects_note)
@@ -646,6 +665,12 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"pipeline\":{";
   oss << "\"running\":" << BoolJson(ast.pipeline_running) << ",";
   oss << "\"starting\":" << BoolJson(ast.pipeline_starting) << ",";
+  oss << "\"active_needed\":" << BoolJson(ast.pipeline_active_needed) << ",";
+  oss << "\"state\":\""
+      << JsonEscape(ast.pipeline_state.empty() ? std::string("disabled")
+                                               : ast.pipeline_state)
+      << "\",";
+  oss << "\"idle_reason\":\"" << JsonEscape(ast.pipeline_idle_reason) << "\",";
   oss << "\"sink\":\"" << JsonEscape(ast.pipeline_sink) << "\",";
   oss << "\"backend_active\":\"" << JsonEscape(ast.effects_backend_active)
       << "\",";

@@ -52,14 +52,30 @@ struct VirtualAudioServiceConfig {
 
   // When a start attempt fails, wait this long before retrying.
   int start_retry_ms = 2000;
+
+  // After the last consumer disappears, keep an already-running pipeline alive
+  // briefly to avoid churn from apps that probe or reconnect audio streams.
+  int consumer_grace_ms = 1000;
+};
+
+struct AudioConsumerSnapshot {
+  bool present = false;
+  int count = 0;
+  std::string error;
 };
 
 struct VirtualAudioServiceStatus {
   bool service_running = false;
 
   bool mic_present = false;
+  bool mic_consumer_present = false;
+  int mic_consumer_count = 0;
+  std::string mic_consumer_error;
 
   bool speakers_present = false;
+  bool speakers_consumer_present = false;
+  int speakers_consumer_count = 0;
+  std::string speakers_consumer_error;
   bool speakers_routing_active = false;
   // "off" (no routing), "loopback" (Pulse module-loopback pass-through),
   // or "pipeline" (daemon processed pipeline).
@@ -71,6 +87,9 @@ struct VirtualAudioServiceStatus {
   // pipeline state.
   bool speakers_pipeline_running = false;
   bool speakers_pipeline_starting = false;
+  bool speakers_pipeline_active_needed = false;
+  std::string speakers_pipeline_state;
+  std::string speakers_pipeline_idle_reason;
   std::string speakers_backend_active;
   std::string speakers_effects_note;
   float speakers_intensity = 0.0f;
@@ -91,6 +110,9 @@ struct VirtualAudioServiceStatus {
 
   bool pipeline_running = false;
   bool pipeline_starting = false;
+  bool pipeline_active_needed = false;
+  std::string pipeline_state;
+  std::string pipeline_idle_reason;
 
   // Microphone pipeline performance (best-effort realtime stats).
   std::uint64_t pipeline_frames_processed = 0;
@@ -146,6 +168,8 @@ struct VirtualAudioServiceHooks {
       probe_microphone_backend_availability;
   std::function<AudioBackendAvailability(const VirtualAudioServiceConfig &)>
       probe_speaker_backend_availability;
+  std::function<AudioConsumerSnapshot()> detect_microphone_consumers;
+  std::function<AudioConsumerSnapshot()> detect_speaker_consumers;
 };
 
 // Minimal daemon-friendly owner of StudioCast virtual audio devices and
@@ -191,6 +215,8 @@ private:
       const VirtualAudioServiceConfig &cfg) const;
   AudioBackendAvailability
   ProbeSpeakerBackendAvailability(const VirtualAudioServiceConfig &cfg) const;
+  AudioConsumerSnapshot DetectMicrophoneConsumers() const;
+  AudioConsumerSnapshot DetectSpeakerConsumers() const;
   void SetLastError(std::string msg);
 
   mutable std::mutex mu_;

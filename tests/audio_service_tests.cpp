@@ -26,6 +26,7 @@
 namespace {
 
 using studiocast::audio::AudioBackendAvailability;
+using studiocast::audio::AudioConsumerSnapshot;
 using studiocast::audio::AudioPipeline;
 using studiocast::audio::AudioPipelineConfig;
 using studiocast::audio::AudioPipelineHooks;
@@ -128,6 +129,27 @@ bool WaitUntil(const std::function<bool()> &pred,
     std::this_thread::sleep_for(1ms);
   }
   return pred();
+}
+
+AudioConsumerSnapshot ConsumerSnapshot(bool present, int count = 1) {
+  AudioConsumerSnapshot out;
+  out.present = present;
+  out.count = present ? count : 0;
+  return out;
+}
+
+void HookMicrophoneConsumerFlag(VirtualAudioServiceHooks *hooks,
+                                std::atomic<bool> *present) {
+  hooks->detect_microphone_consumers = [present] {
+    return ConsumerSnapshot(present->load(std::memory_order_relaxed));
+  };
+}
+
+void HookSpeakerConsumerFlag(VirtualAudioServiceHooks *hooks,
+                             std::atomic<bool> *present) {
+  hooks->detect_speaker_consumers = [present] {
+    return ConsumerSnapshot(present->load(std::memory_order_relaxed));
+  };
 }
 
 class DeadPipeline final : public AudioPipelineRunner {
@@ -757,6 +779,57 @@ bool TestPactlProplistCommandsQuoteArgumentsAndDetectFailures() {
   return true;
 }
 
+bool TestPactlConsumerListsParseSourceOutputsAndSinkInputs() {
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl list short source-outputs 2>&1") {
+      return ExecResult(0,
+                        "7\t3\t51\tprotocol-native.c\tfloat32le 1ch 48000Hz\n"
+                        "8\tstudiocast_mic\t52\tprotocol-native.c\t"
+                        "float32le 1ch 48000Hz\n");
+    }
+    if (command == "pactl list short sink-inputs 2>&1") {
+      return ExecResult(0,
+                        "9\t4\t61\tprotocol-native.c\tfloat32le 2ch 48000Hz\n"
+                        "10\tstudiocast_speakers\t62\tprotocol-native.c\t"
+                        "float32le 2ch 48000Hz\n");
+    }
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  std::string err;
+  const auto outputs = studiocast::audio::pulse::ListSourceOutputs(&err);
+  if (!err.empty() || outputs.size() != 2 || outputs[0].id != 7 ||
+      outputs[0].source != "3" || outputs[1].source != "studiocast_mic") {
+    std::cerr << "source-output parsing failed; count=" << outputs.size()
+              << " error='" << err << "'\n";
+    return false;
+  }
+
+  err.clear();
+  const auto inputs = studiocast::audio::pulse::ListSinkInputs(&err);
+  if (!err.empty() || inputs.size() != 2 || inputs[0].id != 9 ||
+      inputs[0].sink != "4" || inputs[1].sink != "studiocast_speakers") {
+    std::cerr << "sink-input parsing failed; count=" << inputs.size()
+              << " error='" << err << "'\n";
+    return false;
+  }
+
+  const std::vector<std::string> expected = {
+      "pactl list short source-outputs 2>&1",
+      "pactl list short sink-inputs 2>&1",
+  };
+  if (commands != expected) {
+    std::cerr << "unexpected consumer-list command sequence\n";
+    for (const auto &command : commands)
+      std::cerr << "  " << command << "\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestStatusTextSurfacesModuleListFailure() {
   ScopedXdgStateHome state_home;
   std::vector<std::string> commands;
@@ -795,8 +868,7 @@ bool TestStatusTextSurfacesModuleListFailure() {
 
   if (text.find("loaded ids: sink=none, remap=none, loopback=none") !=
           std::string::npos ||
-      text.find("loaded ids: sink=none, loopback=none") !=
-          std::string::npos) {
+      text.find("loaded ids: sink=none, loopback=none") != std::string::npos) {
     std::cerr << "status text rendered unknown loaded ids as none:\n"
               << text << "\n";
     return false;
@@ -829,8 +901,8 @@ bool TestCreateVirtualMicPropagatesListFailureWithoutLoading() {
   err.clear();
   const bool ok = studiocast::audio::CreateVirtualMic(&err);
   if (ok || err.find("synthetic mic list failure") == std::string::npos) {
-    std::cerr << "expected virtual mic create to fail on list failure; ok=" << ok
-              << " error='" << err << "'\n";
+    std::cerr << "expected virtual mic create to fail on list failure; ok="
+              << ok << " error='" << err << "'\n";
     return false;
   }
 
@@ -901,19 +973,18 @@ bool TestCreateVirtualSpeakerPropagatesListFailureWithoutLoading() {
       !state.loopback_module_id || *state.loopback_module_id != 42 ||
       !state.loopback_target_sink_name ||
       *state.loopback_target_sink_name != "physical_test_sink") {
-    std::cerr << "virtual speaker create changed state after list failure; sink="
-              << (state.null_sink_module_id
-                      ? std::to_string(*state.null_sink_module_id)
-                      : std::string("<none>"))
-              << " loopback="
-              << (state.loopback_module_id
-                      ? std::to_string(*state.loopback_module_id)
-                      : std::string("<none>"))
-              << " target='"
-              << (state.loopback_target_sink_name
-                      ? *state.loopback_target_sink_name
-                      : std::string("<none>"))
-              << "'\n";
+    std::cerr
+        << "virtual speaker create changed state after list failure; sink="
+        << (state.null_sink_module_id
+                ? std::to_string(*state.null_sink_module_id)
+                : std::string("<none>"))
+        << " loopback="
+        << (state.loopback_module_id ? std::to_string(*state.loopback_module_id)
+                                     : std::string("<none>"))
+        << " target='"
+        << (state.loopback_target_sink_name ? *state.loopback_target_sink_name
+                                            : std::string("<none>"))
+        << "'\n";
     return false;
   }
 
@@ -1241,12 +1312,302 @@ bool TestDestroyVirtualMicPreservesRemainingStateOnNullUnloadFailure() {
   return true;
 }
 
+bool TestMicrophonePipelineDoesNotStartWithoutConsumer() {
+  std::atomic<int> pipeline_creates{0};
+  std::atomic<bool> mic_consumer_present{false};
+
+  VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
+  hooks.create_pipeline =
+      [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    pipeline_creates.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<FixedStatsPipeline>(true, "");
+  };
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.poll_ms = 1;
+  cfg.consumer_grace_ms = 0;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool saw_idle = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return status.pipeline_state == "idle_no_consumer" &&
+               !status.pipeline_active_needed && !status.pipeline_running &&
+               !status.mic_consumer_present;
+      },
+      250ms);
+  std::this_thread::sleep_for(30ms);
+  const int creates = pipeline_creates.load(std::memory_order_relaxed);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!saw_idle || creates != 0) {
+    std::cerr << "microphone pipeline did not stay idle without consumer; "
+              << "creates=" << creates << " state='" << status.pipeline_state
+              << "' idle='" << status.pipeline_idle_reason
+              << "' running=" << status.pipeline_running << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestMicrophonePipelineStartsWhenConsumerAppears() {
+  std::atomic<int> pipeline_creates{0};
+  std::atomic<bool> mic_consumer_present{false};
+
+  VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
+  hooks.create_pipeline =
+      [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    pipeline_creates.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<FixedStatsPipeline>(true, "");
+  };
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.poll_ms = 1;
+  cfg.consumer_grace_ms = 0;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] { return service.Status().pipeline_state == "idle_no_consumer"; },
+          250ms)) {
+    std::cerr << "microphone pipeline did not reach no-consumer idle state\n";
+    service.Stop();
+    return false;
+  }
+
+  mic_consumer_present.store(true, std::memory_order_relaxed);
+  const bool started = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return pipeline_creates.load(std::memory_order_relaxed) >= 1 &&
+               status.pipeline_running && status.pipeline_active_needed &&
+               status.pipeline_state == "running" &&
+               status.mic_consumer_present;
+      },
+      250ms);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!started) {
+    std::cerr << "microphone pipeline did not start after consumer appeared; "
+              << "creates=" << pipeline_creates.load() << " state='"
+              << status.pipeline_state
+              << "' running=" << status.pipeline_running << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestMicrophonePipelineStopsWhenConsumerDisappears() {
+  std::atomic<int> pipeline_creates{0};
+  std::atomic<int> pipeline_stops{0};
+  std::atomic<bool> mic_consumer_present{true};
+
+  VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
+  hooks.create_pipeline =
+      [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    pipeline_creates.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
+  };
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.poll_ms = 1;
+  cfg.consumer_grace_ms = 0;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            return pipeline_creates.load(std::memory_order_relaxed) >= 1 &&
+                   service.Status().pipeline_running;
+          },
+          250ms)) {
+    std::cerr << "microphone pipeline did not start before consumer vanished\n";
+    service.Stop();
+    return false;
+  }
+
+  mic_consumer_present.store(false, std::memory_order_relaxed);
+  const bool stopped = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return pipeline_stops.load(std::memory_order_relaxed) >= 1 &&
+               !status.pipeline_running &&
+               status.pipeline_state == "idle_no_consumer" &&
+               !status.pipeline_active_needed;
+      },
+      250ms);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!stopped) {
+    std::cerr << "microphone pipeline did not stop after consumer disappeared; "
+              << "stops=" << pipeline_stops.load() << " state='"
+              << status.pipeline_state
+              << "' running=" << status.pipeline_running << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestSpeakerPipelineFollowsConsumerGate() {
+  std::atomic<int> pipeline_creates{0};
+  std::atomic<int> pipeline_stops{0};
+  std::atomic<bool> speaker_consumer_present{false};
+
+  VirtualAudioServiceHooks hooks;
+  HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
+  hooks.create_virtual_speaker = [](std::string *error) {
+    if (error)
+      error->clear();
+    return true;
+  };
+  hooks.probe_speaker_backend_availability =
+      [](const VirtualAudioServiceConfig &) {
+        AudioBackendAvailability avail;
+        avail.maxine_reason = "synthetic maxine unavailable";
+        avail.open_source_reason = "synthetic open audio unavailable";
+        return avail;
+      };
+  hooks.create_pipeline =
+      [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    pipeline_creates.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
+  };
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = false;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = true;
+  cfg.speakers_enabled = true;
+  cfg.speaker_target_sink = "physical_test_sink";
+  cfg.effects.speaker.noise_removal_enabled = true;
+  cfg.poll_ms = 1;
+  cfg.consumer_grace_ms = 0;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool saw_idle = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return status.speakers_pipeline_state == "idle_no_consumer" &&
+               !status.speakers_pipeline_active_needed &&
+               !status.speakers_pipeline_running &&
+               !status.speakers_consumer_present;
+      },
+      250ms);
+  std::this_thread::sleep_for(30ms);
+  if (!saw_idle || pipeline_creates.load(std::memory_order_relaxed) != 0) {
+    const auto status = service.Status();
+    std::cerr << "speaker pipeline did not stay idle without consumer; creates="
+              << pipeline_creates.load() << " state='"
+              << status.speakers_pipeline_state
+              << "' running=" << status.speakers_pipeline_running << "\n";
+    service.Stop();
+    return false;
+  }
+
+  speaker_consumer_present.store(true, std::memory_order_relaxed);
+  const bool started = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return pipeline_creates.load(std::memory_order_relaxed) >= 1 &&
+               status.speakers_pipeline_running &&
+               status.speakers_pipeline_active_needed &&
+               status.speakers_pipeline_state == "running";
+      },
+      250ms);
+  if (!started) {
+    const auto status = service.Status();
+    std::cerr << "speaker pipeline did not start after consumer appeared; "
+              << "creates=" << pipeline_creates.load() << " state='"
+              << status.speakers_pipeline_state
+              << "' running=" << status.speakers_pipeline_running << "\n";
+    service.Stop();
+    return false;
+  }
+
+  speaker_consumer_present.store(false, std::memory_order_relaxed);
+  const bool stopped = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return pipeline_stops.load(std::memory_order_relaxed) >= 1 &&
+               !status.speakers_pipeline_running &&
+               status.speakers_pipeline_state == "idle_no_consumer" &&
+               !status.speakers_pipeline_active_needed;
+      },
+      250ms);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!stopped) {
+    std::cerr << "speaker pipeline did not stop after consumer disappeared; "
+              << "stops=" << pipeline_stops.load() << " state='"
+              << status.speakers_pipeline_state
+              << "' running=" << status.speakers_pipeline_running << "\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestMicrophonePipelineRestartsWhenWorkerDies() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<int> pipeline_stops{0};
   std::atomic<int> sleep_calls{0};
+  std::atomic<bool> mic_consumer_present{true};
 
   VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
       [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
@@ -1294,8 +1655,10 @@ bool TestMicrophonePipelineRestartsWhenWorkerDies() {
 bool TestMicrophonePipelinePreservesWorkerDeathError() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<int> pipeline_stops{0};
+  std::atomic<bool> mic_consumer_present{true};
 
   VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
       [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     const int create_index =
@@ -1351,8 +1714,10 @@ bool TestStatusDoesNotBlockDuringRetrySleep() {
   bool sleep_entered = false;
   bool release_sleep = false;
   std::atomic<int> sleep_calls{0};
+  std::atomic<bool> mic_consumer_present{true};
 
   VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
       [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     return std::make_unique<StartFailPipeline>();
@@ -1416,7 +1781,9 @@ bool TestStatusDoesNotBlockDuringRetrySleep() {
 }
 
 bool TestMicrophoneNullPipelineFactoryFailsWithoutCrash() {
+  std::atomic<bool> mic_consumer_present{true};
   VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
       [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     return nullptr;
@@ -1463,8 +1830,10 @@ bool TestMicrophoneNullPipelineFactoryFailsWithoutCrash() {
 
 bool TestSpeakerPipelineStartFailureClearsRouteState() {
   std::atomic<int> pipeline_creates{0};
+  std::atomic<bool> speaker_consumer_present{true};
 
   VirtualAudioServiceHooks hooks;
+  HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
     if (error)
       error->clear();
@@ -1533,8 +1902,10 @@ bool TestSpeakerPipelineStartFailureClearsRouteState() {
 
 bool TestOpenAudioFailureCooldownAvoidsRestartChurn() {
   std::atomic<int> pipeline_creates{0};
+  std::atomic<bool> mic_consumer_present{true};
 
   VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.probe_microphone_backend_availability =
       [](const VirtualAudioServiceConfig &) {
         AudioBackendAvailability avail;
@@ -1600,8 +1971,10 @@ bool TestOpenAudioFailureCooldownAvoidsRestartChurn() {
 
 bool TestMicrophoneAvailabilityCacheIgnoresSpeakerOnlyChanges() {
   std::atomic<int> mic_probes{0};
+  std::atomic<bool> mic_consumer_present{true};
 
   VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.probe_microphone_backend_availability =
       [&](const VirtualAudioServiceConfig &) {
         mic_probes.fetch_add(1, std::memory_order_relaxed);
@@ -1658,8 +2031,10 @@ bool TestMicrophoneAvailabilityCacheIgnoresSpeakerOnlyChanges() {
 
 bool TestSpeakerAvailabilityCacheIgnoresMicrophoneOnlyChanges() {
   std::atomic<int> speaker_probes{0};
+  std::atomic<bool> speaker_consumer_present{true};
 
   VirtualAudioServiceHooks hooks;
+  HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
     if (error)
       error->clear();
@@ -1724,8 +2099,10 @@ bool TestSpeakerAvailabilityCacheIgnoresMicrophoneOnlyChanges() {
 bool TestMicrophoneDeadWorkerBacksOffBeforeRestart() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<int> pipeline_stops{0};
+  std::atomic<bool> mic_consumer_present{true};
 
   VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
       [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
@@ -1779,8 +2156,10 @@ bool TestMicrophoneDeadWorkerBacksOffBeforeRestart() {
 bool TestSpeakerDeadWorkerBacksOffAndClearsRoute() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<int> pipeline_stops{0};
+  std::atomic<bool> speaker_consumer_present{true};
 
   VirtualAudioServiceHooks hooks;
+  HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
     if (error)
       error->clear();
@@ -1861,6 +2240,7 @@ bool TestSpeakerDeadWorkerBacksOffAndClearsRoute() {
 }
 
 bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
+  std::atomic<bool> speaker_consumer_present{true};
   AudioPipelineStats synthetic_stats;
   synthetic_stats.running = true;
   synthetic_stats.frames_processed = 123;
@@ -1874,6 +2254,7 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
   synthetic_stats.resync_events = 4;
 
   VirtualAudioServiceHooks hooks;
+  HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
     if (error)
       error->clear();
@@ -2252,8 +2633,10 @@ bool TestSpeakerLoopbackStopFailureBlocksPipelineStart() {
   std::atomic<int> loopback_start_calls{0};
   std::atomic<int> loopback_stop_calls{0};
   std::atomic<int> pipeline_creates{0};
+  std::atomic<bool> speaker_consumer_present{true};
 
   VirtualAudioServiceHooks hooks;
+  HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
     if (error)
       error->clear();
@@ -2853,6 +3236,8 @@ int main() {
        &TestPactlDefaultSourceAndSinkFallbackToInfo},
       {"pactl proplist commands quote args and detect failures",
        &TestPactlProplistCommandsQuoteArgumentsAndDetectFailures},
+      {"pactl consumer lists parse source outputs and sink inputs",
+       &TestPactlConsumerListsParseSourceOutputsAndSinkInputs},
       {"status text surfaces module list failures",
        &TestStatusTextSurfacesModuleListFailure},
       {"virtual mic create propagates list failure without loading",
@@ -2871,6 +3256,14 @@ int main() {
        &TestVirtualMicStopLoopbackPropagatesUnloadFailure},
       {"destroy virtual mic preserves remaining state on null unload failure",
        &TestDestroyVirtualMicPreservesRemainingStateOnNullUnloadFailure},
+      {"mic pipeline does not start without consumer",
+       &TestMicrophonePipelineDoesNotStartWithoutConsumer},
+      {"mic pipeline starts when consumer appears",
+       &TestMicrophonePipelineStartsWhenConsumerAppears},
+      {"mic pipeline stops when consumer disappears",
+       &TestMicrophonePipelineStopsWhenConsumerDisappears},
+      {"speaker pipeline follows consumer gate",
+       &TestSpeakerPipelineFollowsConsumerGate},
       {"mic pipeline restarts after worker death",
        &TestMicrophonePipelineRestartsWhenWorkerDies},
       {"mic pipeline preserves worker death error",

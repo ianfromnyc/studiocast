@@ -278,6 +278,60 @@ std::vector<PactlSink> ListSinks(std::string *error) {
   return out;
 }
 
+std::vector<PactlSourceOutput> ListSourceOutputs(std::string *error) {
+  auto res = RunPactlCommand("pactl list short source-outputs 2>&1");
+  if (res.exit_code != 0) {
+    if (error)
+      *error = util::TrimCopy(res.stdout_str);
+    return {};
+  }
+
+  std::vector<PactlSourceOutput> out;
+  for (const auto &raw : util::SplitLines(res.stdout_str)) {
+    const auto line = util::TrimCopy(raw);
+    if (line.empty())
+      continue;
+
+    auto fields = SplitTabs(line);
+    if (fields.size() < 2)
+      continue;
+
+    PactlSourceOutput o;
+    o.id = std::atoi(fields[0].c_str());
+    o.source = fields[1];
+    out.push_back(o);
+  }
+
+  return out;
+}
+
+std::vector<PactlSinkInput> ListSinkInputs(std::string *error) {
+  auto res = RunPactlCommand("pactl list short sink-inputs 2>&1");
+  if (res.exit_code != 0) {
+    if (error)
+      *error = util::TrimCopy(res.stdout_str);
+    return {};
+  }
+
+  std::vector<PactlSinkInput> out;
+  for (const auto &raw : util::SplitLines(res.stdout_str)) {
+    const auto line = util::TrimCopy(raw);
+    if (line.empty())
+      continue;
+
+    auto fields = SplitTabs(line);
+    if (fields.size() < 2)
+      continue;
+
+    PactlSinkInput i;
+    i.id = std::atoi(fields[0].c_str());
+    i.sink = fields[1];
+    out.push_back(i);
+  }
+
+  return out;
+}
+
 static bool StartsWith(const std::string &s, const std::string &prefix) {
   return s.rfind(prefix, 0) == 0;
 }
@@ -385,9 +439,8 @@ bool SetSourcePort(const std::string &source_name, const std::string &port_name,
   if (source_name.empty() || port_name.empty())
     return true;
 
-  std::string cmd =
-      "pactl set-source-port " + ShellQuoteSingle(source_name) + " " +
-      ShellQuoteSingle(port_name) + " 2>&1";
+  std::string cmd = "pactl set-source-port " + ShellQuoteSingle(source_name) +
+                    " " + ShellQuoteSingle(port_name) + " 2>&1";
   auto res = RunPactlCommand(cmd);
   if (res.exit_code != 0) {
     if (error)

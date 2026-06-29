@@ -67,7 +67,7 @@ build/studiocastctl status
 
 Notes:
 
-* StudioCast aims to avoid heavy processing when nothing is consuming the virtual camera. If you see heavy load with no consumer, that is a bug.
+* StudioCast aims to avoid heavy processing when nothing is consuming the virtual camera or virtual audio devices. If you see heavy load with no consumer, that is a bug.
 * Some effects require specific runtimes or model packs to be installed. See the “Models and engines” section below.
 
 ## Common commands (users)
