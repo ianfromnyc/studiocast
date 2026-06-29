@@ -446,7 +446,7 @@ bool VirtualAudioService::StartSpeakerLoopbackRoute(
     return hooks_.start_speaker_loopback(target_sink_name, latency_ms, error);
   }
   return studiocast::audio::StartSpeakerLoopback(target_sink_name, latency_ms,
-                                                error);
+                                                 error);
 }
 
 bool VirtualAudioService::StopSpeakerLoopbackRoute(std::string *error) const {
@@ -456,7 +456,8 @@ bool VirtualAudioService::StopSpeakerLoopbackRoute(std::string *error) const {
   return studiocast::audio::StopSpeakerLoopback(error);
 }
 
-bool VirtualAudioService::DestroyVirtualSpeakerDevice(std::string *error) const {
+bool VirtualAudioService::DestroyVirtualSpeakerDevice(
+    std::string *error) const {
   if (hooks_.destroy_virtual_speaker) {
     return hooks_.destroy_virtual_speaker(error);
   }
@@ -491,6 +492,10 @@ void VirtualAudioService::ThreadMain() {
   steady_clock::time_point nextStartRetry{};
   steady_clock::time_point nextSpeakerStartRetry{};
   steady_clock::time_point nextSpeakerLoopbackStartRetry{};
+  steady_clock::time_point nextSpeakerLoopbackStopRetry{};
+  steady_clock::time_point nextSpeakerDestroyRetry{};
+  std::string speakerLoopbackStopRetryError;
+  std::string speakerDestroyRetryError;
 
   // If the Open Audio backend fails to initialize, latch-disable it for a short
   // cooldown to avoid rapid restart loops.
@@ -616,6 +621,76 @@ void VirtualAudioService::ThreadMain() {
         std::lock_guard<std::mutex> lock(mu_);
         st_.speakers_last_error.clear();
       };
+      auto preserveActiveLoopbackFromState = [&]() -> bool {
+        const auto state = studiocast::audio::LoadVirtualSpeakerState();
+        if (!state.loopback_module_id)
+          return false;
+
+        speakers_loopback_running_ = true;
+        if (state.loopback_target_sink_name) {
+          speakers_loopback_target_ = *state.loopback_target_sink_name;
+        }
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          st_.speakers_route_mode = "loopback";
+          st_.speakers_routing_active = true;
+          st_.speaker_target_sink_active =
+              state.loopback_target_sink_name.value_or(
+                  speakers_loopback_target_);
+        }
+        return true;
+      };
+      auto markActiveLoopbackStopFailure = [&](const std::string &err) {
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          st_.speakers_route_mode = "loopback";
+          st_.speakers_routing_active = true;
+          if (st_.speaker_target_sink_active.empty()) {
+            st_.speaker_target_sink_active = speakers_loopback_target_;
+          }
+        }
+        setSpeakersError("Failed to stop speakers routing: " + err);
+      };
+      auto stopSpeakerLoopbackForTransition = [&](std::string *error) -> bool {
+        const auto stopNow = steady_clock::now();
+        if (stopNow < nextSpeakerLoopbackStopRetry) {
+          const std::string err =
+              speakerLoopbackStopRetryError.empty()
+                  ? "previous stop failure is still in retry backoff"
+                  : speakerLoopbackStopRetryError;
+          if (error)
+            *error = err;
+          markActiveLoopbackStopFailure(err);
+          return false;
+        }
+
+        std::string err;
+        if (StopSpeakerLoopbackRoute(&err)) {
+          nextSpeakerLoopbackStopRetry = steady_clock::time_point{};
+          speakerLoopbackStopRetryError.clear();
+          speakers_loopback_running_ = false;
+          speakers_loopback_target_.clear();
+          speakers_loopback_latency_ms_ = 0;
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            st_.speakers_routing_active = false;
+            st_.speaker_target_sink_active.clear();
+          }
+          clearSpeakersError();
+          if (error)
+            error->clear();
+          return true;
+        }
+
+        if (err.empty())
+          err = "speaker loopback stop failed";
+        nextSpeakerLoopbackStopRetry = stopNow + StartFailureRetryDelay(cfg);
+        speakerLoopbackStopRetryError = err;
+        if (error)
+          *error = err;
+        markActiveLoopbackStopFailure(err);
+        return false;
+      };
 
       const bool wantSpeakersDevice =
           cfg.create_virtual_speakers || cfg.speakers_enabled;
@@ -644,28 +719,9 @@ void VirtualAudioService::ThreadMain() {
           // Ensure loopback is stopped (avoid double-routing).
           if (speakers_loopback_running_) {
             std::string err;
-            if (StopSpeakerLoopbackRoute(&err)) {
-              speakers_loopback_running_ = false;
-              speakers_loopback_target_.clear();
-              speakers_loopback_latency_ms_ = 0;
-              {
-                std::lock_guard<std::mutex> lock(mu_);
-                st_.speakers_routing_active = false;
-                st_.speaker_target_sink_active.clear();
-              }
-              clearSpeakersError();
-            } else {
+            if (!stopSpeakerLoopbackForTransition(&err)) {
               speakerLoopbackStopBlockedProcessing = true;
               speakerLoopbackStopError = err;
-              {
-                std::lock_guard<std::mutex> lock(mu_);
-                st_.speakers_route_mode = "loopback";
-                st_.speakers_routing_active = true;
-                if (st_.speaker_target_sink_active.empty()) {
-                  st_.speaker_target_sink_active = speakers_loopback_target_;
-                }
-              }
-              setSpeakersError("Failed to stop speakers routing: " + err);
             }
           }
 
@@ -719,6 +775,8 @@ void VirtualAudioService::ThreadMain() {
               speakers_loopback_target_ = cfg.speaker_target_sink;
               speakers_loopback_latency_ms_ = cfg.speaker_latency_ms;
               nextSpeakerLoopbackStartRetry = steady_clock::time_point{};
+              nextSpeakerLoopbackStopRetry = steady_clock::time_point{};
+              speakerLoopbackStopRetryError.clear();
 
               const auto state = studiocast::audio::LoadVirtualSpeakerState();
               {
@@ -733,14 +791,23 @@ void VirtualAudioService::ThreadMain() {
             } else {
               nextSpeakerLoopbackStartRetry =
                   loopbackNow + StartFailureRetryDelay(cfg);
-              speakers_loopback_running_ = false;
-              speakers_loopback_target_.clear();
-              speakers_loopback_latency_ms_ = 0;
-              {
-                std::lock_guard<std::mutex> lock(mu_);
-                st_.speakers_route_mode = "loopback";
-                st_.speakers_routing_active = false;
-                st_.speaker_target_sink_active.clear();
+              const bool failedStoppingExisting =
+                  err.find("Failed to stop existing speaker loopback") !=
+                  std::string::npos;
+              bool preservedActiveLoopback = false;
+              if (failedStoppingExisting) {
+                preservedActiveLoopback = preserveActiveLoopbackFromState();
+              }
+              if (!preservedActiveLoopback) {
+                speakers_loopback_running_ = false;
+                speakers_loopback_target_.clear();
+                speakers_loopback_latency_ms_ = 0;
+                {
+                  std::lock_guard<std::mutex> lock(mu_);
+                  st_.speakers_route_mode = "loopback";
+                  st_.speakers_routing_active = false;
+                  st_.speaker_target_sink_active.clear();
+                }
               }
               setSpeakersError("Failed to start speakers routing: " + err);
             }
@@ -780,27 +847,7 @@ void VirtualAudioService::ThreadMain() {
 
         if (speakers_loopback_running_) {
           std::string err;
-          if (StopSpeakerLoopbackRoute(&err)) {
-            speakers_loopback_running_ = false;
-            speakers_loopback_target_.clear();
-            speakers_loopback_latency_ms_ = 0;
-            {
-              std::lock_guard<std::mutex> lock(mu_);
-              st_.speakers_routing_active = false;
-              st_.speaker_target_sink_active.clear();
-            }
-            clearSpeakersError();
-          } else {
-            {
-              std::lock_guard<std::mutex> lock(mu_);
-              st_.speakers_route_mode = "loopback";
-              st_.speakers_routing_active = true;
-              if (st_.speaker_target_sink_active.empty()) {
-                st_.speaker_target_sink_active = speakers_loopback_target_;
-              }
-            }
-            setSpeakersError("Failed to stop speakers routing: " + err);
-          }
+          (void)stopSpeakerLoopbackForTransition(&err);
         }
 
         {
@@ -814,20 +861,36 @@ void VirtualAudioService::ThreadMain() {
         // predictable.
         if (!cfg.create_virtual_speakers && speakers_created_ &&
             !speakers_loopback_running_) {
-          std::string err;
-          if (DestroyVirtualSpeakerDevice(&err)) {
-            speakers_created_ = false;
-            speakers_loopback_running_ = false;
-            speakers_loopback_target_.clear();
-            speakers_loopback_latency_ms_ = 0;
-            {
-              std::lock_guard<std::mutex> lock(mu_);
-              st_.speakers_present = false;
-              st_.speakers_routing_active = false;
-              st_.speaker_target_sink_active.clear();
+          const auto destroyNow = steady_clock::now();
+          if (destroyNow >= nextSpeakerDestroyRetry) {
+            std::string err;
+            if (DestroyVirtualSpeakerDevice(&err)) {
+              nextSpeakerDestroyRetry = steady_clock::time_point{};
+              speakerDestroyRetryError.clear();
+              speakers_created_ = false;
+              speakers_loopback_running_ = false;
+              speakers_loopback_target_.clear();
+              speakers_loopback_latency_ms_ = 0;
+              {
+                std::lock_guard<std::mutex> lock(mu_);
+                st_.speakers_present = false;
+                st_.speakers_routing_active = false;
+                st_.speaker_target_sink_active.clear();
+              }
+              clearSpeakersError();
+            } else {
+              if (err.empty())
+                err = "virtual speaker destroy failed";
+              nextSpeakerDestroyRetry =
+                  destroyNow + StartFailureRetryDelay(cfg);
+              speakerDestroyRetryError = err;
+              setSpeakersError("Failed to destroy virtual speakers: " + err);
             }
-            clearSpeakersError();
           } else {
+            const std::string err =
+                speakerDestroyRetryError.empty()
+                    ? "previous destroy failure is still in retry backoff"
+                    : speakerDestroyRetryError;
             setSpeakersError("Failed to destroy virtual speakers: " + err);
           }
         }
