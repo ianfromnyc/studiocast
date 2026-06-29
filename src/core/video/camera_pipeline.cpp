@@ -607,8 +607,16 @@ bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig &cfg,
     std::string werr;
     if (!writer_.WriteFrame(keepalive_frame_.data(), keepalive_frame_.size(),
                             &werr)) {
+      const std::string msg = "Failed to write keepalive frame: " + werr;
+      writer_.Close();
+      writer_device_.clear();
+      output_device_.clear();
+      output_ = ActualFormat{};
+      keepalive_format_ = ActualFormat{};
+      keepalive_frame_.clear();
+      last_keepalive_frame_at_ = std::chrono::steady_clock::time_point{};
       if (outErr)
-        *outErr = "Failed to write keepalive frame: " + werr;
+        *outErr = msg;
       return false;
     }
     last_keepalive_frame_at_ = now;
@@ -5851,6 +5859,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       append_rule_notes();
 
       std::lock_guard<std::mutex> lock(mu_);
+      const bool last_error_was_previous_effects_note =
+          !effects_note_.empty() && last_error_ == effects_note_;
       std::string backends;
       for (const auto &id : plan.ordered_effect_ids) {
         const auto it = backend_for_effect.find(id);
@@ -5865,6 +5875,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       effects_note_ = note;
       if (!note.empty()) {
         last_error_ = note;
+      } else if (last_error_was_previous_effects_note) {
+        last_error_.clear();
       }
     }
 

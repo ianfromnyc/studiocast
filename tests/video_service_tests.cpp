@@ -394,6 +394,46 @@ bool TestVideoConsumerDetectionErrorSurfacesWithoutStarting() {
   return true;
 }
 
+bool TestVideoOutputOpenFailureDoesNotStartPipeline() {
+  ServiceHarness h;
+  h.consumer_present.store(true, std::memory_order_relaxed);
+  VirtualCameraService service(h.Hooks());
+  auto cfg = TestConfig();
+  h.pipeline->fail_ensure_output.store(true, std::memory_order_relaxed);
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool unavailable = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return status.pipeline_state == "device_unavailable" &&
+               !status.virtual_device_available &&
+               status.virtual_device_error.find("Output open failed") !=
+                   std::string::npos &&
+               !status.pipeline_active_needed &&
+               h.pipeline->ensure_output_calls.load() > 0 &&
+               h.pipeline->start_calls.load() == 0;
+      },
+      250ms);
+  const auto status = service.Status();
+  const int starts = h.pipeline->start_calls.load();
+  service.Stop();
+
+  if (!unavailable || starts != 0) {
+    std::cerr << "output open failure still allowed pipeline start; starts="
+              << starts << " state='" << status.pipeline_state
+              << "' active_needed=" << status.pipeline_active_needed
+              << " virtual_available=" << status.virtual_device_available
+              << " virtual_error='" << status.virtual_device_error << "'\n";
+    return false;
+  }
+  return true;
+}
+
 bool TestVideoStartFailureBacksOff() {
   ServiceHarness h;
   h.consumer_present.store(true, std::memory_order_relaxed);
@@ -538,7 +578,10 @@ bool TestVideoOutputDisappearanceStopsPipelineAndMarksUnavailable() {
                !status.virtual_device_available &&
                status.virtual_device_error.find("synthetic loopback missing") !=
                    std::string::npos &&
-               h.pipeline->stop_calls.load() >= 1;
+               status.pipeline_stops >= 1 &&
+               status.last_transition == "stop_device_unavailable" &&
+               h.pipeline->stop_calls.load() >= 1 &&
+               h.pipeline->close_output_calls.load() >= 1;
       },
       500ms);
   const auto status = service.Status();
@@ -550,7 +593,11 @@ bool TestVideoOutputDisappearanceStopsPipelineAndMarksUnavailable() {
               << "' present=" << status.virtual_device_present
               << " available=" << status.virtual_device_available << " error='"
               << status.virtual_device_error
-              << "' stops=" << h.pipeline->stop_calls.load() << "\n";
+              << "' pipeline_stops=" << status.pipeline_stops
+              << " transition='" << status.last_transition
+              << "' stops=" << h.pipeline->stop_calls.load()
+              << " close_outputs=" << h.pipeline->close_output_calls.load()
+              << "\n";
     return false;
   }
   return true;
@@ -626,6 +673,8 @@ int main() {
        &TestVideoGraceWindowAbsorbsConsumerFlapping},
       {"video consumer detection error surfaces without starting",
        &TestVideoConsumerDetectionErrorSurfacesWithoutStarting},
+      {"video output open failure does not start pipeline",
+       &TestVideoOutputOpenFailureDoesNotStartPipeline},
       {"video start failure backs off", &TestVideoStartFailureBacksOff},
       {"video start failure clears after recovery",
        &TestVideoStartFailureClearsAfterRecovery},

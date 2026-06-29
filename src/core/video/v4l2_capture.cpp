@@ -150,6 +150,12 @@ bool DebugV4l2Fps() {
   return enabled;
 }
 
+bool DebugV4l2AutoBest() {
+  static const bool enabled =
+      (std::getenv("STUDIOCAST_DEBUG_V4L2_AUTO_BEST") != nullptr);
+  return enabled;
+}
+
 void V4l2FpsDbg(const std::string &msg) {
   if (!DebugV4l2Fps())
     return;
@@ -1095,7 +1101,7 @@ bool V4l2Capture::OpenBest(const std::string &device, int target_fps,
   const Mode best = modes.front();
 
   // Deterministic one-shot debug log.
-  {
+  if (DebugV4l2AutoBest()) {
     std::ostringstream oss;
     oss << "V4L2 auto_best: selected " << FourccToString(best.fourcc) << " "
         << best.width << "x" << best.height << " (max_fps=";

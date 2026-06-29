@@ -502,7 +502,15 @@ void VirtualCameraService::ThreadMain() {
           pipeline_idle_reason_.clear();
         }
 
+        const auto beforeStop = pipeline_->Status();
         pipeline_->Stop();
+        pipeline_->CloseOutput();
+        if (beforeStop.running || beforeStop.starting) {
+          std::lock_guard<std::mutex> lock(mu_);
+          ++pipeline_stops_;
+          last_transition_ = "stop_device_unavailable";
+          last_transition_at_ = std::chrono::steady_clock::now();
+        }
         haveAppliedCfg = false;
 
         SleepFor(std::chrono::milliseconds(std::max(50, cfg.consumer_poll_ms)));
@@ -536,6 +544,16 @@ void VirtualCameraService::ThreadMain() {
           pipeline_state_ = "device_unavailable";
           pipeline_idle_reason_.clear();
         }
+        const auto beforeStop = pipeline_->Status();
+        pipeline_->Stop();
+        pipeline_->CloseOutput();
+        if (beforeStop.running || beforeStop.starting) {
+          std::lock_guard<std::mutex> lock(mu_);
+          ++pipeline_stops_;
+          last_transition_ = "stop_device_unavailable";
+          last_transition_at_ = std::chrono::steady_clock::now();
+        }
+        haveAppliedCfg = false;
         SleepFor(std::chrono::milliseconds(std::max(50, cfg.consumer_poll_ms)));
         continue;
       }
@@ -669,7 +687,8 @@ void VirtualCameraService::ThreadMain() {
     std::string suppressMsg;
 
     const bool wantRunRequested =
-        cfg.enabled && (cfg.always_on || consumerPresent);
+        cfg.enabled && outputAvailableForState &&
+        (cfg.always_on || consumerPresent);
 
     const int startGraceMs = std::max(0, cfg.start_grace_ms);
     const bool consumerStable =
@@ -687,8 +706,8 @@ void VirtualCameraService::ThreadMain() {
         (stabilizeUntil != std::chrono::steady_clock::time_point{} &&
          now < stabilizeUntil);
 
-    bool wantRun =
-        cfg.enabled && (cfg.always_on || stabilizing || consumerStable);
+    bool wantRun = cfg.enabled && outputAvailableForState &&
+                   (cfg.always_on || stabilizing || consumerStable);
 
     // Gate expensive capture/processing threads based on engine availability.
     // Keep loopback output alive (see EnsureOutputOpen above) so consumers
