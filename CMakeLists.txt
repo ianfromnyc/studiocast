@@ -601,3 +601,27 @@ if (BUILD_TESTING AND PULSE_SIMPLE_FOUND)
 elseif (BUILD_TESTING)
     message(STATUS "Skipping studiocast-audio-tests because libpulse-simple was not found.")
 endif()
+
+if (BUILD_TESTING)
+    add_executable(studiocast-video-tests
+            tests/video_service_tests.cpp
+    )
+
+    target_link_libraries(studiocast-video-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-video-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-video-tests)
+    studiocast_enable_sanitizers(studiocast-video-tests)
+
+    set_target_properties(studiocast-video-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-video-tests COMMAND studiocast-video-tests)
+endif()

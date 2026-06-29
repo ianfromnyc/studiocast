@@ -131,7 +131,22 @@ struct CameraPipelineStatus {
   std::string last_error;
 };
 
-class CameraPipeline final {
+class CameraPipelineRunner {
+public:
+  virtual ~CameraPipelineRunner() = default;
+
+  virtual bool Start(const CameraPipelineConfig &cfg, std::string *error) = 0;
+  virtual void Stop() = 0;
+  virtual bool EnsureOutputOpen(const CameraPipelineConfig &cfg,
+                                std::string *error) = 0;
+  virtual void CloseOutput() = 0;
+  virtual CameraPipelineStatus Status() const = 0;
+  virtual void SetEffects(
+      const studiocast::video::effects::BroadcastCameraEffects &effects) = 0;
+  virtual void SetMirrorEnabled(bool enabled) = 0;
+};
+
+class CameraPipeline final : public CameraPipelineRunner {
 public:
   CameraPipeline() = default;
   ~CameraPipeline();
@@ -139,8 +154,8 @@ public:
   CameraPipeline(const CameraPipeline &) = delete;
   CameraPipeline &operator=(const CameraPipeline &) = delete;
 
-  bool Start(const CameraPipelineConfig &cfg, std::string *error);
-  void Stop();
+  bool Start(const CameraPipelineConfig &cfg, std::string *error) override;
+  void Stop() override;
 
   // Opens (and keeps open) the v4l2loopback output device without starting
   // camera capture / processing.
@@ -148,17 +163,18 @@ public:
   // This is important when v4l2loopback is loaded with exclusive_caps=1:
   // many applications will not list the device as a capture source unless a
   // producer has it open.
-  bool EnsureOutputOpen(const CameraPipelineConfig &cfg, std::string *error);
-  void CloseOutput();
+  bool EnsureOutputOpen(const CameraPipelineConfig &cfg,
+                        std::string *error) override;
+  void CloseOutput() override;
 
-  CameraPipelineStatus Status() const;
+  CameraPipelineStatus Status() const override;
 
   // Live update of effects while running.
-  void
-  SetEffects(const studiocast::video::effects::BroadcastCameraEffects &effects);
+  void SetEffects(const studiocast::video::effects::BroadcastCameraEffects
+                      &effects) override;
 
   // Convenience for legacy callers.
-  void SetMirrorEnabled(bool enabled);
+  void SetMirrorEnabled(bool enabled) override;
 
 private:
   // Opens (or reuses) the loopback writer.

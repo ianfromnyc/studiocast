@@ -359,8 +359,15 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"video\":{";
   oss << "\"enabled\":" << BoolJson(cfg.enabled) << ",";
   oss << "\"always_on\":" << BoolJson(cfg.always_on) << ",";
+  oss << "\"virtual_device_present\":" << BoolJson(st.virtual_device_present)
+      << ",";
+  oss << "\"virtual_device_available\":"
+      << BoolJson(st.virtual_device_available) << ",";
+  oss << "\"virtual_device_error\":\"" << JsonEscape(st.virtual_device_error)
+      << "\",";
   oss << "\"consumer_present\":" << BoolJson(st.consumer_present) << ",";
   oss << "\"consumer_count\":" << st.consumer_count << ",";
+  oss << "\"consumer_error\":\"" << JsonEscape(st.consumer_error) << "\",";
 
   // Supervisor diagnostics (Phase 2): helps diagnose consumer-driven camera
   // probing/flapping behavior in apps like Discord.
@@ -450,6 +457,12 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"pipeline\":{";
   oss << "\"running\":" << BoolJson(st.pipeline.running) << ",";
   oss << "\"starting\":" << BoolJson(st.pipeline.starting) << ",";
+  oss << "\"active_needed\":" << BoolJson(st.pipeline_active_needed) << ",";
+  oss << "\"state\":\""
+      << JsonEscape(st.pipeline_state.empty() ? std::string("disabled")
+                                              : st.pipeline_state)
+      << "\",";
+  oss << "\"idle_reason\":\"" << JsonEscape(st.pipeline_idle_reason) << "\",";
   oss << "\"frame_index\":" << st.pipeline.frame_index << ",";
   oss << "\"effects_backends\":\"" << JsonEscape(st.pipeline.effects_backends)
       << "\",";
