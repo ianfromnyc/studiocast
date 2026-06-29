@@ -33,11 +33,20 @@ void BestEffortSetFriendlyNames() {
                                   &err);
 }
 
-VirtualSpeakerState DetectLoaded() {
+VirtualSpeakerState DetectLoaded(std::string *error = nullptr) {
+  if (error)
+    error->clear();
+
   std::string err;
   const auto mods = pulse::ListModules(&err);
 
   VirtualSpeakerState s;
+  if (!err.empty()) {
+    if (error)
+      *error = err;
+    return s;
+  }
+
   for (const auto &m : mods) {
     if (m.name == "module-null-sink" &&
         Contains(m.args, std::string("sink_name=") + kSpeakersSinkName)) {
@@ -52,11 +61,21 @@ VirtualSpeakerState DetectLoaded() {
   return s;
 }
 
-std::vector<int> DetectAllLoopbacksFromStudioCastSpeakersMonitor() {
+std::vector<int>
+DetectAllLoopbacksFromStudioCastSpeakersMonitor(std::string *error = nullptr) {
+  if (error)
+    error->clear();
+
   std::string err;
   const auto mods = pulse::ListModules(&err);
 
   std::vector<int> ids;
+  if (!err.empty()) {
+    if (error)
+      *error = err;
+    return ids;
+  }
+
   for (const auto &m : mods) {
     if (m.name == "module-loopback" &&
         Contains(m.args, std::string("source=") + MonitorSourceName())) {
@@ -71,6 +90,9 @@ std::vector<int> DetectAllLoopbacksFromStudioCastSpeakersMonitor() {
 std::string VirtualSpeakerMonitorSourceName() { return MonitorSourceName(); }
 
 VirtualSpeakerState DetectVirtualSpeakerLoaded() { return DetectLoaded(); }
+VirtualSpeakerState DetectVirtualSpeakerLoaded(std::string *error) {
+  return DetectLoaded(error);
+}
 
 bool CreateVirtualSpeaker(std::string *error) {
   std::string details;
@@ -80,24 +102,29 @@ bool CreateVirtualSpeaker(std::string *error) {
     return false;
   }
 
-  auto loaded = DetectLoaded();
+  std::string detectErr;
+  auto loaded = DetectLoaded(&detectErr);
+  if (!detectErr.empty()) {
+    if (error)
+      *error = "Failed to list virtual speakers before create: " + detectErr;
+    return false;
+  }
   auto state = LoadVirtualSpeakerState();
 
   if (!loaded.null_sink_module_id) {
-    // NOTE: Keep quotes *inside* the value so Pulse/PipeWire module parsing can
-    // handle spaces. The outer single quotes are for the shell; the inner
-    // double quotes survive into pactl.
     std::string err;
-    const std::string argsWithDesc =
-        std::string("sink_name=") + kSpeakersSinkName +
-        " sink_properties='device.description=\"StudioCast Speakers\"'";
-
-    auto id = pulse::LoadModule("module-null-sink", argsWithDesc, &err);
+    auto id = pulse::LoadModule(
+        "module-null-sink",
+        {
+            std::string("sink_name=") + kSpeakersSinkName,
+            "sink_properties=device.description=\"StudioCast Speakers\"",
+        },
+        &err);
     if (!id) {
       std::string err2;
-      const std::string argsMinimal =
-          std::string("sink_name=") + kSpeakersSinkName;
-      id = pulse::LoadModule("module-null-sink", argsMinimal, &err2);
+      id = pulse::LoadModule("module-null-sink",
+                             {std::string("sink_name=") + kSpeakersSinkName},
+                             &err2);
       if (!id) {
         if (error) {
           *error = "Failed to load module-null-sink for virtual speakers.\n"
@@ -135,10 +162,40 @@ bool StopSpeakerLoopback(std::string *error) {
     return false;
   }
 
-  const auto ids = DetectAllLoopbacksFromStudioCastSpeakersMonitor();
+  std::string listErr;
+  const auto ids = DetectAllLoopbacksFromStudioCastSpeakersMonitor(&listErr);
+  if (!listErr.empty()) {
+    if (error)
+      *error = "Failed to list StudioCast speaker loopbacks: " + listErr;
+    return false;
+  }
+
+  std::vector<std::string> unload_errors;
   for (int id : ids) {
     std::string err;
-    (void)pulse::UnloadModule(id, &err);
+    if (!pulse::UnloadModule(id, &err)) {
+      std::ostringstream oss;
+      oss << "module " << id;
+      if (!err.empty())
+        oss << ": " << err;
+      unload_errors.push_back(oss.str());
+    }
+  }
+
+  if (!unload_errors.empty()) {
+    std::ostringstream oss;
+    oss << "Failed to unload StudioCast speaker loopback";
+    if (unload_errors.size() > 1)
+      oss << "s";
+    oss << ": ";
+    for (std::size_t i = 0; i < unload_errors.size(); ++i) {
+      if (i)
+        oss << "; ";
+      oss << unload_errors[i];
+    }
+    if (error)
+      *error = oss.str();
+    return false;
   }
 
   auto state = LoadVirtualSpeakerState();
@@ -176,7 +233,11 @@ bool StartSpeakerLoopback(const std::string &target_sink_name, int latency_ms,
   // Avoid duplicates.
   {
     std::string err;
-    (void)StopSpeakerLoopback(&err);
+    if (!StopSpeakerLoopback(&err)) {
+      if (error)
+        *error = "Failed to stop existing speaker loopback: " + err;
+      return false;
+    }
   }
 
   std::string chosen = util::TrimCopy(target_sink_name);
@@ -213,13 +274,15 @@ bool StartSpeakerLoopback(const std::string &target_sink_name, int latency_ms,
     return false;
   }
 
-  std::ostringstream args;
-  args << "source=" << MonitorSourceName() << " "
-       << "sink=" << chosen << " "
-       << "latency_msec=" << latency_ms;
-
   std::string err;
-  auto id = pulse::LoadModule("module-loopback", args.str(), &err);
+  auto id = pulse::LoadModule(
+      "module-loopback",
+      {
+          "source=" + MonitorSourceName(),
+          "sink=" + chosen,
+          "latency_msec=" + std::to_string(latency_ms),
+      },
+      &err);
   if (!id) {
     if (error)
       *error = "Failed to load module-loopback: " + err;
@@ -249,13 +312,32 @@ bool DestroyVirtualSpeaker(std::string *error) {
 
   {
     std::string err;
-    (void)StopSpeakerLoopback(&err);
+    if (!StopSpeakerLoopback(&err)) {
+      if (error)
+        *error = "Failed to stop speaker loopback before destroy: " + err;
+      return false;
+    }
   }
 
-  const auto loaded = DetectLoaded();
+  std::string listErr;
+  const auto loaded = DetectLoaded(&listErr);
+  if (!listErr.empty()) {
+    if (error)
+      *error = "Failed to list virtual speakers before destroy: " + listErr;
+    return false;
+  }
+
   if (loaded.null_sink_module_id) {
     std::string err;
-    (void)pulse::UnloadModule(*loaded.null_sink_module_id, &err);
+    if (!pulse::UnloadModule(*loaded.null_sink_module_id, &err)) {
+      if (error) {
+        *error = "Failed to unload virtual speakers null sink module " +
+                 std::to_string(*loaded.null_sink_module_id);
+        if (!err.empty())
+          *error += ": " + err;
+      }
+      return false;
+    }
   }
 
   std::string err;

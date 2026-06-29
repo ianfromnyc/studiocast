@@ -6,6 +6,8 @@ project(StudioCast
         LANGUAGES CXX
 )
 
+include(CTest)
+
 foreach (var IN ITEMS CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH)
     if (DEFINED ENV{${var}} AND NOT "$ENV{${var}}" STREQUAL "")
         message(WARNING
@@ -216,6 +218,8 @@ add_library(studiocast_core
         src/core/maxine/effects/ar_auto_frame_tracker.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
+        src/core/audio/audio_consumer_detector.h
+        src/core/audio/audio_consumer_detector.cpp
         src/core/audio/audio_backend_resolver.h
         src/core/audio/audio_backend_resolver.cpp
         src/core/audio/audio_processor.h
@@ -571,3 +575,29 @@ install(TARGETS studiocast studiocast-probe studiocast-maxine studiocast-open st
 install(TARGETS studiocastd
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
+
+if (BUILD_TESTING AND PULSE_SIMPLE_FOUND)
+    add_executable(studiocast-audio-tests
+            tests/audio_service_tests.cpp
+    )
+
+    target_link_libraries(studiocast-audio-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-audio-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-audio-tests)
+    studiocast_enable_sanitizers(studiocast-audio-tests)
+
+    set_target_properties(studiocast-audio-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-audio-tests COMMAND studiocast-audio-tests)
+elseif (BUILD_TESTING)
+    message(STATUS "Skipping studiocast-audio-tests because libpulse-simple was not found.")
+endif()

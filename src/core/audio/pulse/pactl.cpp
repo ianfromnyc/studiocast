@@ -1,13 +1,30 @@
 #include "pactl.h"
 
 #include <cstdlib>
+#include <mutex>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 #include "core/util/exec.h"
 #include "core/util/strings.h"
 
 namespace studiocast::audio::pulse {
 namespace {
+std::mutex g_exec_hook_mu;
+PactlExecCaptureHook g_exec_hook;
+
+util::ExecResult RunPactlCommand(const std::string &command) {
+  PactlExecCaptureHook hook;
+  {
+    std::lock_guard<std::mutex> lock(g_exec_hook_mu);
+    hook = g_exec_hook;
+  }
+  if (hook)
+    return hook(command);
+  return util::ExecCapture(command);
+}
+
 std::vector<std::string> SplitTabs(const std::string &line) {
   std::vector<std::string> out;
   std::string cur;
@@ -28,46 +45,71 @@ std::vector<std::string> SplitTabs(const std::string &line) {
 std::string FirstLineOrEmpty(const std::string &s) {
   return util::FirstNonEmptyLine(s);
 }
-} // namespace
 
-std::optional<std::string>
-ParseDefaultFromPactlInfo(const std::string &pactl_info_text,
-                          const std::string &key) {
-  if (key.empty())
-    return std::nullopt;
-
-  for (const auto &raw : util::SplitLines(pactl_info_text)) {
-    const auto line = util::TrimCopy(raw);
-    if (line.rfind(key, 0) == 0) {
-      auto val = util::TrimCopy(line.substr(key.size()));
-      if (!val.empty())
-        return val;
+std::string ShellQuoteSingle(const std::string &s) {
+  // Safe single-quote for /bin/sh -c
+  std::string out;
+  out.reserve(s.size() + 2);
+  out.push_back('\'');
+  for (char c : s) {
+    if (c == '\'') {
+      out += "'\"'\"'"; // close, insert escaped quote, reopen
+    } else {
+      out.push_back(c);
     }
   }
-  return std::nullopt;
+  out.push_back('\'');
+  return out;
 }
 
-bool PactlAvailable(std::string *details) {
-  auto res = util::ExecCapture("pactl --version 2>&1");
-  if (res.exit_code != 0) {
-    if (details)
-      *details = util::TrimCopy(res.stdout_str);
-    return false;
+std::vector<std::string> SplitModuleArgs(const std::string &args) {
+  std::vector<std::string> out;
+  std::string cur;
+  bool in_single = false;
+  bool in_double = false;
+
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const char c = args[i];
+    if (c == '\'' && !in_double) {
+      in_single = !in_single;
+      continue;
+    }
+    if (c == '"' && !in_single) {
+      in_double = !in_double;
+      continue;
+    }
+    if (c == '\\' && i + 1 < args.size()) {
+      cur.push_back(args[++i]);
+      continue;
+    }
+    if (!in_single && !in_double &&
+        (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
+      if (!cur.empty()) {
+        out.push_back(cur);
+        cur.clear();
+      }
+      continue;
+    }
+    cur.push_back(c);
   }
-  if (details)
-    *details = util::TrimCopy(res.stdout_str);
-  return true;
+
+  if (!cur.empty())
+    out.push_back(cur);
+  return out;
 }
 
-std::optional<int> LoadModule(const std::string &module,
-                              const std::string &args, std::string *error) {
-  // Use stderr->stdout so errors are captured.
-  std::string cmd = "pactl load-module " + module;
-  if (!args.empty())
-    cmd += " " + args;
+std::string BuildLoadModuleCommand(const std::string &module,
+                                   const std::vector<std::string> &args) {
+  std::string cmd = "pactl load-module " + ShellQuoteSingle(module);
+  for (const auto &arg : args) {
+    cmd += " " + ShellQuoteSingle(arg);
+  }
   cmd += " 2>&1";
+  return cmd;
+}
 
-  auto res = util::ExecCapture(cmd);
+std::optional<int> ParseLoadModuleResult(const util::ExecResult &res,
+                                         std::string *error) {
   const std::string line = util::TrimCopy(FirstLineOrEmpty(res.stdout_str));
 
   if (res.exit_code != 0) {
@@ -93,11 +135,59 @@ std::optional<int> LoadModule(const std::string &module,
 
   return static_cast<int>(id);
 }
+} // namespace
+
+void SetPactlExecCaptureHookForTesting(PactlExecCaptureHook hook) {
+  std::lock_guard<std::mutex> lock(g_exec_hook_mu);
+  g_exec_hook = std::move(hook);
+}
+
+std::optional<std::string>
+ParseDefaultFromPactlInfo(const std::string &pactl_info_text,
+                          const std::string &key) {
+  if (key.empty())
+    return std::nullopt;
+
+  for (const auto &raw : util::SplitLines(pactl_info_text)) {
+    const auto line = util::TrimCopy(raw);
+    if (line.rfind(key, 0) == 0) {
+      auto val = util::TrimCopy(line.substr(key.size()));
+      if (!val.empty())
+        return val;
+    }
+  }
+  return std::nullopt;
+}
+
+bool PactlAvailable(std::string *details) {
+  auto res = RunPactlCommand("pactl --version 2>&1");
+  if (res.exit_code != 0) {
+    if (details)
+      *details = util::TrimCopy(res.stdout_str);
+    return false;
+  }
+  if (details)
+    *details = util::TrimCopy(res.stdout_str);
+  return true;
+}
+
+std::optional<int> LoadModule(const std::string &module,
+                              const std::string &args, std::string *error) {
+  return LoadModule(module, SplitModuleArgs(args), error);
+}
+
+std::optional<int> LoadModule(const std::string &module,
+                              const std::vector<std::string> &args,
+                              std::string *error) {
+  // Use stderr->stdout so errors are captured.
+  auto res = RunPactlCommand(BuildLoadModuleCommand(module, args));
+  return ParseLoadModuleResult(res, error);
+}
 
 bool UnloadModule(int id, std::string *error) {
   std::ostringstream oss;
   oss << "pactl unload-module " << id << " 2>&1";
-  auto res = util::ExecCapture(oss.str());
+  auto res = RunPactlCommand(oss.str());
   if (res.exit_code != 0) {
     if (error)
       *error = util::TrimCopy(res.stdout_str);
@@ -107,7 +197,7 @@ bool UnloadModule(int id, std::string *error) {
 }
 
 std::vector<PactlModule> ListModules(std::string *error) {
-  auto res = util::ExecCapture("pactl list short modules 2>&1");
+  auto res = RunPactlCommand("pactl list short modules 2>&1");
   if (res.exit_code != 0) {
     if (error)
       *error = util::TrimCopy(res.stdout_str);
@@ -135,7 +225,7 @@ std::vector<PactlModule> ListModules(std::string *error) {
 }
 
 std::vector<PactlSource> ListSources(std::string *error) {
-  auto res = util::ExecCapture("pactl list short sources 2>&1");
+  auto res = RunPactlCommand("pactl list short sources 2>&1");
   if (res.exit_code != 0) {
     if (error)
       *error = util::TrimCopy(res.stdout_str);
@@ -162,7 +252,7 @@ std::vector<PactlSource> ListSources(std::string *error) {
 }
 
 std::vector<PactlSink> ListSinks(std::string *error) {
-  auto res = util::ExecCapture("pactl list short sinks 2>&1");
+  auto res = RunPactlCommand("pactl list short sinks 2>&1");
   if (res.exit_code != 0) {
     if (error)
       *error = util::TrimCopy(res.stdout_str);
@@ -188,12 +278,66 @@ std::vector<PactlSink> ListSinks(std::string *error) {
   return out;
 }
 
+std::vector<PactlSourceOutput> ListSourceOutputs(std::string *error) {
+  auto res = RunPactlCommand("pactl list short source-outputs 2>&1");
+  if (res.exit_code != 0) {
+    if (error)
+      *error = util::TrimCopy(res.stdout_str);
+    return {};
+  }
+
+  std::vector<PactlSourceOutput> out;
+  for (const auto &raw : util::SplitLines(res.stdout_str)) {
+    const auto line = util::TrimCopy(raw);
+    if (line.empty())
+      continue;
+
+    auto fields = SplitTabs(line);
+    if (fields.size() < 2)
+      continue;
+
+    PactlSourceOutput o;
+    o.id = std::atoi(fields[0].c_str());
+    o.source = fields[1];
+    out.push_back(o);
+  }
+
+  return out;
+}
+
+std::vector<PactlSinkInput> ListSinkInputs(std::string *error) {
+  auto res = RunPactlCommand("pactl list short sink-inputs 2>&1");
+  if (res.exit_code != 0) {
+    if (error)
+      *error = util::TrimCopy(res.stdout_str);
+    return {};
+  }
+
+  std::vector<PactlSinkInput> out;
+  for (const auto &raw : util::SplitLines(res.stdout_str)) {
+    const auto line = util::TrimCopy(raw);
+    if (line.empty())
+      continue;
+
+    auto fields = SplitTabs(line);
+    if (fields.size() < 2)
+      continue;
+
+    PactlSinkInput i;
+    i.id = std::atoi(fields[0].c_str());
+    i.sink = fields[1];
+    out.push_back(i);
+  }
+
+  return out;
+}
+
 static bool StartsWith(const std::string &s, const std::string &prefix) {
   return s.rfind(prefix, 0) == 0;
 }
 
 std::vector<PactlSourceInfo> ListSourcesDetailed(std::string *error) {
-  auto res = util::ExecCapture("pactl list sources 2>&1");
+  auto res = RunPactlCommand("pactl list sources 2>&1");
   if (res.exit_code != 0) {
     if (error)
       *error = util::TrimCopy(res.stdout_str);
@@ -295,9 +439,9 @@ bool SetSourcePort(const std::string &source_name, const std::string &port_name,
   if (source_name.empty() || port_name.empty())
     return true;
 
-  std::string cmd =
-      "pactl set-source-port " + source_name + " " + port_name + " 2>&1";
-  auto res = util::ExecCapture(cmd);
+  std::string cmd = "pactl set-source-port " + ShellQuoteSingle(source_name) +
+                    " " + ShellQuoteSingle(port_name) + " 2>&1";
+  auto res = RunPactlCommand(cmd);
   if (res.exit_code != 0) {
     if (error)
       *error = util::TrimCopy(res.stdout_str);
@@ -308,7 +452,7 @@ bool SetSourcePort(const std::string &source_name, const std::string &port_name,
 
 std::optional<std::string> GetDefaultSourceName(std::string *error) {
   // Newer pactl
-  auto res = util::ExecCapture("pactl get-default-source 2>&1");
+  auto res = RunPactlCommand("pactl get-default-source 2>&1");
   if (res.exit_code == 0) {
     const auto line = util::TrimCopy(FirstLineOrEmpty(res.stdout_str));
     if (!line.empty())
@@ -316,7 +460,7 @@ std::optional<std::string> GetDefaultSourceName(std::string *error) {
   }
 
   // Fallback: parse `pactl info`
-  res = util::ExecCapture("pactl info 2>&1");
+  res = RunPactlCommand("pactl info 2>&1");
   if (res.exit_code != 0) {
     if (error)
       *error = util::TrimCopy(res.stdout_str);
@@ -334,7 +478,7 @@ std::optional<std::string> GetDefaultSourceName(std::string *error) {
 
 std::optional<std::string> GetDefaultSinkName(std::string *error) {
   // Newer pactl
-  auto res = util::ExecCapture("pactl get-default-sink 2>&1");
+  auto res = RunPactlCommand("pactl get-default-sink 2>&1");
   if (res.exit_code == 0) {
     const auto line = util::TrimCopy(FirstLineOrEmpty(res.stdout_str));
     if (!line.empty())
@@ -342,7 +486,7 @@ std::optional<std::string> GetDefaultSinkName(std::string *error) {
   }
 
   // Fallback: parse `pactl info`
-  res = util::ExecCapture("pactl info 2>&1");
+  res = RunPactlCommand("pactl info 2>&1");
   if (res.exit_code != 0) {
     if (error)
       *error = util::TrimCopy(res.stdout_str);
@@ -356,22 +500,6 @@ std::optional<std::string> GetDefaultSinkName(std::string *error) {
   if (error)
     *error = "Could not determine default sink";
   return std::nullopt;
-}
-
-static std::string ShellQuoteSingle(const std::string &s) {
-  // Safe single-quote for /bin/sh -c
-  std::string out;
-  out.reserve(s.size() + 2);
-  out.push_back('\'');
-  for (char c : s) {
-    if (c == '\'') {
-      out += "'\"'\"'"; // close, insert escaped quote, reopen
-    } else {
-      out.push_back(c);
-    }
-  }
-  out.push_back('\'');
-  return out;
 }
 
 static bool LooksLikeFailure(const std::string &out) {
@@ -392,7 +520,7 @@ bool UpdateSinkProplist(const std::string &sink_name_or_index,
     cmd += " " + ShellQuoteSingle(kv);
   cmd += " 2>&1";
 
-  auto res = util::ExecCapture(cmd);
+  auto res = RunPactlCommand(cmd);
   const auto out = util::TrimCopy(res.stdout_str);
 
   if (res.exit_code != 0 || LooksLikeFailure(out)) {
@@ -415,7 +543,7 @@ bool UpdateSourceProplist(const std::string &source_name_or_index,
     cmd += " " + ShellQuoteSingle(kv);
   cmd += " 2>&1";
 
-  auto res = util::ExecCapture(cmd);
+  auto res = RunPactlCommand(cmd);
   const auto out = util::TrimCopy(res.stdout_str);
 
   if (res.exit_code != 0 || LooksLikeFailure(out)) {

@@ -1,8 +1,11 @@
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "core/util/exec.h"
 
 namespace studiocast::audio::pulse {
 
@@ -20,6 +23,16 @@ struct PactlSource {
 struct PactlSink {
   int id = -1;
   std::string name;
+};
+
+struct PactlSourceOutput {
+  int id = -1;
+  std::string source;
+};
+
+struct PactlSinkInput {
+  int id = -1;
+  std::string sink;
 };
 
 struct PactlPort {
@@ -42,13 +55,23 @@ bool SetSourcePort(const std::string &source_name, const std::string &port_name,
 
 bool PactlAvailable(std::string *details);
 
+using PactlExecCaptureHook =
+    std::function<studiocast::util::ExecResult(const std::string &)>;
+
+void SetPactlExecCaptureHookForTesting(PactlExecCaptureHook hook);
+
 std::optional<int> LoadModule(const std::string &module,
                               const std::string &args, std::string *error);
+std::optional<int> LoadModule(const std::string &module,
+                              const std::vector<std::string> &args,
+                              std::string *error);
 bool UnloadModule(int id, std::string *error);
 
 std::vector<PactlModule> ListModules(std::string *error);
 std::vector<PactlSource> ListSources(std::string *error);
 std::vector<PactlSink> ListSinks(std::string *error);
+std::vector<PactlSourceOutput> ListSourceOutputs(std::string *error);
+std::vector<PactlSinkInput> ListSinkInputs(std::string *error);
 
 std::optional<std::string> GetDefaultSourceName(std::string *error);
 std::optional<std::string> GetDefaultSinkName(std::string *error);

@@ -39,11 +39,20 @@ void BestEffortSetFriendlyNames() {
       &err);
 }
 
-VirtualMicState DetectLoaded() {
+VirtualMicState DetectLoaded(std::string *error = nullptr) {
+  if (error)
+    error->clear();
+
   std::string err;
   const auto mods = pulse::ListModules(&err);
 
   VirtualMicState s;
+  if (!err.empty()) {
+    if (error)
+      *error = err;
+    return s;
+  }
+
   for (const auto &m : mods) {
     if (m.name == "module-null-sink" &&
         Contains(m.args, std::string("sink_name=") + kSinkName)) {
@@ -64,11 +73,21 @@ VirtualMicState DetectLoaded() {
   return s;
 }
 
-std::vector<int> DetectAllLoopbacksToStudioCastSink() {
+std::vector<int>
+DetectAllLoopbacksToStudioCastSink(std::string *error = nullptr) {
+  if (error)
+    error->clear();
+
   std::string err;
   const auto mods = pulse::ListModules(&err);
 
   std::vector<int> ids;
+  if (!err.empty()) {
+    if (error)
+      *error = err;
+    return ids;
+  }
+
   for (const auto &m : mods) {
     if (m.name == "module-loopback" &&
         Contains(m.args, std::string("sink=") + kSinkName)) {
@@ -88,26 +107,33 @@ bool CreateVirtualMic(std::string *error) {
     return false;
   }
 
-  // Prefer existing loaded modules (idempotent behavior).
-  auto loaded = DetectLoaded();
+  // Prefer existing loaded modules (idempotent behavior). If Pulse cannot be
+  // queried, do not treat that as "not loaded"; loading another copy can create
+  // duplicates or report a misleading follow-up failure.
+  std::string detectErr;
+  auto loaded = DetectLoaded(&detectErr);
+  if (!detectErr.empty()) {
+    if (error)
+      *error = "Failed to list virtual mic modules before create: " + detectErr;
+    return false;
+  }
   auto state = LoadVirtualMicState();
 
   // Ensure null sink
   if (!loaded.null_sink_module_id) {
-    // NOTE: Keep quotes *inside* the value so Pulse/PipeWire module parsing can
-    // handle spaces. The outer single quotes are for the shell; the inner
-    // double quotes survive into pactl.
     std::string err;
-    const std::string argsWithDesc =
-        std::string("sink_name=") + kSinkName +
-        " sink_properties='device.description=\"StudioCast Sink\"'";
-
-    auto id = pulse::LoadModule("module-null-sink", argsWithDesc, &err);
+    auto id = pulse::LoadModule(
+        "module-null-sink",
+        {
+            std::string("sink_name=") + kSinkName,
+            "sink_properties=device.description=\"StudioCast Sink\"",
+        },
+        &err);
     if (!id) {
       // Fallback: try without sink_properties (some servers are picky)
       std::string err2;
-      const std::string argsMinimal = std::string("sink_name=") + kSinkName;
-      id = pulse::LoadModule("module-null-sink", argsMinimal, &err2);
+      id = pulse::LoadModule("module-null-sink",
+                             {std::string("sink_name=") + kSinkName}, &err2);
 
       if (!id) {
         if (error) {
@@ -127,20 +153,24 @@ bool CreateVirtualMic(std::string *error) {
   // Ensure remap source (virtual mic)
   if (!loaded.remap_source_module_id) {
     std::string err;
-    const std::string argsWithDesc =
-        std::string("master=") + kSinkName + ".monitor " +
-        "source_name=" + kSourceName + " " +
-        "source_properties='device.description=\"StudioCast Microphone\"'";
-
-    auto id = pulse::LoadModule("module-remap-source", argsWithDesc, &err);
+    auto id = pulse::LoadModule(
+        "module-remap-source",
+        {
+            std::string("master=") + kSinkName + ".monitor",
+            std::string("source_name=") + kSourceName,
+            "source_properties=device.description=\"StudioCast Microphone\"",
+        },
+        &err);
     if (!id) {
       // Fallback: try without source_properties
       std::string err2;
-      const std::string argsMinimal = std::string("master=") + kSinkName +
-                                      ".monitor " +
-                                      "source_name=" + kSourceName;
-
-      id = pulse::LoadModule("module-remap-source", argsMinimal, &err2);
+      id =
+          pulse::LoadModule("module-remap-source",
+                            {
+                                std::string("master=") + kSinkName + ".monitor",
+                                std::string("source_name=") + kSourceName,
+                            },
+                            &err2);
 
       if (!id) {
         if (error) {
@@ -186,10 +216,40 @@ bool StopLoopback(std::string *error) {
   }
 
   // Unload any loopback modules routing into our sink (safe cleanup).
-  const auto ids = DetectAllLoopbacksToStudioCastSink();
+  std::string listErr;
+  const auto ids = DetectAllLoopbacksToStudioCastSink(&listErr);
+  if (!listErr.empty()) {
+    if (error)
+      *error = "Failed to list StudioCast mic loopbacks: " + listErr;
+    return false;
+  }
+
+  std::vector<std::string> unload_errors;
   for (int id : ids) {
     std::string err;
-    (void)pulse::UnloadModule(id, &err);
+    if (!pulse::UnloadModule(id, &err)) {
+      std::ostringstream oss;
+      oss << "module " << id;
+      if (!err.empty())
+        oss << ": " << err;
+      unload_errors.push_back(oss.str());
+    }
+  }
+
+  if (!unload_errors.empty()) {
+    std::ostringstream oss;
+    oss << "Failed to unload StudioCast mic loopback";
+    if (unload_errors.size() > 1)
+      oss << "s";
+    oss << ": ";
+    for (std::size_t i = 0; i < unload_errors.size(); ++i) {
+      if (i)
+        oss << "; ";
+      oss << unload_errors[i];
+    }
+    if (error)
+      *error = oss.str();
+    return false;
   }
 
   // Clear loopback from state file (preserve other ids if present).
@@ -238,7 +298,11 @@ bool StartLoopback(const std::string &source_name, int latency_ms,
   // Stop existing loopbacks into our sink to avoid duplicates.
   {
     std::string err;
-    (void)StopLoopback(&err);
+    if (!StopLoopback(&err)) {
+      if (error)
+        *error = "Failed to stop existing mic loopback: " + err;
+      return false;
+    }
   }
 
   std::string chosen = util::TrimCopy(source_name);
@@ -253,13 +317,14 @@ bool StartLoopback(const std::string &source_name, int latency_ms,
     chosen = *def;
   }
 
-  std::ostringstream args;
-  args << "source=" << chosen << " "
-       << "sink=" << kSinkName << " "
-       << "latency_msec=" << latency_ms;
-
   std::string err;
-  auto id = pulse::LoadModule("module-loopback", args.str(), &err);
+  auto id = pulse::LoadModule("module-loopback",
+                              {
+                                  "source=" + chosen,
+                                  std::string("sink=") + kSinkName,
+                                  "latency_msec=" + std::to_string(latency_ms),
+                              },
+                              &err);
   if (!id) {
     if (error)
       *error = "Failed to load module-loopback: " + err;
@@ -290,23 +355,67 @@ bool DestroyVirtualMic(std::string *error) {
   // Stop loopback first.
   {
     std::string err;
-    (void)StopLoopback(&err);
+    if (!StopLoopback(&err)) {
+      if (error)
+        *error = "Failed to stop mic loopback before destroy: " + err;
+      return false;
+    }
   }
 
   // Prefer unloading the modules we detect by name/args (safe and works even if
   // state file is stale).
-  const auto loaded = DetectLoaded();
+  std::string listErr;
+  const auto loaded = DetectLoaded(&listErr);
+  if (!listErr.empty()) {
+    if (error)
+      *error = "Failed to list virtual mic modules before destroy: " + listErr;
+    return false;
+  }
+
+  auto state = LoadVirtualMicState();
+  state.null_sink_module_id = loaded.null_sink_module_id;
+  state.remap_source_module_id = loaded.remap_source_module_id;
 
   // Unload remap source
   if (loaded.remap_source_module_id) {
     std::string err;
-    (void)pulse::UnloadModule(*loaded.remap_source_module_id, &err);
+    if (!pulse::UnloadModule(*loaded.remap_source_module_id, &err)) {
+      if (error) {
+        *error = "Failed to unload virtual mic remap source module " +
+                 std::to_string(*loaded.remap_source_module_id);
+        if (!err.empty())
+          *error += ": " + err;
+      }
+      return false;
+    }
+
+    state.remap_source_module_id.reset();
+    if (!SaveVirtualMicState(state, &err)) {
+      if (error)
+        *error = err;
+      return false;
+    }
   }
 
   // Unload null sink
   if (loaded.null_sink_module_id) {
     std::string err;
-    (void)pulse::UnloadModule(*loaded.null_sink_module_id, &err);
+    if (!pulse::UnloadModule(*loaded.null_sink_module_id, &err)) {
+      if (error) {
+        *error = "Failed to unload virtual mic null sink module " +
+                 std::to_string(*loaded.null_sink_module_id);
+        if (!err.empty())
+          *error += ": " + err;
+      }
+      return false;
+    }
+
+    state.null_sink_module_id.reset();
+    if (!SaveVirtualMicState(state, &err)) {
+      if (error)
+        *error = err;
+      return false;
+    }
   }
 
   // Clear state file.
@@ -335,7 +444,8 @@ std::string StatusText() {
   oss << "  source name: " << kSourceName << "\n";
 
   const auto state = LoadVirtualMicState();
-  const auto loaded = DetectLoaded();
+  std::string loadedErr;
+  const auto loaded = DetectLoaded(&loadedErr);
 
   oss << "  state file: " << VirtualMicStatePath().string() << "\n";
   oss << "  state ids: "
@@ -353,21 +463,27 @@ std::string StatusText() {
                                    : "none")
       << "\n";
 
-  oss << "  loaded ids: "
-      << "sink="
-      << (loaded.null_sink_module_id
-              ? std::to_string(*loaded.null_sink_module_id)
-              : "none")
-      << ", "
-      << "remap="
-      << (loaded.remap_source_module_id
-              ? std::to_string(*loaded.remap_source_module_id)
-              : "none")
-      << ", "
-      << "loopback="
-      << (loaded.loopback_module_id ? std::to_string(*loaded.loopback_module_id)
-                                    : "none")
-      << "\n";
+  if (!loadedErr.empty()) {
+    oss << "  loaded ids: unavailable\n";
+    oss << "  loaded ids note: " << loadedErr << "\n";
+  } else {
+    oss << "  loaded ids: "
+        << "sink="
+        << (loaded.null_sink_module_id
+                ? std::to_string(*loaded.null_sink_module_id)
+                : "none")
+        << ", "
+        << "remap="
+        << (loaded.remap_source_module_id
+                ? std::to_string(*loaded.remap_source_module_id)
+                : "none")
+        << ", "
+        << "loopback="
+        << (loaded.loopback_module_id
+                ? std::to_string(*loaded.loopback_module_id)
+                : "none")
+        << "\n";
+  }
 
   // List sources for convenience
   std::string err;
@@ -388,7 +504,8 @@ std::string StatusText() {
   oss << "  monitor source: " << VirtualSpeakerMonitorSourceName() << "\n";
 
   const auto spkState = LoadVirtualSpeakerState();
-  const auto spkLoaded = DetectVirtualSpeakerLoaded();
+  std::string spkLoadedErr;
+  const auto spkLoaded = DetectVirtualSpeakerLoaded(&spkLoadedErr);
   oss << "  state file: " << VirtualSpeakerStatePath().string() << "\n";
   oss << "  state ids: "
       << "sink="
@@ -406,17 +523,22 @@ std::string StatusText() {
               ? *spkState.loopback_target_sink_name
               : "none")
       << "\n";
-  oss << "  loaded ids: "
-      << "sink="
-      << (spkLoaded.null_sink_module_id
-              ? std::to_string(*spkLoaded.null_sink_module_id)
-              : "none")
-      << ", "
-      << "loopback="
-      << (spkLoaded.loopback_module_id
-              ? std::to_string(*spkLoaded.loopback_module_id)
-              : "none")
-      << "\n";
+  if (!spkLoadedErr.empty()) {
+    oss << "  loaded ids: unavailable\n";
+    oss << "  loaded ids note: " << spkLoadedErr << "\n";
+  } else {
+    oss << "  loaded ids: "
+        << "sink="
+        << (spkLoaded.null_sink_module_id
+                ? std::to_string(*spkLoaded.null_sink_module_id)
+                : "none")
+        << ", "
+        << "loopback="
+        << (spkLoaded.loopback_module_id
+                ? std::to_string(*spkLoaded.loopback_module_id)
+                : "none")
+        << "\n";
+  }
 
   {
     std::string err2;
