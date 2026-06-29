@@ -757,6 +757,121 @@ bool TestPactlProplistCommandsQuoteArgumentsAndDetectFailures() {
   return true;
 }
 
+bool TestCreateVirtualMicPropagatesListFailureWithoutLoading() {
+  ScopedXdgStateHome state_home;
+  VirtualMicState initial;
+  initial.null_sink_module_id = 10;
+  initial.remap_source_module_id = 11;
+  std::string err;
+  if (!studiocast::audio::SaveVirtualMicState(initial, &err)) {
+    std::cerr << "failed to seed virtual mic state: " << err << "\n";
+    return false;
+  }
+
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl --version 2>&1")
+      return ExecResult(0, "pactl 16.1\n");
+    if (command == "pactl list short modules 2>&1")
+      return ExecResult(1, "Failure: synthetic mic list failure\n");
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  err.clear();
+  const bool ok = studiocast::audio::CreateVirtualMic(&err);
+  if (ok || err.find("synthetic mic list failure") == std::string::npos) {
+    std::cerr << "expected virtual mic create to fail on list failure; ok=" << ok
+              << " error='" << err << "'\n";
+    return false;
+  }
+
+  if (CommandWasRun(commands, "pactl load-module")) {
+    std::cerr << "virtual mic create loaded modules after list failure\n";
+    for (const auto &command : commands)
+      std::cerr << "  " << command << "\n";
+    return false;
+  }
+
+  const auto state = studiocast::audio::LoadVirtualMicState();
+  if (!state.null_sink_module_id || *state.null_sink_module_id != 10 ||
+      !state.remap_source_module_id || *state.remap_source_module_id != 11) {
+    std::cerr << "virtual mic create changed state after list failure; sink="
+              << (state.null_sink_module_id
+                      ? std::to_string(*state.null_sink_module_id)
+                      : std::string("<none>"))
+              << " remap="
+              << (state.remap_source_module_id
+                      ? std::to_string(*state.remap_source_module_id)
+                      : std::string("<none>"))
+              << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestCreateVirtualSpeakerPropagatesListFailureWithoutLoading() {
+  ScopedXdgStateHome state_home;
+  VirtualSpeakerState initial;
+  initial.null_sink_module_id = 10;
+  initial.loopback_module_id = 42;
+  initial.loopback_target_sink_name = "physical_test_sink";
+  std::string err;
+  if (!studiocast::audio::SaveVirtualSpeakerState(initial, &err)) {
+    std::cerr << "failed to seed virtual speaker state: " << err << "\n";
+    return false;
+  }
+
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl --version 2>&1")
+      return ExecResult(0, "pactl 16.1\n");
+    if (command == "pactl list short modules 2>&1")
+      return ExecResult(1, "Failure: synthetic speaker list failure\n");
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  err.clear();
+  const bool ok = studiocast::audio::CreateVirtualSpeaker(&err);
+  if (ok || err.find("synthetic speaker list failure") == std::string::npos) {
+    std::cerr << "expected virtual speaker create to fail on list failure; ok="
+              << ok << " error='" << err << "'\n";
+    return false;
+  }
+
+  if (CommandWasRun(commands, "pactl load-module")) {
+    std::cerr << "virtual speaker create loaded modules after list failure\n";
+    for (const auto &command : commands)
+      std::cerr << "  " << command << "\n";
+    return false;
+  }
+
+  const auto state = studiocast::audio::LoadVirtualSpeakerState();
+  if (!state.null_sink_module_id || *state.null_sink_module_id != 10 ||
+      !state.loopback_module_id || *state.loopback_module_id != 42 ||
+      !state.loopback_target_sink_name ||
+      *state.loopback_target_sink_name != "physical_test_sink") {
+    std::cerr << "virtual speaker create changed state after list failure; sink="
+              << (state.null_sink_module_id
+                      ? std::to_string(*state.null_sink_module_id)
+                      : std::string("<none>"))
+              << " loopback="
+              << (state.loopback_module_id
+                      ? std::to_string(*state.loopback_module_id)
+                      : std::string("<none>"))
+              << " target='"
+              << (state.loopback_target_sink_name
+                      ? *state.loopback_target_sink_name
+                      : std::string("<none>"))
+              << "'\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestVirtualSpeakerLoopbackFallsBackFromVirtualDefaultSink() {
   ScopedXdgStateHome state_home;
   std::vector<std::string> commands;
@@ -2690,6 +2805,10 @@ int main() {
        &TestPactlDefaultSourceAndSinkFallbackToInfo},
       {"pactl proplist commands quote args and detect failures",
        &TestPactlProplistCommandsQuoteArgumentsAndDetectFailures},
+      {"virtual mic create propagates list failure without loading",
+       &TestCreateVirtualMicPropagatesListFailureWithoutLoading},
+      {"virtual speaker create propagates list failure without loading",
+       &TestCreateVirtualSpeakerPropagatesListFailureWithoutLoading},
       {"virtual speaker loopback falls back from virtual default sink",
        &TestVirtualSpeakerLoopbackFallsBackFromVirtualDefaultSink},
       {"virtual speaker loopback rejects virtual target",

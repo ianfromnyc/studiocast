@@ -107,8 +107,16 @@ bool CreateVirtualMic(std::string *error) {
     return false;
   }
 
-  // Prefer existing loaded modules (idempotent behavior).
-  auto loaded = DetectLoaded();
+  // Prefer existing loaded modules (idempotent behavior). If Pulse cannot be
+  // queried, do not treat that as "not loaded"; loading another copy can create
+  // duplicates or report a misleading follow-up failure.
+  std::string detectErr;
+  auto loaded = DetectLoaded(&detectErr);
+  if (!detectErr.empty()) {
+    if (error)
+      *error = "Failed to list virtual mic modules before create: " + detectErr;
+    return false;
+  }
   auto state = LoadVirtualMicState();
 
   // Ensure null sink

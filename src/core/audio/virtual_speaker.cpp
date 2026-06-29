@@ -99,7 +99,13 @@ bool CreateVirtualSpeaker(std::string *error) {
     return false;
   }
 
-  auto loaded = DetectLoaded();
+  std::string detectErr;
+  auto loaded = DetectLoaded(&detectErr);
+  if (!detectErr.empty()) {
+    if (error)
+      *error = "Failed to list virtual speakers before create: " + detectErr;
+    return false;
+  }
   auto state = LoadVirtualSpeakerState();
 
   if (!loaded.null_sink_module_id) {
