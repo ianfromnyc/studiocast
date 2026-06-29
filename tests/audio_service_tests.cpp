@@ -1,6 +1,9 @@
 #include <atomic>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -595,6 +598,181 @@ private:
   std::shared_ptr<LatencyIoState> state_;
   const std::atomic<bool> *external_stop_requested_ = nullptr;
 };
+
+struct ScriptedQualityIoState {
+  std::mutex mu;
+  std::vector<float> input;
+  std::vector<float> output;
+  std::size_t read_offset_samples = 0;
+  std::size_t bytes_per_frame = 0;
+  std::uint32_t open_sample_rate = 0;
+  std::uint32_t open_channels = 0;
+  int read_calls = 0;
+  int write_calls = 0;
+  int flush_calls = 0;
+  bool stop_requested = false;
+};
+
+class ScriptedQualityIo final : public AudioPipelineIo {
+public:
+  explicit ScriptedQualityIo(std::shared_ptr<ScriptedQualityIoState> state)
+      : state_(std::move(state)) {}
+
+  void SetStopRequestedFlag(const std::atomic<bool> *stop_requested) override {
+    external_stop_requested_ = stop_requested;
+  }
+
+  bool Open(const AudioPipelineConfig &cfg, std::string *error) override {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    state_->open_sample_rate = static_cast<std::uint32_t>(cfg.sample_rate);
+    state_->open_channels = cfg.channels;
+    state_->bytes_per_frame =
+        static_cast<std::size_t>(cfg.frame_samples) * cfg.channels *
+        sizeof(float);
+    state_->read_offset_samples = 0;
+    state_->output.clear();
+    state_->read_calls = 0;
+    state_->write_calls = 0;
+    state_->flush_calls = 0;
+    state_->stop_requested = false;
+
+    const std::size_t samples_per_frame =
+        static_cast<std::size_t>(cfg.frame_samples) * cfg.channels;
+    if (samples_per_frame == 0 ||
+        (state_->input.size() % samples_per_frame) != 0) {
+      if (error)
+        *error = "scripted audio input is not frame aligned";
+      return false;
+    }
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool Read(void *dst, std::size_t bytes, std::string *error) override {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    if (ShouldStopLocked()) {
+      if (error)
+        error->clear();
+      return false;
+    }
+    if (bytes != state_->bytes_per_frame) {
+      if (error)
+        *error = "unexpected scripted read size";
+      return false;
+    }
+    if (state_->read_offset_samples >= state_->input.size()) {
+      if (error)
+        error->clear();
+      return false;
+    }
+
+    const std::size_t samples = bytes / sizeof(float);
+    if (state_->read_offset_samples + samples > state_->input.size()) {
+      if (error)
+        *error = "scripted read exceeded input";
+      return false;
+    }
+    std::memcpy(dst, state_->input.data() + state_->read_offset_samples,
+                bytes);
+    state_->read_offset_samples += samples;
+    ++state_->read_calls;
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool Write(const void *src, std::size_t bytes, std::string *error) override {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    if (ShouldStopLocked()) {
+      if (error)
+        error->clear();
+      return false;
+    }
+    if (bytes != state_->bytes_per_frame) {
+      if (error)
+        *error = "unexpected scripted write size";
+      return false;
+    }
+    const auto *samples = static_cast<const float *>(src);
+    state_->output.insert(state_->output.end(), samples,
+                          samples + (bytes / sizeof(float)));
+    ++state_->write_calls;
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+
+  void Flush() override {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    ++state_->flush_calls;
+  }
+
+  void RequestStop() override {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    state_->stop_requested = true;
+  }
+
+private:
+  bool ShouldStopLocked() const {
+    return state_->stop_requested ||
+           (external_stop_requested_ &&
+            external_stop_requested_->load(std::memory_order_acquire));
+  }
+
+  std::shared_ptr<ScriptedQualityIoState> state_;
+  const std::atomic<bool> *external_stop_requested_ = nullptr;
+};
+
+std::vector<float> MakeSyntheticStereoAudio(std::uint32_t frame_samples,
+                                            int frame_count) {
+  constexpr double kPi = 3.141592653589793238462643383279502884;
+  constexpr double kSampleRate = 48000.0;
+  const std::size_t total_frames =
+      static_cast<std::size_t>(frame_samples) *
+      static_cast<std::size_t>(frame_count);
+  std::vector<float> audio(total_frames * 2, 0.0f);
+
+  for (std::size_t n = 0; n < total_frames; ++n) {
+    const std::size_t packet = n / frame_samples;
+    float left = 0.0f;
+    float right = 0.0f;
+    const double t = static_cast<double>(n) / kSampleRate;
+
+    if (packet == 1 || packet == 2) {
+      left = static_cast<float>(0.35 * std::sin(2.0 * kPi * 1000.0 * t));
+      right = static_cast<float>(0.25 * std::sin(2.0 * kPi * 440.0 * t));
+    } else if (packet == 3) {
+      if ((n % frame_samples) == 0) {
+        left = 0.75f;
+        right = -0.75f;
+      }
+    } else if (packet > 3) {
+      const double sweep01 = static_cast<double>(n) /
+                             static_cast<double>(std::max<std::size_t>(
+                                 total_frames - 1, 1));
+      const double hz = 220.0 + 1780.0 * sweep01;
+      left = static_cast<float>(0.2 * std::sin(2.0 * kPi * hz * t));
+      right = static_cast<float>(0.2 * std::sin(2.0 * kPi * hz * t + 0.3));
+    }
+
+    audio[n * 2 + 0] = left;
+    audio[n * 2 + 1] = right;
+  }
+  return audio;
+}
+
+double Rms(const std::vector<float> &samples) {
+  if (samples.empty())
+    return 0.0;
+  double sum = 0.0;
+  for (float sample : samples)
+    sum += static_cast<double>(sample) * static_cast<double>(sample);
+  return std::sqrt(sum / static_cast<double>(samples.size()));
+}
 
 bool TestPactlLoadModuleQuotesVectorArguments() {
   std::vector<std::string> commands;
@@ -1491,6 +1669,217 @@ bool TestMicrophonePipelineStopsWhenConsumerDisappears() {
   return true;
 }
 
+bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
+  std::atomic<int> pipeline_creates{0};
+  std::atomic<int> pipeline_stops{0};
+  std::atomic<bool> mic_consumer_present{true};
+
+  VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
+  hooks.create_pipeline =
+      [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    pipeline_creates.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
+  };
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.poll_ms = 1;
+  cfg.consumer_grace_ms = 200;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            const auto status = service.Status();
+            return pipeline_creates.load(std::memory_order_relaxed) == 1 &&
+                   status.pipeline_running &&
+                   status.pipeline_state == "running";
+          },
+          250ms)) {
+    std::cerr << "microphone pipeline did not start before flapping test\n";
+    service.Stop();
+    return false;
+  }
+
+  for (int i = 0; i < 5; ++i) {
+    mic_consumer_present.store(false, std::memory_order_relaxed);
+    std::this_thread::sleep_for(10ms);
+    const auto absent_status = service.Status();
+    if (pipeline_stops.load(std::memory_order_relaxed) != 0 ||
+        !absent_status.pipeline_running ||
+        !absent_status.pipeline_active_needed) {
+      std::cerr << "microphone pipeline churned during grace window; i=" << i
+                << " creates=" << pipeline_creates.load()
+                << " stops=" << pipeline_stops.load() << " running="
+                << absent_status.pipeline_running << " needed="
+                << absent_status.pipeline_active_needed << " state='"
+                << absent_status.pipeline_state << "'\n";
+      service.Stop();
+      return false;
+    }
+
+    mic_consumer_present.store(true, std::memory_order_relaxed);
+    if (!WaitUntil(
+            [&] {
+              const auto status = service.Status();
+              return status.pipeline_running && status.mic_consumer_present;
+            },
+            100ms)) {
+      std::cerr << "microphone consumer did not recover during flap cycle\n";
+      service.Stop();
+      return false;
+    }
+  }
+
+  if (pipeline_creates.load(std::memory_order_relaxed) != 1 ||
+      pipeline_stops.load(std::memory_order_relaxed) != 0) {
+    std::cerr << "microphone pipeline restarted during flapping; creates="
+              << pipeline_creates.load() << " stops=" << pipeline_stops.load()
+              << "\n";
+    service.Stop();
+    return false;
+  }
+
+  mic_consumer_present.store(false, std::memory_order_relaxed);
+  const bool stopped = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return pipeline_stops.load(std::memory_order_relaxed) == 1 &&
+               !status.pipeline_running &&
+               !status.pipeline_active_needed &&
+               status.pipeline_state == "idle_no_consumer";
+      },
+      700ms);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!stopped) {
+    std::cerr << "microphone pipeline did not stop after sustained absence; "
+              << "creates=" << pipeline_creates.load()
+              << " stops=" << pipeline_stops.load() << " running="
+              << status.pipeline_running << " needed="
+              << status.pipeline_active_needed << " state='"
+              << status.pipeline_state << "'\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
+  std::atomic<int> pipeline_creates{0};
+  std::atomic<int> detection_stage{0};
+
+  VirtualAudioServiceHooks hooks;
+  hooks.detect_microphone_consumers = [&] {
+    AudioConsumerSnapshot out;
+    const int stage = detection_stage.load(std::memory_order_relaxed);
+    if (stage == 0) {
+      out.error = "synthetic Pulse server restart";
+    } else if (stage == 1) {
+      out.error = "Pulse source 'studiocast_mic' is not present.";
+    } else {
+      out = ConsumerSnapshot(true, 1);
+    }
+    return out;
+  };
+  hooks.create_pipeline =
+      [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    pipeline_creates.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<FixedStatsPipeline>(true, "");
+  };
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.poll_ms = 1;
+  cfg.consumer_grace_ms = 0;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            const auto status = service.Status();
+            return status.pipeline_state == "idle_no_consumer" &&
+                   status.mic_consumer_error.find("server restart") !=
+                       std::string::npos &&
+                   pipeline_creates.load(std::memory_order_relaxed) == 0;
+          },
+          250ms)) {
+    const auto status = service.Status();
+    std::cerr << "microphone detection error was not surfaced; state='"
+              << status.pipeline_state << "' error='"
+              << status.mic_consumer_error << "' creates="
+              << pipeline_creates.load() << "\n";
+    service.Stop();
+    return false;
+  }
+
+  detection_stage.store(1, std::memory_order_relaxed);
+  if (!WaitUntil(
+          [&] {
+            const auto status = service.Status();
+            return status.pipeline_state == "idle_no_consumer" &&
+                   status.mic_consumer_error.find("not present") !=
+                       std::string::npos &&
+                   pipeline_creates.load(std::memory_order_relaxed) == 0;
+          },
+          250ms)) {
+    const auto status = service.Status();
+    std::cerr << "missing virtual mic source was not surfaced; state='"
+              << status.pipeline_state << "' error='"
+              << status.mic_consumer_error << "' creates="
+              << pipeline_creates.load() << "\n";
+    service.Stop();
+    return false;
+  }
+
+  detection_stage.store(2, std::memory_order_relaxed);
+  const bool recovered = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return pipeline_creates.load(std::memory_order_relaxed) == 1 &&
+               status.pipeline_running &&
+               status.pipeline_state == "running" &&
+               status.mic_consumer_present && status.mic_consumer_error.empty();
+      },
+      250ms);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!recovered) {
+    std::cerr << "microphone pipeline did not recover after detection errors; "
+              << "creates=" << pipeline_creates.load() << " state='"
+              << status.pipeline_state << "' running="
+              << status.pipeline_running << " consumer="
+              << status.mic_consumer_present << " error='"
+              << status.mic_consumer_error << "'\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestSpeakerPipelineFollowsConsumerGate() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<int> pipeline_stops{0};
@@ -1594,6 +1983,207 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
               << "stops=" << pipeline_stops.load() << " state='"
               << status.speakers_pipeline_state
               << "' running=" << status.speakers_pipeline_running << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
+  std::atomic<int> pipeline_creates{0};
+  std::atomic<int> pipeline_stops{0};
+  std::atomic<bool> speaker_consumer_present{true};
+
+  VirtualAudioServiceHooks hooks;
+  HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
+  hooks.create_virtual_speaker = [](std::string *error) {
+    if (error)
+      error->clear();
+    return true;
+  };
+  hooks.probe_speaker_backend_availability =
+      [](const VirtualAudioServiceConfig &) {
+        AudioBackendAvailability avail;
+        avail.maxine_reason = "synthetic maxine unavailable";
+        avail.open_source_reason = "synthetic open audio unavailable";
+        return avail;
+      };
+  hooks.create_pipeline =
+      [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    pipeline_creates.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
+  };
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = false;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = true;
+  cfg.speakers_enabled = true;
+  cfg.speaker_target_sink = "physical_test_sink";
+  cfg.effects.speaker.noise_removal_enabled = true;
+  cfg.poll_ms = 1;
+  cfg.consumer_grace_ms = 200;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            const auto status = service.Status();
+            return pipeline_creates.load(std::memory_order_relaxed) == 1 &&
+                   status.speakers_pipeline_running &&
+                   status.speakers_pipeline_state == "running";
+          },
+          250ms)) {
+    std::cerr << "speaker pipeline did not start before flapping test\n";
+    service.Stop();
+    return false;
+  }
+
+  for (int i = 0; i < 5; ++i) {
+    speaker_consumer_present.store(false, std::memory_order_relaxed);
+    std::this_thread::sleep_for(10ms);
+    const auto absent_status = service.Status();
+    if (pipeline_stops.load(std::memory_order_relaxed) != 0 ||
+        !absent_status.speakers_pipeline_running ||
+        !absent_status.speakers_pipeline_active_needed) {
+      std::cerr << "speaker pipeline churned during grace window; i=" << i
+                << " creates=" << pipeline_creates.load()
+                << " stops=" << pipeline_stops.load() << " running="
+                << absent_status.speakers_pipeline_running << " needed="
+                << absent_status.speakers_pipeline_active_needed << " state='"
+                << absent_status.speakers_pipeline_state << "'\n";
+      service.Stop();
+      return false;
+    }
+
+    speaker_consumer_present.store(true, std::memory_order_relaxed);
+    if (!WaitUntil(
+            [&] {
+              const auto status = service.Status();
+              return status.speakers_pipeline_running &&
+                     status.speakers_consumer_present;
+            },
+            100ms)) {
+      std::cerr << "speaker consumer did not recover during flap cycle\n";
+      service.Stop();
+      return false;
+    }
+  }
+
+  if (pipeline_creates.load(std::memory_order_relaxed) != 1 ||
+      pipeline_stops.load(std::memory_order_relaxed) != 0) {
+    std::cerr << "speaker pipeline restarted during flapping; creates="
+              << pipeline_creates.load() << " stops=" << pipeline_stops.load()
+              << "\n";
+    service.Stop();
+    return false;
+  }
+
+  speaker_consumer_present.store(false, std::memory_order_relaxed);
+  const bool stopped = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return pipeline_stops.load(std::memory_order_relaxed) == 1 &&
+               !status.speakers_pipeline_running &&
+               !status.speakers_pipeline_active_needed &&
+               status.speakers_pipeline_state == "idle_no_consumer";
+      },
+      700ms);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!stopped) {
+    std::cerr << "speaker pipeline did not stop after sustained absence; "
+              << "creates=" << pipeline_creates.load()
+              << " stops=" << pipeline_stops.load() << " running="
+              << status.speakers_pipeline_running << " needed="
+              << status.speakers_pipeline_active_needed << " state='"
+              << status.speakers_pipeline_state << "'\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestSpeakerLoopbackPassThroughStatusIsNotConsumerGated() {
+  std::atomic<int> loopback_start_calls{0};
+  std::atomic<int> speaker_detection_calls{0};
+
+  VirtualAudioServiceHooks hooks;
+  hooks.create_virtual_speaker = [](std::string *error) {
+    if (error)
+      error->clear();
+    return true;
+  };
+  hooks.start_speaker_loopback = [&](const std::string &, int,
+                                     std::string *error) {
+    loopback_start_calls.fetch_add(1, std::memory_order_relaxed);
+    if (error)
+      error->clear();
+    return true;
+  };
+  hooks.detect_speaker_consumers = [&] {
+    speaker_detection_calls.fetch_add(1, std::memory_order_relaxed);
+    return ConsumerSnapshot(false, 0);
+  };
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = false;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = true;
+  cfg.speakers_enabled = true;
+  cfg.speaker_target_sink = "physical_test_sink";
+  cfg.poll_ms = 1;
+  cfg.consumer_grace_ms = 0;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool active = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return loopback_start_calls.load(std::memory_order_relaxed) >= 1 &&
+               status.speakers_route_mode == "loopback" &&
+               status.speakers_routing_active &&
+               status.speakers_pipeline_state == "disabled" &&
+               status.speakers_pipeline_idle_reason ==
+                   "Speaker processing is not requested.";
+      },
+      250ms);
+  std::this_thread::sleep_for(30ms);
+  const auto status = service.Status();
+  const int detections =
+      speaker_detection_calls.load(std::memory_order_relaxed);
+  service.Stop();
+
+  if (!active) {
+    std::cerr << "speaker pass-through loopback status was not explicit; "
+              << "starts=" << loopback_start_calls.load() << " route='"
+              << status.speakers_route_mode
+              << "' active=" << status.speakers_routing_active
+              << " pipeline_state='" << status.speakers_pipeline_state
+              << "' idle='" << status.speakers_pipeline_idle_reason << "'\n";
+    return false;
+  }
+
+  if (detections != 0) {
+    std::cerr << "speaker pass-through loopback was consumer-gated; "
+              << "consumer detections=" << detections << "\n";
     return false;
   }
 
@@ -3109,6 +3699,129 @@ bool TestLatencyGuardSumsCaptureAndPlaybackBeforeResync() {
   return true;
 }
 
+bool TestOfflinePassthroughPipelineAudioQuality() {
+  constexpr std::uint32_t kFrameSamples = 480;
+  constexpr int kFrameCount = 8;
+  constexpr std::uint32_t kChannels = 2;
+
+  auto state = std::make_shared<ScriptedQualityIoState>();
+  const std::vector<float> input =
+      MakeSyntheticStereoAudio(kFrameSamples, kFrameCount);
+  {
+    std::lock_guard<std::mutex> lock(state->mu);
+    state->input = input;
+  }
+
+  studiocast::audio::PassthroughAudioProcessor processor;
+  AudioPipelineHooks hooks;
+  hooks.create_io = [state] {
+    return std::make_unique<ScriptedQualityIo>(state);
+  };
+
+  AudioPipeline pipeline(&processor, std::move(hooks));
+  AudioPipelineConfig cfg;
+  cfg.sample_rate = 48000;
+  cfg.frame_samples = kFrameSamples;
+  cfg.channels = kChannels;
+
+  std::string err;
+  if (!pipeline.Start(cfg, &err)) {
+    std::cerr << "pipeline.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool finished = WaitUntil(
+      [&] {
+        const auto stats = pipeline.GetStats();
+        return stats.frames_processed == static_cast<std::uint64_t>(kFrameCount) &&
+               !stats.running;
+      },
+      500ms);
+  const auto stats = pipeline.GetStats();
+  pipeline.Stop();
+
+  std::vector<float> output;
+  std::uint32_t open_sample_rate = 0;
+  std::uint32_t open_channels = 0;
+  int read_calls = 0;
+  int write_calls = 0;
+  int flush_calls = 0;
+  {
+    std::lock_guard<std::mutex> lock(state->mu);
+    output = state->output;
+    open_sample_rate = state->open_sample_rate;
+    open_channels = state->open_channels;
+    read_calls = state->read_calls;
+    write_calls = state->write_calls;
+    flush_calls = state->flush_calls;
+  }
+
+  if (!finished) {
+    std::cerr << "offline passthrough pipeline did not finish expected "
+                 "buffers; frames="
+              << stats.frames_processed << " running=" << stats.running
+              << " error='" << stats.last_error << "'\n";
+    return false;
+  }
+
+  if (open_sample_rate != 48000 || open_channels != kChannels ||
+      read_calls != kFrameCount || write_calls != kFrameCount ||
+      flush_calls < 2) {
+    std::cerr << "offline pipeline format/buffer behavior changed; rate="
+              << open_sample_rate << " channels=" << open_channels
+              << " reads=" << read_calls << " writes=" << write_calls
+              << " flushes=" << flush_calls << "\n";
+    return false;
+  }
+
+  if (output.size() != input.size()) {
+    std::cerr << "offline pipeline changed sample count; input=" << input.size()
+              << " output=" << output.size() << "\n";
+    return false;
+  }
+
+  for (std::size_t i = 0; i < output.size(); ++i) {
+    if (!std::isfinite(output[i]) || std::fabs(output[i]) > 1.000001f) {
+      std::cerr << "offline pipeline produced invalid sample at " << i
+                << ": " << output[i] << "\n";
+      return false;
+    }
+  }
+
+  const std::size_t silence_samples =
+      static_cast<std::size_t>(kFrameSamples) * kChannels;
+  for (std::size_t i = 0; i < silence_samples; ++i) {
+    if (output[i] != 0.0f) {
+      std::cerr << "offline pipeline did not preserve leading silence at " << i
+                << ": " << output[i] << "\n";
+      return false;
+    }
+  }
+
+  if (output != input) {
+    double max_abs_diff = 0.0;
+    for (std::size_t i = 0; i < output.size(); ++i) {
+      max_abs_diff = std::max(
+          max_abs_diff,
+          std::fabs(static_cast<double>(output[i]) -
+                    static_cast<double>(input[i])));
+    }
+    std::cerr << "passthrough pipeline changed samples; max_abs_diff="
+              << max_abs_diff << "\n";
+    return false;
+  }
+
+  const double input_rms = Rms(input);
+  const double output_rms = Rms(output);
+  if (std::fabs(input_rms - output_rms) > 1e-9) {
+    std::cerr << "passthrough RMS changed; input=" << input_rms
+              << " output=" << output_rms << "\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestStopInterruptsBlockedCaptureRead() {
   auto state = std::make_shared<BlockingIoState>();
   CopyProcessor processor;
@@ -3262,8 +3975,16 @@ int main() {
        &TestMicrophonePipelineStartsWhenConsumerAppears},
       {"mic pipeline stops when consumer disappears",
        &TestMicrophonePipelineStopsWhenConsumerDisappears},
+      {"mic grace window absorbs consumer flapping",
+       &TestMicrophoneGraceWindowAbsorbsConsumerFlapping},
+      {"mic consumer detection recovers after errors",
+       &TestMicrophoneConsumerDetectionRecoversAfterErrors},
       {"speaker pipeline follows consumer gate",
        &TestSpeakerPipelineFollowsConsumerGate},
+      {"speaker grace window absorbs consumer flapping",
+       &TestSpeakerGraceWindowAbsorbsConsumerFlapping},
+      {"speaker loopback pass-through status is not consumer-gated",
+       &TestSpeakerLoopbackPassThroughStatusIsNotConsumerGated},
       {"mic pipeline restarts after worker death",
        &TestMicrophonePipelineRestartsWhenWorkerDies},
       {"mic pipeline preserves worker death error",
@@ -3305,6 +4026,8 @@ int main() {
        &TestPipelineSurfacesCaptureDisconnectError},
       {"latency guard sums capture and playback before resync",
        &TestLatencyGuardSumsCaptureAndPlaybackBeforeResync},
+      {"offline passthrough pipeline audio quality",
+       &TestOfflinePassthroughPipelineAudioQuality},
       {"stop interrupts blocked capture read",
        &TestStopInterruptsBlockedCaptureRead},
       {"stop interrupts blocked playback write",

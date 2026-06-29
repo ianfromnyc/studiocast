@@ -153,6 +153,7 @@ struct VirtualAudioServiceStatus {
 
 class AudioPipelineRunner;
 class AudioProcessor;
+class AudioConsumerDetector;
 
 struct VirtualAudioServiceHooks {
   std::function<void(std::chrono::milliseconds)> sleep_for;
@@ -183,7 +184,7 @@ struct VirtualAudioServiceHooks {
 //  yet).
 class VirtualAudioService final {
 public:
-  VirtualAudioService() = default;
+  VirtualAudioService();
   explicit VirtualAudioService(VirtualAudioServiceHooks hooks);
   ~VirtualAudioService();
 
@@ -234,6 +235,7 @@ private:
   VirtualAudioServiceHooks hooks_{};
   VirtualAudioServiceConfig cfg_{};
   VirtualAudioServiceStatus st_{};
+  mutable std::unique_ptr<AudioConsumerDetector> consumer_detector_;
 };
 
 } // namespace studiocast::audio

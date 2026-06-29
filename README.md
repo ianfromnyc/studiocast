@@ -158,7 +158,7 @@ Notes:
 
 ## Daemon mode (studiocastd)
 
-StudioCast includes a background daemon (`studiocastd`) that keeps the virtual camera available and only starts heavy video processing when a consumer opens the v4l2loopback device (OBS/Zoom/etc.).
+StudioCast includes a background daemon (`studiocastd`) that keeps the virtual camera available and only starts heavy video processing when a consumer opens the v4l2loopback device (OBS/Zoom/etc.). Audio virtual devices are also kept available while microphone and processed-speaker pipelines idle until an app consumes them. Speaker pass-through loopback is separate: daemon status reports it as `speakers.route_mode=loopback`, while processed speaker effects report `speakers.route_mode=pipeline` and are consumer-gated.
 
 During development you can run it manually:
 

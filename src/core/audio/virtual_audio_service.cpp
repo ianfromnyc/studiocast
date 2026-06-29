@@ -7,8 +7,8 @@
 #include <optional>
 #include <thread>
 #include <utility>
-#include <vector>
 
+#include "core/audio/audio_consumer_detector.h"
 #include "core/audio/audio_backend_resolver.h"
 #include "core/audio/audio_pipeline.h"
 #include "core/audio/audio_processor.h"
@@ -143,88 +143,6 @@ StartFailureRetryDelay(const VirtualAudioServiceConfig &cfg) {
 std::chrono::milliseconds
 WorkerDeathRetryDelay(const VirtualAudioServiceConfig &cfg) {
   return std::chrono::milliseconds(std::max(25, cfg.start_retry_ms));
-}
-
-bool TokenMatchesNameOrId(const std::string &token, const std::string &name,
-                          const std::vector<int> &ids) {
-  if (token == name)
-    return true;
-  for (const int id : ids) {
-    if (token == std::to_string(id))
-      return true;
-  }
-  return false;
-}
-
-AudioConsumerSnapshot
-DetectSourceConsumersByName(const std::string &source_name) {
-  AudioConsumerSnapshot out;
-
-  std::string err;
-  const auto sources = pulse::ListSources(&err);
-  if (!err.empty()) {
-    out.error = "Failed to list Pulse sources: " + err;
-    return out;
-  }
-
-  std::vector<int> sourceIds;
-  for (const auto &source : sources) {
-    if (source.name == source_name)
-      sourceIds.push_back(source.id);
-  }
-  if (sourceIds.empty()) {
-    out.error = "Pulse source '" + source_name + "' is not present.";
-    return out;
-  }
-
-  err.clear();
-  const auto outputs = pulse::ListSourceOutputs(&err);
-  if (!err.empty()) {
-    out.error = "Failed to list Pulse source outputs: " + err;
-    return out;
-  }
-
-  for (const auto &output : outputs) {
-    if (TokenMatchesNameOrId(output.source, source_name, sourceIds))
-      ++out.count;
-  }
-  out.present = out.count > 0;
-  return out;
-}
-
-AudioConsumerSnapshot DetectSinkConsumersByName(const std::string &sink_name) {
-  AudioConsumerSnapshot out;
-
-  std::string err;
-  const auto sinks = pulse::ListSinks(&err);
-  if (!err.empty()) {
-    out.error = "Failed to list Pulse sinks: " + err;
-    return out;
-  }
-
-  std::vector<int> sinkIds;
-  for (const auto &sink : sinks) {
-    if (sink.name == sink_name)
-      sinkIds.push_back(sink.id);
-  }
-  if (sinkIds.empty()) {
-    out.error = "Pulse sink '" + sink_name + "' is not present.";
-    return out;
-  }
-
-  err.clear();
-  const auto inputs = pulse::ListSinkInputs(&err);
-  if (!err.empty()) {
-    out.error = "Failed to list Pulse sink inputs: " + err;
-    return out;
-  }
-
-  for (const auto &input : inputs) {
-    if (TokenMatchesNameOrId(input.sink, sink_name, sinkIds))
-      ++out.count;
-  }
-  out.present = out.count > 0;
-  return out;
 }
 
 std::optional<std::string>
@@ -382,6 +300,8 @@ ProbeAudioBackendAvailabilityForSpeaker(const VirtualAudioServiceConfig &cfg) {
 
 } // namespace
 
+VirtualAudioService::VirtualAudioService() = default;
+
 VirtualAudioService::VirtualAudioService(VirtualAudioServiceHooks hooks)
     : hooks_(std::move(hooks)) {}
 
@@ -428,6 +348,7 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
     speakers_loopback_running_ = false;
     speakers_loopback_target_.clear();
     speakers_loopback_latency_ms_ = 0;
+    consumer_detector_.reset();
   }
 
   stop_.store(false, std::memory_order_release);
@@ -494,6 +415,7 @@ void VirtualAudioService::Stop() {
     st_.speakers_pipeline_pulse_playback_latency_us_last = 0;
     st_.speakers_pipeline_pulse_latency_us_max = 0;
     st_.speakers_pipeline_resync_events = 0;
+    consumer_detector_.reset();
   }
 }
 
@@ -593,14 +515,21 @@ AudioConsumerSnapshot VirtualAudioService::DetectMicrophoneConsumers() const {
   if (hooks_.detect_microphone_consumers) {
     return hooks_.detect_microphone_consumers();
   }
-  return DetectSourceConsumersByName(kVirtualMicSourceName);
+  if (!consumer_detector_) {
+    consumer_detector_ = CreateDefaultAudioConsumerDetector();
+  }
+  return consumer_detector_->DetectSourceConsumersByName(kVirtualMicSourceName);
 }
 
 AudioConsumerSnapshot VirtualAudioService::DetectSpeakerConsumers() const {
   if (hooks_.detect_speaker_consumers) {
     return hooks_.detect_speaker_consumers();
   }
-  return DetectSinkConsumersByName(kVirtualSpeakersSinkName);
+  if (!consumer_detector_) {
+    consumer_detector_ = CreateDefaultAudioConsumerDetector();
+  }
+  return consumer_detector_->DetectSinkConsumersByName(
+      kVirtualSpeakersSinkName);
 }
 
 void VirtualAudioService::SetLastError(std::string msg) {

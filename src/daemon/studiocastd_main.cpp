@@ -545,7 +545,7 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"last_error\":\"" << JsonEscape(st.last_error) << "\"";
   oss << "}"; // video
 
-  // Audio status (MVP: microphone processing only).
+  // Audio status.
   oss << ",\"audio\":{";
   oss << "\"enabled\":" << BoolJson(acfg.enabled) << ",";
   oss << "\"create_virtual_mic\":" << BoolJson(acfg.create_virtual_mic) << ",";
@@ -574,7 +574,8 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
              static_cast<double>(ast.pipeline_frames_processed) / 1000.0)
           : 0.0;
 
-  // Speakers routing status (Phase 9: pass-through module-loopback).
+  // Speakers routing status. `route_mode` distinguishes pass-through
+  // module-loopback from the consumer-gated processed speaker pipeline.
   oss << "\"speakers\":{";
   oss << "\"enabled\":" << BoolJson(acfg.speakers_enabled) << ",";
   oss << "\"target_sink\":\""
