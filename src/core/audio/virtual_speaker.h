@@ -27,7 +27,9 @@ bool StopSpeakerLoopback(std::string *error);
 std::string VirtualSpeakerMonitorSourceName();
 
 // Debug/status helper: detects currently loaded modules by scanning `pactl list
-// short modules`.
+// short modules`. If `error` is non-null, it is filled when the Pulse query
+// fails.
 VirtualSpeakerState DetectVirtualSpeakerLoaded();
+VirtualSpeakerState DetectVirtualSpeakerLoaded(std::string *error);
 
 } // namespace studiocast::audio

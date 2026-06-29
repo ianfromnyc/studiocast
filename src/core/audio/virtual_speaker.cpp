@@ -90,6 +90,9 @@ DetectAllLoopbacksFromStudioCastSpeakersMonitor(std::string *error = nullptr) {
 std::string VirtualSpeakerMonitorSourceName() { return MonitorSourceName(); }
 
 VirtualSpeakerState DetectVirtualSpeakerLoaded() { return DetectLoaded(); }
+VirtualSpeakerState DetectVirtualSpeakerLoaded(std::string *error) {
+  return DetectLoaded(error);
+}
 
 bool CreateVirtualSpeaker(std::string *error) {
   std::string details;

@@ -444,7 +444,8 @@ std::string StatusText() {
   oss << "  source name: " << kSourceName << "\n";
 
   const auto state = LoadVirtualMicState();
-  const auto loaded = DetectLoaded();
+  std::string loadedErr;
+  const auto loaded = DetectLoaded(&loadedErr);
 
   oss << "  state file: " << VirtualMicStatePath().string() << "\n";
   oss << "  state ids: "
@@ -462,21 +463,27 @@ std::string StatusText() {
                                    : "none")
       << "\n";
 
-  oss << "  loaded ids: "
-      << "sink="
-      << (loaded.null_sink_module_id
-              ? std::to_string(*loaded.null_sink_module_id)
-              : "none")
-      << ", "
-      << "remap="
-      << (loaded.remap_source_module_id
-              ? std::to_string(*loaded.remap_source_module_id)
-              : "none")
-      << ", "
-      << "loopback="
-      << (loaded.loopback_module_id ? std::to_string(*loaded.loopback_module_id)
-                                    : "none")
-      << "\n";
+  if (!loadedErr.empty()) {
+    oss << "  loaded ids: unavailable\n";
+    oss << "  loaded ids note: " << loadedErr << "\n";
+  } else {
+    oss << "  loaded ids: "
+        << "sink="
+        << (loaded.null_sink_module_id
+                ? std::to_string(*loaded.null_sink_module_id)
+                : "none")
+        << ", "
+        << "remap="
+        << (loaded.remap_source_module_id
+                ? std::to_string(*loaded.remap_source_module_id)
+                : "none")
+        << ", "
+        << "loopback="
+        << (loaded.loopback_module_id
+                ? std::to_string(*loaded.loopback_module_id)
+                : "none")
+        << "\n";
+  }
 
   // List sources for convenience
   std::string err;
@@ -497,7 +504,8 @@ std::string StatusText() {
   oss << "  monitor source: " << VirtualSpeakerMonitorSourceName() << "\n";
 
   const auto spkState = LoadVirtualSpeakerState();
-  const auto spkLoaded = DetectVirtualSpeakerLoaded();
+  std::string spkLoadedErr;
+  const auto spkLoaded = DetectVirtualSpeakerLoaded(&spkLoadedErr);
   oss << "  state file: " << VirtualSpeakerStatePath().string() << "\n";
   oss << "  state ids: "
       << "sink="
@@ -515,17 +523,22 @@ std::string StatusText() {
               ? *spkState.loopback_target_sink_name
               : "none")
       << "\n";
-  oss << "  loaded ids: "
-      << "sink="
-      << (spkLoaded.null_sink_module_id
-              ? std::to_string(*spkLoaded.null_sink_module_id)
-              : "none")
-      << ", "
-      << "loopback="
-      << (spkLoaded.loopback_module_id
-              ? std::to_string(*spkLoaded.loopback_module_id)
-              : "none")
-      << "\n";
+  if (!spkLoadedErr.empty()) {
+    oss << "  loaded ids: unavailable\n";
+    oss << "  loaded ids note: " << spkLoadedErr << "\n";
+  } else {
+    oss << "  loaded ids: "
+        << "sink="
+        << (spkLoaded.null_sink_module_id
+                ? std::to_string(*spkLoaded.null_sink_module_id)
+                : "none")
+        << ", "
+        << "loopback="
+        << (spkLoaded.loopback_module_id
+                ? std::to_string(*spkLoaded.loopback_module_id)
+                : "none")
+        << "\n";
+  }
 
   {
     std::string err2;

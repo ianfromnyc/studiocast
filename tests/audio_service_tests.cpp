@@ -757,6 +757,54 @@ bool TestPactlProplistCommandsQuoteArgumentsAndDetectFailures() {
   return true;
 }
 
+bool TestStatusTextSurfacesModuleListFailure() {
+  ScopedXdgStateHome state_home;
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl --version 2>&1")
+      return ExecResult(0, "pactl 16.1\n");
+    if (command == "pactl list short modules 2>&1")
+      return ExecResult(1, "Failure: synthetic module list failure\n");
+    if (command == "pactl list short sources 2>&1")
+      return ExecResult(0);
+    if (command == "pactl get-default-sink 2>&1")
+      return ExecResult(0, "physical_test_sink\n");
+    if (command == "pactl list short sinks 2>&1")
+      return ExecResult(0, "2\tphysical_test_sink\tmodule-alsa-card.c\t"
+                           "s16le 2ch 48000Hz\tRUNNING\n");
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  const std::string text = studiocast::audio::StatusText();
+
+  const std::string unavailable = "loaded ids: unavailable";
+  std::size_t unavailable_count = 0;
+  std::size_t pos = 0;
+  while ((pos = text.find(unavailable, pos)) != std::string::npos) {
+    ++unavailable_count;
+    pos += unavailable.size();
+  }
+
+  if (unavailable_count < 2 ||
+      text.find("synthetic module list failure") == std::string::npos) {
+    std::cerr << "status text did not surface module list failures:\n"
+              << text << "\n";
+    return false;
+  }
+
+  if (text.find("loaded ids: sink=none, remap=none, loopback=none") !=
+          std::string::npos ||
+      text.find("loaded ids: sink=none, loopback=none") !=
+          std::string::npos) {
+    std::cerr << "status text rendered unknown loaded ids as none:\n"
+              << text << "\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestCreateVirtualMicPropagatesListFailureWithoutLoading() {
   ScopedXdgStateHome state_home;
   VirtualMicState initial;
@@ -2805,6 +2853,8 @@ int main() {
        &TestPactlDefaultSourceAndSinkFallbackToInfo},
       {"pactl proplist commands quote args and detect failures",
        &TestPactlProplistCommandsQuoteArgumentsAndDetectFailures},
+      {"status text surfaces module list failures",
+       &TestStatusTextSurfacesModuleListFailure},
       {"virtual mic create propagates list failure without loading",
        &TestCreateVirtualMicPropagatesListFailureWithoutLoading},
       {"virtual speaker create propagates list failure without loading",
