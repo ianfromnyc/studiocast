@@ -556,6 +556,59 @@ bool TestVideoOutputDisappearanceStopsPipelineAndMarksUnavailable() {
   return true;
 }
 
+bool TestVideoOutputRecoveryClearsUnavailableError() {
+  ServiceHarness h;
+  h.device_exists.store(false, std::memory_order_relaxed);
+  VirtualCameraService service(h.Hooks());
+  auto cfg = TestConfig();
+  cfg.pipeline.output_device.clear();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            const auto status = service.Status();
+            return status.pipeline_state == "device_unavailable" &&
+                   !status.virtual_device_available &&
+                   status.last_error.find("synthetic loopback missing") !=
+                       std::string::npos;
+          },
+          250ms)) {
+    const auto status = service.Status();
+    std::cerr << "missing output was not surfaced before recovery; state='"
+              << status.pipeline_state << "' last_error='" << status.last_error
+              << "'\n";
+    service.Stop();
+    return false;
+  }
+
+  h.device_exists.store(true, std::memory_order_relaxed);
+  const bool recovered = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return status.pipeline_state == "idle_no_consumer" &&
+               status.virtual_device_present && status.virtual_device_available &&
+               status.virtual_device_error.empty() && status.last_error.empty() &&
+               h.pipeline->ensure_output_calls.load() > 0;
+      },
+      500ms);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!recovered) {
+    std::cerr << "output recovery left stale unavailable error; state='"
+              << status.pipeline_state << "' virtual_error='"
+              << status.virtual_device_error << "' last_error='"
+              << status.last_error << "'\n";
+    return false;
+  }
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -580,6 +633,8 @@ int main() {
        &TestVideoConfigRestartTransitionNameIsStable},
       {"video output disappearance marks unavailable",
        &TestVideoOutputDisappearanceStopsPipelineAndMarksUnavailable},
+      {"video output recovery clears unavailable error",
+       &TestVideoOutputRecoveryClearsUnavailableError},
   };
 
   int failed = 0;

@@ -566,9 +566,11 @@ void VirtualCameraService::ThreadMain() {
         std::lock_guard<std::mutex> lock(mu_);
         virtual_device_present_ = true;
         virtual_device_available_ = true;
-        virtual_device_error_.clear();
-        if (last_error_.rfind("Output open failed:", 0) == 0)
+        if (last_error_ == virtual_device_error_ ||
+            last_error_.rfind("Output open failed:", 0) == 0) {
           last_error_.clear();
+        }
+        virtual_device_error_.clear();
       }
     }
 
