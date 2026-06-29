@@ -474,6 +474,15 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
 
   const auto t0 = std::chrono::steady_clock::now();
   auto sleep = kOpenRetrySleepMin;
+  auto sleep_or_stop = [this](std::chrono::milliseconds d) {
+    constexpr auto kStopCheckQuantum = std::chrono::milliseconds(25);
+    auto remaining = d;
+    while (!stop_.load() && remaining > std::chrono::milliseconds::zero()) {
+      const auto chunk = std::min(remaining, kStopCheckQuantum);
+      std::this_thread::sleep_for(chunk);
+      remaining -= chunk;
+    }
+  };
   for (int attempt = 0;; ++attempt) {
     attempts = attempt + 1;
     werr.clear();
@@ -499,7 +508,7 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
     if ((std::chrono::steady_clock::now() - t0) >= kOpenRetryBudget)
       break;
 
-    std::this_thread::sleep_for(sleep);
+    sleep_or_stop(sleep);
     sleep = std::min(sleep * 2, kOpenRetrySleepMax);
   }
 
@@ -693,6 +702,7 @@ void CameraPipeline::CloseOutput() {
 
 void CameraPipeline::Stop() {
   stop_.store(true);
+  cv_.notify_all();
 
   std::thread toJoin;
   {
@@ -6122,6 +6132,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
     last_capture_sequence = f.sequence;
 
+    if (stop_.load()) {
+      std::string rerr;
+      (void)cap.ReleaseFrame(f, &rerr);
+      break;
+    }
+
     const auto t_capture_start = Clock::now();
 
     // Convert capture -> internal RGB (tight stride)
@@ -7452,7 +7468,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         const auto sleep_d = next_pace_deadline - now;
         ema_pace_sleep.Add(ToMs(sleep_d));
         ++pace_sleeps;
-        std::this_thread::sleep_until(next_pace_deadline);
+        std::unique_lock<std::mutex> lock(mu_);
+        cv_.wait_until(lock, next_pace_deadline,
+                       [this] { return stop_.load(); });
       } else if (now > next_pace_deadline) {
         const auto late_d = now - next_pace_deadline;
         ema_pace_late.Add(ToMs(late_d));
@@ -7461,6 +7479,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       next_pace_deadline += pace_period;
     }
+
+    if (stop_.load())
+      break;
 
     const auto t_write_start = Clock::now();
 
@@ -7532,11 +7553,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     // Approximate end-to-end latency (driver timestamp -> end of write).
     double latency_ms = 0.0;
+    bool have_latency_sample = false;
     if (f.timestamp_ns != 0) {
       const std::uint64_t now_ns =
           f.timestamp_monotonic ? NowNsMonotonic() : NowNsRealtime();
-      if (now_ns >= f.timestamp_ns) {
+      if (now_ns > f.timestamp_ns) {
         latency_ms = static_cast<double>(now_ns - f.timestamp_ns) / 1000000.0;
+        have_latency_sample = true;
       }
     }
 
@@ -7544,7 +7567,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     ema_effects.Add(effects_ms);
     ema_scale.Add(scale_ms);
     ema_write.Add(write_ms);
-    ema_latency.Add(latency_ms);
+    if (have_latency_sample)
+      ema_latency.Add(latency_ms);
 
     ++perf_frames;
 

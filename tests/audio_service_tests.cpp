@@ -599,6 +599,89 @@ private:
   const std::atomic<bool> *external_stop_requested_ = nullptr;
 };
 
+struct FlakyLatencyIoState {
+  std::atomic<bool> stop_requested{false};
+  std::atomic<int> capture_latency_queries{0};
+  std::atomic<int> playback_latency_queries{0};
+};
+
+class FlakyLatencyIo final : public AudioPipelineIo {
+public:
+  explicit FlakyLatencyIo(std::shared_ptr<FlakyLatencyIoState> state)
+      : state_(std::move(state)) {}
+
+  void SetStopRequestedFlag(const std::atomic<bool> *stop_requested) override {
+    external_stop_requested_ = stop_requested;
+  }
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool Read(void *dst, std::size_t bytes, std::string *error) override {
+    if (ShouldStop()) {
+      if (error)
+        error->clear();
+      return false;
+    }
+    std::memset(dst, 0, bytes);
+    std::this_thread::sleep_for(1ms);
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (ShouldStop()) {
+      if (error)
+        error->clear();
+      return false;
+    }
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *latency_us) override {
+    const int q =
+        state_->capture_latency_queries.fetch_add(1, std::memory_order_relaxed) +
+        1;
+    if (q == 1) {
+      if (latency_us)
+        *latency_us = 12000;
+      return true;
+    }
+    return false;
+  }
+
+  bool GetPlaybackLatencyUs(std::uint64_t *latency_us) override {
+    const int q = state_->playback_latency_queries.fetch_add(
+                      1, std::memory_order_relaxed) +
+                  1;
+    if (latency_us)
+      *latency_us = (q == 1) ? 34000 : 5000;
+    return true;
+  }
+
+  void Flush() override {}
+
+  void RequestStop() override {
+    state_->stop_requested.store(true, std::memory_order_release);
+  }
+
+private:
+  bool ShouldStop() const {
+    return state_->stop_requested.load(std::memory_order_acquire) ||
+           (external_stop_requested_ &&
+            external_stop_requested_->load(std::memory_order_acquire));
+  }
+
+  std::shared_ptr<FlakyLatencyIoState> state_;
+  const std::atomic<bool> *external_stop_requested_ = nullptr;
+};
+
 struct ScriptedQualityIoState {
   std::mutex mu;
   std::vector<float> input;
@@ -3699,6 +3782,64 @@ bool TestLatencyGuardSumsCaptureAndPlaybackBeforeResync() {
   return true;
 }
 
+bool TestLatencyQueryFailureClearsStaleLastValue() {
+  auto state = std::make_shared<FlakyLatencyIoState>();
+  CopyProcessor processor;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [state] {
+    return std::make_unique<FlakyLatencyIo>(state);
+  };
+
+  AudioPipeline pipeline(&processor, std::move(hooks));
+  AudioPipelineConfig cfg;
+
+  std::string err;
+  if (!pipeline.Start(cfg, &err)) {
+    std::cerr << "pipeline.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool saw_initial_latency = WaitUntil(
+      [&] {
+        const auto stats = pipeline.GetStats();
+        return stats.pulse_capture_latency_us_last == 12000 &&
+               stats.pulse_playback_latency_us_last == 34000 &&
+               stats.pulse_latency_us_max >= 46000;
+      },
+      1300ms);
+
+  const bool cleared_failed_side = WaitUntil(
+      [&] {
+        const auto stats = pipeline.GetStats();
+        return state->capture_latency_queries.load(std::memory_order_relaxed) >=
+                   2 &&
+               state->playback_latency_queries.load(std::memory_order_relaxed) >=
+                   2 &&
+               stats.pulse_capture_latency_us_last == 0 &&
+               stats.pulse_playback_latency_us_last == 5000 &&
+               stats.pulse_latency_us_max >= 46000;
+      },
+      1300ms);
+  const auto stats = pipeline.GetStats();
+  pipeline.Stop();
+
+  if (!saw_initial_latency || !cleared_failed_side) {
+    std::cerr << "latency query failure left stale status; initial="
+              << saw_initial_latency << " cleared=" << cleared_failed_side
+              << " capture_last=" << stats.pulse_capture_latency_us_last
+              << " playback_last=" << stats.pulse_playback_latency_us_last
+              << " max=" << stats.pulse_latency_us_max
+              << " capture_queries="
+              << state->capture_latency_queries.load()
+              << " playback_queries="
+              << state->playback_latency_queries.load() << "\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestOfflinePassthroughPipelineAudioQuality() {
   constexpr std::uint32_t kFrameSamples = 480;
   constexpr int kFrameCount = 8;
@@ -4026,6 +4167,8 @@ int main() {
        &TestPipelineSurfacesCaptureDisconnectError},
       {"latency guard sums capture and playback before resync",
        &TestLatencyGuardSumsCaptureAndPlaybackBeforeResync},
+      {"latency query failure clears stale last value",
+       &TestLatencyQueryFailureClearsStaleLastValue},
       {"offline passthrough pipeline audio quality",
        &TestOfflinePassthroughPipelineAudioQuality},
       {"stop interrupts blocked capture read",

@@ -880,10 +880,14 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
       if (rec_ok) {
         pulse_capture_latency_us_last_.store(rec_lat_us,
                                              std::memory_order_relaxed);
+      } else {
+        pulse_capture_latency_us_last_.store(0, std::memory_order_relaxed);
       }
       if (play_ok) {
         pulse_playback_latency_us_last_.store(play_lat_us,
                                               std::memory_order_relaxed);
+      } else {
+        pulse_playback_latency_us_last_.store(0, std::memory_order_relaxed);
       }
 
       // Best-effort end-to-end estimate.
