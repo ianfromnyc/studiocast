@@ -9,8 +9,9 @@ testers and contributors to install prerequisites without guessing.
 ./scripts/setup.sh --deps --v4l2loopback --load-loopback --persist-loopback
 ```
 
-This installs build dependencies (Qt6/CMake/Ninja/etc), ONNX Runtime (required; GPU build by default), and runtime dependencies (v4l2loopback DKMS, v4l-utils),
+This installs build dependencies (Qt6/CMake/Ninja/etc), ONNX Runtime (required; GPU build by default), and runtime dependencies (v4l2loopback tools, v4l-utils),
 then creates a virtual camera device (by default at `/dev/video10` with label **StudioCast Camera**).
+The setup helper prefers a kernel-provided/prebuilt v4l2loopback module and only falls back to `v4l2loopback-dkms` when the running kernel does not already provide one.
 
 MJPEG decode uses **libjpeg-turbo** (via CMake `FindJPEG`). If you are installing dependencies manually:
 
@@ -22,6 +23,31 @@ Verify:
 
 ```bash
 v4l2-ctl --list-devices
+```
+
+### v4l2loopback module install fallback
+
+Ubuntu kernels may already ship a signed/prebuilt `v4l2loopback.ko`. StudioCast
+checks that first and avoids DKMS when it is available. If the helper falls back
+to `v4l2loopback-dkms` and that DKMS build fails against a newer kernel, install
+v4l2loopback from upstream source, then rerun the StudioCast setup with
+`--load-loopback --persist-loopback`:
+
+```bash
+git clone https://github.com/v4l2loopback/v4l2loopback.git /tmp/v4l2loopback
+cd /tmp/v4l2loopback
+VERSION=$(grep 'PACKAGE_VERSION' dkms.conf | cut -d'"' -f2)
+sudo mkdir -p /usr/src/v4l2loopback-${VERSION}
+sudo cp -r ./* /usr/src/v4l2loopback-${VERSION}/
+sudo dkms add v4l2loopback/${VERSION}
+sudo dkms autoinstall
+```
+
+If you have the Ubuntu DKMS package installed and want to keep apt from
+replacing the upstream source copy, hold it:
+
+```bash
+sudo apt-mark hold v4l2loopback-dkms
 ```
 
 ## 2) Build StudioCast

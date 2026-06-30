@@ -1118,7 +1118,7 @@ void VideoPage::Refresh() {
     const QString deviceNode = QString::fromStdString(d.dev_node);
     const QString label = DeviceLabel(d);
 
-    if (!d.is_loopback && d.can_read) {
+    if (d.can_read) {
       inputCombo_->addItem(label, deviceNode);
       ++inAdded;
       if (!prevIn.isEmpty() && prevIn == deviceNode)
