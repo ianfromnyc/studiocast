@@ -16,7 +16,7 @@ Usage:
   scripts/setup/v4l2loopback.sh [options]
 
 Options:
-  --install             Install v4l2loopback DKMS + dependencies via apt.
+  --install             Install v4l2loopback tools/module support via apt.
   --load                Load the v4l2loopback module now (creates /dev/videoN).
   --persist             Persist the module load/options across reboot.
   --video-nr N          Video device number (default: 10).
@@ -44,6 +44,19 @@ DEVICES=1
 LABEL="StudioCast Camera"
 EXCLUSIVE_CAPS=1
 
+module_available() {
+  modinfo v4l2loopback >/dev/null 2>&1
+}
+
+print_upstream_dkms_hint() {
+  cat >&2 <<'EOF'
+[v4l2loopback] v4l2loopback install failed.
+[v4l2loopback] If the failure was during DKMS module build on a newer kernel,
+[v4l2loopback] install v4l2loopback from upstream source and retry with
+[v4l2loopback] --load/--persist. See docs/SETUP.md for the DKMS fallback.
+EOF
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install) DO_INSTALL=1; shift ;;
@@ -65,7 +78,40 @@ if [[ "$DO_INSTALL" -eq 1 ]]; then
   if [[ "$YES" -eq 1 ]]; then APT_ARGS+=("-y"); fi
 
   sudo apt update
-  sudo apt install "${APT_ARGS[@]}"     dkms     linux-headers-$(uname -r)     v4l2loopback-dkms     v4l2loopback-utils     v4l-utils
+
+  # Install user-space tools first, without pulling v4l2loopback-dkms via
+  # Recommends. Many Ubuntu kernels already ship a signed/prebuilt
+  # v4l2loopback.ko through linux-modules-*.
+  if ! sudo apt install "${APT_ARGS[@]}" --no-install-recommends \
+    v4l2loopback-utils v4l-utils; then
+    print_upstream_dkms_hint
+    exit 1
+  fi
+
+  if module_available; then
+    echo "[v4l2loopback] Found kernel-provided v4l2loopback module; skipping DKMS."
+  else
+    MODULE_PACKAGE="linux-modules-$(uname -r)"
+    if apt-cache show "$MODULE_PACKAGE" >/dev/null 2>&1; then
+      echo "[v4l2loopback] Trying prebuilt kernel module package: $MODULE_PACKAGE"
+      if sudo apt install "${APT_ARGS[@]}" "$MODULE_PACKAGE"; then
+        sudo depmod -a || true
+      else
+        echo "[v4l2loopback] Prebuilt module package install failed; trying DKMS." >&2
+      fi
+    else
+      echo "[v4l2loopback] No prebuilt module package found for $(uname -r); trying DKMS." >&2
+    fi
+  fi
+
+  if ! module_available; then
+    echo "[v4l2loopback] Installing DKMS fallback..."
+    if ! sudo apt install "${APT_ARGS[@]}" \
+      dkms "linux-headers-$(uname -r)" v4l2loopback-dkms; then
+      print_upstream_dkms_hint
+      exit 1
+    fi
+  fi
 fi
 
 if [[ "$DO_LOAD" -eq 1 ]]; then
