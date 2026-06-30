@@ -17,6 +17,13 @@ struct DaemonCallResult {
   std::string error_json;
 };
 
+struct DaemonCallOptions {
+  // Separate budgets keep stale sockets from blocking UI callers forever while
+  // still allowing CLI/status callers to tolerate first-run diagnostics.
+  int connect_timeout_ms = 1000;
+  int io_timeout_ms = 10000;
+};
+
 // Sends a single request line to the studiocastd control socket and reads a
 // single-line reply.
 //
@@ -27,5 +34,8 @@ struct DaemonCallResult {
 // case, *error is set.
 bool DaemonCall(const std::string &request_line, DaemonCallResult *out,
                 std::string *error);
+
+bool DaemonCall(const std::string &request_line, DaemonCallResult *out,
+                std::string *error, const DaemonCallOptions &options);
 
 } // namespace studiocast::ipc

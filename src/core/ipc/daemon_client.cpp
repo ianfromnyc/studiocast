@@ -4,6 +4,8 @@
 #include <cstring>
 #include <sstream>
 
+#include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -13,13 +15,95 @@
 namespace studiocast::ipc {
 namespace {
 
-bool WriteAll(int fd, const void *data, std::size_t bytes, std::string *error) {
+int PositiveTimeoutOrFallback(int value, int fallback) {
+  return value > 0 ? value : fallback;
+}
+
+bool SetNonBlocking(int fd, std::string *error) {
+  const int flags = ::fcntl(fd, F_GETFL, 0);
+  if (flags < 0) {
+    if (error)
+      *error = std::string("fcntl(F_GETFL) failed: ") + std::strerror(errno);
+    return false;
+  }
+  if (::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+    if (error)
+      *error = std::string("fcntl(F_SETFL O_NONBLOCK) failed: ") +
+               std::strerror(errno);
+    return false;
+  }
+  return true;
+}
+
+bool WaitFd(int fd, short events, int timeout_ms, const char *what,
+            std::string *error) {
+  pollfd pfd{};
+  pfd.fd = fd;
+  pfd.events = events;
+
+  for (;;) {
+    const int r = ::poll(&pfd, 1, timeout_ms);
+    if (r > 0)
+      return true;
+    if (r == 0) {
+      if (error) {
+        std::ostringstream oss;
+        oss << what << " timed out after " << timeout_ms << "ms";
+        *error = oss.str();
+      }
+      return false;
+    }
+    if (errno == EINTR)
+      continue;
+    if (error)
+      *error = std::string(what) + " poll failed: " + std::strerror(errno);
+    return false;
+  }
+}
+
+bool FinishConnect(int fd, int timeout_ms, const std::string &path,
+                   std::string *error) {
+  std::string werr;
+  if (!WaitFd(fd, POLLOUT, timeout_ms, "connect", &werr)) {
+    if (error)
+      *error = werr + " (" + path + ")";
+    return false;
+  }
+
+  int soErr = 0;
+  socklen_t soErrLen = sizeof(soErr);
+  if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soErr, &soErrLen) != 0) {
+    if (error)
+      *error = std::string("getsockopt(SO_ERROR) failed: ") +
+               std::strerror(errno) + " (" + path + ")";
+    return false;
+  }
+  if (soErr != 0) {
+    if (error)
+      *error = std::string("connect failed: ") + std::strerror(soErr) + " (" +
+               path + ")";
+    return false;
+  }
+  return true;
+}
+
+bool WriteAll(int fd, const void *data, std::size_t bytes, int timeout_ms,
+              std::string *error) {
   const char *p = static_cast<const char *>(data);
   std::size_t n = 0;
   while (n < bytes) {
+    std::string perr;
+    if (!WaitFd(fd, POLLOUT, timeout_ms, "write", &perr)) {
+      if (error)
+        *error = perr;
+      return false;
+    }
+
     const ssize_t w = ::write(fd, p + n, bytes - n);
     if (w < 0) {
       if (errno == EINTR)
+        continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
         continue;
       if (error)
         *error = std::string("write failed: ") + std::strerror(errno);
@@ -35,7 +119,7 @@ bool WriteAll(int fd, const void *data, std::size_t bytes, std::string *error) {
   return true;
 }
 
-bool ReadLine(int fd, std::string *line, std::string *error) {
+bool ReadLine(int fd, std::string *line, int timeout_ms, std::string *error) {
   if (!line)
     return false;
   line->clear();
@@ -44,9 +128,18 @@ bool ReadLine(int fd, std::string *line, std::string *error) {
   char buf[4096];
 
   while (line->size() < kMax) {
+    std::string perr;
+    if (!WaitFd(fd, POLLIN, timeout_ms, "read", &perr)) {
+      if (error)
+        *error = perr;
+      return false;
+    }
+
     const ssize_t r = ::read(fd, buf, sizeof(buf));
     if (r < 0) {
       if (errno == EINTR)
+        continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
         continue;
       if (error)
         *error = std::string("read failed: ") + std::strerror(errno);
@@ -76,8 +169,17 @@ bool ReadLine(int fd, std::string *line, std::string *error) {
 
 bool DaemonCall(const std::string &request_line, DaemonCallResult *out,
                 std::string *error) {
+  return DaemonCall(request_line, out, error, DaemonCallOptions{});
+}
+
+bool DaemonCall(const std::string &request_line, DaemonCallResult *out,
+                std::string *error, const DaemonCallOptions &options) {
   if (out)
     *out = DaemonCallResult{};
+
+  const int connectTimeoutMs =
+      PositiveTimeoutOrFallback(options.connect_timeout_ms, 1000);
+  const int ioTimeoutMs = PositiveTimeoutOrFallback(options.io_timeout_ms, 10000);
 
   std::string pathErr;
   const auto sockPath = DaemonSocketPath(&pathErr);
@@ -94,6 +196,14 @@ bool DaemonCall(const std::string &request_line, DaemonCallResult *out,
     return false;
   }
 
+  std::string nberr;
+  if (!SetNonBlocking(fd, &nberr)) {
+    ::close(fd);
+    if (error)
+      *error = nberr;
+    return false;
+  }
+
   sockaddr_un addr{};
   addr.sun_family = AF_UNIX;
   const std::string pathStr = sockPath.string();
@@ -107,19 +217,29 @@ bool DaemonCall(const std::string &request_line, DaemonCallResult *out,
 
   if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
     const int e = errno;
-    ::close(fd);
-    std::ostringstream oss;
-    oss << "connect failed: " << std::strerror(e) << " (" << pathStr << ")";
-    if (error)
-      *error = oss.str();
-    return false;
+    if (e == EINPROGRESS || e == EAGAIN || e == EALREADY) {
+      std::string cerr;
+      if (!FinishConnect(fd, connectTimeoutMs, pathStr, &cerr)) {
+        ::close(fd);
+        if (error)
+          *error = cerr;
+        return false;
+      }
+    } else {
+      ::close(fd);
+      std::ostringstream oss;
+      oss << "connect failed: " << std::strerror(e) << " (" << pathStr << ")";
+      if (error)
+        *error = oss.str();
+      return false;
+    }
   }
 
   std::string wire = request_line;
   wire.push_back('\n');
 
   std::string werr;
-  if (!WriteAll(fd, wire.data(), wire.size(), &werr)) {
+  if (!WriteAll(fd, wire.data(), wire.size(), ioTimeoutMs, &werr)) {
     ::close(fd);
     if (error)
       *error = werr;
@@ -128,7 +248,7 @@ bool DaemonCall(const std::string &request_line, DaemonCallResult *out,
 
   std::string line;
   std::string rerr;
-  if (!ReadLine(fd, &line, &rerr)) {
+  if (!ReadLine(fd, &line, ioTimeoutMs, &rerr)) {
     ::close(fd);
     if (error)
       *error = rerr;

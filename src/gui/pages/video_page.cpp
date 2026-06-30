@@ -199,12 +199,35 @@ struct DaemonVideoStatus {
   bool enabled = false;
   bool always_on = false;
 
+  bool virtual_device_present = false;
+  bool virtual_device_available = false;
+  QString virtual_device_error;
+
   bool consumer_present = false;
   int consumer_count = 0;
+  QString consumer_error;
 
   bool pipeline_running = false;
   bool pipeline_starting = false;
+  bool pipeline_active_needed = false;
+  QString pipeline_state;
+  QString pipeline_idle_reason;
   long long frame_index = 0;
+
+  int consumer_poll_ms = 0;
+  int start_grace_ms = 0;
+  int stop_grace_ms = 0;
+  int min_run_ms = 0;
+  long long pipeline_start_attempts = 0;
+  long long pipeline_starts = 0;
+  long long pipeline_start_failures = 0;
+  long long pipeline_stops = 0;
+  long long pipeline_config_restarts = 0;
+  bool stabilizing = false;
+  int thrash_events_10s = 0;
+  QString last_transition;
+  long long last_transition_ms_ago = -1;
+  long long next_start_retry_ms = -1;
 
   int width = 0;
   int height = 0;
@@ -289,8 +312,15 @@ bool ParseDaemonStatusJson(const std::string &json, DaemonVideoStatus *out,
   out->reachable = true;
   out->enabled = video.value("enabled").toBool(false);
   out->always_on = video.value("always_on").toBool(false);
+  out->virtual_device_present =
+      video.value("virtual_device_present").toBool(false);
+  out->virtual_device_available =
+      video.value("virtual_device_available").toBool(false);
+  out->virtual_device_error =
+      video.value("virtual_device_error").toString();
   out->consumer_present = video.value("consumer_present").toBool(false);
   out->consumer_count = video.value("consumer_count").toInt(0);
+  out->consumer_error = video.value("consumer_error").toString();
 
   out->width = video.value("width").toInt(0);
   out->height = video.value("height").toInt(0);
@@ -334,11 +364,39 @@ bool ParseDaemonStatusJson(const std::string &json, DaemonVideoStatus *out,
   const QJsonObject pipe = video.value("pipeline").toObject();
   out->pipeline_running = pipe.value("running").toBool(false);
   out->pipeline_starting = pipe.value("starting").toBool(false);
+  out->pipeline_active_needed = pipe.value("active_needed").toBool(false);
+  out->pipeline_state = pipe.value("state").toString();
+  out->pipeline_idle_reason = pipe.value("idle_reason").toString();
   out->frame_index =
       static_cast<long long>(pipe.value("frame_index").toDouble(0));
 
   out->effects_backends = pipe.value("effects_backends").toString();
   out->effects_note = pipe.value("effects_note").toString();
+
+  const QJsonObject sup = video.value("supervisor").toObject();
+  if (!sup.isEmpty()) {
+    out->consumer_poll_ms = sup.value("consumer_poll_ms").toInt(0);
+    out->start_grace_ms = sup.value("start_grace_ms").toInt(0);
+    out->stop_grace_ms = sup.value("stop_grace_ms").toInt(0);
+    out->min_run_ms = sup.value("min_run_ms").toInt(0);
+    out->pipeline_start_attempts =
+        static_cast<long long>(sup.value("pipeline_start_attempts").toDouble(0));
+    out->pipeline_starts =
+        static_cast<long long>(sup.value("pipeline_starts").toDouble(0));
+    out->pipeline_start_failures = static_cast<long long>(
+        sup.value("pipeline_start_failures").toDouble(0));
+    out->pipeline_stops =
+        static_cast<long long>(sup.value("pipeline_stops").toDouble(0));
+    out->pipeline_config_restarts = static_cast<long long>(
+        sup.value("pipeline_config_restarts").toDouble(0));
+    out->stabilizing = sup.value("stabilizing").toBool(false);
+    out->thrash_events_10s = sup.value("thrash_events_10s").toInt(0);
+    out->last_transition = sup.value("last_transition").toString();
+    out->last_transition_ms_ago =
+        static_cast<long long>(sup.value("last_transition_ms_ago").toDouble(-1));
+    out->next_start_retry_ms =
+        static_cast<long long>(sup.value("next_start_retry_ms").toDouble(-1));
+  }
 
   // Canonical effects model (Broadcast schema).
   out->effects = {};
@@ -638,8 +696,11 @@ QString SummarizeEffectsBackends(const QString &raw) {
 bool DaemonRequest(const std::string &request, std::string *outJson,
                    QString *outErr) {
   studiocast::ipc::DaemonCallResult res;
+  studiocast::ipc::DaemonCallOptions options;
+  options.connect_timeout_ms = 500;
+  options.io_timeout_ms = 2500;
   std::string err;
-  if (!studiocast::ipc::DaemonCall(request, &res, &err)) {
+  if (!studiocast::ipc::DaemonCall(request, &res, &err, options)) {
     if (outErr)
       *outErr = QString::fromStdString(err);
     return false;
@@ -671,8 +732,16 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
 
   // Preview
   preview_ = new VideoPreviewWidget(box);
-  preview_->SetStatusText("Preview (opens the virtual camera as a consumer)");
+  preview_->SetStatusText("Preview off");
   boxLayout->addWidget(preview_);
+
+  auto *previewRow = new QHBoxLayout();
+  previewCheck_ = new QCheckBox("Preview", box);
+  previewCheck_->setToolTip(
+      "Opens the virtual camera in this GUI. This counts as a consumer.");
+  previewRow->addWidget(previewCheck_);
+  previewRow->addStretch(1);
+  boxLayout->addLayout(previewRow);
 
   // Input row
   auto *inRow = new QHBoxLayout();
@@ -1005,6 +1074,8 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
           &VideoPage::CopySuggestedCommand);
   connect(startBtn_, &QPushButton::clicked, this, &VideoPage::OnStart);
   connect(stopBtn_, &QPushButton::clicked, this, &VideoPage::OnStop);
+  connect(previewCheck_, &QCheckBox::toggled, this,
+          &VideoPage::OnPreviewToggled);
 
   connect(engineCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
           this, &VideoPage::OnEnginePreferenceChanged);
@@ -1176,14 +1247,18 @@ bool VideoPage::SyncFromDaemonConfig() {
   // video config.
   if (!DaemonRequest("GET_STATUS", &json, &err)) {
     daemonReachable_ = false;
+    daemonLastStatusJson_.clear();
     return false;
   }
 
   daemonReachable_ = true;
+  daemonLastStatusJson_ = json;
 
   QJsonObject root;
   QString parseErr;
   if (!ParseJsonObject(json, &root, &parseErr)) {
+    daemonReachable_ = false;
+    daemonLastStatusJson_.clear();
     return false;
   }
 
@@ -1435,7 +1510,8 @@ bool VideoPage::SyncFromDaemonConfig() {
 
 bool VideoPage::SendDaemonVideoConfig() {
   const QString inDev = inputCombo_->currentData().toString();
-  const QString outDev = outputCombo_->currentData().toString();
+  const QString selectedOutDev = outputCombo_->currentData().toString();
+  QString outDev = selectedOutDev;
 
   if (outDev.isEmpty()) {
     ShowError("Start failed",
@@ -1443,6 +1519,37 @@ bool VideoPage::SendDaemonVideoConfig() {
               "suggested modprobe command).\n\n"
               "Note: studiocastd keeps the virtual device discoverable, but it "
               "cannot create the kernel module.");
+    return false;
+  }
+
+  const bool explicitInput = !inDev.isEmpty() && inDev != "auto";
+
+  if (explicitInput && outDev == "auto" &&
+      outputCombo_->findData(inDev) >= 0) {
+    bool resolvedDifferentOutput = false;
+    for (int i = 0; i < outputCombo_->count(); ++i) {
+      const QString candidate = outputCombo_->itemData(i).toString();
+      if (!candidate.isEmpty() && candidate != "auto" && candidate != inDev) {
+        outDev = candidate;
+        resolvedDifferentOutput = true;
+        break;
+      }
+    }
+    if (!resolvedDifferentOutput) {
+      ShowError("Start failed",
+                "The selected input is also the only writable v4l2loopback "
+                "output.\n\nChoose a different input device or create a "
+                "separate StudioCast output loopback.");
+      return false;
+    }
+  }
+
+  if (explicitInput && !outDev.isEmpty() && outDev != "auto" &&
+      inDev == outDev) {
+    ShowError("Start failed",
+              "The input camera and virtual output cannot be the same device.\n\n"
+              "Choose a physical/readable input device and a different "
+              "writable v4l2loopback output.");
     return false;
   }
 
@@ -1835,14 +1942,28 @@ void VideoPage::OnStart() {
     return;
   }
 
-  (void)SendDaemonVideoEffects();
-  (void)SendDaemonEnabled(true);
-
-  if (DebugGuiPreview()) {
-    GuiPreviewDbg("OnStart: daemon enabled=true; starting preview");
+  if (!SendDaemonVideoEffects()) {
+    if (DebugGuiPreview()) {
+      GuiPreviewDbg("OnStart: SendDaemonVideoEffects failed");
+    }
+    UpdateStatusText();
+    UpdateUiEnabled();
+    return;
   }
 
-  StartPreview();
+  if (!SendDaemonEnabled(true)) {
+    if (DebugGuiPreview()) {
+      GuiPreviewDbg("OnStart: SendDaemonEnabled(true) failed");
+    }
+    UpdateStatusText();
+    UpdateUiEnabled();
+    return;
+  }
+
+  if (DebugGuiPreview()) {
+    GuiPreviewDbg("OnStart: daemon enabled=true");
+  }
+
   UpdateStatusText();
   UpdateUiEnabled();
 }
@@ -1855,6 +1976,27 @@ void VideoPage::OnStop() {
   (void)SendDaemonEnabled(false);
   UpdateStatusText();
   UpdateUiEnabled();
+}
+
+void VideoPage::OnPreviewToggled(bool checked) {
+  if (!checked) {
+    StopPreview();
+    return;
+  }
+
+  DaemonVideoStatus st;
+  if (daemonReachable_ && !daemonLastStatusJson_.empty()) {
+    QString perr;
+    (void)ParseDaemonStatusJson(daemonLastStatusJson_, &st, &perr);
+  }
+
+  if (!daemonReachable_ || !st.enabled) {
+    if (preview_)
+      preview_->SetStatusText("Preview available when camera is started");
+    return;
+  }
+
+  StartPreview();
 }
 
 void VideoPage::OnPoll() {
@@ -2059,7 +2201,10 @@ void VideoPage::UpdateUiEnabled() {
   DaemonVideoStatus st;
   if (daemonReachable_ && !daemonLastStatusJson_.empty()) {
     QString perr;
-    (void)ParseDaemonStatusJson(daemonLastStatusJson_, &st, &perr);
+    if (!ParseDaemonStatusJson(daemonLastStatusJson_, &st, &perr)) {
+      daemonReachable_ = false;
+      daemonLastStatusJson_.clear();
+    }
   }
 
   const auto currentEnginePref =
@@ -2863,8 +3008,24 @@ void VideoPage::UpdateUiEnabled() {
                         !outputCombo_->currentData().toString().isEmpty());
   stopBtn_->setEnabled(daemonReachable_ && enabled);
 
-  // Keep preview in sync with enabled state.
-  if (enabled && daemonReachable_ && !previewCapture_.IsOpen()) {
+  const bool previewRequested =
+      previewCheck_ ? previewCheck_->isChecked() : false;
+
+  if (previewCheck_) {
+    previewCheck_->setEnabled(daemonReachable_);
+    if (!daemonReachable_) {
+      previewCheck_->setToolTip("Daemon unreachable.");
+    } else if (!enabled) {
+      previewCheck_->setToolTip("Start the camera before opening preview.");
+    } else {
+      previewCheck_->setToolTip(
+          "Opens the virtual camera in this GUI. This counts as a consumer.");
+    }
+  }
+
+  // Keep preview in sync with explicit user request.
+  if (enabled && daemonReachable_ && previewRequested &&
+      !previewCapture_.IsOpen()) {
     const auto now = std::chrono::steady_clock::now();
     if (previewAutoRetryFailures_ > 0 && now < previewAutoRetryAfter_) {
       if (DebugGuiPreview()) {
@@ -2879,10 +3040,11 @@ void VideoPage::UpdateUiEnabled() {
       StartPreview();
     }
   }
-  if (!enabled && previewCapture_.IsOpen()) {
+  if ((!enabled || !daemonReachable_ || !previewRequested) &&
+      previewCapture_.IsOpen()) {
     if (DebugGuiPreview()) {
-      GuiPreviewDbg(
-          "UpdateUiEnabled: enabled=0 but preview open -> StopPreview()");
+      GuiPreviewDbg("UpdateUiEnabled: preview not requested/available but "
+                    "open -> StopPreview()");
     }
     StopPreview();
   }
@@ -2894,19 +3056,27 @@ void VideoPage::UpdateStatusText() {
   daemonLastStatusJson_.clear();
 
   QString derr;
+  QString parseErr;
   std::string json;
   if (DaemonRequest("GET_STATUS", &json, &derr)) {
-    daemonReachable_ = true;
-    daemonLastStatusJson_ = json;
-    QString perr;
-    (void)ParseDaemonStatusJson(json, &st, &perr);
+    if (ParseDaemonStatusJson(json, &st, &parseErr)) {
+      daemonReachable_ = true;
+      daemonLastStatusJson_ = json;
+    }
   }
 
   std::ostringstream oss;
   oss << baseStatusText_ << "\n\n---\nDaemon (studiocastd)\n";
 
   if (!daemonReachable_) {
-    oss << "  status: not running / not reachable\n";
+    oss << "  status: not running / not reachable";
+    if (!parseErr.isEmpty())
+      oss << " (invalid status JSON)";
+    oss << "\n";
+    if (!derr.isEmpty())
+      oss << "  detail: " << derr.toStdString() << "\n";
+    if (!parseErr.isEmpty())
+      oss << "  detail: " << parseErr.toStdString() << "\n";
     oss << "\nTips\n"
         << "  - Start the daemon in a terminal:\n"
         << "      ./build/studiocastd\n"
@@ -2916,13 +3086,55 @@ void VideoPage::UpdateStatusText() {
     return;
   }
 
+  const QString pipelineState =
+      st.pipeline_state.isEmpty()
+          ? QString::fromUtf8(st.pipeline_running
+                                  ? "running"
+                                  : (st.pipeline_starting ? "starting"
+                                                          : "stopped"))
+          : st.pipeline_state;
+
   oss << "  enabled:    " << (st.enabled ? "yes" : "no") << "\n";
+  oss << "  virtual:    "
+      << (st.virtual_device_present ? "present" : "missing") << " / "
+      << (st.virtual_device_available ? "available" : "unavailable") << "\n";
+  if (!st.virtual_device_error.isEmpty()) {
+    oss << "  virtual err: " << st.virtual_device_error.toStdString() << "\n";
+  }
   oss << "  consumers:  " << st.consumer_count
       << (st.consumer_present ? " (present)" : "") << "\n";
-  oss << "  pipeline:   "
-      << (st.pipeline_running ? "running"
-                              : (st.pipeline_starting ? "starting" : "stopped"))
-      << "\n";
+  if (!st.consumer_error.isEmpty()) {
+    oss << "  consumer err: " << st.consumer_error.toStdString() << "\n";
+  }
+  oss << "  pipeline:   " << pipelineState.toStdString();
+  if (!st.pipeline_idle_reason.isEmpty())
+    oss << " (" << st.pipeline_idle_reason.toStdString() << ")";
+  if (st.pipeline_active_needed)
+    oss << " active_needed";
+  oss << "\n";
+  if (st.next_start_retry_ms >= 0) {
+    oss << "  retry in:   " << st.next_start_retry_ms << " ms\n";
+  }
+  if (!st.last_transition.isEmpty()) {
+    oss << "  transition: " << st.last_transition.toStdString();
+    if (st.last_transition_ms_ago >= 0)
+      oss << " (" << st.last_transition_ms_ago << " ms ago)";
+    oss << "\n";
+  }
+  if (st.stabilizing || st.thrash_events_10s > 0) {
+    oss << "  stabilize:  " << (st.stabilizing ? "yes" : "no")
+        << " thrash_events_10s=" << st.thrash_events_10s << "\n";
+  }
+  if (st.consumer_poll_ms > 0) {
+    oss << "  grace:      start=" << st.start_grace_ms
+        << " stop=" << st.stop_grace_ms << " min_run=" << st.min_run_ms
+        << " poll=" << st.consumer_poll_ms << " ms\n";
+  }
+  oss << "  starts:     attempts=" << st.pipeline_start_attempts
+      << " ok=" << st.pipeline_starts
+      << " failed=" << st.pipeline_start_failures
+      << " stops=" << st.pipeline_stops
+      << " restarts=" << st.pipeline_config_restarts << "\n";
 
   const auto fmtPixfmt = [](const QString &pixfmt) -> QString {
     if (pixfmt == QStringLiteral("RGB3"))

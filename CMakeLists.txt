@@ -625,6 +625,28 @@ if (BUILD_TESTING)
 
     add_test(NAME studiocast-maxine-paths-tests COMMAND studiocast-maxine-paths-tests)
 
+    add_executable(studiocast-ipc-tests
+            tests/ipc_client_tests.cpp
+    )
+
+    target_link_libraries(studiocast-ipc-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-ipc-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-ipc-tests)
+    studiocast_enable_sanitizers(studiocast-ipc-tests)
+
+    set_target_properties(studiocast-ipc-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-ipc-tests COMMAND studiocast-ipc-tests)
+
     add_executable(studiocast-video-tests
             tests/video_service_tests.cpp
     )

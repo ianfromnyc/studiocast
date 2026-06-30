@@ -72,6 +72,7 @@ private slots:
   void OnVignetteCenterOnFaceToggled(bool checked);
 
   void OnPoll();
+  void OnPreviewToggled(bool checked);
 
 private:
   void ShowError(const QString &title, const QString &details);
@@ -155,6 +156,7 @@ private:
   QPushButton *stopBtn_ = nullptr;
 
   VideoPreviewWidget *preview_ = nullptr;
+  QCheckBox *previewCheck_ = nullptr;
   QTimer *previewTimer_ = nullptr;
 
   QPlainTextEdit *statusText_ = nullptr;

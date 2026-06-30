@@ -1194,6 +1194,28 @@ int main(int argc, char **argv) {
           socketPath,
           [&](const std::string &line) -> std::string {
             const auto pc = ParseLine(line);
+            const auto persistVideo =
+                [&](const studiocast::video::VirtualCameraServiceConfig &newCfg,
+                    std::string *error) -> bool {
+              auto nextDaemonCfg = daemonCfg;
+              studiocast::config::ApplyVideoServiceConfigToDaemonConfig(
+                  newCfg, &nextDaemonCfg);
+              if (!studiocast::config::SaveDaemonConfig(nextDaemonCfg, error))
+                return false;
+              daemonCfg = nextDaemonCfg;
+              return true;
+            };
+            const auto persistAudio =
+                [&](const studiocast::audio::VirtualAudioServiceConfig &newCfg,
+                    std::string *error) -> bool {
+              auto nextDaemonCfg = daemonCfg;
+              studiocast::config::ApplyAudioServiceConfigToDaemonConfig(
+                  newCfg, &nextDaemonCfg);
+              if (!studiocast::config::SaveDaemonConfig(nextDaemonCfg, error))
+                return false;
+              daemonCfg = nextDaemonCfg;
+              return true;
+            };
 
             if (pc.cmd == "PING") {
               return std::string("OK {\"pong\":true}");
@@ -1281,12 +1303,14 @@ int main(int argc, char **argv) {
               std::lock_guard<std::mutex> lock(controlMu);
               auto newCfg = svc.Config();
               newCfg.enabled = enabled;
-              svc.UpdateConfig(newCfg);
 
-              studiocast::config::ApplyVideoServiceConfigToDaemonConfig(
-                  newCfg, &daemonCfg);
               std::string perr;
-              (void)studiocast::config::SaveDaemonConfig(daemonCfg, &perr);
+              if (!persistVideo(newCfg, &perr)) {
+                return std::string("ERR ") +
+                       ErrorJson("failed to save config: " + perr);
+              }
+
+              svc.UpdateConfig(newCfg);
 
               return std::string("OK {\"enabled\":") + BoolJson(enabled) + "}";
             }
@@ -1295,12 +1319,14 @@ int main(int argc, char **argv) {
               std::lock_guard<std::mutex> lock(controlMu);
               auto newCfg = audioSvc.Config();
               newCfg.enabled = true;
-              audioSvc.UpdateConfig(newCfg);
 
-              studiocast::config::ApplyAudioServiceConfigToDaemonConfig(
-                  newCfg, &daemonCfg);
               std::string perr;
-              (void)studiocast::config::SaveDaemonConfig(daemonCfg, &perr);
+              if (!persistAudio(newCfg, &perr)) {
+                return std::string("ERR ") +
+                       ErrorJson("failed to save config: " + perr);
+              }
+
+              audioSvc.UpdateConfig(newCfg);
 
               return std::string("OK {\"enabled\":true}");
             }
@@ -1309,12 +1335,14 @@ int main(int argc, char **argv) {
               std::lock_guard<std::mutex> lock(controlMu);
               auto newCfg = audioSvc.Config();
               newCfg.enabled = false;
-              audioSvc.UpdateConfig(newCfg);
 
-              studiocast::config::ApplyAudioServiceConfigToDaemonConfig(
-                  newCfg, &daemonCfg);
               std::string perr;
-              (void)studiocast::config::SaveDaemonConfig(daemonCfg, &perr);
+              if (!persistAudio(newCfg, &perr)) {
+                return std::string("ERR ") +
+                       ErrorJson("failed to save config: " + perr);
+              }
+
+              audioSvc.UpdateConfig(newCfg);
 
               return std::string("OK {\"enabled\":false}");
             }
@@ -1339,12 +1367,13 @@ int main(int argc, char **argv) {
                                               : jerr);
               }
 
-              audioSvc.UpdateConfig(newCfg);
-
-              studiocast::config::ApplyAudioServiceConfigToDaemonConfig(
-                  newCfg, &daemonCfg);
               std::string perr;
-              (void)studiocast::config::SaveDaemonConfig(daemonCfg, &perr);
+              if (!persistAudio(newCfg, &perr)) {
+                return std::string("ERR ") +
+                       ErrorJson("failed to save config: " + perr);
+              }
+
+              audioSvc.UpdateConfig(newCfg);
 
               return std::string("OK ") +
                      AppendWarningsToObjectJson(AudioConfigToJson(newCfg),
@@ -1381,12 +1410,13 @@ int main(int argc, char **argv) {
                 newCfg.always_on = v;
               }
 
-              svc.UpdateConfig(newCfg);
-
-              studiocast::config::ApplyVideoServiceConfigToDaemonConfig(
-                  newCfg, &daemonCfg);
               std::string perr;
-              (void)studiocast::config::SaveDaemonConfig(daemonCfg, &perr);
+              if (!persistVideo(newCfg, &perr)) {
+                return std::string("ERR ") +
+                       ErrorJson("failed to save config: " + perr);
+              }
+
+              svc.UpdateConfig(newCfg);
 
               return std::string("OK ") + ConfigToJson(newCfg);
             }
@@ -1430,12 +1460,13 @@ int main(int argc, char **argv) {
               }
               newCfg.pipeline.effects = bfx;
 
-              svc.UpdateConfig(newCfg);
-
-              studiocast::config::ApplyVideoServiceConfigToDaemonConfig(
-                  newCfg, &daemonCfg);
               std::string perr;
-              (void)studiocast::config::SaveDaemonConfig(daemonCfg, &perr);
+              if (!persistVideo(newCfg, &perr)) {
+                return std::string("ERR ") +
+                       ErrorJson("failed to save config: " + perr);
+              }
+
+              svc.UpdateConfig(newCfg);
 
               return std::string("OK ") +
                      AppendWarningsToObjectJson(ConfigToJson(newCfg), warnings);
@@ -1623,12 +1654,13 @@ int main(int argc, char **argv) {
               // Persist via canonical schema.
               newCfg.pipeline.effects = bfx;
 
-              svc.UpdateConfig(newCfg);
-
-              studiocast::config::ApplyVideoServiceConfigToDaemonConfig(
-                  newCfg, &daemonCfg);
               std::string perr;
-              (void)studiocast::config::SaveDaemonConfig(daemonCfg, &perr);
+              if (!persistVideo(newCfg, &perr)) {
+                return std::string("ERR ") +
+                       ErrorJson("failed to save config: " + perr);
+              }
+
+              svc.UpdateConfig(newCfg);
 
               return std::string("OK ") +
                      AppendWarningsToObjectJson(ConfigToJson(newCfg), warnings);
