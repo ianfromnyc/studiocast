@@ -155,6 +155,7 @@ Notes:
 * Maxine install hints: `docs/maxine_install.md` or `build/studiocast-maxine install-hints`
 * Open Video model packs: `build/studiocast-open install-hints` and `build/studiocast-open list-models`
 * Support bundle: `build/studiocastctl debug-report --out studiocast-debug-report.txt`
+* Manual hardware/GUI test plan: `docs/MANUAL_TESTING.md`
 
 ## Daemon mode (studiocastd)
 
