@@ -34,6 +34,7 @@
 #include "core/audio/virtual_speaker.h"
 #include "core/ipc/daemon_client.h"
 #include "core/maxine/reason_codes.h"
+#include "gui/text_edit_utils.h"
 
 namespace studiocast::gui {
 namespace {
@@ -972,7 +973,8 @@ void AudioPage::RefreshSources() {
   cachedSources_ = studiocast::audio::pulse::ListSourcesDetailed(&err);
   if (!err.empty() && statusText_) {
     // Non-fatal warning, but useful
-    statusText_->setPlainText(QString::fromStdString("Warning: " + err));
+    SetPlainTextPreservingScroll(statusText_,
+                                 QString::fromStdString("Warning: " + err));
   }
 
   std::optional<std::string> defaultSource;
@@ -1071,7 +1073,8 @@ void AudioPage::RefreshSpeakerTargets() {
   std::string err;
   const auto sinks = studiocast::audio::pulse::ListSinks(&err);
   if (!err.empty() && statusText_) {
-    statusText_->setPlainText(QString::fromStdString("Warning: " + err));
+    SetPlainTextPreservingScroll(statusText_,
+                                 QString::fromStdString("Warning: " + err));
   }
 
   std::optional<std::string> defaultSink;
@@ -1344,7 +1347,7 @@ void AudioPage::RefreshStatus() {
       text += "\n\n---\nDaemon audio status:\n";
       text += daemonStatusText_;
     }
-    statusText_->setPlainText(text);
+    SetPlainTextPreservingScroll(statusText_, text);
   }
 
   // Enable/disable buttons based on current loaded modules (best-effort).

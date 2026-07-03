@@ -12,6 +12,7 @@
 #include <algorithm>
 
 #include "gui/status/daemon_status_snapshot.h"
+#include "gui/text_edit_utils.h"
 
 namespace studiocast::gui {
 namespace {
@@ -454,9 +455,10 @@ void EnginesModelsPage::UpdateEngineCard(EngineCard *card,
 
   card->summary->setText(EngineSummary(engine, selectedByPreference));
   card->models->setText(ModelSummary(engine));
-  card->details->setPlainText(EngineDetailsText(engine));
-  card->installHints->setPlainText(InstallHintsText(engine));
-  card->rawDetails->setPlainText(
+  SetPlainTextPreservingScroll(card->details, EngineDetailsText(engine));
+  SetPlainTextPreservingScroll(card->installHints, InstallHintsText(engine));
+  SetPlainTextPreservingScroll(
+      card->rawDetails,
       engine.rawJson.trimmed().isEmpty()
           ? QStringLiteral("No raw engine diagnostics reported.")
           : engine.rawJson);

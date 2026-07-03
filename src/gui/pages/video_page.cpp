@@ -52,6 +52,7 @@
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/effect_descriptors.h"
 #include "core/video/v4l2loopback.h"
+#include "gui/text_edit_utils.h"
 
 namespace studiocast::gui {
 
@@ -935,7 +936,8 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   backgroundCombo_->addItem("Replace", "replace");
   vbRow->addWidget(backgroundCombo_, 1);
   vbRow->addSpacing(12);
-  vbRow->addWidget(new QLabel("Blur strength:", vbBox));
+  backgroundStrengthLabel_ = new QLabel("Blur strength:", vbBox);
+  vbRow->addWidget(backgroundStrengthLabel_);
   backgroundStrengthSpin_ = new QSpinBox(vbBox);
   backgroundStrengthSpin_->setRange(0, 100);
   backgroundStrengthSpin_->setValue(50);
@@ -956,14 +958,16 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   vbModelCombo_->setVisible(false);
 
   auto *vbParamRow = new QHBoxLayout();
-  vbParamRow->addWidget(new QLabel("Remove color (#RRGGBB):", vbBox));
+  backgroundRemoveColorLabel_ = new QLabel("Remove color (#RRGGBB):", vbBox);
+  vbParamRow->addWidget(backgroundRemoveColorLabel_);
   backgroundRemoveColorEdit_ = new QLineEdit(vbBox);
   backgroundRemoveColorEdit_->setPlaceholderText("#000000");
   backgroundRemoveColorEdit_->setMaximumWidth(110);
   vbParamRow->addWidget(backgroundRemoveColorEdit_);
 
   vbParamRow->addSpacing(12);
-  vbParamRow->addWidget(new QLabel("Replace image:", vbBox));
+  backgroundReplaceImageLabel_ = new QLabel("Replace image:", vbBox);
+  vbParamRow->addWidget(backgroundReplaceImageLabel_);
   backgroundReplaceImageEdit_ = new QLineEdit(vbBox);
   vbParamRow->addWidget(backgroundReplaceImageEdit_, 1);
   browseReplaceImageBtn_ = new QPushButton("Browse…", vbBox);
@@ -1295,6 +1299,31 @@ void VideoPage::ShowError(const QString &title, const QString &details) {
   QMessageBox::critical(this, title, details);
 }
 
+void VideoPage::UpdateBackgroundModeOptionVisibility() {
+  const QString bgMode =
+      backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  const bool showBlur = (bgMode == QStringLiteral("blur"));
+  const bool showRemove = (bgMode == QStringLiteral("remove"));
+  const bool showReplace = (bgMode == QStringLiteral("replace"));
+
+  if (backgroundStrengthLabel_)
+    backgroundStrengthLabel_->setVisible(showBlur);
+  if (backgroundStrengthSpin_)
+    backgroundStrengthSpin_->setVisible(showBlur);
+
+  if (backgroundRemoveColorLabel_)
+    backgroundRemoveColorLabel_->setVisible(showRemove);
+  if (backgroundRemoveColorEdit_)
+    backgroundRemoveColorEdit_->setVisible(showRemove);
+
+  if (backgroundReplaceImageLabel_)
+    backgroundReplaceImageLabel_->setVisible(showReplace);
+  if (backgroundReplaceImageEdit_)
+    backgroundReplaceImageEdit_->setVisible(showReplace);
+  if (browseReplaceImageBtn_)
+    browseReplaceImageBtn_->setVisible(showReplace);
+}
+
 void VideoPage::Refresh() {
   const auto rep = studiocast::video::ProbeLoopback();
   baseStatusText_ = rep.ToText();
@@ -1624,14 +1653,15 @@ bool VideoPage::SyncFromDaemonConfig() {
   // Enable per-effect parameter controls.
   const QString bgMode =
       backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  UpdateBackgroundModeOptionVisibility();
   if (backgroundStrengthSpin_)
-    backgroundStrengthSpin_->setEnabled(bgMode == "blur");
+    backgroundStrengthSpin_->setEnabled(bgMode == QStringLiteral("blur"));
   if (backgroundRemoveColorEdit_)
-    backgroundRemoveColorEdit_->setEnabled(bgMode == "remove");
+    backgroundRemoveColorEdit_->setEnabled(bgMode == QStringLiteral("remove"));
   if (backgroundReplaceImageEdit_)
-    backgroundReplaceImageEdit_->setEnabled(bgMode == "replace");
+    backgroundReplaceImageEdit_->setEnabled(bgMode == QStringLiteral("replace"));
   if (browseReplaceImageBtn_)
-    browseReplaceImageBtn_->setEnabled(bgMode == "replace");
+    browseReplaceImageBtn_->setEnabled(bgMode == QStringLiteral("replace"));
 
   if (autoFrameZoomSlider_ && autoFrameCheck_)
     autoFrameZoomSlider_->setEnabled(autoFrameCheck_->isChecked());
@@ -1858,14 +1888,15 @@ void VideoPage::OnBackgroundChanged(int /*index*/) {
   // Enable per-effect parameter controls.
   const QString bg =
       backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  UpdateBackgroundModeOptionVisibility();
   if (backgroundStrengthSpin_)
-    backgroundStrengthSpin_->setEnabled(bg == "blur");
+    backgroundStrengthSpin_->setEnabled(bg == QStringLiteral("blur"));
   if (backgroundRemoveColorEdit_)
-    backgroundRemoveColorEdit_->setEnabled(bg == "remove");
+    backgroundRemoveColorEdit_->setEnabled(bg == QStringLiteral("remove"));
   if (backgroundReplaceImageEdit_)
-    backgroundReplaceImageEdit_->setEnabled(bg == "replace");
+    backgroundReplaceImageEdit_->setEnabled(bg == QStringLiteral("replace"));
   if (browseReplaceImageBtn_)
-    browseReplaceImageBtn_->setEnabled(bg == "replace");
+    browseReplaceImageBtn_->setEnabled(bg == QStringLiteral("replace"));
   UpdateUiEnabled();
   (void)SendDaemonVideoEffects();
 }
@@ -2532,11 +2563,13 @@ void VideoPage::UpdateUiEnabled() {
         note += QStringLiteral("\n\n");
       }
 
-      diagnosticsText_->setPlainText(
+      SetPlainTextPreservingScroll(
+          diagnosticsText_,
           note + QString::fromUtf8(
                      QJsonDocument(diag).toJson(QJsonDocument::Indented)));
     } else {
-      diagnosticsText_->setPlainText("(failed to parse status JSON)\n" + perr);
+      SetPlainTextPreservingScroll(
+          diagnosticsText_, "(failed to parse status JSON)\n" + perr);
     }
   }
 
@@ -2696,6 +2729,7 @@ void VideoPage::UpdateUiEnabled() {
   // Virtual Background
   const QString vbMode =
       backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  UpdateBackgroundModeOptionVisibility();
   const bool vbBlurAvail =
       effectAvailable(QStringLiteral("virtual_background.blur"));
   const bool vbRemoveAvail =
@@ -2738,16 +2772,41 @@ void VideoPage::UpdateUiEnabled() {
     }
   }
   if (backgroundStrengthSpin_ && backgroundCombo_) {
-    backgroundStrengthSpin_->setEnabled(vbMode == "blur" && vbBlurAvail);
+    const bool on = (vbMode == QStringLiteral("blur"));
+    const QString tip =
+        on && !vbBlurAvail
+            ? effectUnavailableTooltip(QStringLiteral("virtual_background.blur"))
+            : QString();
+    backgroundStrengthSpin_->setEnabled(on);
+    backgroundStrengthSpin_->setToolTip(tip);
+    if (backgroundStrengthLabel_)
+      backgroundStrengthLabel_->setToolTip(tip);
   }
   if (backgroundRemoveColorEdit_ && backgroundCombo_) {
-    backgroundRemoveColorEdit_->setEnabled(vbMode == "remove" && vbRemoveAvail);
+    const bool on = (vbMode == QStringLiteral("remove"));
+    const QString tip =
+        on && !vbRemoveAvail
+            ? effectUnavailableTooltip(QStringLiteral("virtual_background.remove"))
+            : QString();
+    backgroundRemoveColorEdit_->setEnabled(on);
+    backgroundRemoveColorEdit_->setToolTip(tip);
+    if (backgroundRemoveColorLabel_)
+      backgroundRemoveColorLabel_->setToolTip(tip);
   }
   if (backgroundReplaceImageEdit_ && backgroundCombo_) {
-    const bool on = vbMode == "replace" && vbReplaceAvail;
+    const bool on = (vbMode == QStringLiteral("replace"));
+    const QString tip =
+        on && !vbReplaceAvail
+            ? effectUnavailableTooltip(QStringLiteral("virtual_background.replace"))
+            : QString();
     backgroundReplaceImageEdit_->setEnabled(on);
-    if (browseReplaceImageBtn_)
+    backgroundReplaceImageEdit_->setToolTip(tip);
+    if (backgroundReplaceImageLabel_)
+      backgroundReplaceImageLabel_->setToolTip(tip);
+    if (browseReplaceImageBtn_) {
       browseReplaceImageBtn_->setEnabled(on);
+      browseReplaceImageBtn_->setToolTip(tip);
+    }
   }
 
   // Virtual Background model selection (Open Source-only).
@@ -3252,7 +3311,8 @@ void VideoPage::UpdateStatusText() {
         << "      ./build/studiocastd\n"
         << "  - Or enable the systemd user service (packaging step).\n";
 
-    statusText_->setPlainText(QString::fromStdString(oss.str()));
+    SetPlainTextPreservingScroll(statusText_,
+                                 QString::fromStdString(oss.str()));
     return;
   }
 
@@ -3509,7 +3569,8 @@ void VideoPage::UpdateStatusText() {
       << "  - Preview counts as a consumer: it opens the v4l2loopback device "
          "for capture.\n";
 
-  statusText_->setPlainText(QString::fromStdString(oss.str()));
+  SetPlainTextPreservingScroll(statusText_,
+                               QString::fromStdString(oss.str()));
 }
 
 } // namespace studiocast::gui

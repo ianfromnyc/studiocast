@@ -29,6 +29,7 @@
 #include "core/ipc/daemon_client.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "gui/status/daemon_status_snapshot.h"
+#include "gui/text_edit_utils.h"
 
 namespace studiocast::gui {
 namespace {
@@ -482,8 +483,7 @@ void AdvancedPage::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
                                   ? QStringLiteral("Unknown")
                                   : snapshot.socketPath.trimmed());
   }
-  if (rawStatusText_ && rawStatusText_->toPlainText() != currentRawStatus_)
-    rawStatusText_->setPlainText(currentRawStatus_);
+  SetPlainTextPreservingScroll(rawStatusText_, currentRawStatus_);
 
   QJsonParseError parseError;
   const QJsonDocument doc =
@@ -940,7 +940,8 @@ void AdvancedPage::RefreshPulseState() {
   hasVirtualSpeakersLoopback_ = false;
 
   if (localAudioStatusText_) {
-    localAudioStatusText_->setPlainText(
+    SetPlainTextPreservingScroll(
+        localAudioStatusText_,
         QString::fromStdString(studiocast::audio::StatusText()));
   }
 

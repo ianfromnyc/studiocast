@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "gui/status/daemon_status_snapshot.h"
+#include "gui/text_edit_utils.h"
 #include "studiocast/version.h"
 
 namespace studiocast::gui {
@@ -707,9 +708,9 @@ void SupportPage::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
   currentInstallHints_ = BuildInstallHintsText(snapshot);
   currentRawStatus_ = snapshot.RawDiagnosticsText();
 
-  issueDetails_->setPlainText(currentIssueDetails_);
-  installHints_->setPlainText(currentInstallHints_);
-  rawStatus_->setPlainText(currentRawStatus_);
+  SetPlainTextPreservingScroll(issueDetails_, currentIssueDetails_);
+  SetPlainTextPreservingScroll(installHints_, currentInstallHints_);
+  SetPlainTextPreservingScroll(rawStatus_, currentRawStatus_);
 }
 
 void SupportPage::GenerateSupportReport() {

@@ -77,6 +77,7 @@ private slots:
 private:
   void ShowError(const QString &title, const QString &details);
   void UpdateUiEnabled();
+  void UpdateBackgroundModeOptionVisibility();
   void UpdateStatusText();
   bool SyncFromDaemonConfig();
 
@@ -104,12 +105,15 @@ private:
   QLineEdit *suggestedCmdEdit_ = nullptr;
 
   QComboBox *backgroundCombo_ = nullptr;
+  QLabel *backgroundStrengthLabel_ = nullptr;
   QSpinBox *backgroundStrengthSpin_ = nullptr;
 
   QLabel *vbModelLabel_ = nullptr;
   QComboBox *vbModelCombo_ = nullptr;
 
+  QLabel *backgroundRemoveColorLabel_ = nullptr;
   QLineEdit *backgroundRemoveColorEdit_ = nullptr;  // #RRGGBB
+  QLabel *backgroundReplaceImageLabel_ = nullptr;
   QLineEdit *backgroundReplaceImageEdit_ = nullptr; // path (PPM/P6 for now)
   QPushButton *browseReplaceImageBtn_ = nullptr;
 
