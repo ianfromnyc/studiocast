@@ -791,6 +791,16 @@ QString DaemonStatusSnapshot::ServiceDetail() const {
                          : parts.join(QStringLiteral(" - "));
 }
 
+QString DaemonStatusSnapshot::RawDiagnosticsText() const {
+  if (!rawJson.trimmed().isEmpty())
+    return rawJson;
+  if (!transportError.trimmed().isEmpty())
+    return QStringLiteral("Daemon unavailable: %1").arg(transportError);
+  if (!parseError.trimmed().isEmpty())
+    return QStringLiteral("Daemon status parse error: %1").arg(parseError);
+  return QStringLiteral("Daemon status has not been read.");
+}
+
 QString ReadinessLabel(ReadinessState state) {
   switch (state) {
   case ReadinessState::Ready:

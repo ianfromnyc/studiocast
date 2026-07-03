@@ -100,6 +100,7 @@ struct DaemonStatusSnapshot {
 
   QString ServiceSummary() const;
   QString ServiceDetail() const;
+  QString RawDiagnosticsText() const;
 };
 
 QString ReadinessLabel(ReadinessState state);

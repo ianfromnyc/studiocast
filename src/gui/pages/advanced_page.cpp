@@ -63,17 +63,6 @@ void CopyText(const QString &text) {
     clipboard->setText(text);
 }
 
-QString RawStatusText(const DaemonStatusSnapshot &snapshot) {
-  if (!snapshot.rawJson.trimmed().isEmpty())
-    return snapshot.rawJson;
-  if (!snapshot.transportError.trimmed().isEmpty())
-    return QStringLiteral("Daemon unavailable: %1").arg(snapshot.transportError);
-  if (!snapshot.parseError.trimmed().isEmpty())
-    return QStringLiteral("Daemon status parse error: %1")
-        .arg(snapshot.parseError);
-  return QStringLiteral("Daemon status has not been read.");
-}
-
 QString HumanDaemonError(const QString &raw) {
   const QString trimmed = raw.trimmed();
   if (trimmed.isEmpty())
@@ -471,7 +460,7 @@ AdvancedPage::AdvancedPage(QWidget *parent) : QWidget(parent) {
 
 void AdvancedPage::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
   daemonReachable_ = snapshot.reachable;
-  currentRawStatus_ = RawStatusText(snapshot);
+  currentRawStatus_ = snapshot.RawDiagnosticsText();
 
   if (serviceStateLabel_) {
     serviceStateLabel_->setText(snapshot.ServiceSummary());

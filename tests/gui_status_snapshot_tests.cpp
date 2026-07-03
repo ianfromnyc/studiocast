@@ -238,7 +238,21 @@ bool TestInvalidJsonPreservesRawPayload() {
   return Expect(s.reachable, "parse errors still came from a reachable daemon") &&
          Expect(!s.parsed, "invalid json should not parse") &&
          Expect(s.rawJson == json, "invalid raw json should be preserved") &&
-         Expect(!s.parseError.isEmpty(), "parse error should be reported");
+         Expect(!s.parseError.isEmpty(), "parse error should be reported") &&
+         Expect(s.RawDiagnosticsText() == json,
+                "raw diagnostics should preserve invalid raw payloads");
+}
+
+bool TestRawDiagnosticsFallbacks() {
+  const auto unreachable = studiocast::gui::DaemonStatusSnapshot::Unreachable(
+      QStringLiteral("connect failed"));
+  studiocast::gui::DaemonStatusSnapshot empty;
+  return Expect(unreachable.RawDiagnosticsText() ==
+                    QStringLiteral("Daemon unavailable: connect failed"),
+                "unreachable raw diagnostics should include transport error") &&
+         Expect(empty.RawDiagnosticsText() ==
+                    QStringLiteral("Daemon status has not been read."),
+                "empty raw diagnostics should explain status is unread");
 }
 
 } // namespace
@@ -249,5 +263,6 @@ int main() {
   ok = TestStatusJsonCompatibilityShapes() && ok;
   ok = TestEngineModelDetailsAndConfiguredSelections() && ok;
   ok = TestInvalidJsonPreservesRawPayload() && ok;
+  ok = TestRawDiagnosticsFallbacks() && ok;
   return ok ? 0 : 1;
 }

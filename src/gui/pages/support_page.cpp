@@ -96,17 +96,6 @@ void ClearLayout(QLayout *layout) {
   }
 }
 
-QString RawStatusText(const DaemonStatusSnapshot &snapshot) {
-  if (!snapshot.rawJson.trimmed().isEmpty())
-    return snapshot.rawJson;
-  if (!snapshot.transportError.trimmed().isEmpty())
-    return QStringLiteral("Daemon unavailable: %1").arg(snapshot.transportError);
-  if (!snapshot.parseError.trimmed().isEmpty())
-    return QStringLiteral("Daemon status parse error: %1")
-        .arg(snapshot.parseError);
-  return QStringLiteral("Daemon status has not been read.");
-}
-
 QString SeverityProperty(IssueSeverity severity) {
   return severity == IssueSeverity::Error ? QStringLiteral("error")
                                           : QStringLiteral("warning");
@@ -716,7 +705,7 @@ void SupportPage::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
 
   currentIssueDetails_ = BuildIssueDetailsText(snapshot, issues);
   currentInstallHints_ = BuildInstallHintsText(snapshot);
-  currentRawStatus_ = RawStatusText(snapshot);
+  currentRawStatus_ = snapshot.RawDiagnosticsText();
 
   issueDetails_->setPlainText(currentIssueDetails_);
   installHints_->setPlainText(currentInstallHints_);
