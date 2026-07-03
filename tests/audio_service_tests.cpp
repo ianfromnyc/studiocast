@@ -1355,6 +1355,63 @@ bool TestVirtualSpeakerLoopbackRejectsVirtualTarget() {
   return true;
 }
 
+bool TestVirtualSpeakerLoopbackRejectsVirtualTargetBeforeStop() {
+  ScopedXdgStateHome state_home;
+  VirtualSpeakerState initial;
+  initial.null_sink_module_id = 10;
+  initial.loopback_module_id = 42;
+  initial.loopback_target_sink_name = "physical_test_sink";
+  std::string err;
+  if (!studiocast::audio::SaveVirtualSpeakerState(initial, &err)) {
+    std::cerr << "failed to seed virtual speaker state: " << err << "\n";
+    return false;
+  }
+
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl --version 2>&1")
+      return ExecResult(0, "pactl 16.1\n");
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  err.clear();
+  const bool ok =
+      studiocast::audio::StartSpeakerLoopback("studiocast_sink", 10, &err);
+  if (ok || err.find("feedback loop") == std::string::npos) {
+    std::cerr
+        << "expected virtual speaker target to be rejected before stop; ok="
+        << ok << " error='" << err << "'\n";
+    return false;
+  }
+
+  const auto state = studiocast::audio::LoadVirtualSpeakerState();
+  if (!state.loopback_module_id || *state.loopback_module_id != 42 ||
+      !state.loopback_target_sink_name ||
+      *state.loopback_target_sink_name != "physical_test_sink") {
+    std::cerr << "invalid target changed active speaker route state; id="
+              << (state.loopback_module_id
+                      ? std::to_string(*state.loopback_module_id)
+                      : std::string("<none>"))
+              << " target='"
+              << (state.loopback_target_sink_name
+                      ? *state.loopback_target_sink_name
+                      : std::string("<none>"))
+              << "'\n";
+    return false;
+  }
+
+  if (CommandWasRun(commands, "pactl unload-module") ||
+      CommandWasRun(commands, "pactl load-module")) {
+    std::cerr << "invalid target performed destructive pactl operation\n";
+    for (const auto &command : commands)
+      std::cerr << "  " << command << "\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestVirtualSpeakerLoopbackRestartPropagatesStopFailure() {
   ScopedXdgStateHome state_home;
   VirtualSpeakerState initial;
@@ -4102,6 +4159,8 @@ int main() {
        &TestVirtualSpeakerLoopbackFallsBackFromVirtualDefaultSink},
       {"virtual speaker loopback rejects virtual target",
        &TestVirtualSpeakerLoopbackRejectsVirtualTarget},
+      {"virtual speaker loopback rejects virtual target before stop",
+       &TestVirtualSpeakerLoopbackRejectsVirtualTargetBeforeStop},
       {"virtual speaker loopback restart propagates stop failure",
        &TestVirtualSpeakerLoopbackRestartPropagatesStopFailure},
       {"destroy virtual speaker propagates null sink unload failure",

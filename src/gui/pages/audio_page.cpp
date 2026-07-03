@@ -34,6 +34,7 @@
 namespace studiocast::gui {
 namespace {
 constexpr const char *kStudioCastVirtualMicName = "studiocast_mic";
+constexpr const char *kAutoPulseSource = "auto";
 
 bool IsBadLoopbackSourceCandidate(const std::string &name) {
   // Avoid obvious feedback loops / non-mic candidates:
@@ -75,8 +76,11 @@ QString FormatMaxineReasonCode(const QString &code) {
 bool DaemonRequest(const std::string &request, std::string *outJson,
                    QString *outErr) {
   studiocast::ipc::DaemonCallResult res;
+  studiocast::ipc::DaemonCallOptions options;
+  options.connect_timeout_ms = 500;
+  options.io_timeout_ms = 2500;
   std::string err;
-  if (!studiocast::ipc::DaemonCall(request, &res, &err)) {
+  if (!studiocast::ipc::DaemonCall(request, &res, &err, options)) {
     if (outErr)
       *outErr = QString::fromStdString(err);
     return false;
@@ -594,6 +598,8 @@ void AudioPage::RefreshSources() {
   if (!sourceCombo_)
     return;
 
+  updatingSourceUi_ = true;
+  sourceCombo_->blockSignals(true);
   sourceCombo_->clear();
   if (portCombo_) {
     portCombo_->clear();
@@ -605,12 +611,16 @@ void AudioPage::RefreshSources() {
   if (!studiocast::audio::pulse::PactlAvailable(&pactlDetails)) {
     sourceCombo_->addItem("pactl not available");
     sourceCombo_->setEnabled(false);
+    sourceCombo_->blockSignals(false);
+    updatingSourceUi_ = false;
     ShowError("Audio", QString("pactl not available.\n\nDetails:\n%1")
                            .arg(QString::fromStdString(pactlDetails)));
     return;
   }
 
   sourceCombo_->setEnabled(true);
+  sourceCombo_->addItem("Auto (Pulse default)",
+                        QVariant(QString::fromLatin1(kAutoPulseSource)));
 
   std::string err;
   cachedSources_ = studiocast::audio::pulse::ListSourcesDetailed(&err);
@@ -625,8 +635,10 @@ void AudioPage::RefreshSources() {
     defaultSource = studiocast::audio::pulse::GetDefaultSourceName(&derr);
   }
 
-  int defaultIndex = -1;
-  int added = 0;
+  const QString daemonSource = daemonSource_.trimmed();
+  int defaultIndex = 0;
+  int daemonIndex = -1;
+  int added = 1;
 
   for (const auto &s : cachedSources_) {
     if (s.name.empty())
@@ -643,22 +655,51 @@ void AudioPage::RefreshSources() {
     if (defaultSource && s.name == *defaultSource) {
       defaultIndex = added;
     }
+    if (!daemonSource.isEmpty() &&
+        daemonSource != QString::fromLatin1(kAutoPulseSource) &&
+        s.name == daemonSource.toStdString()) {
+      daemonIndex = added;
+    }
     ++added;
   }
 
-  if (added == 0) {
+  if (added == 1) {
     sourceCombo_->addItem("<no suitable sources found>");
-    sourceCombo_->setEnabled(false);
-    if (portCombo_)
-      portCombo_->setEnabled(false);
-    return;
   }
 
-  sourceCombo_->setCurrentIndex(defaultIndex >= 0 ? defaultIndex : 0);
-  OnSourceChanged(sourceCombo_->currentIndex());
+  int targetIndex = 0;
+  if (daemonSource.isEmpty() ||
+      daemonSource == QString::fromLatin1(kAutoPulseSource)) {
+    targetIndex = 0;
+  } else if (daemonIndex >= 0) {
+    targetIndex = daemonIndex;
+  } else {
+    const int insertAt = std::min(1, sourceCombo_->count());
+    sourceCombo_->insertItem(insertAt,
+                             QStringLiteral("<missing: %1>").arg(daemonSource),
+                             QVariant(daemonSource));
+    targetIndex = insertAt;
+  }
+
+  if (daemonSource.isEmpty() && defaultIndex >= 0) {
+    // Before the first daemon status arrives, show the current Pulse default
+    // without writing it back to the daemon.
+    targetIndex = defaultIndex;
+  }
+
+  sourceCombo_->setCurrentIndex(targetIndex);
+  sourceCombo_->blockSignals(false);
+  updatingSourceUi_ = false;
+  UpdatePortControlsForSelectedSource(false);
 }
 
 void AudioPage::OnSourceChanged(int /*index*/) {
+  if (updatingSourceUi_)
+    return;
+  UpdatePortControlsForSelectedSource(true);
+}
+
+void AudioPage::UpdatePortControlsForSelectedSource(bool pushDaemon) {
   if (!sourceCombo_)
     return;
   if (portCombo_) {
@@ -673,6 +714,11 @@ void AudioPage::OnSourceChanged(int /*index*/) {
       sourceCombo_->currentData().toString().toStdString();
   if (srcName.empty())
     return;
+  if (srcName == kAutoPulseSource) {
+    if (pushDaemon)
+      PushDaemonSourceSelection();
+    return;
+  }
 
   const studiocast::audio::pulse::PactlSourceInfo *info = nullptr;
   for (const auto &s : cachedSources_) {
@@ -686,14 +732,16 @@ void AudioPage::OnSourceChanged(int /*index*/) {
 
   if (!portCombo_) {
     // Port selection is an advanced/legacy control.
-    PushDaemonSourceSelection();
+    if (pushDaemon)
+      PushDaemonSourceSelection();
     return;
   }
 
   if (info->ports.empty()) {
     // Many sources will have no explicit ports; that's fine.
     portCombo_->setEnabled(false);
-    PushDaemonSourceSelection();
+    if (pushDaemon)
+      PushDaemonSourceSelection();
     return;
   }
 
@@ -726,7 +774,45 @@ void AudioPage::OnSourceChanged(int /*index*/) {
   else
     portCombo_->setCurrentIndex(0);
 
-  PushDaemonSourceSelection();
+  if (pushDaemon)
+    PushDaemonSourceSelection();
+}
+
+void AudioPage::SyncSourceSelectionFromDaemon(const QString &source) {
+  QString wanted = source.trimmed();
+  if (wanted.isEmpty())
+    wanted = QString::fromLatin1(kAutoPulseSource);
+  daemonSource_ = wanted;
+
+  if (!sourceCombo_ || !sourceCombo_->isEnabled())
+    return;
+
+  updatingSourceUi_ = true;
+  sourceCombo_->blockSignals(true);
+  int idx = sourceCombo_->findData(wanted);
+  if (idx < 0 && wanted != QString::fromLatin1(kAutoPulseSource)) {
+    for (int i = sourceCombo_->count() - 1; i >= 0; --i) {
+      if (sourceCombo_->itemText(i).startsWith(QStringLiteral("<missing:"))) {
+        sourceCombo_->removeItem(i);
+      }
+    }
+    idx = sourceCombo_->findData(wanted);
+    if (idx < 0) {
+      const int insertAt = std::min(1, sourceCombo_->count());
+      sourceCombo_->insertItem(insertAt,
+                               QStringLiteral("<missing: %1>").arg(wanted),
+                               QVariant(wanted));
+      idx = insertAt;
+    }
+  }
+
+  if (idx < 0)
+    idx = 0;
+
+  sourceCombo_->setCurrentIndex(idx);
+  sourceCombo_->blockSignals(false);
+  updatingSourceUi_ = false;
+  UpdatePortControlsForSelectedSource(false);
 }
 
 void AudioPage::RefreshStatus() {
@@ -1005,6 +1091,7 @@ void AudioPage::RefreshDaemonAudioStatus() {
 
   const auto audio = root.value("audio").toObject();
   const bool audioEnabled = audio.value("enabled").toBool(false);
+  SyncSourceSelectionFromDaemon(audio.value("source").toString());
   const QString micMode = audio.value("mic_mode").toString();
   const auto pipeline = audio.value("pipeline").toObject();
   const bool running = pipeline.value("running").toBool(false);

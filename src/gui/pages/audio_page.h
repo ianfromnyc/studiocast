@@ -73,6 +73,8 @@ private:
   void PushDaemonSourceSelection();
   void SetAiControlsEnabled(bool enabled, const QString &reason);
 
+  void SyncSourceSelectionFromDaemon(const QString &source);
+  void UpdatePortControlsForSelectedSource(bool pushDaemon);
   void UpdateEngineUiVisibility();
 
   void SetAdvancedVisible(bool visible);
@@ -153,9 +155,11 @@ private:
 
   // --- Shared state
   bool updatingAiUi_ = false;
+  bool updatingSourceUi_ = false;
   bool daemonAiSupported_ = false;
   QString daemonAiDisableReason_;
   QString daemonStatusText_;
+  QString daemonSource_;
 
   // Last speaker routing status reported by the daemon.
   bool daemonSpeakersRoutingActive_ = false;

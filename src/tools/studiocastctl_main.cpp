@@ -939,10 +939,31 @@ int main(int argc, char **argv) {
       }
     }
 
+    section("IPC: GET_AUDIO_CONFIG");
+    {
+      studiocast::ipc::DaemonCallResult res;
+      std::string err;
+      if (!studiocast::ipc::DaemonCall("GET_AUDIO_CONFIG", &res, &err)) {
+        okAll = false;
+        out << "DaemonCall failed: " << err << "\n";
+      } else if (!res.ok) {
+        okAll = false;
+        out << "Daemon returned ok=false\n";
+        out << (res.error_json.empty()
+                    ? std::string("{\"error\":\"daemon_error\"}")
+                    : res.error_json)
+            << "\n";
+      } else {
+        out << res.json << "\n";
+      }
+    }
+
     const std::string probePath =
         ResolveSiblingToolPath(argv[0], "studiocast-probe");
     const std::string maxinePath =
         ResolveSiblingToolPath(argv[0], "studiocast-maxine");
+    const std::string openPath =
+        ResolveSiblingToolPath(argv[0], "studiocast-open");
 
     section(std::string("Exec: ") + probePath + " --json");
     {
@@ -977,6 +998,36 @@ int main(int argc, char **argv) {
     section(std::string("Exec: ") + maxinePath + " install-hints");
     {
       const auto r = RunCommandCapture({maxinePath, "install-hints"});
+      if (!r.error.empty()) {
+        okAll = false;
+        out << "spawn error: " << r.error << "\n";
+      }
+      out << "exit_code: " << r.exit_code << "\n";
+      if (r.exit_code != 0)
+        okAll = false;
+      out << r.output;
+      if (!r.output.empty() && r.output.back() != '\n')
+        out << "\n";
+    }
+
+    section(std::string("Exec: ") + openPath + " audio-list-models");
+    {
+      const auto r = RunCommandCapture({openPath, "audio-list-models"});
+      if (!r.error.empty()) {
+        okAll = false;
+        out << "spawn error: " << r.error << "\n";
+      }
+      out << "exit_code: " << r.exit_code << "\n";
+      if (r.exit_code != 0)
+        okAll = false;
+      out << r.output;
+      if (!r.output.empty() && r.output.back() != '\n')
+        out << "\n";
+    }
+
+    section(std::string("Exec: ") + openPath + " audio-install-hints");
+    {
+      const auto r = RunCommandCapture({openPath, "audio-install-hints"});
       if (!r.error.empty()) {
         okAll = false;
         out << "spawn error: " << r.error << "\n";

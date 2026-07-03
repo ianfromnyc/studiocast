@@ -221,37 +221,28 @@ bool StartSpeakerLoopback(const std::string &target_sink_name, int latency_ms,
     return false;
   }
 
-  {
-    std::string err;
-    if (!CreateVirtualSpeaker(&err)) {
-      if (error)
-        *error = err;
-      return false;
-    }
-  }
-
-  // Avoid duplicates.
-  {
-    std::string err;
-    if (!StopSpeakerLoopback(&err)) {
-      if (error)
-        *error = "Failed to stop existing speaker loopback: " + err;
-      return false;
-    }
-  }
+  auto isVirtualTarget = [](const std::string &name) {
+    return name == kSpeakersSinkName || name == kVirtualMicSinkName;
+  };
 
   std::string chosen = util::TrimCopy(target_sink_name);
+  if (isVirtualTarget(chosen)) {
+    if (error)
+      *error = "Refusing to loop back to '" + chosen + "' (feedback loop).";
+    return false;
+  }
+
   if (chosen.empty()) {
     std::string err;
     auto def = pulse::GetDefaultSinkName(&err);
-    if (def && *def != kSpeakersSinkName && *def != kVirtualMicSinkName) {
+    if (def && !isVirtualTarget(*def)) {
       chosen = *def;
     } else {
       // If the user's default sink is our virtual device (common when testing),
       // pick the first non-virtual sink as a best-effort physical target.
       const auto sinks = pulse::ListSinks(&err);
       for (const auto &s : sinks) {
-        if (s.name != kSpeakersSinkName && s.name != kVirtualMicSinkName) {
+        if (!isVirtualTarget(s.name)) {
           chosen = s.name;
           break;
         }
@@ -268,21 +259,34 @@ bool StartSpeakerLoopback(const std::string &target_sink_name, int latency_ms,
     }
   }
 
-  if (chosen == kSpeakersSinkName || chosen == kVirtualMicSinkName) {
-    if (error)
-      *error = "Refusing to loop back to '" + chosen + "' (feedback loop).";
-    return false;
+  {
+    std::string err;
+    if (!CreateVirtualSpeaker(&err)) {
+      if (error)
+        *error = err;
+      return false;
+    }
+  }
+
+  // Avoid duplicates only after the new target has been validated. This
+  // preserves any active route when the requested target would create feedback.
+  {
+    std::string err;
+    if (!StopSpeakerLoopback(&err)) {
+      if (error)
+        *error = "Failed to stop existing speaker loopback: " + err;
+      return false;
+    }
   }
 
   std::string err;
-  auto id = pulse::LoadModule(
-      "module-loopback",
-      {
-          "source=" + MonitorSourceName(),
-          "sink=" + chosen,
-          "latency_msec=" + std::to_string(latency_ms),
-      },
-      &err);
+  auto id = pulse::LoadModule("module-loopback",
+                              {
+                                  "source=" + MonitorSourceName(),
+                                  "sink=" + chosen,
+                                  "latency_msec=" + std::to_string(latency_ms),
+                              },
+                              &err);
   if (!id) {
     if (error)
       *error = "Failed to load module-loopback: " + err;
