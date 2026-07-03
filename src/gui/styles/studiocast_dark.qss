@@ -173,7 +173,8 @@ QFrame[scRole="homeSummary"],
 QFrame[scRole="homeCard"],
 QFrame[scRole="homeRepairItem"],
 QFrame[scRole="engineCard"],
-QFrame[scRole="supportIssue"] {
+QFrame[scRole="supportIssue"],
+QFrame[scRole="settingsAction"] {
   background: #121A26;
   border: 1px solid #273247;
   border-radius: 8px;

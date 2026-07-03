@@ -24,6 +24,7 @@
 #include "gui/pages/audio_page.h"
 #include "gui/pages/engines_models_page.h"
 #include "gui/pages/home_page.h"
+#include "gui/pages/settings_page.h"
 #include "gui/pages/support_page.h"
 #include "gui/pages/video_page.h"
 #include "gui/status/daemon_status_snapshot.h"
@@ -73,21 +74,6 @@ QFrame *StatusRow(const QString &name, QLabel **valueOut, QWidget *parent) {
   if (valueOut)
     *valueOut = valueLabel;
   return row;
-}
-
-QWidget *PendingPage(const QString &body, QWidget *parent) {
-  auto *page = new QWidget(parent);
-  auto *layout = new QVBoxLayout(page);
-  layout->setContentsMargins(16, 16, 16, 16);
-  layout->setSpacing(12);
-
-  auto *box = new QGroupBox(QStringLiteral("Status"), page);
-  auto *boxLayout = new QVBoxLayout(box);
-  boxLayout->setSpacing(10);
-  boxLayout->addWidget(MutedLabel(body, box));
-  layout->addWidget(box);
-  layout->addStretch(1);
-  return page;
 }
 
 QPlainTextEdit *RawStatusBox(QWidget *parent) {
@@ -232,13 +218,8 @@ void MainWindow::BuildUi() {
   supportPage_ = new SupportPage(pages_);
   pages_->addWidget(WrapScrollable(supportPage_, pages_));
 
-  pages_->addWidget(WrapScrollable(
-      PendingPage(QStringLiteral("Normal settings and scoped resets will move "
-                                 "here in a later milestone. Current "
-                                 "write-through controls remain on the device "
-                                 "pages."),
-                  pages_),
-      pages_));
+  settingsPage_ = new SettingsPage(pages_);
+  pages_->addWidget(WrapScrollable(settingsPage_, pages_));
 
   auto *advanced = new QWidget(pages_);
   auto *advancedLayout = new QVBoxLayout(advanced);
@@ -326,6 +307,8 @@ void MainWindow::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
     enginesModelsPage_->UpdateStatus(snapshot);
   if (supportPage_)
     supportPage_->UpdateStatus(snapshot);
+  if (settingsPage_)
+    settingsPage_->UpdateStatus(snapshot);
 
   if (advancedSocketLabel_) {
     advancedSocketLabel_->setText(snapshot.socketPath.isEmpty()
