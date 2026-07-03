@@ -116,6 +116,122 @@ bool TestStatusJsonCompatibilityShapes() {
                 "top-level open_audio diagnostics should parse");
 }
 
+bool TestEngineModelDetailsAndConfiguredSelections() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "engines":{
+          "maxine":{
+            "supported":false,
+            "ok":false,
+            "summary":"Maxine VideoFX SDK not found.",
+            "blocked_reason":"sdk_missing",
+            "blocked_details":["Install Maxine VideoFX and AudioFX."],
+            "hints":["Run studiocast-maxine install-hints"],
+            "components":{
+              "vfx":{
+                "feature_status":{
+                  "BackgroundBlur":{"installed":false,"details":"Missing feature file."}
+                }
+              }
+            }
+          },
+          "open_cuda":{
+            "ok":true,
+            "installed_models":["matting-good"],
+            "default_model_id":"matting-good",
+            "models":[
+              {"id":"matting-good","display_name":"Good Matting","task":"matting","width":256,"height":256}
+            ],
+            "missing_models":{"configured-missing":"model.json is missing"},
+            "available_effects":["video_noise_removal"],
+            "blocked_effects":{"auto_frame":"missing_model_packs"},
+            "install_hints":["Open Video hint"]
+          },
+          "open_audio":{
+            "ok":true,
+            "installed_models":["fast-enhancer"],
+            "models":[
+              {"id":"fast-enhancer","display_name":"Fast Enhancer","effects":["noise_removal"],"sample_rate":48000,"channels":1}
+            ],
+            "missing_models":{"gone":"No such model pack"},
+            "install_hints":["Open Audio hint"]
+          }
+        },
+        "video":{
+          "enabled":true,
+          "virtual_device_present":true,
+          "virtual_device_available":true,
+          "consumer_count":1,
+          "video_effects":{
+            "engine":"open_cuda",
+            "virtual_background":{"model_id":"matting-good"},
+            "auto_frame":{"model_id":"configured-missing"},
+            "eye_contact":{"model_id":"not-reported"}
+          },
+          "pipeline":{
+            "running":true,
+            "starting":false,
+            "effects_backends":"virtual_background.blur:open_cuda,mirror:passthrough"
+          }
+        },
+        "audio":{
+          "mic_present":true,
+          "source_error":"",
+          "audio_effects":{
+            "engine":"open_source",
+            "microphone":{"model_id":"fast-enhancer","model_path":""},
+            "speaker":{"model_id":"gone","model_path":"/tmp/explicit.onnx"}
+          },
+          "pipeline":{"running":true,"starting":false,"last_error":"","backend_active":"open_audio"},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":true,
+            "route_mode":"pipeline",
+            "backend_active":"open_audio",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
+  return Expect(s.parsed, "engine model details payload should parse") &&
+         Expect(s.videoEffectsActiveBackends.contains(QStringLiteral("open_cuda")),
+                "video active backends should parse") &&
+         Expect(s.microphoneActiveBackend == QStringLiteral("open_audio"),
+                "microphone active backend should parse") &&
+         Expect(s.speakersActiveBackend == QStringLiteral("open_audio"),
+                "speaker active backend should parse") &&
+         Expect(s.maxine.installHints.contains(
+                    QStringLiteral("Run studiocast-maxine install-hints")),
+                "maxine hints should be preserved") &&
+         Expect(s.maxine.missingModelCount == 1,
+                "maxine missing feature state should parse") &&
+         Expect(!s.openCuda.rawJson.isEmpty(),
+                "raw open_cuda diagnostics should be preserved") &&
+         Expect(s.openCuda.installedModels.size() == 1 &&
+                    s.openCuda.installedModels.front().displayName ==
+                        QStringLiteral("Good Matting"),
+                "open video model display names should parse") &&
+         Expect(s.openCuda.configuredModels.size() == 3,
+                "configured open video model IDs should parse") &&
+         Expect(s.openCuda.configuredMissingModelCount == 2,
+                "configured missing open video IDs should be counted") &&
+         Expect(s.openAudio.installedModels.size() == 1 &&
+                    s.openAudio.installedModels.front().displayName ==
+                        QStringLiteral("Fast Enhancer"),
+                "open audio model display names should parse") &&
+         Expect(s.openAudio.configuredModels.size() == 2,
+                "configured open audio model IDs should parse") &&
+         Expect(s.openAudio.configuredMissingModelCount == 1,
+                "configured missing open audio IDs should be counted") &&
+         Expect(s.openAudio.configuredModels.back().modelPath ==
+                    QStringLiteral("/tmp/explicit.onnx"),
+                "explicit model paths should be preserved in details");
+}
+
 bool TestInvalidJsonPreservesRawPayload() {
   const QString json = QStringLiteral("{not-json");
   const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
@@ -131,6 +247,7 @@ int main() {
   bool ok = true;
   ok = TestUnreachableStatus() && ok;
   ok = TestStatusJsonCompatibilityShapes() && ok;
+  ok = TestEngineModelDetailsAndConfiguredSelections() && ok;
   ok = TestInvalidJsonPreservesRawPayload() && ok;
   return ok ? 0 : 1;
 }

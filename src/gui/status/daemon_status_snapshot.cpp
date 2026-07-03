@@ -6,6 +6,8 @@
 #include <QJsonParseError>
 #include <QJsonValue>
 
+#include <algorithm>
+#include <cstddef>
 #include <limits>
 
 namespace studiocast::gui {
@@ -94,6 +96,14 @@ int SizeToInt(qsizetype size) {
   return static_cast<int>(size);
 }
 
+int StdSizeToInt(std::size_t size) {
+  constexpr std::size_t kMax =
+      static_cast<std::size_t>(std::numeric_limits<int>::max());
+  if (size > kMax)
+    return std::numeric_limits<int>::max();
+  return static_cast<int>(size);
+}
+
 int CountObjectEntries(const QJsonObject &obj, const QString &key) {
   const QJsonValue value = obj.value(key);
   if (value.isObject())
@@ -101,6 +111,275 @@ int CountObjectEntries(const QJsonObject &obj, const QString &key) {
   if (value.isArray())
     return SizeToInt(value.toArray().size());
   return 0;
+}
+
+QString RawObjectText(const QJsonObject &obj) {
+  if (obj.isEmpty())
+    return {};
+  return QString::fromUtf8(
+             QJsonDocument(obj).toJson(QJsonDocument::Indented))
+      .trimmed();
+}
+
+QStringList CombinedStringListValue(const QJsonObject &obj,
+                                    std::initializer_list<QString> keys) {
+  QStringList out;
+  for (const QString &key : keys) {
+    for (const QString &item : StringListValue(obj, key)) {
+      if (!out.contains(item))
+        out.push_back(item);
+    }
+  }
+  return out;
+}
+
+bool EngineReportsModelId(const EngineStatus &engine, const QString &modelId) {
+  const QString want = modelId.trimmed();
+  if (want.isEmpty())
+    return false;
+  for (const EngineModelEntry &entry : engine.installedModels) {
+    if (entry.id == want)
+      return true;
+  }
+  return false;
+}
+
+bool EngineExplicitlyMissingModelId(const EngineStatus &engine,
+                                    const QString &modelId) {
+  const QString want = modelId.trimmed();
+  if (want.isEmpty())
+    return false;
+  for (const EngineModelEntry &entry : engine.missingModelEntries) {
+    if (entry.id == want)
+      return true;
+  }
+  return false;
+}
+
+QString JoinModelDetails(const QStringList &parts) {
+  QStringList out;
+  for (const QString &part : parts) {
+    const QString trimmed = part.trimmed();
+    if (!trimmed.isEmpty())
+      out.push_back(trimmed);
+  }
+  return out.join(QStringLiteral("; "));
+}
+
+std::vector<EngineModelEntry> ParseInstalledModelEntries(
+    const QJsonObject &obj) {
+  std::vector<EngineModelEntry> out;
+
+  const QJsonArray models = obj.value(QStringLiteral("models")).toArray();
+  for (const QJsonValue &value : models) {
+    if (!value.isObject())
+      continue;
+    const QJsonObject model = value.toObject();
+    const QString id = model.value(QStringLiteral("id")).toString().trimmed();
+    if (id.isEmpty())
+      continue;
+
+    EngineModelEntry entry;
+    entry.id = id;
+    entry.displayName =
+        FirstNonEmpty({model.value(QStringLiteral("display_name")).toString(),
+                       id});
+    entry.category = model.value(QStringLiteral("task")).toString().trimmed();
+
+    QStringList details;
+    if (!entry.category.isEmpty())
+      details << QStringLiteral("task: %1").arg(entry.category);
+
+    const QStringList effects = StringListValue(model, QStringLiteral("effects"));
+    if (!effects.isEmpty()) {
+      entry.category = effects.join(QStringLiteral(", "));
+      details << QStringLiteral("effects: %1")
+                     .arg(effects.join(QStringLiteral(", ")));
+    }
+
+    const int width = model.value(QStringLiteral("width")).toInt(0);
+    const int height = model.value(QStringLiteral("height")).toInt(0);
+    if (width > 0 && height > 0)
+      details << QStringLiteral("size: %1x%2").arg(width).arg(height);
+
+    const int sampleRate = model.value(QStringLiteral("sample_rate")).toInt(0);
+    if (sampleRate > 0)
+      details << QStringLiteral("sample rate: %1 Hz").arg(sampleRate);
+
+    const int channels = model.value(QStringLiteral("channels")).toInt(0);
+    if (channels > 0)
+      details << QStringLiteral("channels: %1").arg(channels);
+
+    entry.details = JoinModelDetails(details);
+    out.push_back(entry);
+  }
+
+  const QJsonArray installed =
+      obj.value(QStringLiteral("installed_models")).toArray();
+  for (const QJsonValue &value : installed) {
+    const QString id = value.toString().trimmed();
+    if (id.isEmpty())
+      continue;
+
+    const auto it = std::find_if(
+        out.begin(), out.end(),
+        [&id](const EngineModelEntry &entry) { return entry.id == id; });
+    if (it != out.end())
+      continue;
+
+    EngineModelEntry entry;
+    entry.id = id;
+    entry.displayName = id;
+    out.push_back(entry);
+  }
+
+  return out;
+}
+
+std::vector<EngineModelEntry> ParseMissingModelEntries(
+    const QJsonObject &obj) {
+  std::vector<EngineModelEntry> out;
+  const QJsonObject missing = ObjectValue(obj, QStringLiteral("missing_models"));
+  for (auto it = missing.constBegin(); it != missing.constEnd(); ++it) {
+    const QString id = it.key().trimmed();
+    if (id.isEmpty())
+      continue;
+    EngineModelEntry entry;
+    entry.id = id;
+    entry.displayName = id;
+    entry.details = it.value().toString().trimmed();
+    entry.installed = false;
+    out.push_back(entry);
+  }
+  return out;
+}
+
+void AddMaxineFeatureEntriesFromMap(const QString &component,
+                                    const QJsonObject &featureStatus,
+                                    EngineStatus *engine) {
+  if (!engine)
+    return;
+  for (auto it = featureStatus.constBegin(); it != featureStatus.constEnd();
+       ++it) {
+    const QString id = it.key().trimmed();
+    const QJsonObject feature = it.value().toObject();
+    if (id.isEmpty() || feature.isEmpty())
+      continue;
+
+    EngineModelEntry entry;
+    entry.id = QStringLiteral("%1.%2").arg(component, id);
+    entry.displayName = id;
+    entry.category = component.toUpper();
+    entry.installed = feature.value(QStringLiteral("installed")).toBool(false);
+    entry.details = feature.value(QStringLiteral("details")).toString();
+
+    auto &target =
+        entry.installed ? engine->installedModels : engine->missingModelEntries;
+    const auto existing = std::find_if(
+        target.begin(), target.end(),
+        [&entry](const EngineModelEntry &candidate) {
+          return candidate.id == entry.id;
+        });
+    if (existing == target.end())
+      target.push_back(entry);
+  }
+}
+
+void AddMaxineFeatureEntries(const QJsonObject &obj, EngineStatus *engine) {
+  const QJsonObject components = ObjectValue(obj, QStringLiteral("components"));
+  for (auto it = components.constBegin(); it != components.constEnd(); ++it) {
+    AddMaxineFeatureEntriesFromMap(
+        it.key(), ObjectValue(it.value().toObject(),
+                              QStringLiteral("feature_status")),
+        engine);
+  }
+
+  for (const QString &component :
+       {QStringLiteral("vfx"), QStringLiteral("ar"), QStringLiteral("afx")}) {
+    const QJsonObject componentObj = ObjectValue(obj, component);
+    AddMaxineFeatureEntriesFromMap(
+        component, ObjectValue(componentObj, QStringLiteral("feature_status")),
+        engine);
+  }
+}
+
+ConfiguredModelEntry MakeConfiguredModel(const EngineStatus &engine,
+                                         const QString &owner,
+                                         const QString &modelId,
+                                         const QString &modelPath = {}) {
+  ConfiguredModelEntry entry;
+  entry.owner = owner;
+  entry.modelId = modelId.trimmed();
+  entry.modelPath = modelPath.trimmed();
+  entry.modelIdReported = EngineReportsModelId(engine, entry.modelId);
+  entry.modelIdExplicitlyMissing =
+      EngineExplicitlyMissingModelId(engine, entry.modelId);
+  return entry;
+}
+
+void AddConfiguredModelIfNeeded(EngineStatus *engine, const QString &owner,
+                                const QString &modelId,
+                                const QString &modelPath = {}) {
+  if (!engine)
+    return;
+  ConfiguredModelEntry entry =
+      MakeConfiguredModel(*engine, owner, modelId, modelPath);
+  if (entry.modelId.isEmpty() && entry.modelPath.isEmpty())
+    return;
+  if (!entry.modelId.isEmpty() && !entry.modelIdReported)
+    ++engine->configuredMissingModelCount;
+  engine->configuredModels.push_back(entry);
+}
+
+void AddConfiguredVideoModels(const QJsonObject &video,
+                              EngineStatus *openCuda) {
+  if (!openCuda)
+    return;
+  const QJsonObject fx = ObjectValue(video, QStringLiteral("video_effects"));
+  if (fx.isEmpty())
+    return;
+
+  AddConfiguredModelIfNeeded(
+      openCuda, QStringLiteral("Camera virtual background"),
+      ObjectValue(fx, QStringLiteral("virtual_background"))
+          .value(QStringLiteral("model_id"))
+          .toString());
+  AddConfiguredModelIfNeeded(
+      openCuda, QStringLiteral("Camera auto frame"),
+      ObjectValue(fx, QStringLiteral("auto_frame"))
+          .value(QStringLiteral("model_id"))
+          .toString());
+  AddConfiguredModelIfNeeded(
+      openCuda, QStringLiteral("Camera eye contact"),
+      ObjectValue(fx, QStringLiteral("eye_contact"))
+          .value(QStringLiteral("model_id"))
+          .toString());
+  AddConfiguredModelIfNeeded(
+      openCuda, QStringLiteral("Camera video noise removal"),
+      ObjectValue(fx, QStringLiteral("video_noise_removal"))
+          .value(QStringLiteral("model_id"))
+          .toString());
+}
+
+void AddConfiguredAudioModels(const QJsonObject &audio,
+                              EngineStatus *openAudio) {
+  if (!openAudio)
+    return;
+  const QJsonObject fx = ObjectValue(audio, QStringLiteral("audio_effects"));
+  if (fx.isEmpty())
+    return;
+
+  const QJsonObject mic = ObjectValue(fx, QStringLiteral("microphone"));
+  AddConfiguredModelIfNeeded(
+      openAudio, QStringLiteral("Microphone cleanup"),
+      mic.value(QStringLiteral("model_id")).toString(),
+      mic.value(QStringLiteral("model_path")).toString());
+
+  const QJsonObject speaker = ObjectValue(fx, QStringLiteral("speaker"));
+  AddConfiguredModelIfNeeded(
+      openAudio, QStringLiteral("Speaker cleanup"),
+      speaker.value(QStringLiteral("model_id")).toString(),
+      speaker.value(QStringLiteral("model_path")).toString());
 }
 
 EngineStatus ParseEngine(const QJsonObject &obj, const QString &id,
@@ -114,6 +393,7 @@ EngineStatus ParseEngine(const QJsonObject &obj, const QString &id,
     return out;
   }
 
+  out.rawJson = RawObjectText(obj);
   out.ok = obj.value(QStringLiteral("ok")).toBool(false);
   out.supported = obj.value(QStringLiteral("supported")).toBool(out.ok);
   out.summary = FirstNonEmpty({
@@ -125,15 +405,25 @@ EngineStatus ParseEngine(const QJsonObject &obj, const QString &id,
   out.blockedDetails = StringListValue(obj, QStringLiteral("blocked_details"));
   out.missingModels = StringMapDetails(obj, QStringLiteral("missing_models"));
   out.blockedEffects = StringMapDetails(obj, QStringLiteral("blocked_effects"));
-  out.installHints = StringListValue(obj, QStringLiteral("install_hints"));
-  out.installedModelCount =
-      SizeToInt(obj.value(QStringLiteral("installed_models")).toArray().size());
+  out.installHints = CombinedStringListValue(
+      obj, {QStringLiteral("install_hints"), QStringLiteral("hints")});
+  out.availableEffects = CombinedStringListValue(
+      obj, {QStringLiteral("available_effects"),
+            QStringLiteral("available_audio_effects")});
+  out.defaultModelId = obj.value(QStringLiteral("default_model_id")).toString();
+  out.installedModels = ParseInstalledModelEntries(obj);
+  out.missingModelEntries = ParseMissingModelEntries(obj);
+  if (id == QStringLiteral("maxine"))
+    AddMaxineFeatureEntries(obj, &out);
+  out.installedModelCount = StdSizeToInt(out.installedModels.size());
   out.knownModelCount =
       SizeToInt(obj.value(QStringLiteral("models")).toArray().size());
   out.missingModelCount = out.missingModels.isEmpty()
                               ? CountObjectEntries(
                                     obj, QStringLiteral("missing_models"))
                               : SizeToInt(out.missingModels.size());
+  if (out.missingModelCount == 0 && id == QStringLiteral("maxine"))
+    out.missingModelCount = StdSizeToInt(out.missingModelEntries.size());
 
   if (out.summary.isEmpty()) {
     if (out.ok || out.supported) {
@@ -443,6 +733,21 @@ DaemonStatusSnapshot DaemonStatusSnapshot::FromJson(const QString &json) {
       ObjectValue(audio, QStringLiteral("audio_effects"))
           .value(QStringLiteral("engine"))
           .toString();
+  out.videoEffectsActiveBackends =
+      ObjectValue(video, QStringLiteral("pipeline"))
+          .value(QStringLiteral("effects_backends"))
+          .toString();
+  out.microphoneActiveBackend =
+      ObjectValue(audio, QStringLiteral("pipeline"))
+          .value(QStringLiteral("backend_active"))
+          .toString();
+  const QJsonObject speakers = ObjectValue(audio, QStringLiteral("speakers"));
+  out.speakersRouteMode = speakers.value(QStringLiteral("route_mode")).toString();
+  out.speakersActiveBackend =
+      FirstNonEmpty({speakers.value(QStringLiteral("backend_active")).toString(),
+                     ObjectValue(speakers, QStringLiteral("pipeline"))
+                         .value(QStringLiteral("backend_active"))
+                         .toString()});
 
   out.maxine = ParseEngine(EngineObject(root, QStringLiteral("maxine")),
                            QStringLiteral("maxine"), QStringLiteral("Maxine"));
@@ -452,6 +757,8 @@ DaemonStatusSnapshot DaemonStatusSnapshot::FromJson(const QString &json) {
   out.openAudio =
       ParseEngine(EngineObject(root, QStringLiteral("open_audio")),
                   QStringLiteral("open_audio"), QStringLiteral("Open Audio"));
+  AddConfiguredVideoModels(video, &out.openCuda);
+  AddConfiguredAudioModels(audio, &out.openAudio);
 
   return out;
 }

@@ -3,6 +3,8 @@
 #include <QString>
 #include <QStringList>
 
+#include <vector>
+
 namespace studiocast::gui {
 
 enum class ReadinessState {
@@ -27,21 +29,44 @@ struct DeviceReadiness {
   QStringList disabledReasons;
 };
 
+struct EngineModelEntry {
+  QString id;
+  QString displayName;
+  QString category;
+  QString details;
+  bool installed = true;
+};
+
+struct ConfiguredModelEntry {
+  QString owner;
+  QString modelId;
+  QString modelPath;
+  bool modelIdReported = false;
+  bool modelIdExplicitlyMissing = false;
+};
+
 struct EngineStatus {
   QString id;
   QString label;
   bool present = false;
   bool ok = false;
   bool supported = false;
+  QString rawJson;
   QString summary;
   QString blockedReason;
   QStringList blockedDetails;
   QStringList missingModels;
   QStringList blockedEffects;
   QStringList installHints;
+  QStringList availableEffects;
+  QString defaultModelId;
+  std::vector<EngineModelEntry> installedModels;
+  std::vector<EngineModelEntry> missingModelEntries;
+  std::vector<ConfiguredModelEntry> configuredModels;
   int installedModelCount = 0;
   int knownModelCount = 0;
   int missingModelCount = 0;
+  int configuredMissingModelCount = 0;
 };
 
 struct DaemonStatusSnapshot {
@@ -61,6 +86,10 @@ struct DaemonStatusSnapshot {
   DeviceReadiness speakers;
   QString videoEffectsEnginePreference;
   QString audioEffectsEnginePreference;
+  QString videoEffectsActiveBackends;
+  QString microphoneActiveBackend;
+  QString speakersActiveBackend;
+  QString speakersRouteMode;
 
   EngineStatus maxine;
   EngineStatus openCuda;

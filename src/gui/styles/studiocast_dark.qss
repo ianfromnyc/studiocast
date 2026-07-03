@@ -171,7 +171,8 @@ QFrame[scRole="microphonePanel"] {
 /* Home readiness dashboard */
 QFrame[scRole="homeSummary"],
 QFrame[scRole="homeCard"],
-QFrame[scRole="homeRepairItem"] {
+QFrame[scRole="homeRepairItem"],
+QFrame[scRole="engineCard"] {
   background: #121A26;
   border: 1px solid #273247;
   border-radius: 8px;
@@ -190,6 +191,18 @@ QFrame[scRole="homeCard"][scStatus="warning"] {
 }
 
 QFrame[scRole="homeCard"][scStatus="error"] {
+  border-color: rgba(255, 140, 144, 0.50);
+}
+
+QFrame[scRole="engineCard"][scStatus="good"] {
+  border-color: rgba(117, 224, 167, 0.45);
+}
+
+QFrame[scRole="engineCard"][scStatus="warning"] {
+  border-color: rgba(255, 207, 112, 0.45);
+}
+
+QFrame[scRole="engineCard"][scStatus="error"] {
   border-color: rgba(255, 140, 144, 0.50);
 }
 

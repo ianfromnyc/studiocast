@@ -22,6 +22,7 @@
 #include <algorithm>
 
 #include "gui/pages/home_page.h"
+#include "gui/pages/engines_models_page.h"
 #include "gui/pages/audio_page.h"
 #include "gui/pages/video_page.h"
 #include "gui/status/daemon_status_snapshot.h"
@@ -95,31 +96,6 @@ QPlainTextEdit *RawStatusBox(QWidget *parent) {
   text->setMinimumHeight(240);
   text->setPlaceholderText(QStringLiteral("Daemon status has not been read."));
   return text;
-}
-
-QString FormatEngine(const EngineStatus &engine) {
-  if (!engine.present)
-    return QStringLiteral("Unknown - no daemon diagnostics reported.");
-
-  QString state = (engine.ok || engine.supported) ? QStringLiteral("Available")
-                                                  : QStringLiteral("Unavailable");
-  if (engine.missingModelCount > 0) {
-    state = QStringLiteral("Missing models");
-  }
-
-  QStringList details;
-  if (!engine.summary.trimmed().isEmpty())
-    details << engine.summary.trimmed();
-  if (engine.knownModelCount > 0 || engine.installedModelCount > 0 ||
-      engine.missingModelCount > 0) {
-    details << QStringLiteral("%1 installed, %2 known, %3 missing")
-                   .arg(engine.installedModelCount)
-                   .arg(engine.knownModelCount)
-                   .arg(engine.missingModelCount);
-  }
-  return details.isEmpty() ? state
-                           : QStringLiteral("%1 - %2")
-                                 .arg(state, details.join(QStringLiteral("; ")));
 }
 
 QString RawStatusText(const DaemonStatusSnapshot &snapshot) {
@@ -249,23 +225,8 @@ void MainWindow::BuildUi() {
   pages_->addWidget(
       WrapScrollable(new AudioPage(AudioPageMode::Speakers, pages_), pages_));
 
-  auto *engines = new QWidget(pages_);
-  auto *enginesLayout = new QVBoxLayout(engines);
-  enginesLayout->setContentsMargins(16, 16, 16, 16);
-  enginesLayout->setSpacing(12);
-  auto *enginesBox =
-      new QGroupBox(QStringLiteral("Backend And Model Health"), engines);
-  auto *enginesBoxLayout = new QVBoxLayout(enginesBox);
-  enginesBoxLayout->setSpacing(10);
-  enginesBoxLayout->addWidget(
-      StatusRow(QStringLiteral("Maxine"), &maxineHealthLabel_, enginesBox));
-  enginesBoxLayout->addWidget(StatusRow(QStringLiteral("Open Video"),
-                                        &openVideoHealthLabel_, enginesBox));
-  enginesBoxLayout->addWidget(StatusRow(QStringLiteral("Open Audio"),
-                                        &openAudioHealthLabel_, enginesBox));
-  enginesLayout->addWidget(enginesBox);
-  enginesLayout->addStretch(1);
-  pages_->addWidget(WrapScrollable(engines, pages_));
+  enginesModelsPage_ = new EnginesModelsPage(pages_);
+  pages_->addWidget(WrapScrollable(enginesModelsPage_, pages_));
 
   auto *support = new QWidget(pages_);
   auto *supportLayout = new QVBoxLayout(support);
@@ -370,13 +331,8 @@ void MainWindow::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
 
   if (homePage_)
     homePage_->UpdateStatus(snapshot);
-
-  if (maxineHealthLabel_)
-    maxineHealthLabel_->setText(FormatEngine(snapshot.maxine));
-  if (openVideoHealthLabel_)
-    openVideoHealthLabel_->setText(FormatEngine(snapshot.openCuda));
-  if (openAudioHealthLabel_)
-    openAudioHealthLabel_->setText(FormatEngine(snapshot.openAudio));
+  if (enginesModelsPage_)
+    enginesModelsPage_->UpdateStatus(snapshot);
 
   if (advancedSocketLabel_) {
     advancedSocketLabel_->setText(snapshot.socketPath.isEmpty()

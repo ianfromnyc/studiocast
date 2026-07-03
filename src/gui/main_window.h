@@ -12,6 +12,7 @@ class QStackedWidget;
 namespace studiocast::gui {
 
 struct DaemonStatusSnapshot;
+class EnginesModelsPage;
 class HomePage;
 class StatusPoller;
 
@@ -38,9 +39,7 @@ private:
   QStringList pageTitles_;
 
   HomePage *homePage_ = nullptr;
-  QLabel *maxineHealthLabel_ = nullptr;
-  QLabel *openVideoHealthLabel_ = nullptr;
-  QLabel *openAudioHealthLabel_ = nullptr;
+  EnginesModelsPage *enginesModelsPage_ = nullptr;
   QLabel *advancedSocketLabel_ = nullptr;
   QPlainTextEdit *supportRawStatus_ = nullptr;
   QPlainTextEdit *advancedRawStatus_ = nullptr;
