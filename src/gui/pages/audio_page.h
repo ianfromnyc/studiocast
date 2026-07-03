@@ -74,6 +74,8 @@ private:
   void PushDaemonAudioConfig();
   void PushDaemonSourceSelection();
   void SetAiControlsEnabled(bool enabled, const QString &reason);
+  void SetMicStatusSummary(const QString &state, const QString &detail,
+                           const QString &status);
 
   void SyncSourceSelectionFromDaemon(const QString &source);
   void SyncSpeakerTargetSelectionFromDaemon(const QString &target);
@@ -101,9 +103,15 @@ private:
   QLabel *aiInfoBanner_ = nullptr;
 
   // --- Microphone UI (may be nullptr in Speakers mode)
+  QGroupBox *micSourceBox_ = nullptr;
   QGroupBox *micEffectsBox_ = nullptr;
+  QGroupBox *micDetailsBox_ = nullptr;
+  QWidget *micDetailsContent_ = nullptr;
   QComboBox *sourceCombo_ = nullptr;
   QPushButton *refreshSourcesBtn_ = nullptr;
+  QLabel *micStateLabel_ = nullptr;
+  QLabel *micDetailLabel_ = nullptr;
+  QLabel *micSourceStatusLabel_ = nullptr;
 
   // Broadcast-like single effect selector.
   QComboBox *micEffectCombo_ = nullptr;

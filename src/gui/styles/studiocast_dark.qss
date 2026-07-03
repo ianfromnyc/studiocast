@@ -162,6 +162,12 @@ QFrame[scRole="cameraEffect"] {
   border-radius: 8px;
 }
 
+QFrame[scRole="microphonePanel"] {
+  background: #0F1520;
+  border: 1px solid #273247;
+  border-radius: 8px;
+}
+
 /* Home readiness dashboard */
 QFrame[scRole="homeSummary"],
 QFrame[scRole="homeCard"],

@@ -1,8 +1,11 @@
 #include "audio_page.h"
 
+#include <QClipboard>
 #include <QComboBox>
 #include <QFileDialog>
+#include <QFrame>
 #include <QGroupBox>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -117,6 +120,48 @@ QString FriendlyBackendLabel(const QString &id) {
   return id;
 }
 
+QLabel *MutedLabel(const QString &text, QWidget *parent) {
+  auto *label = new QLabel(text, parent);
+  label->setProperty("scRole", "muted");
+  label->setWordWrap(true);
+  return label;
+}
+
+QLabel *ValueLabel(const QString &text, QWidget *parent) {
+  auto *label = new QLabel(text, parent);
+  label->setProperty("scRole", "value");
+  label->setWordWrap(true);
+  return label;
+}
+
+QLabel *SectionLabel(const QString &text, QWidget *parent) {
+  auto *label = new QLabel(text, parent);
+  label->setProperty("scRole", "sectionTitle");
+  return label;
+}
+
+void SetDynamicProperty(QWidget *widget, const char *name,
+                        const QString &value) {
+  if (!widget)
+    return;
+  widget->setProperty(name, value);
+  widget->style()->unpolish(widget);
+  widget->style()->polish(widget);
+}
+
+QFrame *MicrophonePanel(const QString &title, QWidget *parent,
+                        QVBoxLayout **layoutOut) {
+  auto *panel = new QFrame(parent);
+  panel->setProperty("scRole", "microphonePanel");
+  auto *layout = new QVBoxLayout(panel);
+  layout->setContentsMargins(12, 10, 12, 12);
+  layout->setSpacing(10);
+  layout->addWidget(SectionLabel(title, panel));
+  if (layoutOut)
+    *layoutOut = layout;
+  return panel;
+}
+
 } // namespace
 
 AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
@@ -140,7 +185,8 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
     titleRow->addStretch(1);
 
     advancedToggle_ = new QToolButton(this);
-    advancedToggle_->setText("Advanced");
+    advancedToggle_->setText(mode_ == AudioPageMode::Microphone ? "Details"
+                                                                : "Advanced");
     advancedToggle_->setToolButtonStyle(Qt::ToolButtonTextOnly);
     advancedToggle_->setCheckable(true);
     advancedToggle_->setChecked(false);
@@ -152,12 +198,33 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
   // -----------------------
   // Backend / availability
   // -----------------------
-  backendBox_ = new QGroupBox("AI backend", this);
+  backendBox_ = new QGroupBox(
+      mode_ == AudioPageMode::Microphone ? "Status" : "AI backend", this);
   {
     auto *backendLayout = new QVBoxLayout(backendBox_);
+    backendLayout->setSpacing(10);
+
+    if (mode_ == AudioPageMode::Microphone) {
+      micStateLabel_ = new QLabel("Checking daemon", backendBox_);
+      micStateLabel_->setProperty("scRole", "statusPill");
+      micStateLabel_->setAlignment(Qt::AlignCenter);
+      backendLayout->addWidget(micStateLabel_, 0, Qt::AlignLeft);
+
+      micDetailLabel_ =
+          MutedLabel(QStringLiteral("Waiting for microphone status."),
+                     backendBox_);
+      backendLayout->addWidget(micDetailLabel_);
+
+      micSourceStatusLabel_ = MutedLabel(QString(), backendBox_);
+      micSourceStatusLabel_->setVisible(false);
+      backendLayout->addWidget(micSourceStatusLabel_);
+    }
 
     auto *engineRow = new QHBoxLayout();
-    engineRow->addWidget(new QLabel("Backend:", backendBox_));
+    engineRow->addWidget(new QLabel(mode_ == AudioPageMode::Microphone
+                                        ? "Preference:"
+                                        : "Backend:",
+                                    backendBox_));
     engineCombo_ = new QComboBox(backendBox_);
     engineCombo_->addItem("Auto", "auto");
     engineCombo_->addItem("Maxine", "maxine");
@@ -167,8 +234,7 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
 
     engineRow->addSpacing(12);
     engineRow->addWidget(new QLabel("Active:", backendBox_));
-    engineActiveValue_ = new QLabel("—", backendBox_);
-    engineActiveValue_->setProperty("scRole", "value");
+    engineActiveValue_ = ValueLabel("—", backendBox_);
     engineRow->addWidget(engineActiveValue_);
     engineRow->addStretch(1);
     backendLayout->addLayout(engineRow);
@@ -186,55 +252,52 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
     aiBanner_->setVisible(false);
     backendLayout->addWidget(aiBanner_);
 
-    openAudioInstallHintsBtn_ =
-        new QPushButton("Open Audio install hints", backendBox_);
-    openAudioInstallHintsBtn_->setEnabled(false);
-    backendLayout->addWidget(openAudioInstallHintsBtn_, 0, Qt::AlignLeft);
+    if (mode_ == AudioPageMode::Speakers) {
+      openAudioInstallHintsBtn_ =
+          new QPushButton("Open Audio install hints", backendBox_);
+      openAudioInstallHintsBtn_->setEnabled(false);
+      backendLayout->addWidget(openAudioInstallHintsBtn_, 0, Qt::AlignLeft);
+    }
   }
-  root->addWidget(backendBox_);
+  if (mode_ == AudioPageMode::Speakers) {
+    root->addWidget(backendBox_);
+  }
 
   // -----------------------
   // Mode-specific content
   // -----------------------
   if (mode_ == AudioPageMode::Microphone) {
     // -----------------------
-    // Microphone effects
+    // Microphone source
     // -----------------------
-    micEffectsBox_ = new QGroupBox("Microphone effects", this);
+    micSourceBox_ = new QGroupBox("Source", this);
     {
-      auto *aiLayout = new QVBoxLayout(micEffectsBox_);
+      auto *sourceLayout = new QVBoxLayout(micSourceBox_);
+      sourceLayout->setSpacing(10);
 
-      // Device selection
       auto *devRow = new QHBoxLayout();
-      devRow->addWidget(new QLabel("Input:", micEffectsBox_));
-      sourceCombo_ = new QComboBox(micEffectsBox_);
+      devRow->addWidget(new QLabel("Input:", micSourceBox_));
+      sourceCombo_ = new QComboBox(micSourceBox_);
       sourceCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
       devRow->addWidget(sourceCombo_, 1);
-      refreshSourcesBtn_ = new QPushButton("Refresh", micEffectsBox_);
+      refreshSourcesBtn_ = new QPushButton("Refresh", micSourceBox_);
       devRow->addWidget(refreshSourcesBtn_);
-      aiLayout->addLayout(devRow);
+      sourceLayout->addLayout(devRow);
 
-      // Open-source model selection (only shown when Open Source is
-      // active/selected).
-      auto *modelRow = new QHBoxLayout();
-      openAudioModelLabel_ = new QLabel("Model:", micEffectsBox_);
-      openAudioModelCombo_ = new QComboBox(micEffectsBox_);
-      openAudioModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-      openAudioModelCombo_->addItem("<auto>", "");
-      modelRow->addWidget(openAudioModelLabel_);
-      modelRow->addWidget(openAudioModelCombo_, 1);
-      aiLayout->addLayout(modelRow);
+      sourceLayout->addWidget(MutedLabel(
+          "Virtual and loopback sources are hidden from this list. A configured "
+          "source that is not currently available stays visible as missing.",
+          micSourceBox_));
+    }
+    root->addWidget(micSourceBox_);
 
-      auto *modelPathRow = new QHBoxLayout();
-      openAudioModelPathLabel_ = new QLabel("Model path:", micEffectsBox_);
-      openAudioModelPathEdit_ = new QLineEdit(micEffectsBox_);
-      openAudioModelPathEdit_->setPlaceholderText(
-          "(optional) /path/to/model.onnx");
-      browseOpenAudioModelBtn_ = new QPushButton("Browse…", micEffectsBox_);
-      modelPathRow->addWidget(openAudioModelPathLabel_);
-      modelPathRow->addWidget(openAudioModelPathEdit_, 1);
-      modelPathRow->addWidget(browseOpenAudioModelBtn_);
-      aiLayout->addLayout(modelPathRow);
+    // -----------------------
+    // Microphone cleanup effects
+    // -----------------------
+    micEffectsBox_ = new QGroupBox("Cleanup Effects", this);
+    {
+      auto *aiLayout = new QVBoxLayout(micEffectsBox_);
+      aiLayout->setSpacing(10);
 
       // Effect selection (Broadcast-style single selector).
       auto *effectRow = new QHBoxLayout();
@@ -262,77 +325,163 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
       strengthRow->addWidget(strengthValueLabel_);
       aiLayout->addLayout(strengthRow);
 
-      auto *tip = new QLabel("Tip: Set Effect to Off for pass-through. In "
-                             "other apps, choose “StudioCast Microphone”.",
-                             micEffectsBox_);
-      tip->setWordWrap(true);
-      tip->setProperty("scRole", "muted");
-      aiLayout->addWidget(tip);
+      aiLayout->addWidget(MutedLabel(
+          "Set Effect to Off for pass-through. Other apps should use "
+          "StudioCast Microphone.",
+          micEffectsBox_));
     }
     root->addWidget(micEffectsBox_);
 
+    root->addWidget(backendBox_);
+
     // -----------------------
-    // Legacy loopback controls (advanced)
+    // Details and support
     // -----------------------
-    legacyInputBox_ = new QGroupBox("Input (legacy loopback)", this);
+    micDetailsBox_ = new QGroupBox("Details & Support", this);
+    micDetailsBox_->setCheckable(true);
+    micDetailsBox_->setChecked(false);
     {
-      auto *inputLayout = new QVBoxLayout(legacyInputBox_);
+      auto *detailsLayout = new QVBoxLayout(micDetailsBox_);
+      detailsLayout->setSpacing(10);
 
-      auto *portRow = new QHBoxLayout();
-      portRow->addWidget(new QLabel("Input port:", legacyInputBox_));
-      portCombo_ = new QComboBox(legacyInputBox_);
-      portRow->addWidget(portCombo_, 1);
-      inputLayout->addLayout(portRow);
+      micDetailsContent_ = new QWidget(micDetailsBox_);
+      auto *detailsContentLayout = new QVBoxLayout(micDetailsContent_);
+      detailsContentLayout->setContentsMargins(0, 0, 0, 0);
+      detailsContentLayout->setSpacing(10);
 
-      auto *latencyRow = new QHBoxLayout();
-      latencyRow->addWidget(new QLabel("Latency (ms):", legacyInputBox_));
-      latencySpin_ = new QSpinBox(legacyInputBox_);
-      latencySpin_->setRange(1, 200);
-      latencySpin_->setValue(10);
-      latencyRow->addWidget(latencySpin_);
-      latencyRow->addStretch(1);
-      inputLayout->addLayout(latencyRow);
+      detailsContentLayout->addWidget(MutedLabel(
+          "Technical microphone details, Open Audio model selection, and "
+          "legacy audio controls stay here.",
+          micDetailsContent_));
 
-      auto *loopbackButtons = new QHBoxLayout();
-      startBtn_ = new QPushButton("Start loopback", legacyInputBox_);
-      stopBtn_ = new QPushButton("Stop loopback", legacyInputBox_);
-      loopbackButtons->addWidget(startBtn_);
-      loopbackButtons->addWidget(stopBtn_);
-      loopbackButtons->addStretch(1);
-      inputLayout->addLayout(loopbackButtons);
+      QVBoxLayout *modelPanelLayout = nullptr;
+      auto *modelPanel =
+          MicrophonePanel("Open Audio Model", micDetailsContent_,
+                          &modelPanelLayout);
 
-      inputLayout->addWidget(
-          new QLabel("Legacy path: module-loopback (debug/dev only).\n"
-                     "The preferred path is the daemon pipeline feeding the "
-                     "StudioCast virtual devices.",
-                     legacyInputBox_));
+      auto *modelRow = new QHBoxLayout();
+      openAudioModelLabel_ = new QLabel("Model:", modelPanel);
+      openAudioModelCombo_ = new QComboBox(modelPanel);
+      openAudioModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+      openAudioModelCombo_->addItem("<auto>", "");
+      modelRow->addWidget(openAudioModelLabel_);
+      modelRow->addWidget(openAudioModelCombo_, 1);
+      modelPanelLayout->addLayout(modelRow);
+
+      auto *modelPathRow = new QHBoxLayout();
+      openAudioModelPathLabel_ = new QLabel("Model path:", modelPanel);
+      openAudioModelPathEdit_ = new QLineEdit(modelPanel);
+      openAudioModelPathEdit_->setPlaceholderText(
+          "(optional) /path/to/model.onnx");
+      browseOpenAudioModelBtn_ = new QPushButton("Browse…", modelPanel);
+      modelPathRow->addWidget(openAudioModelPathLabel_);
+      modelPathRow->addWidget(openAudioModelPathEdit_, 1);
+      modelPathRow->addWidget(browseOpenAudioModelBtn_);
+      modelPanelLayout->addLayout(modelPathRow);
+
+      openAudioInstallHintsBtn_ =
+          new QPushButton("Open Audio install hints", modelPanel);
+      openAudioInstallHintsBtn_->setEnabled(false);
+      modelPanelLayout->addWidget(openAudioInstallHintsBtn_, 0, Qt::AlignLeft);
+      detailsContentLayout->addWidget(modelPanel);
+
+      // Virtual mic controls (advanced/system).
+      vmicBox_ = new QGroupBox("Virtual Microphone Lifecycle",
+                               micDetailsContent_);
+      {
+        auto *vmicLayout = new QVBoxLayout(vmicBox_);
+        vmicLayout->setSpacing(10);
+
+        auto *buttonsRow = new QHBoxLayout();
+        createBtn_ = new QPushButton("Create virtual mic", vmicBox_);
+        destroyBtn_ = new QPushButton("Destroy virtual mic", vmicBox_);
+        destroyBtn_->setProperty("scVariant", "danger");
+
+        buttonsRow->addWidget(createBtn_);
+        buttonsRow->addWidget(destroyBtn_);
+        buttonsRow->addStretch(1);
+        vmicLayout->addLayout(buttonsRow);
+
+        vmicLayout->addWidget(MutedLabel(
+            "Other apps should select StudioCast Microphone. The processed "
+            "feed comes from the daemon audio pipeline.",
+            vmicBox_));
+      }
+      detailsContentLayout->addWidget(vmicBox_);
+
+      // Legacy loopback controls (advanced/debug).
+      legacyInputBox_ =
+          new QGroupBox("Legacy Loopback", micDetailsContent_);
+      {
+        auto *inputLayout = new QVBoxLayout(legacyInputBox_);
+        inputLayout->setSpacing(10);
+
+        auto *portRow = new QHBoxLayout();
+        portRow->addWidget(new QLabel("Input port:", legacyInputBox_));
+        portCombo_ = new QComboBox(legacyInputBox_);
+        portRow->addWidget(portCombo_, 1);
+        inputLayout->addLayout(portRow);
+
+        auto *latencyRow = new QHBoxLayout();
+        latencyRow->addWidget(new QLabel("Latency (ms):", legacyInputBox_));
+        latencySpin_ = new QSpinBox(legacyInputBox_);
+        latencySpin_->setRange(1, 200);
+        latencySpin_->setValue(10);
+        latencyRow->addWidget(latencySpin_);
+        latencyRow->addStretch(1);
+        inputLayout->addLayout(latencyRow);
+
+        auto *loopbackButtons = new QHBoxLayout();
+        startBtn_ = new QPushButton("Start loopback", legacyInputBox_);
+        stopBtn_ = new QPushButton("Stop loopback", legacyInputBox_);
+        loopbackButtons->addWidget(startBtn_);
+        loopbackButtons->addWidget(stopBtn_);
+        loopbackButtons->addStretch(1);
+        inputLayout->addLayout(loopbackButtons);
+
+        inputLayout->addWidget(MutedLabel(
+            "Legacy module-loopback path for debug/dev use. The daemon "
+            "pipeline is the preferred path.",
+            legacyInputBox_));
+      }
+      detailsContentLayout->addWidget(legacyInputBox_);
+
+      // Raw status.
+      statusBox_ = new QGroupBox("Raw Microphone Status", micDetailsContent_);
+      {
+        auto *statusLayout = new QVBoxLayout(statusBox_);
+        statusLayout->setSpacing(10);
+
+        statusText_ = new QPlainTextEdit(statusBox_);
+        statusText_->setReadOnly(true);
+        statusText_->setMinimumHeight(220);
+        statusLayout->addWidget(statusText_, 1);
+
+        auto *buttonsRow = new QHBoxLayout();
+        refreshStatusBtn_ = new QPushButton("Refresh status", statusBox_);
+        buttonsRow->addWidget(refreshStatusBtn_);
+        auto *copyStatusBtn =
+            new QPushButton("Copy raw microphone status", statusBox_);
+        buttonsRow->addWidget(copyStatusBtn);
+        buttonsRow->addStretch(1);
+        statusLayout->addLayout(buttonsRow);
+
+        connect(copyStatusBtn, &QPushButton::clicked, this, [this] {
+          if (auto *cb = QGuiApplication::clipboard())
+            cb->setText(statusText_ ? statusText_->toPlainText() : QString());
+        });
+      }
+      detailsContentLayout->addWidget(statusBox_);
+
+      micDetailsContent_->setVisible(false);
+      detailsLayout->addWidget(micDetailsContent_);
+      connect(micDetailsBox_, &QGroupBox::toggled, micDetailsContent_,
+              &QWidget::setVisible);
+      connect(micDetailsBox_, &QGroupBox::toggled, advancedToggle_,
+              &QToolButton::setChecked);
     }
-    root->addWidget(legacyInputBox_);
+    root->addWidget(micDetailsBox_);
 
-    // -----------------------
-    // Virtual mic controls (advanced)
-    // -----------------------
-    vmicBox_ = new QGroupBox("StudioCast Virtual Microphone", this);
-    {
-      auto *vmicLayout = new QVBoxLayout(vmicBox_);
-
-      auto *buttonsRow = new QHBoxLayout();
-      createBtn_ = new QPushButton("Create virtual mic", vmicBox_);
-      destroyBtn_ = new QPushButton("Destroy virtual mic", vmicBox_);
-
-      buttonsRow->addWidget(createBtn_);
-      buttonsRow->addWidget(destroyBtn_);
-      buttonsRow->addStretch(1);
-      vmicLayout->addLayout(buttonsRow);
-
-      vmicLayout->addWidget(
-          new QLabel("Tip: In other apps, select “StudioCast Microphone”.\n"
-                     "Processed feed: the audio pipeline plays into "
-                     "“StudioCast Sink”, and apps should use\n"
-                     "“StudioCast Microphone” (sink monitor).",
-                     vmicBox_));
-    }
-    root->addWidget(vmicBox_);
   } else {
     // -----------------------
     // Speaker effects
@@ -437,25 +586,27 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
     root->addWidget(speakersBox_);
   }
 
-  // -----------------------
-  // Status (advanced)
-  // -----------------------
-  statusBox_ = new QGroupBox("Status", this);
-  {
-    auto *statusLayout = new QVBoxLayout(statusBox_);
+  if (mode_ == AudioPageMode::Speakers) {
+    // -----------------------
+    // Status (advanced)
+    // -----------------------
+    statusBox_ = new QGroupBox("Status", this);
+    {
+      auto *statusLayout = new QVBoxLayout(statusBox_);
 
-    statusText_ = new QPlainTextEdit(statusBox_);
-    statusText_->setReadOnly(true);
-    statusText_->setMinimumHeight(220);
-    statusLayout->addWidget(statusText_, 1);
+      statusText_ = new QPlainTextEdit(statusBox_);
+      statusText_->setReadOnly(true);
+      statusText_->setMinimumHeight(220);
+      statusLayout->addWidget(statusText_, 1);
 
-    auto *buttonsRow = new QHBoxLayout();
-    refreshStatusBtn_ = new QPushButton("Refresh status", statusBox_);
-    buttonsRow->addWidget(refreshStatusBtn_);
-    buttonsRow->addStretch(1);
-    statusLayout->addLayout(buttonsRow);
+      auto *buttonsRow = new QHBoxLayout();
+      refreshStatusBtn_ = new QPushButton("Refresh status", statusBox_);
+      buttonsRow->addWidget(refreshStatusBtn_);
+      buttonsRow->addStretch(1);
+      statusLayout->addLayout(buttonsRow);
+    }
+    root->addWidget(statusBox_);
   }
-  root->addWidget(statusBox_);
   root->addStretch(1);
 
   // -----------------------
@@ -599,6 +750,13 @@ void AudioPage::ShowError(const QString &title, const QString &details) {
 void AudioPage::OnToggleAdvanced(bool checked) { SetAdvancedVisible(checked); }
 
 void AudioPage::SetAdvancedVisible(bool visible) {
+  if (micDetailsBox_) {
+    micDetailsBox_->setChecked(visible);
+    if (micDetailsContent_)
+      micDetailsContent_->setVisible(visible);
+    return;
+  }
+
   // Advanced items are intentionally per-mode.
   if (legacyInputBox_)
     legacyInputBox_->setVisible(visible);
@@ -606,6 +764,19 @@ void AudioPage::SetAdvancedVisible(bool visible) {
     vmicBox_->setVisible(visible);
   if (statusBox_)
     statusBox_->setVisible(visible);
+}
+
+void AudioPage::SetMicStatusSummary(const QString &state,
+                                    const QString &detail,
+                                    const QString &status) {
+  if (micStateLabel_) {
+    micStateLabel_->setText(state);
+    SetDynamicProperty(micStateLabel_, "scStatus", status);
+  }
+  if (micDetailLabel_) {
+    micDetailLabel_->setText(detail);
+    micDetailLabel_->setVisible(!detail.trimmed().isEmpty());
+  }
 }
 
 void AudioPage::RefreshSources() {
@@ -1139,6 +1310,15 @@ void AudioPage::SetAiControlsEnabled(bool enabled, const QString &reason) {
     aiBanner_->setText(reason);
   }
 
+  if (!enabled && micStateLabel_) {
+    SetMicStatusSummary(QStringLiteral("Daemon unavailable"), reason,
+                        QStringLiteral("error"));
+    if (micSourceStatusLabel_)
+      micSourceStatusLabel_->setVisible(false);
+    if (openAudioInstallHintsBtn_)
+      openAudioInstallHintsBtn_->setEnabled(false);
+  }
+
   // Avoid stacked banners: when we show a warning, hide the info note.
   if (aiInfoBanner_ && (!enabled || (aiBanner_ && aiBanner_->isVisible()))) {
     aiInfoBanner_->setVisible(false);
@@ -1188,18 +1368,20 @@ void AudioPage::UpdateEngineUiVisibility() {
 
   const bool showOpen =
       (eng == "open_source") || (eng == "auto" && activeIsOpen);
+  const bool showMicOpenDetails =
+      mode_ == AudioPageMode::Microphone ? true : showOpen;
 
   // Microphone model controls
   if (openAudioModelLabel_)
-    openAudioModelLabel_->setVisible(showOpen);
+    openAudioModelLabel_->setVisible(showMicOpenDetails);
   if (openAudioModelCombo_)
-    openAudioModelCombo_->setVisible(showOpen);
+    openAudioModelCombo_->setVisible(showMicOpenDetails);
   if (openAudioModelPathLabel_)
-    openAudioModelPathLabel_->setVisible(showOpen);
+    openAudioModelPathLabel_->setVisible(showMicOpenDetails);
   if (openAudioModelPathEdit_)
-    openAudioModelPathEdit_->setVisible(showOpen);
+    openAudioModelPathEdit_->setVisible(showMicOpenDetails);
   if (browseOpenAudioModelBtn_)
-    browseOpenAudioModelBtn_->setVisible(showOpen);
+    browseOpenAudioModelBtn_->setVisible(showMicOpenDetails);
 
   // Speaker model controls
   if (speakerOpenAudioModelLabel_)
@@ -1213,9 +1395,12 @@ void AudioPage::UpdateEngineUiVisibility() {
   if (speakerBrowseOpenAudioModelBtn_)
     speakerBrowseOpenAudioModelBtn_->setVisible(showOpen);
 
-  // Install hints are only relevant when using Open Source.
+  // Microphone keeps install hints in Details so model setup remains reachable;
+  // Speakers keeps the legacy visibility behavior until its migration.
   if (openAudioInstallHintsBtn_)
-    openAudioInstallHintsBtn_->setVisible(showOpen);
+    openAudioInstallHintsBtn_->setVisible(mode_ == AudioPageMode::Microphone
+                                              ? true
+                                              : showOpen);
 }
 
 void AudioPage::RefreshDaemonAudioStatus() {
@@ -1297,6 +1482,61 @@ void AudioPage::RefreshDaemonAudioStatus() {
   const QString lastErr = pipeline.value("last_error").toString();
   const QString backendActive = pipeline.value("backend_active").toString();
   const QString effectsNote = pipeline.value("effects_note").toString();
+
+  if (mode_ == AudioPageMode::Microphone) {
+    const bool micPresent = audio.value("mic_present").toBool(
+        audio.value("create_virtual_mic").toBool(false));
+
+    QString state = QStringLiteral("Available");
+    QString detail =
+        QStringLiteral("StudioCast Microphone is available to other apps.");
+    QString status = QStringLiteral("good");
+
+    if (!lastErr.trimmed().isEmpty()) {
+      state = QStringLiteral("Processing error");
+      detail = lastErr.trimmed();
+      status = QStringLiteral("error");
+    } else if (!sourceErr.trimmed().isEmpty()) {
+      state = QStringLiteral("Source needs attention");
+      detail = sourceErr.trimmed();
+      status = QStringLiteral("warning");
+    } else if (!micPresent) {
+      state = QStringLiteral("Virtual mic missing");
+      detail = QStringLiteral(
+          "The StudioCast Microphone virtual device is not present.");
+      status = QStringLiteral("warning");
+    } else if (running) {
+      state = QStringLiteral("Processing active");
+      detail = backendActive.trimmed().isEmpty()
+                   ? QStringLiteral("Microphone cleanup is running.")
+                   : QStringLiteral("Microphone cleanup is running with %1.")
+                         .arg(FriendlyBackendLabel(backendActive));
+    } else if (starting) {
+      state = QStringLiteral("Starting");
+      detail = QStringLiteral("Microphone cleanup is starting.");
+    } else if (!audioEnabled) {
+      state = QStringLiteral("Off");
+      detail = QStringLiteral(
+          "Microphone processing is disabled by the current backend setting.");
+      status = QStringLiteral("warning");
+    }
+    SetMicStatusSummary(state, detail, status);
+
+    if (micSourceStatusLabel_) {
+      QStringList sourceLines;
+      if (!sourceResolved.trimmed().isEmpty()) {
+        sourceLines << QStringLiteral("Resolved source: %1")
+                           .arg(sourceResolved.trimmed());
+      }
+      for (const auto &v : sourceWarnings) {
+        const QString warning = v.toString().trimmed();
+        if (!warning.isEmpty())
+          sourceLines << warning;
+      }
+      micSourceStatusLabel_->setText(sourceLines.join(QStringLiteral("\n")));
+      micSourceStatusLabel_->setVisible(!sourceLines.isEmpty());
+    }
+  }
 
   // Tab-specific summary: in Speakers mode, prefer the speakers pipeline
   // backend and note rather than the microphone pipeline.
