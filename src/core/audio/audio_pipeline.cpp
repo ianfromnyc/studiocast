@@ -16,6 +16,7 @@
 #include <pulse/stream.h>
 #include <pulse/thread-mainloop.h>
 
+#include "core/audio/audio_device_safety.h"
 #include "core/audio/audio_processor.h"
 
 namespace studiocast::audio {
@@ -113,8 +114,21 @@ public:
     play_attr.minreq = static_cast<uint32_t>(bytes_per_frame);
     play_attr.fragsize = static_cast<uint32_t>(-1);
 
+    std::string resolved_capture_dev = cfg.source_name;
+    if (!cfg.allow_monitor_source) {
+      const auto sourceResolution = ResolveSafeInputSourceName(cfg.source_name);
+      if (!sourceResolution.ok) {
+        if (error) {
+          *error = sourceResolution.error.empty()
+                       ? "Failed to resolve a safe Pulse capture source."
+                       : sourceResolution.error;
+        }
+        return false;
+      }
+      resolved_capture_dev = sourceResolution.source_name;
+    }
     const char *capture_dev =
-        cfg.source_name.empty() ? nullptr : cfg.source_name.c_str();
+        resolved_capture_dev.empty() ? nullptr : resolved_capture_dev.c_str();
     const char *playback_dev =
         cfg.sink_name.empty() ? nullptr : cfg.sink_name.c_str();
 

@@ -120,3 +120,10 @@ ${XDG_DATA_HOME:-~/.local/share}/studiocast/models/open_audio/<model_id>/
 ```
 
 See `docs/open_audio_install.md` for the installer script, pack schema, and validation tooling.
+
+## Audio device safety
+
+Production GUI audio changes go through daemon IPC (`SET_AUDIO_CONFIG`). The daemon and audio pipeline reject
+StudioCast virtual microphone sources, Pulse monitor sources, and StudioCast virtual speaker target sinks to avoid
+feedback loops. `source: "auto"` is resolved by the daemon/audio pipeline to a safe physical microphone source when the
+Pulse default source is unsafe, or fails with an actionable status/config error if no safe source exists.

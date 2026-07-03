@@ -1,7 +1,7 @@
 # Manual Testing
 
 Status: starter plan for hardware and desktop workflow validation.
-Last updated: 2026-06-30.
+Last updated: 2026-07-03.
 
 This document tracks manual tests that cannot be covered deterministically in
 CI because they require real V4L2 devices, v4l2loopback behavior, desktop
@@ -51,6 +51,10 @@ Useful artifacts:
 
 - `build/studiocastctl status`
 - `build/studiocastctl debug-report --out studiocast-debug-report.txt`
+- `pactl info`
+- `pactl list short sources`
+- `pactl list short sinks`
+- `pactl list short modules`
 - `v4l2-ctl --list-devices`
 - `v4l2-ctl --all -d /dev/videoX`
 - GUI screenshots for user-visible errors or disabled controls
@@ -73,6 +77,8 @@ v4l2-ctl --list-devices
 ```
 
 - At least one readable physical camera for physical input tests.
+- At least one physical microphone/input source and one physical speaker/output
+  sink for audio routing tests.
 - A desktop consumer app such as OBS or a browser/WebRTC camera test page.
 - Optional: a second readable loopback device for loopback-as-input tests.
 - Optional: Maxine SDK or Open CUDA model packs for positive effect availability
@@ -259,6 +265,108 @@ Expected:
 - Retries are bounded.
 - Status remains understandable during exclusive-caps transitions.
 - No persistent stuck preview state remains after consumers close.
+
+## Audio Device And Routing
+
+- [ ] Open the Microphone page with the daemon running and inspect the input
+  selector.
+
+Expected:
+
+- Physical microphone/input sources are selectable.
+- StudioCast virtual sources and Pulse monitor sources are absent from the
+  selectable list.
+- `Auto (Pulse default)` is available.
+- A persisted missing source appears as missing/disconnected instead of being
+  silently replaced.
+
+- [ ] Select a physical microphone source, enable a microphone effect or
+  pass-through mode, then check:
+
+```bash
+build/studiocastctl status
+```
+
+Expected:
+
+- `audio.source` matches the selected source or `auto`.
+- `audio.source_resolved` is a physical microphone/input source.
+- If the daemon rejects the change, the GUI reports the error and does not leave
+  the rejected source shown as applied.
+
+- [ ] Set the Pulse default source to a monitor source, then set StudioCast
+  microphone input to `Auto`.
+
+Expected:
+
+- `SET_AUDIO_CONFIG` rejects the config when no safe source exists, or status
+  reports that a safe physical source was selected instead.
+- The daemon never captures from `studiocast_mic`,
+  `studiocast_speakers.monitor`, or another sink monitor for the microphone
+  pipeline.
+- The error tells the tester to choose a physical microphone/input source.
+
+- [ ] Open the Speakers page and inspect the output selector.
+
+Expected:
+
+- Physical output sinks are selectable.
+- StudioCast virtual sinks and monitor devices are not offered as normal
+  targets.
+- A persisted missing target sink appears as disconnected/unavailable and
+  remains visible until another sink is selected.
+
+- [ ] Select a physical output sink, enable StudioCast Speakers with speaker
+  effects off, and play audio from an app into `StudioCast Speakers`.
+
+Expected:
+
+- Daemon status reports `audio.speakers.route_mode=loopback`.
+- `audio.speakers.target_sink` matches the selected sink or `auto`.
+- `audio.speakers.target_sink_active` is the resolved physical sink.
+- Audio reaches the selected physical speakers.
+
+- [ ] Enable a speaker effect and keep the same physical output sink selected.
+
+Expected:
+
+- Daemon status switches to `audio.speakers.route_mode=pipeline`.
+- The Pulse module-loopback route is stopped before processed speaker routing
+  starts.
+- `target_sink_active` remains the selected physical sink while the pipeline is
+  running.
+- If the pipeline cannot start, the GUI/status show the failure and do not claim
+  routing is active.
+
+- [ ] Kill and restart `studiocastd` while the GUI is open and audio devices are
+  enabled.
+
+Expected:
+
+- GUI controls become unavailable while IPC is down.
+- Release builds do not create/destroy virtual audio devices directly via
+  `pactl` while the daemon is unreachable.
+- After daemon restart, microphone source, speaker target, effect state, and
+  routing state resync from daemon status.
+
+- [ ] Create stale StudioCast Pulse modules manually or by killing the daemon
+  mid-route, then restart the daemon and use GUI stop/destroy actions.
+
+Expected:
+
+- Stale `module-loopback`, `module-null-sink`, and `module-remap-source`
+  instances are cleaned up or reported with actionable errors.
+- Failed cleanup preserves the old active route in status instead of claiming a
+  new route is active.
+
+- [ ] Unplug or disable the selected microphone/source or selected speaker sink
+  while routing or processing is active.
+
+Expected:
+
+- Status reports disconnected/unavailable source or target state.
+- The GUI preserves the missing persisted selection visibly.
+- Selecting another physical source/sink recovers without restarting the GUI.
 
 ## Effects Availability
 

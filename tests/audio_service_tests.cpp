@@ -1,5 +1,5 @@
-#include <atomic>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "core/audio/audio_backend_resolver.h"
+#include "core/audio/audio_device_safety.h"
 #include "core/audio/audio_pipeline.h"
 #include "core/audio/audio_processor.h"
 #include "core/audio/pulse/pactl.h"
@@ -645,9 +646,9 @@ public:
   }
 
   bool GetCaptureLatencyUs(std::uint64_t *latency_us) override {
-    const int q =
-        state_->capture_latency_queries.fetch_add(1, std::memory_order_relaxed) +
-        1;
+    const int q = state_->capture_latency_queries.fetch_add(
+                      1, std::memory_order_relaxed) +
+                  1;
     if (q == 1) {
       if (latency_us)
         *latency_us = 12000;
@@ -709,9 +710,8 @@ public:
     std::lock_guard<std::mutex> lock(state_->mu);
     state_->open_sample_rate = static_cast<std::uint32_t>(cfg.sample_rate);
     state_->open_channels = cfg.channels;
-    state_->bytes_per_frame =
-        static_cast<std::size_t>(cfg.frame_samples) * cfg.channels *
-        sizeof(float);
+    state_->bytes_per_frame = static_cast<std::size_t>(cfg.frame_samples) *
+                              cfg.channels * sizeof(float);
     state_->read_offset_samples = 0;
     state_->output.clear();
     state_->read_calls = 0;
@@ -756,8 +756,7 @@ public:
         *error = "scripted read exceeded input";
       return false;
     }
-    std::memcpy(dst, state_->input.data() + state_->read_offset_samples,
-                bytes);
+    std::memcpy(dst, state_->input.data() + state_->read_offset_samples, bytes);
     state_->read_offset_samples += samples;
     ++state_->read_calls;
     if (error)
@@ -814,9 +813,8 @@ std::vector<float> MakeSyntheticStereoAudio(std::uint32_t frame_samples,
                                             int frame_count) {
   constexpr double kPi = 3.141592653589793238462643383279502884;
   constexpr double kSampleRate = 48000.0;
-  const std::size_t total_frames =
-      static_cast<std::size_t>(frame_samples) *
-      static_cast<std::size_t>(frame_count);
+  const std::size_t total_frames = static_cast<std::size_t>(frame_samples) *
+                                   static_cast<std::size_t>(frame_count);
   std::vector<float> audio(total_frames * 2, 0.0f);
 
   for (std::size_t n = 0; n < total_frames; ++n) {
@@ -834,9 +832,9 @@ std::vector<float> MakeSyntheticStereoAudio(std::uint32_t frame_samples,
         right = -0.75f;
       }
     } else if (packet > 3) {
-      const double sweep01 = static_cast<double>(n) /
-                             static_cast<double>(std::max<std::size_t>(
-                                 total_frames - 1, 1));
+      const double sweep01 =
+          static_cast<double>(n) /
+          static_cast<double>(std::max<std::size_t>(total_frames - 1, 1));
       const double hz = 220.0 + 1780.0 * sweep01;
       left = static_cast<float>(0.2 * std::sin(2.0 * kPi * hz * t));
       right = static_cast<float>(0.2 * std::sin(2.0 * kPi * hz * t + 0.3));
@@ -1083,6 +1081,192 @@ bool TestPactlConsumerListsParseSourceOutputsAndSinkInputs() {
   };
   if (commands != expected) {
     std::cerr << "unexpected consumer-list command sequence\n";
+    for (const auto &command : commands)
+      std::cerr << "  " << command << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestAudioSourceSafetyRejectsVirtualAndMonitorSources() {
+  std::string reason;
+  if (!studiocast::audio::IsUnsafeInputSourceName("studiocast_mic", &reason) ||
+      reason.find("StudioCast virtual source") == std::string::npos) {
+    std::cerr << "StudioCast virtual mic source was not rejected; reason='"
+              << reason << "'\n";
+    return false;
+  }
+
+  reason.clear();
+  if (!studiocast::audio::IsUnsafeInputSourceName(
+          "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor", &reason) ||
+      reason.find("monitor source") == std::string::npos) {
+    std::cerr << "monitor source was not rejected; reason='" << reason << "'\n";
+    return false;
+  }
+
+  const auto explicit_virtual =
+      studiocast::audio::ResolveSafeInputSourceName("studiocast_mic");
+  if (explicit_virtual.ok ||
+      explicit_virtual.error.find("StudioCast virtual source") ==
+          std::string::npos) {
+    std::cerr << "explicit virtual source was not rejected; ok="
+              << explicit_virtual.ok << " error='" << explicit_virtual.error
+              << "'\n";
+    return false;
+  }
+
+  const auto explicit_physical =
+      studiocast::audio::ResolveSafeInputSourceName("alsa_input.usb_test_mic");
+  if (!explicit_physical.ok ||
+      explicit_physical.source_name != "alsa_input.usb_test_mic") {
+    std::cerr << "explicit physical source was not accepted; ok="
+              << explicit_physical.ok << " source='"
+              << explicit_physical.source_name << "' error='"
+              << explicit_physical.error << "'\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestAudioSourceAutoFallsBackFromUnsafeDefaultSource() {
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl get-default-source 2>&1")
+      return ExecResult(0, "studiocast_speakers.monitor\n");
+    if (command == "pactl list short sources 2>&1") {
+      return ExecResult(0,
+                        "0\tstudiocast_speakers.monitor\tmodule-null-sink.c\t"
+                        "s16le 2ch 48000Hz\tIDLE\n"
+                        "1\talsa_output.pci_test.monitor\tmodule-alsa-card.c\t"
+                        "s16le 2ch 48000Hz\tIDLE\n"
+                        "2\talsa_input.usb_test_mic\tmodule-alsa-card.c\t"
+                        "s16le 1ch 48000Hz\tRUNNING\n");
+    }
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  const auto resolved = studiocast::audio::ResolveSafeInputSourceName("");
+  if (!resolved.ok || resolved.source_name != "alsa_input.usb_test_mic" ||
+      resolved.warnings.empty()) {
+    std::cerr << "auto source did not fall back to physical mic; ok="
+              << resolved.ok << " source='" << resolved.source_name
+              << "' error='" << resolved.error
+              << "' warnings=" << resolved.warnings.size() << "\n";
+    return false;
+  }
+
+  const std::vector<std::string> expected = {
+      "pactl get-default-source 2>&1",
+      "pactl list short sources 2>&1",
+  };
+  if (commands != expected) {
+    std::cerr << "unexpected source auto fallback command sequence\n";
+    for (const auto &command : commands)
+      std::cerr << "  " << command << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestAudioSourceAutoFailsWhenNoSafeSourceExists() {
+  ScopedPactlExecHook hook([](const std::string &command) {
+    if (command == "pactl get-default-source 2>&1")
+      return ExecResult(0, "studiocast_mic\n");
+    if (command == "pactl list short sources 2>&1") {
+      return ExecResult(0,
+                        "0\tstudiocast_mic\tmodule-remap-source.c\t"
+                        "s16le 1ch 48000Hz\tIDLE\n"
+                        "1\talsa_output.pci_test.monitor\tmodule-alsa-card.c\t"
+                        "s16le 2ch 48000Hz\tIDLE\n");
+    }
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  const auto resolved = studiocast::audio::ResolveSafeInputSourceName("auto");
+  if (resolved.ok ||
+      resolved.error.find("No safe Pulse microphone source") ==
+          std::string::npos ||
+      resolved.error.find("Select a physical microphone") ==
+          std::string::npos) {
+    std::cerr << "auto source without safe fallback did not fail clearly; ok="
+              << resolved.ok << " source='" << resolved.source_name
+              << "' error='" << resolved.error << "'\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestSpeakerTargetSafetyRejectsVirtualAndMonitorEndpoints() {
+  std::string reason;
+  if (!studiocast::audio::IsUnsafeSpeakerTargetSinkName("studiocast_sink",
+                                                        &reason) ||
+      reason.find("feedback loop") == std::string::npos) {
+    std::cerr << "virtual speaker target was not rejected; reason='" << reason
+              << "'\n";
+    return false;
+  }
+
+  reason.clear();
+  if (!studiocast::audio::IsUnsafeSpeakerTargetSinkName(
+          "alsa_output.pci_test.monitor", &reason) ||
+      reason.find("monitor source") == std::string::npos) {
+    std::cerr << "monitor endpoint target was not rejected; reason='" << reason
+              << "'\n";
+    return false;
+  }
+
+  std::string err;
+  const auto chosen = studiocast::audio::ChooseSafeSpeakerTargetSinkName(
+      "studiocast_sink", &err);
+  if (chosen || err.find("feedback loop") == std::string::npos) {
+    std::cerr << "virtual target chooser did not reject sink; chosen='"
+              << (chosen ? *chosen : std::string("<none>")) << "' error='"
+              << err << "'\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestSpeakerTargetAutoFallsBackFromUnsafeDefaultSink() {
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl get-default-sink 2>&1")
+      return ExecResult(0, "studiocast_speakers\n");
+    if (command == "pactl list short sinks 2>&1") {
+      return ExecResult(0, "0\tstudiocast_speakers\tmodule-null-sink.c\t"
+                           "s16le 2ch 48000Hz\tIDLE\n"
+                           "1\tstudiocast_sink\tmodule-null-sink.c\t"
+                           "s16le 2ch 48000Hz\tIDLE\n"
+                           "2\tphysical_test_sink\tmodule-alsa-card.c\t"
+                           "s16le 2ch 48000Hz\tRUNNING\n");
+    }
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  std::string err;
+  const auto chosen = studiocast::audio::ChooseSafeSpeakerTargetSinkName(
+      /*configured_target=*/"", &err);
+  if (!chosen || *chosen != "physical_test_sink") {
+    std::cerr << "speaker auto target did not fall back to physical sink; "
+              << "chosen='" << (chosen ? *chosen : std::string("<none>"))
+              << "' error='" << err << "'\n";
+    return false;
+  }
+
+  const std::vector<std::string> expected = {
+      "pactl get-default-sink 2>&1",
+      "pactl list short sinks 2>&1",
+  };
+  if (commands != expected) {
+    std::cerr << "unexpected speaker target command sequence\n";
     for (const auto &command : commands)
       std::cerr << "  " << command << "\n";
     return false;
@@ -1861,10 +2045,10 @@ bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
         !absent_status.pipeline_active_needed) {
       std::cerr << "microphone pipeline churned during grace window; i=" << i
                 << " creates=" << pipeline_creates.load()
-                << " stops=" << pipeline_stops.load() << " running="
-                << absent_status.pipeline_running << " needed="
-                << absent_status.pipeline_active_needed << " state='"
-                << absent_status.pipeline_state << "'\n";
+                << " stops=" << pipeline_stops.load()
+                << " running=" << absent_status.pipeline_running
+                << " needed=" << absent_status.pipeline_active_needed
+                << " state='" << absent_status.pipeline_state << "'\n";
       service.Stop();
       return false;
     }
@@ -1896,8 +2080,7 @@ bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
       [&] {
         const auto status = service.Status();
         return pipeline_stops.load(std::memory_order_relaxed) == 1 &&
-               !status.pipeline_running &&
-               !status.pipeline_active_needed &&
+               !status.pipeline_running && !status.pipeline_active_needed &&
                status.pipeline_state == "idle_no_consumer";
       },
       700ms);
@@ -1907,9 +2090,9 @@ bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
   if (!stopped) {
     std::cerr << "microphone pipeline did not stop after sustained absence; "
               << "creates=" << pipeline_creates.load()
-              << " stops=" << pipeline_stops.load() << " running="
-              << status.pipeline_running << " needed="
-              << status.pipeline_active_needed << " state='"
+              << " stops=" << pipeline_stops.load()
+              << " running=" << status.pipeline_running
+              << " needed=" << status.pipeline_active_needed << " state='"
               << status.pipeline_state << "'\n";
     return false;
   }
@@ -1969,8 +2152,8 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
     const auto status = service.Status();
     std::cerr << "microphone detection error was not surfaced; state='"
               << status.pipeline_state << "' error='"
-              << status.mic_consumer_error << "' creates="
-              << pipeline_creates.load() << "\n";
+              << status.mic_consumer_error
+              << "' creates=" << pipeline_creates.load() << "\n";
     service.Stop();
     return false;
   }
@@ -1988,8 +2171,8 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
     const auto status = service.Status();
     std::cerr << "missing virtual mic source was not surfaced; state='"
               << status.pipeline_state << "' error='"
-              << status.mic_consumer_error << "' creates="
-              << pipeline_creates.load() << "\n";
+              << status.mic_consumer_error
+              << "' creates=" << pipeline_creates.load() << "\n";
     service.Stop();
     return false;
   }
@@ -1999,8 +2182,7 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
       [&] {
         const auto status = service.Status();
         return pipeline_creates.load(std::memory_order_relaxed) == 1 &&
-               status.pipeline_running &&
-               status.pipeline_state == "running" &&
+               status.pipeline_running && status.pipeline_state == "running" &&
                status.mic_consumer_present && status.mic_consumer_error.empty();
       },
       250ms);
@@ -2010,9 +2192,9 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
   if (!recovered) {
     std::cerr << "microphone pipeline did not recover after detection errors; "
               << "creates=" << pipeline_creates.load() << " state='"
-              << status.pipeline_state << "' running="
-              << status.pipeline_running << " consumer="
-              << status.mic_consumer_present << " error='"
+              << status.pipeline_state
+              << "' running=" << status.pipeline_running
+              << " consumer=" << status.mic_consumer_present << " error='"
               << status.mic_consumer_error << "'\n";
     return false;
   }
@@ -2196,10 +2378,10 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
         !absent_status.speakers_pipeline_active_needed) {
       std::cerr << "speaker pipeline churned during grace window; i=" << i
                 << " creates=" << pipeline_creates.load()
-                << " stops=" << pipeline_stops.load() << " running="
-                << absent_status.speakers_pipeline_running << " needed="
-                << absent_status.speakers_pipeline_active_needed << " state='"
-                << absent_status.speakers_pipeline_state << "'\n";
+                << " stops=" << pipeline_stops.load()
+                << " running=" << absent_status.speakers_pipeline_running
+                << " needed=" << absent_status.speakers_pipeline_active_needed
+                << " state='" << absent_status.speakers_pipeline_state << "'\n";
       service.Stop();
       return false;
     }
@@ -2243,10 +2425,10 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
   if (!stopped) {
     std::cerr << "speaker pipeline did not stop after sustained absence; "
               << "creates=" << pipeline_creates.load()
-              << " stops=" << pipeline_stops.load() << " running="
-              << status.speakers_pipeline_running << " needed="
-              << status.speakers_pipeline_active_needed << " state='"
-              << status.speakers_pipeline_state << "'\n";
+              << " stops=" << pipeline_stops.load()
+              << " running=" << status.speakers_pipeline_running
+              << " needed=" << status.speakers_pipeline_active_needed
+              << " state='" << status.speakers_pipeline_state << "'\n";
     return false;
   }
 
@@ -3844,9 +4026,7 @@ bool TestLatencyQueryFailureClearsStaleLastValue() {
   CopyProcessor processor;
 
   AudioPipelineHooks hooks;
-  hooks.create_io = [state] {
-    return std::make_unique<FlakyLatencyIo>(state);
-  };
+  hooks.create_io = [state] { return std::make_unique<FlakyLatencyIo>(state); };
 
   AudioPipeline pipeline(&processor, std::move(hooks));
   AudioPipelineConfig cfg;
@@ -3871,8 +4051,8 @@ bool TestLatencyQueryFailureClearsStaleLastValue() {
         const auto stats = pipeline.GetStats();
         return state->capture_latency_queries.load(std::memory_order_relaxed) >=
                    2 &&
-               state->playback_latency_queries.load(std::memory_order_relaxed) >=
-                   2 &&
+               state->playback_latency_queries.load(
+                   std::memory_order_relaxed) >= 2 &&
                stats.pulse_capture_latency_us_last == 0 &&
                stats.pulse_playback_latency_us_last == 5000 &&
                stats.pulse_latency_us_max >= 46000;
@@ -3887,10 +4067,9 @@ bool TestLatencyQueryFailureClearsStaleLastValue() {
               << " capture_last=" << stats.pulse_capture_latency_us_last
               << " playback_last=" << stats.pulse_playback_latency_us_last
               << " max=" << stats.pulse_latency_us_max
-              << " capture_queries="
-              << state->capture_latency_queries.load()
-              << " playback_queries="
-              << state->playback_latency_queries.load() << "\n";
+              << " capture_queries=" << state->capture_latency_queries.load()
+              << " playback_queries=" << state->playback_latency_queries.load()
+              << "\n";
     return false;
   }
 
@@ -3931,7 +4110,8 @@ bool TestOfflinePassthroughPipelineAudioQuality() {
   const bool finished = WaitUntil(
       [&] {
         const auto stats = pipeline.GetStats();
-        return stats.frames_processed == static_cast<std::uint64_t>(kFrameCount) &&
+        return stats.frames_processed ==
+                   static_cast<std::uint64_t>(kFrameCount) &&
                !stats.running;
       },
       500ms);
@@ -3980,8 +4160,8 @@ bool TestOfflinePassthroughPipelineAudioQuality() {
 
   for (std::size_t i = 0; i < output.size(); ++i) {
     if (!std::isfinite(output[i]) || std::fabs(output[i]) > 1.000001f) {
-      std::cerr << "offline pipeline produced invalid sample at " << i
-                << ": " << output[i] << "\n";
+      std::cerr << "offline pipeline produced invalid sample at " << i << ": "
+                << output[i] << "\n";
       return false;
     }
   }
@@ -3999,10 +4179,9 @@ bool TestOfflinePassthroughPipelineAudioQuality() {
   if (output != input) {
     double max_abs_diff = 0.0;
     for (std::size_t i = 0; i < output.size(); ++i) {
-      max_abs_diff = std::max(
-          max_abs_diff,
-          std::fabs(static_cast<double>(output[i]) -
-                    static_cast<double>(input[i])));
+      max_abs_diff =
+          std::max(max_abs_diff, std::fabs(static_cast<double>(output[i]) -
+                                           static_cast<double>(input[i])));
     }
     std::cerr << "passthrough pipeline changed samples; max_abs_diff="
               << max_abs_diff << "\n";
@@ -4149,6 +4328,16 @@ int main() {
        &TestPactlProplistCommandsQuoteArgumentsAndDetectFailures},
       {"pactl consumer lists parse source outputs and sink inputs",
        &TestPactlConsumerListsParseSourceOutputsAndSinkInputs},
+      {"audio source safety rejects virtual and monitor sources",
+       &TestAudioSourceSafetyRejectsVirtualAndMonitorSources},
+      {"audio source auto falls back from unsafe default source",
+       &TestAudioSourceAutoFallsBackFromUnsafeDefaultSource},
+      {"audio source auto fails when no safe source exists",
+       &TestAudioSourceAutoFailsWhenNoSafeSourceExists},
+      {"speaker target safety rejects virtual and monitor endpoints",
+       &TestSpeakerTargetSafetyRejectsVirtualAndMonitorEndpoints},
+      {"speaker target auto falls back from unsafe default sink",
+       &TestSpeakerTargetAutoFallsBackFromUnsafeDefaultSink},
       {"status text surfaces module list failures",
        &TestStatusTextSurfacesModuleListFailure},
       {"virtual mic create propagates list failure without loading",

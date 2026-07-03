@@ -4,15 +4,14 @@
 #include <string>
 #include <vector>
 
+#include "core/audio/audio_device_safety.h"
 #include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_speaker_state.h"
-#include "core/util/strings.h"
 
 namespace studiocast::audio {
 namespace {
 
 constexpr const char *kSpeakersSinkName = "studiocast_speakers";
-constexpr const char *kVirtualMicSinkName = "studiocast_sink";
 
 bool Contains(const std::string &hay, const std::string &needle) {
   return hay.find(needle) != std::string::npos;
@@ -221,43 +220,16 @@ bool StartSpeakerLoopback(const std::string &target_sink_name, int latency_ms,
     return false;
   }
 
-  auto isVirtualTarget = [](const std::string &name) {
-    return name == kSpeakersSinkName || name == kVirtualMicSinkName;
-  };
-
-  std::string chosen = util::TrimCopy(target_sink_name);
-  if (isVirtualTarget(chosen)) {
+  std::string targetErr;
+  auto chosenOpt =
+      ChooseSafeSpeakerTargetSinkName(target_sink_name, &targetErr);
+  if (!chosenOpt) {
     if (error)
-      *error = "Refusing to loop back to '" + chosen + "' (feedback loop).";
+      *error = targetErr.empty() ? "Failed to choose a physical target sink."
+                                 : targetErr;
     return false;
   }
-
-  if (chosen.empty()) {
-    std::string err;
-    auto def = pulse::GetDefaultSinkName(&err);
-    if (def && !isVirtualTarget(*def)) {
-      chosen = *def;
-    } else {
-      // If the user's default sink is our virtual device (common when testing),
-      // pick the first non-virtual sink as a best-effort physical target.
-      const auto sinks = pulse::ListSinks(&err);
-      for (const auto &s : sinks) {
-        if (!isVirtualTarget(s.name)) {
-          chosen = s.name;
-          break;
-        }
-      }
-      if (chosen.empty()) {
-        if (error) {
-          *error = "Failed to choose a target sink. Default sink is virtual or "
-                   "missing.";
-          if (!err.empty())
-            *error += " (note) " + err;
-        }
-        return false;
-      }
-    }
-  }
+  const std::string chosen = *chosenOpt;
 
   {
     std::string err;

@@ -4,10 +4,10 @@
 #include <string>
 #include <vector>
 
+#include "core/audio/audio_device_safety.h"
 #include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_mic_state.h"
 #include "core/audio/virtual_speaker.h"
-#include "core/util/strings.h"
 
 namespace studiocast::audio {
 namespace {
@@ -285,6 +285,16 @@ bool StartLoopback(const std::string &source_name, int latency_ms,
     return false;
   }
 
+  const auto sourceResolution = ResolveSafeInputSourceName(source_name);
+  if (!sourceResolution.ok) {
+    if (error)
+      *error = sourceResolution.error.empty()
+                   ? "Failed to resolve a safe input source."
+                   : sourceResolution.error;
+    return false;
+  }
+  const std::string chosen = sourceResolution.source_name;
+
   // Ensure virtual mic exists first.
   {
     std::string err;
@@ -303,18 +313,6 @@ bool StartLoopback(const std::string &source_name, int latency_ms,
         *error = "Failed to stop existing mic loopback: " + err;
       return false;
     }
-  }
-
-  std::string chosen = util::TrimCopy(source_name);
-  if (chosen.empty()) {
-    std::string err;
-    auto def = pulse::GetDefaultSourceName(&err);
-    if (!def) {
-      if (error)
-        *error = "Failed to find default source: " + err;
-      return false;
-    }
-    chosen = *def;
   }
 
   std::string err;
