@@ -21,9 +21,10 @@
 #include <QWidget>
 #include <algorithm>
 
-#include "gui/pages/home_page.h"
-#include "gui/pages/engines_models_page.h"
 #include "gui/pages/audio_page.h"
+#include "gui/pages/engines_models_page.h"
+#include "gui/pages/home_page.h"
+#include "gui/pages/support_page.h"
 #include "gui/pages/video_page.h"
 #include "gui/status/daemon_status_snapshot.h"
 #include "gui/status/status_poller.h"
@@ -228,18 +229,8 @@ void MainWindow::BuildUi() {
   enginesModelsPage_ = new EnginesModelsPage(pages_);
   pages_->addWidget(WrapScrollable(enginesModelsPage_, pages_));
 
-  auto *support = new QWidget(pages_);
-  auto *supportLayout = new QVBoxLayout(support);
-  supportLayout->setContentsMargins(16, 16, 16, 16);
-  supportLayout->setSpacing(12);
-  auto *supportBox = new QGroupBox(QStringLiteral("Raw Daemon Status"), support);
-  auto *supportBoxLayout = new QVBoxLayout(supportBox);
-  supportBoxLayout->setSpacing(10);
-  supportRawStatus_ = RawStatusBox(supportBox);
-  supportBoxLayout->addWidget(supportRawStatus_);
-  supportLayout->addWidget(supportBox);
-  supportLayout->addStretch(1);
-  pages_->addWidget(WrapScrollable(support, pages_));
+  supportPage_ = new SupportPage(pages_);
+  pages_->addWidget(WrapScrollable(supportPage_, pages_));
 
   pages_->addWidget(WrapScrollable(
       PendingPage(QStringLiteral("Normal settings and scoped resets will move "
@@ -333,6 +324,8 @@ void MainWindow::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
     homePage_->UpdateStatus(snapshot);
   if (enginesModelsPage_)
     enginesModelsPage_->UpdateStatus(snapshot);
+  if (supportPage_)
+    supportPage_->UpdateStatus(snapshot);
 
   if (advancedSocketLabel_) {
     advancedSocketLabel_->setText(snapshot.socketPath.isEmpty()
@@ -341,8 +334,6 @@ void MainWindow::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
   }
 
   const QString raw = RawStatusText(snapshot);
-  if (supportRawStatus_)
-    supportRawStatus_->setPlainText(raw);
   if (advancedRawStatus_)
     advancedRawStatus_->setPlainText(raw);
 }

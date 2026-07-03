@@ -14,6 +14,7 @@ namespace studiocast::gui {
 struct DaemonStatusSnapshot;
 class EnginesModelsPage;
 class HomePage;
+class SupportPage;
 class StatusPoller;
 
 class MainWindow final : public QMainWindow {
@@ -40,8 +41,8 @@ private:
 
   HomePage *homePage_ = nullptr;
   EnginesModelsPage *enginesModelsPage_ = nullptr;
+  SupportPage *supportPage_ = nullptr;
   QLabel *advancedSocketLabel_ = nullptr;
-  QPlainTextEdit *supportRawStatus_ = nullptr;
   QPlainTextEdit *advancedRawStatus_ = nullptr;
 
   StatusPoller *statusPoller_ = nullptr;
