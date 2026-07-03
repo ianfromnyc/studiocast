@@ -24,6 +24,7 @@
 #include <string>
 #include <vector>
 
+#include "core/audio/audio_device_safety.h"
 #include "core/audio/effects/broadcast_audio_effects.h"
 #include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_mic.h"
@@ -33,17 +34,12 @@
 
 namespace studiocast::gui {
 namespace {
-constexpr const char *kStudioCastVirtualMicName = "studiocast_mic";
+constexpr const char *kAutoPulseSource = "auto";
+constexpr const char *kAutoPulseSink = "auto";
 
 bool IsBadLoopbackSourceCandidate(const std::string &name) {
-  // Avoid obvious feedback loops / non-mic candidates:
-  // - our own virtual mic
-  // - monitor sources (sink monitors)
-  if (name == kStudioCastVirtualMicName)
-    return true;
-  if (name.find(".monitor") != std::string::npos)
-    return true;
-  return false;
+  std::string reason;
+  return studiocast::audio::IsUnsafeInputSourceName(name, &reason);
 }
 
 bool Contains(const std::string &hay, const std::string &needle) {
@@ -75,8 +71,11 @@ QString FormatMaxineReasonCode(const QString &code) {
 bool DaemonRequest(const std::string &request, std::string *outJson,
                    QString *outErr) {
   studiocast::ipc::DaemonCallResult res;
+  studiocast::ipc::DaemonCallOptions options;
+  options.connect_timeout_ms = 500;
+  options.io_timeout_ms = 2500;
   std::string err;
-  if (!studiocast::ipc::DaemonCall(request, &res, &err)) {
+  if (!studiocast::ipc::DaemonCall(request, &res, &err, options)) {
     if (outErr)
       *outErr = QString::fromStdString(err);
     return false;
@@ -405,6 +404,15 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
     {
       auto *spkLayout = new QVBoxLayout(speakersBox_);
 
+      auto *targetRow = new QHBoxLayout();
+      targetRow->addWidget(new QLabel("Output:", speakersBox_));
+      speakerTargetCombo_ = new QComboBox(speakersBox_);
+      speakerTargetCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+      targetRow->addWidget(speakerTargetCombo_, 1);
+      refreshSpeakerTargetsBtn_ = new QPushButton("Refresh", speakersBox_);
+      targetRow->addWidget(refreshSpeakerTargetsBtn_);
+      spkLayout->addLayout(targetRow);
+
       auto *buttonsRow = new QHBoxLayout();
       enableSpeakersBtn_ =
           new QPushButton("Enable speakers device", speakersBox_);
@@ -459,6 +467,9 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
   if (refreshSourcesBtn_)
     connect(refreshSourcesBtn_, &QPushButton::clicked, this,
             &AudioPage::RefreshSources);
+  if (refreshSpeakerTargetsBtn_)
+    connect(refreshSpeakerTargetsBtn_, &QPushButton::clicked, this,
+            &AudioPage::RefreshSpeakerTargets);
   if (refreshStatusBtn_)
     connect(refreshStatusBtn_, &QPushButton::clicked, this,
             &AudioPage::RefreshStatus);
@@ -537,6 +548,11 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
   if (destroySpeakersBtn_)
     connect(destroySpeakersBtn_, &QPushButton::clicked, this,
             &AudioPage::OnDestroyVirtualSpeakers);
+  if (speakerTargetCombo_) {
+    connect(speakerTargetCombo_,
+            QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &AudioPage::OnSpeakerTargetChanged);
+  }
 
   if (sourceCombo_) {
     connect(sourceCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -555,6 +571,8 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
   // Initial state.
   if (mode_ == AudioPageMode::Microphone) {
     RefreshSources();
+  } else {
+    RefreshSpeakerTargets();
   }
   RefreshStatus();
 
@@ -594,6 +612,8 @@ void AudioPage::RefreshSources() {
   if (!sourceCombo_)
     return;
 
+  updatingSourceUi_ = true;
+  sourceCombo_->blockSignals(true);
   sourceCombo_->clear();
   if (portCombo_) {
     portCombo_->clear();
@@ -605,12 +625,16 @@ void AudioPage::RefreshSources() {
   if (!studiocast::audio::pulse::PactlAvailable(&pactlDetails)) {
     sourceCombo_->addItem("pactl not available");
     sourceCombo_->setEnabled(false);
+    sourceCombo_->blockSignals(false);
+    updatingSourceUi_ = false;
     ShowError("Audio", QString("pactl not available.\n\nDetails:\n%1")
                            .arg(QString::fromStdString(pactlDetails)));
     return;
   }
 
   sourceCombo_->setEnabled(true);
+  sourceCombo_->addItem("Auto (Pulse default)",
+                        QVariant(QString::fromLatin1(kAutoPulseSource)));
 
   std::string err;
   cachedSources_ = studiocast::audio::pulse::ListSourcesDetailed(&err);
@@ -625,8 +649,10 @@ void AudioPage::RefreshSources() {
     defaultSource = studiocast::audio::pulse::GetDefaultSourceName(&derr);
   }
 
-  int defaultIndex = -1;
-  int added = 0;
+  const QString daemonSource = daemonSource_.trimmed();
+  int defaultIndex = 0;
+  int daemonIndex = -1;
+  int added = 1;
 
   for (const auto &s : cachedSources_) {
     if (s.name.empty())
@@ -643,22 +669,171 @@ void AudioPage::RefreshSources() {
     if (defaultSource && s.name == *defaultSource) {
       defaultIndex = added;
     }
+    if (!daemonSource.isEmpty() &&
+        daemonSource != QString::fromLatin1(kAutoPulseSource) &&
+        s.name == daemonSource.toStdString()) {
+      daemonIndex = added;
+    }
     ++added;
   }
 
-  if (added == 0) {
+  if (added == 1) {
     sourceCombo_->addItem("<no suitable sources found>");
-    sourceCombo_->setEnabled(false);
-    if (portCombo_)
-      portCombo_->setEnabled(false);
+  }
+
+  int targetIndex = 0;
+  if (daemonSource.isEmpty() ||
+      daemonSource == QString::fromLatin1(kAutoPulseSource)) {
+    targetIndex = 0;
+  } else if (daemonIndex >= 0) {
+    targetIndex = daemonIndex;
+  } else {
+    const int insertAt = std::min(1, sourceCombo_->count());
+    sourceCombo_->insertItem(insertAt,
+                             QStringLiteral("<missing: %1>").arg(daemonSource),
+                             QVariant(daemonSource));
+    targetIndex = insertAt;
+  }
+
+  if (daemonSource.isEmpty() && defaultIndex >= 0) {
+    // Before the first daemon status arrives, show the current Pulse default
+    // without writing it back to the daemon.
+    targetIndex = defaultIndex;
+  }
+
+  sourceCombo_->setCurrentIndex(targetIndex);
+  sourceCombo_->blockSignals(false);
+  updatingSourceUi_ = false;
+  UpdatePortControlsForSelectedSource(false);
+}
+
+void AudioPage::RefreshSpeakerTargets() {
+  if (!speakerTargetCombo_)
+    return;
+
+  updatingSpeakerTargetUi_ = true;
+  speakerTargetCombo_->blockSignals(true);
+  speakerTargetCombo_->clear();
+
+  std::string pactlDetails;
+  if (!studiocast::audio::pulse::PactlAvailable(&pactlDetails)) {
+    speakerTargetCombo_->addItem("pactl not available");
+    speakerTargetCombo_->setEnabled(false);
+    speakerTargetCombo_->blockSignals(false);
+    updatingSpeakerTargetUi_ = false;
+    ShowError("Audio", QString("pactl not available.\n\nDetails:\n%1")
+                           .arg(QString::fromStdString(pactlDetails)));
     return;
   }
 
-  sourceCombo_->setCurrentIndex(defaultIndex >= 0 ? defaultIndex : 0);
-  OnSourceChanged(sourceCombo_->currentIndex());
+  speakerTargetCombo_->setEnabled(true);
+  speakerTargetCombo_->addItem("Auto (Pulse default)",
+                               QVariant(QString::fromLatin1(kAutoPulseSink)));
+
+  std::string err;
+  const auto sinks = studiocast::audio::pulse::ListSinks(&err);
+  if (!err.empty() && statusText_) {
+    statusText_->setPlainText(QString::fromStdString("Warning: " + err));
+  }
+
+  std::optional<std::string> defaultSink;
+  {
+    std::string derr;
+    defaultSink = studiocast::audio::pulse::GetDefaultSinkName(&derr);
+  }
+
+  const QString daemonTarget = daemonSpeakerTarget_.trimmed();
+  int defaultIndex = 0;
+  int daemonIndex = -1;
+  int added = 1;
+
+  for (const auto &sink : sinks) {
+    if (sink.name.empty())
+      continue;
+
+    std::string reason;
+    if (studiocast::audio::IsUnsafeSpeakerTargetSinkName(sink.name, &reason))
+      continue;
+
+    std::string label = sink.name;
+    if (defaultSink && sink.name == *defaultSink)
+      label += " (default)";
+
+    speakerTargetCombo_->addItem(QString::fromStdString(label),
+                                 QVariant(QString::fromStdString(sink.name)));
+
+    if (defaultSink && sink.name == *defaultSink)
+      defaultIndex = added;
+    if (!daemonTarget.isEmpty() &&
+        daemonTarget != QString::fromLatin1(kAutoPulseSink) &&
+        sink.name == daemonTarget.toStdString()) {
+      daemonIndex = added;
+    }
+    ++added;
+  }
+
+  if (added == 1) {
+    speakerTargetCombo_->addItem("<no physical output sinks found>");
+  }
+
+  int targetIndex = 0;
+  if (daemonTarget.isEmpty() ||
+      daemonTarget == QString::fromLatin1(kAutoPulseSink)) {
+    targetIndex = 0;
+  } else if (daemonIndex >= 0) {
+    targetIndex = daemonIndex;
+  } else {
+    const int insertAt = std::min(1, speakerTargetCombo_->count());
+    speakerTargetCombo_->insertItem(
+        insertAt, QStringLiteral("<disconnected: %1>").arg(daemonTarget),
+        QVariant(daemonTarget));
+    targetIndex = insertAt;
+  }
+
+  if (daemonTarget.isEmpty() && defaultIndex >= 0)
+    targetIndex = defaultIndex;
+
+  speakerTargetCombo_->setCurrentIndex(targetIndex);
+  speakerTargetCombo_->blockSignals(false);
+  updatingSpeakerTargetUi_ = false;
 }
 
 void AudioPage::OnSourceChanged(int /*index*/) {
+  if (updatingSourceUi_)
+    return;
+  UpdatePortControlsForSelectedSource(true);
+}
+
+void AudioPage::OnSpeakerTargetChanged(int /*index*/) {
+  if (updatingSpeakerTargetUi_)
+    return;
+  if (!daemonAiSupported_ || !speakerTargetCombo_ ||
+      !speakerTargetCombo_->isEnabled()) {
+    return;
+  }
+
+  const std::string target =
+      speakerTargetCombo_->currentData().toString().toStdString();
+  if (target.empty())
+    return;
+
+  QJsonObject patch;
+  patch.insert("speaker_target_sink", QString::fromStdString(target));
+  const auto json = QJsonDocument(patch).toJson(QJsonDocument::Compact);
+
+  std::string out;
+  QString err;
+  if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(),
+                     &out, &err)) {
+    ShowError("Audio", "Failed to update speaker output:\n\n" + err);
+    SyncSpeakerTargetSelectionFromDaemon(daemonSpeakerTarget_);
+    return;
+  }
+
+  RefreshDaemonAudioStatus();
+}
+
+void AudioPage::UpdatePortControlsForSelectedSource(bool pushDaemon) {
   if (!sourceCombo_)
     return;
   if (portCombo_) {
@@ -673,6 +848,11 @@ void AudioPage::OnSourceChanged(int /*index*/) {
       sourceCombo_->currentData().toString().toStdString();
   if (srcName.empty())
     return;
+  if (srcName == kAutoPulseSource) {
+    if (pushDaemon)
+      PushDaemonSourceSelection();
+    return;
+  }
 
   const studiocast::audio::pulse::PactlSourceInfo *info = nullptr;
   for (const auto &s : cachedSources_) {
@@ -686,14 +866,16 @@ void AudioPage::OnSourceChanged(int /*index*/) {
 
   if (!portCombo_) {
     // Port selection is an advanced/legacy control.
-    PushDaemonSourceSelection();
+    if (pushDaemon)
+      PushDaemonSourceSelection();
     return;
   }
 
   if (info->ports.empty()) {
     // Many sources will have no explicit ports; that's fine.
     portCombo_->setEnabled(false);
-    PushDaemonSourceSelection();
+    if (pushDaemon)
+      PushDaemonSourceSelection();
     return;
   }
 
@@ -726,7 +908,82 @@ void AudioPage::OnSourceChanged(int /*index*/) {
   else
     portCombo_->setCurrentIndex(0);
 
-  PushDaemonSourceSelection();
+  if (pushDaemon)
+    PushDaemonSourceSelection();
+}
+
+void AudioPage::SyncSourceSelectionFromDaemon(const QString &source) {
+  QString wanted = source.trimmed();
+  if (wanted.isEmpty())
+    wanted = QString::fromLatin1(kAutoPulseSource);
+  daemonSource_ = wanted;
+
+  if (!sourceCombo_ || !sourceCombo_->isEnabled())
+    return;
+
+  updatingSourceUi_ = true;
+  sourceCombo_->blockSignals(true);
+  int idx = sourceCombo_->findData(wanted);
+  if (idx < 0 && wanted != QString::fromLatin1(kAutoPulseSource)) {
+    for (int i = sourceCombo_->count() - 1; i >= 0; --i) {
+      if (sourceCombo_->itemText(i).startsWith(QStringLiteral("<missing:"))) {
+        sourceCombo_->removeItem(i);
+      }
+    }
+    idx = sourceCombo_->findData(wanted);
+    if (idx < 0) {
+      const int insertAt = std::min(1, sourceCombo_->count());
+      sourceCombo_->insertItem(insertAt,
+                               QStringLiteral("<missing: %1>").arg(wanted),
+                               QVariant(wanted));
+      idx = insertAt;
+    }
+  }
+
+  if (idx < 0)
+    idx = 0;
+
+  sourceCombo_->setCurrentIndex(idx);
+  sourceCombo_->blockSignals(false);
+  updatingSourceUi_ = false;
+  UpdatePortControlsForSelectedSource(false);
+}
+
+void AudioPage::SyncSpeakerTargetSelectionFromDaemon(const QString &target) {
+  QString wanted = target.trimmed();
+  if (wanted.isEmpty())
+    wanted = QString::fromLatin1(kAutoPulseSink);
+  daemonSpeakerTarget_ = wanted;
+
+  if (!speakerTargetCombo_ || !speakerTargetCombo_->isEnabled())
+    return;
+
+  updatingSpeakerTargetUi_ = true;
+  speakerTargetCombo_->blockSignals(true);
+  int idx = speakerTargetCombo_->findData(wanted);
+  if (idx < 0 && wanted != QString::fromLatin1(kAutoPulseSink)) {
+    for (int i = speakerTargetCombo_->count() - 1; i >= 0; --i) {
+      if (speakerTargetCombo_->itemText(i).startsWith(
+              QStringLiteral("<disconnected:"))) {
+        speakerTargetCombo_->removeItem(i);
+      }
+    }
+    idx = speakerTargetCombo_->findData(wanted);
+    if (idx < 0) {
+      const int insertAt = std::min(1, speakerTargetCombo_->count());
+      speakerTargetCombo_->insertItem(
+          insertAt, QStringLiteral("<disconnected: %1>").arg(wanted),
+          QVariant(wanted));
+      idx = insertAt;
+    }
+  }
+
+  if (idx < 0)
+    idx = 0;
+
+  speakerTargetCombo_->setCurrentIndex(idx);
+  speakerTargetCombo_->blockSignals(false);
+  updatingSpeakerTargetUi_ = false;
 }
 
 void AudioPage::RefreshStatus() {
@@ -746,24 +1003,35 @@ void AudioPage::RefreshStatus() {
   std::string pactlDetails;
   const bool pactlOk = studiocast::audio::pulse::PactlAvailable(&pactlDetails);
 
+#ifdef NDEBUG
+  const bool mutationControlsOk = pactlOk && daemonAiSupported_;
+#else
+  const bool mutationControlsOk = pactlOk;
+#endif
+
   if (createBtn_)
-    createBtn_->setEnabled(pactlOk);
+    createBtn_->setEnabled(mutationControlsOk);
   if (destroyBtn_)
-    destroyBtn_->setEnabled(pactlOk);
+    destroyBtn_->setEnabled(mutationControlsOk);
   if (startBtn_)
     startBtn_->setEnabled(pactlOk);
   if (stopBtn_)
     stopBtn_->setEnabled(pactlOk);
 
   if (enableSpeakersBtn_)
-    enableSpeakersBtn_->setEnabled(pactlOk);
+    enableSpeakersBtn_->setEnabled(mutationControlsOk);
   if (stopSpeakersBtn_)
-    stopSpeakersBtn_->setEnabled(pactlOk);
+    stopSpeakersBtn_->setEnabled(mutationControlsOk);
   if (destroySpeakersBtn_)
-    destroySpeakersBtn_->setEnabled(pactlOk);
+    destroySpeakersBtn_->setEnabled(mutationControlsOk);
 
   if (!pactlOk)
     return;
+
+#ifdef NDEBUG
+  if (!daemonAiSupported_)
+    return;
+#endif
 
   std::string err;
   const auto mods = studiocast::audio::pulse::ListModules(&err);
@@ -801,17 +1069,18 @@ void AudioPage::RefreshStatus() {
 
   // Create is always safe; disable Destroy if nothing exists.
   if (destroyBtn_)
-    destroyBtn_->setEnabled(hasSink || hasRemap);
+    destroyBtn_->setEnabled(mutationControlsOk && (hasSink || hasRemap));
   if (startBtn_)
     startBtn_->setEnabled(hasSink && hasRemap);
   if (stopBtn_)
     stopBtn_->setEnabled(hasLoopback);
 
   if (destroySpeakersBtn_)
-    destroySpeakersBtn_->setEnabled(hasSpeakersSink);
+    destroySpeakersBtn_->setEnabled(mutationControlsOk && hasSpeakersSink);
   if (stopSpeakersBtn_)
-    stopSpeakersBtn_->setEnabled(hasSpeakersLoopback ||
-                                 daemonSpeakersRoutingActive_);
+    stopSpeakersBtn_->setEnabled(
+        mutationControlsOk &&
+        (hasSpeakersLoopback || daemonSpeakersRoutingActive_));
 }
 
 void AudioPage::SetAiControlsEnabled(bool enabled, const QString &reason) {
@@ -838,6 +1107,12 @@ void AudioPage::SetAiControlsEnabled(bool enabled, const QString &reason) {
     speakerBrowseOpenAudioModelBtn_->setEnabled(enabled);
 
   // Microphone controls
+  if (sourceCombo_) {
+    const bool pactlUnavailable =
+        sourceCombo_->count() > 0 &&
+        sourceCombo_->itemText(0) == QStringLiteral("pactl not available");
+    sourceCombo_->setEnabled(enabled && !pactlUnavailable);
+  }
   if (micEffectCombo_)
     micEffectCombo_->setEnabled(enabled);
   if (strengthSlider_)
@@ -846,6 +1121,12 @@ void AudioPage::SetAiControlsEnabled(bool enabled, const QString &reason) {
     strengthValueLabel_->setEnabled(enabled);
 
   // Speaker controls
+  if (speakerTargetCombo_) {
+    const bool pactlUnavailable = speakerTargetCombo_->count() > 0 &&
+                                  speakerTargetCombo_->itemText(0) ==
+                                      QStringLiteral("pactl not available");
+    speakerTargetCombo_->setEnabled(enabled && !pactlUnavailable);
+  }
   if (speakerEffectCombo_)
     speakerEffectCombo_->setEnabled(enabled);
   if (speakerStrengthSlider_)
@@ -1005,6 +1286,10 @@ void AudioPage::RefreshDaemonAudioStatus() {
 
   const auto audio = root.value("audio").toObject();
   const bool audioEnabled = audio.value("enabled").toBool(false);
+  SyncSourceSelectionFromDaemon(audio.value("source").toString());
+  const QString sourceResolved = audio.value("source_resolved").toString();
+  const QString sourceErr = audio.value("source_error").toString();
+  const auto sourceWarnings = audio.value("source_warnings").toArray();
   const QString micMode = audio.value("mic_mode").toString();
   const auto pipeline = audio.value("pipeline").toObject();
   const bool running = pipeline.value("running").toBool(false);
@@ -1086,6 +1371,15 @@ void AudioPage::RefreshDaemonAudioStatus() {
   }
   if (!lastErr.isEmpty())
     daemonStatusText_ += "last_error: " + lastErr + "\n";
+  if (!sourceResolved.isEmpty())
+    daemonStatusText_ += "source_resolved: " + sourceResolved + "\n";
+  if (!sourceErr.isEmpty())
+    daemonStatusText_ += "source_error: " + sourceErr + "\n";
+  for (const auto &v : sourceWarnings) {
+    const QString warning = v.toString();
+    if (!warning.isEmpty())
+      daemonStatusText_ += "source_warning: " + warning + "\n";
+  }
 
   // Speakers status (if present).
   if (audio.contains("speakers")) {
@@ -1097,6 +1391,10 @@ void AudioPage::RefreshDaemonAudioStatus() {
     const bool spkPresent = spk.value("present").toBool(false);
     const bool spkRouting = spk.value("routing_active").toBool(false);
     const QString spkRouteMode = spk.value("route_mode").toString();
+    const QString spkConfiguredTarget = spk.value("target_sink").toString();
+    const QString spkResolvedTarget =
+        spk.value("target_sink_resolved").toString();
+    const QString spkTargetErr = spk.value("target_sink_error").toString();
     const QString spkTarget = spk.value("target_sink_active").toString();
     const QString spkErr = spk.value("last_error").toString();
 
@@ -1111,6 +1409,14 @@ void AudioPage::RefreshDaemonAudioStatus() {
             .arg(spkPresent ? "true" : "false")
             .arg(spkRouting ? "true" : "false")
             .arg(spkRouteMode.isEmpty() ? "(none)" : spkRouteMode);
+    if (!spkConfiguredTarget.isEmpty())
+      daemonStatusText_ +=
+          "speakers_target_sink_configured: " + spkConfiguredTarget + "\n";
+    if (!spkResolvedTarget.isEmpty())
+      daemonStatusText_ +=
+          "speakers_target_sink_resolved: " + spkResolvedTarget + "\n";
+    if (!spkTargetErr.isEmpty())
+      daemonStatusText_ += "speakers_target_sink_error: " + spkTargetErr + "\n";
 
     if (spk.contains("pipeline")) {
       const auto spkPipe = spk.value("pipeline").toObject();
@@ -1160,6 +1466,8 @@ void AudioPage::RefreshDaemonAudioStatus() {
         QString("speakers_pipeline=%1\n")
             .arg(spkPipeRunning ? "running"
                                 : (spkPipeStarting ? "starting" : "stopped"));
+
+    SyncSpeakerTargetSelectionFromDaemon(spkConfiguredTarget);
   }
 
   if (!backendActive.isEmpty())
@@ -1402,9 +1710,13 @@ void AudioPage::PushDaemonSourceSelection() {
   QString err;
   if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(),
                      &out, &err)) {
-    // Non-fatal: show in status.
     daemonStatusText_ += "\nfailed_to_set_source: " + err;
+    ShowError("Audio", "Failed to update microphone source:\n\n" + err);
+    SyncSourceSelectionFromDaemon(daemonSource_);
+    return;
   }
+
+  RefreshDaemonAudioStatus();
 }
 
 void AudioPage::PushDaemonAudioConfig() {
@@ -1463,6 +1775,13 @@ void AudioPage::PushDaemonAudioConfig() {
 
   QJsonObject patch;
   patch.insert("audio_effects", effects);
+
+  if (speakerEffectCombo_ && speakerTargetCombo_ &&
+      speakerTargetCombo_->isEnabled()) {
+    const auto target = speakerTargetCombo_->currentData().toString();
+    if (!target.isEmpty())
+      patch.insert("speaker_target_sink", target);
+  }
 
   // In microphone mode we also toggle the service enabled flag.
   //
@@ -1608,6 +1927,28 @@ void AudioPage::OnAiStrengthChanged(int v) {
 }
 
 void AudioPage::OnCreateVirtualMic() {
+  if (daemonAiSupported_) {
+    QJsonObject patch;
+    patch.insert("create_virtual_mic", true);
+    const auto json = QJsonDocument(patch).toJson(QJsonDocument::Compact);
+    std::string out;
+    QString err;
+    if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(),
+                       &out, &err)) {
+      ShowError("Create virtual mic failed",
+                "Failed to update daemon audio config:\n\n" + err);
+      return;
+    }
+    RefreshStatus();
+    RefreshSources();
+    return;
+  }
+
+#ifdef NDEBUG
+  ShowError("Create virtual mic failed",
+            "Daemon unavailable. Start studiocastd and try again.");
+  return;
+#else
   std::string err;
   if (!studiocast::audio::CreateVirtualMic(&err)) {
     ShowError("Create virtual mic failed", QString::fromStdString(err));
@@ -1615,9 +1956,33 @@ void AudioPage::OnCreateVirtualMic() {
   }
   RefreshStatus();
   RefreshSources();
+#endif
 }
 
 void AudioPage::OnDestroyVirtualMic() {
+  if (daemonAiSupported_) {
+    QJsonObject patch;
+    patch.insert("enabled", false);
+    patch.insert("create_virtual_mic", false);
+    const auto json = QJsonDocument(patch).toJson(QJsonDocument::Compact);
+    std::string out;
+    QString err;
+    if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(),
+                       &out, &err)) {
+      ShowError("Destroy virtual mic failed",
+                "Failed to update daemon audio config:\n\n" + err);
+      return;
+    }
+    RefreshStatus();
+    RefreshSources();
+    return;
+  }
+
+#ifdef NDEBUG
+  ShowError("Destroy virtual mic failed",
+            "Daemon unavailable. Start studiocastd and try again.");
+  return;
+#else
   std::string err;
   if (!studiocast::audio::DestroyVirtualMic(&err)) {
     ShowError("Destroy virtual mic failed", QString::fromStdString(err));
@@ -1625,6 +1990,7 @@ void AudioPage::OnDestroyVirtualMic() {
   }
   RefreshStatus();
   RefreshSources();
+#endif
 }
 
 void AudioPage::OnStartLoopback() {
@@ -1675,6 +2041,11 @@ void AudioPage::OnEnableVirtualSpeakers() {
     patch.insert("create_virtual_speakers", true);
     patch.insert("speakers_enabled", true);
     patch.insert("speaker_latency_ms", 10);
+    if (speakerTargetCombo_ && speakerTargetCombo_->isEnabled()) {
+      const auto target = speakerTargetCombo_->currentData().toString();
+      if (!target.isEmpty())
+        patch.insert("speaker_target_sink", target);
+    }
 
     const auto json = QJsonDocument(patch).toJson(QJsonDocument::Compact);
     std::string out;
@@ -1688,6 +2059,10 @@ void AudioPage::OnEnableVirtualSpeakers() {
     return;
   }
 
+#ifdef NDEBUG
+  ShowError("Audio", "Daemon unavailable. Start studiocastd and try again.");
+  return;
+#else
   // Fallback: direct pactl manipulation (debug/dev only).
   std::string err;
   if (!studiocast::audio::CreateVirtualSpeaker(&err)) {
@@ -1702,6 +2077,7 @@ void AudioPage::OnEnableVirtualSpeakers() {
   }
 
   RefreshStatus();
+#endif
 }
 
 void AudioPage::OnStopSpeakersRouting() {
@@ -1721,12 +2097,17 @@ void AudioPage::OnStopSpeakersRouting() {
     return;
   }
 
+#ifdef NDEBUG
+  ShowError("Audio", "Daemon unavailable. Start studiocastd and try again.");
+  return;
+#else
   std::string err;
   if (!studiocast::audio::StopSpeakerLoopback(&err)) {
     ShowError("Stop speakers routing failed", QString::fromStdString(err));
     return;
   }
   RefreshStatus();
+#endif
 }
 
 void AudioPage::OnDestroyVirtualSpeakers() {
@@ -1746,12 +2127,17 @@ void AudioPage::OnDestroyVirtualSpeakers() {
     return;
   }
 
+#ifdef NDEBUG
+  ShowError("Audio", "Daemon unavailable. Start studiocastd and try again.");
+  return;
+#else
   std::string err;
   if (!studiocast::audio::DestroyVirtualSpeaker(&err)) {
     ShowError("Destroy speakers failed", QString::fromStdString(err));
     return;
   }
   RefreshStatus();
+#endif
 }
 
 } // namespace studiocast::gui

@@ -8,8 +8,9 @@
 #include <thread>
 #include <utility>
 
-#include "core/audio/audio_consumer_detector.h"
 #include "core/audio/audio_backend_resolver.h"
+#include "core/audio/audio_consumer_detector.h"
+#include "core/audio/audio_device_safety.h"
 #include "core/audio/audio_pipeline.h"
 #include "core/audio/audio_processor.h"
 #include "core/audio/pulse/pactl.h"
@@ -20,7 +21,6 @@
 #include "core/maxine/gpu_selection.h"
 #include "core/maxine/paths.h"
 #include "core/open_audio/open_audio_audio_processor.h"
-#include "core/util/strings.h"
 
 // Effect planning is build-time independent from the Pulse audio pipeline.
 #include "core/maxine/afx/afx_effect.h"
@@ -35,13 +35,8 @@ namespace studiocast::audio {
 
 namespace {
 
-constexpr const char *kVirtualMicSinkName = "studiocast_sink";
 constexpr const char *kVirtualMicSourceName = "studiocast_mic";
 constexpr const char *kVirtualSpeakersSinkName = "studiocast_speakers";
-
-bool IsVirtualSinkName(const std::string &name) {
-  return name == kVirtualMicSinkName || name == kVirtualSpeakersSinkName;
-}
 
 using AudioEffectsEnginePreference =
     studiocast::audio::effects::AudioEffectsEnginePreference;
@@ -148,46 +143,7 @@ WorkerDeathRetryDelay(const VirtualAudioServiceConfig &cfg) {
 std::optional<std::string>
 ChooseSpeakerTargetSinkName(const std::string &configured_target,
                             std::string *error) {
-  if (error)
-    error->clear();
-
-  std::string chosen = studiocast::util::TrimCopy(configured_target);
-  std::string err;
-  if (chosen.empty()) {
-    // Prefer default sink, unless it's one of our virtual sinks.
-    auto def = pulse::GetDefaultSinkName(&err);
-    if (def && !IsVirtualSinkName(*def)) {
-      chosen = *def;
-    } else {
-      // If the user's default sink is our virtual device (common when testing),
-      // pick the first non-virtual sink as a best-effort physical target.
-      const auto sinks = pulse::ListSinks(&err);
-      for (const auto &s : sinks) {
-        if (!IsVirtualSinkName(s.name)) {
-          chosen = s.name;
-          break;
-        }
-      }
-      if (chosen.empty()) {
-        if (error) {
-          *error = "Failed to choose a target sink. Default sink is virtual or "
-                   "missing.";
-          if (!err.empty())
-            *error += " (note) " + err;
-        }
-        return std::nullopt;
-      }
-    }
-  }
-
-  if (IsVirtualSinkName(chosen)) {
-    if (error)
-      *error =
-          "Refusing to route speakers to '" + chosen + "' (feedback loop).";
-    return std::nullopt;
-  }
-
-  return chosen;
+  return ChooseSafeSpeakerTargetSinkName(configured_target, error);
 }
 
 void FillMaxineAvailability(AudioBackendAvailability *out) {
@@ -1470,6 +1426,7 @@ void VirtualAudioService::ThreadMain() {
               studiocast::audio::AudioPipelineConfig pcfg;
               pcfg.source_name =
                   studiocast::audio::VirtualSpeakerMonitorSourceName();
+              pcfg.allow_monitor_source = true;
               pcfg.sink_name = sinkName;
               // Speaker processing should preserve stereo.
               pcfg.channels = 2;

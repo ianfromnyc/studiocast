@@ -49,6 +49,10 @@ struct AudioPipelineConfig {
   // Empty = Pulse default source.
   std::string source_name;
 
+  // Speaker processing intentionally captures from the StudioCast Speakers
+  // monitor source. Microphone capture must leave this false.
+  bool allow_monitor_source = false;
+
   // Target sink to write processed audio to.
   // This should typically be the StudioCast null sink ("studiocast_sink").
   std::string sink_name = "studiocast_sink";

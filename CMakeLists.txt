@@ -220,6 +220,8 @@ add_library(studiocast_core
         src/core/audio/pulse/pactl.cpp
         src/core/audio/audio_consumer_detector.h
         src/core/audio/audio_consumer_detector.cpp
+        src/core/audio/audio_device_safety.h
+        src/core/audio/audio_device_safety.cpp
         src/core/audio/audio_backend_resolver.h
         src/core/audio/audio_backend_resolver.cpp
         src/core/audio/audio_processor.h

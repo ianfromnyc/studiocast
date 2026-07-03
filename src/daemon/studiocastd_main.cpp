@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "../core/open_video/diagnose.h"
+#include "core/audio/audio_device_safety.h"
 #include "core/audio/effects/broadcast_audio_effects_json.h"
 #include "core/config/daemon_config.h"
 #include "core/ipc/daemon_server.h"
@@ -558,6 +559,47 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"last_error\":\"" << JsonEscape(st.last_error) << "\"";
   oss << "}"; // video
 
+  std::string audioSourceResolved = acfg.source_name;
+  std::string audioSourceError;
+  std::vector<std::string> audioSourceWarnings;
+  {
+    std::string reason;
+    if (studiocast::audio::IsUnsafeInputSourceName(acfg.source_name, &reason)) {
+      audioSourceError = reason;
+    } else if (acfg.enabled) {
+      const auto resolved =
+          studiocast::audio::ResolveSafeInputSourceName(acfg.source_name);
+      if (resolved.ok) {
+        audioSourceResolved = resolved.source_name;
+        audioSourceWarnings = resolved.warnings;
+      } else {
+        audioSourceResolved.clear();
+        audioSourceError = resolved.error;
+        audioSourceWarnings = resolved.warnings;
+      }
+    }
+  }
+
+  std::string speakerTargetResolved = acfg.speaker_target_sink;
+  std::string speakerTargetError;
+  {
+    std::string reason;
+    if (studiocast::audio::IsUnsafeSpeakerTargetSinkName(
+            acfg.speaker_target_sink, &reason)) {
+      speakerTargetError = reason;
+    } else if (acfg.speakers_enabled && acfg.speaker_target_sink.empty()) {
+      std::string sinkErr;
+      const auto resolved = studiocast::audio::ChooseSafeSpeakerTargetSinkName(
+          acfg.speaker_target_sink, &sinkErr);
+      if (resolved) {
+        speakerTargetResolved = *resolved;
+      } else {
+        speakerTargetResolved.clear();
+        speakerTargetError = sinkErr;
+      }
+    }
+  }
+
   // Audio status.
   oss << ",\"audio\":{";
   oss << "\"enabled\":" << BoolJson(acfg.enabled) << ",";
@@ -568,6 +610,18 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
       << JsonEscape(acfg.source_name.empty() ? std::string("auto")
                                              : acfg.source_name)
       << "\",";
+  oss << "\"source_resolved\":\""
+      << JsonEscape(audioSourceResolved.empty() ? std::string("auto")
+                                                : audioSourceResolved)
+      << "\",";
+  oss << "\"source_error\":\"" << JsonEscape(audioSourceError) << "\",";
+  oss << "\"source_warnings\":[";
+  for (std::size_t i = 0; i < audioSourceWarnings.size(); ++i) {
+    if (i)
+      oss << ",";
+    oss << "\"" << JsonEscape(audioSourceWarnings[i]) << "\"";
+  }
+  oss << "],";
   oss << "\"mic_present\":" << BoolJson(ast.mic_present) << ",";
   oss << "\"mic_consumer_present\":" << BoolJson(ast.mic_consumer_present)
       << ",";
@@ -595,6 +649,11 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
       << JsonEscape(acfg.speaker_target_sink.empty() ? std::string("auto")
                                                      : acfg.speaker_target_sink)
       << "\",";
+  oss << "\"target_sink_resolved\":\""
+      << JsonEscape(speakerTargetResolved.empty() ? std::string("auto")
+                                                  : speakerTargetResolved)
+      << "\",";
+  oss << "\"target_sink_error\":\"" << JsonEscape(speakerTargetError) << "\",";
   oss << "\"latency_ms\":" << acfg.speaker_latency_ms << ",";
   oss << "\"present\":" << BoolJson(ast.speakers_present) << ",";
   oss << "\"consumer_present\":" << BoolJson(ast.speakers_consumer_present)
@@ -962,6 +1021,59 @@ bool ApplyAudioConfigPatchJsonText(
   return true;
 }
 
+bool ValidateAudioConfigSafetyForDaemon(
+    const studiocast::audio::VirtualAudioServiceConfig &cfg,
+    std::vector<std::string> *warnings, std::string *error) {
+  std::string reason;
+  if (studiocast::audio::IsUnsafeInputSourceName(cfg.source_name, &reason)) {
+    if (error) {
+      *error = "Unsafe audio source: " + reason +
+               " Select a physical microphone/input source or use "
+               "source=\"auto\".";
+    }
+    return false;
+  }
+
+  if (studiocast::audio::IsUnsafeSpeakerTargetSinkName(cfg.speaker_target_sink,
+                                                       &reason)) {
+    if (error) {
+      *error = "Unsafe speaker target sink: " + reason +
+               " Select a physical output sink or use "
+               "speaker_target_sink=\"auto\".";
+    }
+    return false;
+  }
+
+  if (cfg.enabled) {
+    const auto source =
+        studiocast::audio::ResolveSafeInputSourceName(cfg.source_name);
+    if (!source.ok) {
+      if (error)
+        *error = "Unsafe audio source configuration: " + source.error;
+      return false;
+    }
+    if (warnings) {
+      warnings->insert(warnings->end(), source.warnings.begin(),
+                       source.warnings.end());
+    }
+  }
+
+  if (cfg.speakers_enabled && cfg.speaker_target_sink.empty()) {
+    std::string sinkErr;
+    if (!studiocast::audio::ChooseSafeSpeakerTargetSinkName(
+            cfg.speaker_target_sink, &sinkErr)) {
+      if (error) {
+        *error = "Unsafe speaker routing configuration: " +
+                 (sinkErr.empty() ? "no safe physical output sink was found"
+                                  : sinkErr);
+      }
+      return false;
+    }
+  }
+
+  return true;
+}
+
 std::string ExtractRawTailAfterCmd(const std::string &line,
                                    const std::string &cmd) {
   std::size_t pos = 0;
@@ -1320,6 +1432,14 @@ int main(int argc, char **argv) {
               auto newCfg = audioSvc.Config();
               newCfg.enabled = true;
 
+              std::vector<std::string> warnings;
+              std::string verr;
+              if (!ValidateAudioConfigSafetyForDaemon(newCfg, &warnings,
+                                                      &verr)) {
+                return std::string("ERR ") +
+                       ErrorJson(verr.empty() ? "invalid audio config" : verr);
+              }
+
               std::string perr;
               if (!persistAudio(newCfg, &perr)) {
                 return std::string("ERR ") +
@@ -1328,7 +1448,8 @@ int main(int argc, char **argv) {
 
               audioSvc.UpdateConfig(newCfg);
 
-              return std::string("OK {\"enabled\":true}");
+              return std::string("OK ") +
+                     AppendWarningsToObjectJson("{\"enabled\":true}", warnings);
             }
 
             if (pc.cmd == "AUDIO_STOP") {
@@ -1365,6 +1486,11 @@ int main(int argc, char **argv) {
                 return std::string("ERR ") +
                        ErrorJson(jerr.empty() ? "invalid audio config JSON"
                                               : jerr);
+              }
+              if (!ValidateAudioConfigSafetyForDaemon(newCfg, &warnings,
+                                                      &jerr)) {
+                return std::string("ERR ") +
+                       ErrorJson(jerr.empty() ? "invalid audio config" : jerr);
               }
 
               std::string perr;

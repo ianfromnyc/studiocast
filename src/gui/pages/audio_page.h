@@ -34,6 +34,7 @@ public:
 
 private slots:
   void RefreshSources();
+  void RefreshSpeakerTargets();
   void RefreshStatus();
 
   void OnAiStrengthChanged(int v);
@@ -62,6 +63,7 @@ private slots:
   void OnEnableVirtualSpeakers();
   void OnStopSpeakersRouting();
   void OnDestroyVirtualSpeakers();
+  void OnSpeakerTargetChanged(int index);
 
   void OnToggleAdvanced(bool checked);
 
@@ -73,6 +75,9 @@ private:
   void PushDaemonSourceSelection();
   void SetAiControlsEnabled(bool enabled, const QString &reason);
 
+  void SyncSourceSelectionFromDaemon(const QString &source);
+  void SyncSpeakerTargetSelectionFromDaemon(const QString &target);
+  void UpdatePortControlsForSelectedSource(bool pushDaemon);
   void UpdateEngineUiVisibility();
 
   void SetAdvancedVisible(bool visible);
@@ -142,6 +147,8 @@ private:
   QPushButton *speakerBrowseOpenAudioModelBtn_ = nullptr;
 
   QGroupBox *speakersBox_ = nullptr;
+  QComboBox *speakerTargetCombo_ = nullptr;
+  QPushButton *refreshSpeakerTargetsBtn_ = nullptr;
   QPushButton *enableSpeakersBtn_ = nullptr;
   QPushButton *stopSpeakersBtn_ = nullptr;
   QPushButton *destroySpeakersBtn_ = nullptr;
@@ -153,13 +160,17 @@ private:
 
   // --- Shared state
   bool updatingAiUi_ = false;
+  bool updatingSourceUi_ = false;
+  bool updatingSpeakerTargetUi_ = false;
   bool daemonAiSupported_ = false;
   QString daemonAiDisableReason_;
   QString daemonStatusText_;
+  QString daemonSource_;
 
   // Last speaker routing status reported by the daemon.
   bool daemonSpeakersRoutingActive_ = false;
   QString daemonSpeakersRouteMode_;
+  QString daemonSpeakerTarget_;
 
   // Cached daemon effects blob so we can preserve fields not represented in
   // this UI.
