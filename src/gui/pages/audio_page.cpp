@@ -231,7 +231,7 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
     titleRow->addStretch(1);
 
     advancedToggle_ = new QToolButton(this);
-    advancedToggle_->setText("Details");
+    advancedToggle_->setText("Show Diagnostics");
     advancedToggle_->setToolButtonStyle(Qt::ToolButtonTextOnly);
     advancedToggle_->setCheckable(true);
     advancedToggle_->setChecked(false);
@@ -370,11 +370,10 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
     root->addWidget(backendBox_);
 
     // -----------------------
-    // Details and support
+    // Diagnostics
     // -----------------------
-    micDetailsBox_ = new QGroupBox("Details & Support", this);
-    micDetailsBox_->setCheckable(true);
-    micDetailsBox_->setChecked(false);
+    micDetailsBox_ = new QGroupBox("Diagnostics", this);
+    micDetailsBox_->setVisible(false);
     {
       auto *detailsLayout = new QVBoxLayout(micDetailsBox_);
       detailsLayout->setSpacing(10);
@@ -510,10 +509,6 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
 
       micDetailsContent_->setVisible(false);
       detailsLayout->addWidget(micDetailsContent_);
-      connect(micDetailsBox_, &QGroupBox::toggled, micDetailsContent_,
-              &QWidget::setVisible);
-      connect(micDetailsBox_, &QGroupBox::toggled, advancedToggle_,
-              &QToolButton::setChecked);
     }
     root->addWidget(micDetailsBox_);
 
@@ -629,11 +624,10 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
     root->addWidget(backendBox_);
 
     // -----------------------
-    // Details and support
+    // Diagnostics
     // -----------------------
-    speakerDetailsBox_ = new QGroupBox("Details & Support", this);
-    speakerDetailsBox_->setCheckable(true);
-    speakerDetailsBox_->setChecked(false);
+    speakerDetailsBox_ = new QGroupBox("Diagnostics", this);
+    speakerDetailsBox_->setVisible(false);
     {
       auto *detailsLayout = new QVBoxLayout(speakerDetailsBox_);
       detailsLayout->setSpacing(10);
@@ -730,10 +724,6 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
 
       speakerDetailsContent_->setVisible(false);
       detailsLayout->addWidget(speakerDetailsContent_);
-      connect(speakerDetailsBox_, &QGroupBox::toggled, speakerDetailsContent_,
-              &QWidget::setVisible);
-      connect(speakerDetailsBox_, &QGroupBox::toggled, advancedToggle_,
-              &QToolButton::setChecked);
     }
     root->addWidget(speakerDetailsBox_);
   }
@@ -880,15 +870,21 @@ void AudioPage::ShowError(const QString &title, const QString &details) {
 void AudioPage::OnToggleAdvanced(bool checked) { SetAdvancedVisible(checked); }
 
 void AudioPage::SetAdvancedVisible(bool visible) {
+  if (advancedToggle_) {
+    advancedToggle_->setChecked(visible);
+    advancedToggle_->setText(visible ? QStringLiteral("Hide Diagnostics")
+                                     : QStringLiteral("Show Diagnostics"));
+  }
+
   if (micDetailsBox_) {
-    micDetailsBox_->setChecked(visible);
+    micDetailsBox_->setVisible(visible);
     if (micDetailsContent_)
       micDetailsContent_->setVisible(visible);
     return;
   }
 
   if (speakerDetailsBox_) {
-    speakerDetailsBox_->setChecked(visible);
+    speakerDetailsBox_->setVisible(visible);
     if (speakerDetailsContent_)
       speakerDetailsContent_->setVisible(visible);
     return;

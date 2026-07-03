@@ -769,9 +769,23 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   root->setContentsMargins(16, 16, 16, 16);
   root->setSpacing(12);
 
+  auto *titleRow = new QHBoxLayout();
+  titleRow->setContentsMargins(0, 0, 0, 0);
+
   auto *title = new QLabel("Camera", this);
   title->setProperty("scRole", "title");
-  root->addWidget(title);
+  titleRow->addWidget(title);
+
+  titleRow->addStretch(1);
+
+  diagnosticsToggle_ = new QToolButton(this);
+  diagnosticsToggle_->setText("Show Diagnostics");
+  diagnosticsToggle_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  diagnosticsToggle_->setCheckable(true);
+  diagnosticsToggle_->setChecked(false);
+  titleRow->addWidget(diagnosticsToggle_);
+
+  root->addLayout(titleRow);
 
   auto *workspace = new QWidget(this);
   auto *workspaceLayout = new QHBoxLayout(workspace);
@@ -1142,62 +1156,63 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   effectsLayout->addLayout(effectsGrid);
   root->addWidget(effectsBox);
 
-  auto *detailsBox = new QGroupBox("Details & Support", this);
-  detailsBox->setCheckable(true);
-  detailsBox->setChecked(false);
-  auto *detailsLayout = new QVBoxLayout(detailsBox);
+  diagnosticsBox_ = new QGroupBox("Diagnostics", this);
+  diagnosticsBox_->setVisible(false);
+  auto *detailsLayout = new QVBoxLayout(diagnosticsBox_);
   detailsLayout->setSpacing(10);
 
-  auto *detailsContent = new QWidget(detailsBox);
-  auto *detailsContentLayout = new QVBoxLayout(detailsContent);
+  diagnosticsContent_ = new QWidget(diagnosticsBox_);
+  auto *detailsContentLayout = new QVBoxLayout(diagnosticsContent_);
   detailsContentLayout->setContentsMargins(0, 0, 0, 0);
   detailsContentLayout->setSpacing(10);
 
   detailsContentLayout->addWidget(MutedLabel(
-      "Technical camera details stay here for setup and support.", detailsContent));
+      "Technical camera details stay here for setup and support.",
+      diagnosticsContent_));
 
   auto *cmdRow = new QHBoxLayout();
-  cmdRow->addWidget(new QLabel("v4l2loopback command:", detailsContent));
-  suggestedCmdEdit_ = new QLineEdit(detailsContent);
+  cmdRow->addWidget(new QLabel("v4l2loopback command:", diagnosticsContent_));
+  suggestedCmdEdit_ = new QLineEdit(diagnosticsContent_);
   suggestedCmdEdit_->setReadOnly(true);
   suggestedCmdEdit_->setProperty("scRole", "copyValue");
   suggestedCmdEdit_->setPlaceholderText("No suggested modprobe command.");
   cmdRow->addWidget(suggestedCmdEdit_, 1);
-  copyCmdBtn_ = new QPushButton("Copy command", detailsContent);
+  copyCmdBtn_ = new QPushButton("Copy command", diagnosticsContent_);
   cmdRow->addWidget(copyCmdBtn_);
   detailsContentLayout->addLayout(cmdRow);
 
   auto *detailsActionsRow = new QHBoxLayout();
-  openInstallHintsBtn_ = new QPushButton("Open install hints", detailsContent);
+  openInstallHintsBtn_ =
+      new QPushButton("Open install hints", diagnosticsContent_);
   detailsActionsRow->addWidget(openInstallHintsBtn_, 0, Qt::AlignLeft);
   auto *copyStatusBtn =
-      new QPushButton("Copy raw camera details", detailsContent);
+      new QPushButton("Copy raw camera details", diagnosticsContent_);
   detailsActionsRow->addWidget(copyStatusBtn, 0, Qt::AlignLeft);
   detailsActionsRow->addStretch(1);
   detailsContentLayout->addLayout(detailsActionsRow);
 
-  diagnosticsText_ = new QPlainTextEdit(detailsContent);
+  diagnosticsText_ = new QPlainTextEdit(diagnosticsContent_);
   diagnosticsText_->setReadOnly(true);
   diagnosticsText_->setMinimumHeight(140);
-  detailsContentLayout->addWidget(new QLabel("Engine diagnostics:", detailsContent));
+  detailsContentLayout->addWidget(
+      new QLabel("Engine diagnostics:", diagnosticsContent_));
   detailsContentLayout->addWidget(diagnosticsText_);
 
-  statusText_ = new QPlainTextEdit(detailsContent);
+  statusText_ = new QPlainTextEdit(diagnosticsContent_);
   statusText_->setReadOnly(true);
   statusText_->setMinimumHeight(260);
-  detailsContentLayout->addWidget(new QLabel("Raw camera status:", detailsContent));
+  detailsContentLayout->addWidget(
+      new QLabel("Raw camera status:", diagnosticsContent_));
   detailsContentLayout->addWidget(statusText_, 1);
 
-  detailsContent->setVisible(false);
-  detailsLayout->addWidget(detailsContent);
-  connect(detailsBox, &QGroupBox::toggled, detailsContent,
-          &QWidget::setVisible);
+  diagnosticsContent_->setVisible(false);
+  detailsLayout->addWidget(diagnosticsContent_);
   connect(copyStatusBtn, &QPushButton::clicked, this, [this] {
     if (auto *cb = QGuiApplication::clipboard())
       cb->setText(statusText_ ? statusText_->toPlainText() : QString());
   });
 
-  root->addWidget(detailsBox);
+  root->addWidget(diagnosticsBox_);
   root->addStretch(1);
 
   connect(refreshBtn_, &QPushButton::clicked, this, &VideoPage::Refresh);
@@ -1207,6 +1222,8 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   connect(stopBtn_, &QPushButton::clicked, this, &VideoPage::OnStop);
   connect(previewCheck_, &QCheckBox::toggled, this,
           &VideoPage::OnPreviewToggled);
+  connect(diagnosticsToggle_, &QToolButton::toggled, this,
+          &VideoPage::SetDiagnosticsVisible);
 
   connect(engineCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
           this, &VideoPage::OnEnginePreferenceChanged);
@@ -1297,6 +1314,18 @@ VideoPage::~VideoPage() { StopPreview(); }
 
 void VideoPage::ShowError(const QString &title, const QString &details) {
   QMessageBox::critical(this, title, details);
+}
+
+void VideoPage::SetDiagnosticsVisible(bool visible) {
+  if (diagnosticsToggle_) {
+    diagnosticsToggle_->setChecked(visible);
+    diagnosticsToggle_->setText(visible ? QStringLiteral("Hide Diagnostics")
+                                        : QStringLiteral("Show Diagnostics"));
+  }
+  if (diagnosticsBox_)
+    diagnosticsBox_->setVisible(visible);
+  if (diagnosticsContent_)
+    diagnosticsContent_->setVisible(visible);
 }
 
 void VideoPage::UpdateBackgroundModeOptionVisibility() {

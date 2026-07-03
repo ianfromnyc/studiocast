@@ -11,6 +11,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QGroupBox;
 class QSlider;
 class QPlainTextEdit;
 class QPushButton;
@@ -18,6 +19,7 @@ class QSpinBox;
 class QLabel;
 class QTimer;
 class QLineEdit;
+class QToolButton;
 
 namespace studiocast::gui {
 class VideoPreviewWidget;
@@ -88,6 +90,7 @@ private:
   void StartPreview();
   void StopPreview();
   void OnPreviewTick();
+  void SetDiagnosticsVisible(bool visible);
 
   QComboBox *inputCombo_ = nullptr;
   QComboBox *outputCombo_ = nullptr;
@@ -158,6 +161,9 @@ private:
   QLabel *maxineBanner_ = nullptr;
 
   QPushButton *openInstallHintsBtn_ = nullptr;
+  QToolButton *diagnosticsToggle_ = nullptr;
+  QGroupBox *diagnosticsBox_ = nullptr;
+  QWidget *diagnosticsContent_ = nullptr;
   QPlainTextEdit *diagnosticsText_ = nullptr;
 
   QPushButton *refreshBtn_ = nullptr;
