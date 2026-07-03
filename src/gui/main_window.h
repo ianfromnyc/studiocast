@@ -6,12 +6,12 @@
 class QFrame;
 class QLabel;
 class QListWidget;
-class QPlainTextEdit;
 class QStackedWidget;
 
 namespace studiocast::gui {
 
 struct DaemonStatusSnapshot;
+class AdvancedPage;
 class EnginesModelsPage;
 class HomePage;
 class SettingsPage;
@@ -44,8 +44,7 @@ private:
   EnginesModelsPage *enginesModelsPage_ = nullptr;
   SupportPage *supportPage_ = nullptr;
   SettingsPage *settingsPage_ = nullptr;
-  QLabel *advancedSocketLabel_ = nullptr;
-  QPlainTextEdit *advancedRawStatus_ = nullptr;
+  AdvancedPage *advancedPage_ = nullptr;
 
   StatusPoller *statusPoller_ = nullptr;
 };

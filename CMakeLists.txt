@@ -396,6 +396,8 @@ add_executable(studiocast
         src/gui/pages/support_page.cpp
         src/gui/pages/settings_page.h
         src/gui/pages/settings_page.cpp
+        src/gui/pages/advanced_page.h
+        src/gui/pages/advanced_page.cpp
         src/gui/pages/audio_page.h
         src/gui/pages/audio_page.cpp
         src/gui/pages/video_page.h

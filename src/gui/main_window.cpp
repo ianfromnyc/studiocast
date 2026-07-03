@@ -4,7 +4,6 @@
 #include <QApplication>
 #include <QFrame>
 #include <QGuiApplication>
-#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLayout>
@@ -12,7 +11,6 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
-#include <QPlainTextEdit>
 #include <QScreen>
 #include <QScrollArea>
 #include <QStackedWidget>
@@ -21,6 +19,7 @@
 #include <QWidget>
 #include <algorithm>
 
+#include "gui/pages/advanced_page.h"
 #include "gui/pages/audio_page.h"
 #include "gui/pages/engines_models_page.h"
 #include "gui/pages/home_page.h"
@@ -48,52 +47,6 @@ QLabel *MutedLabel(const QString &text, QWidget *parent) {
   label->setProperty("scRole", "muted");
   label->setWordWrap(true);
   return label;
-}
-
-QLabel *ValueLabel(QWidget *parent) {
-  auto *label = new QLabel(parent);
-  label->setProperty("scRole", "value");
-  label->setWordWrap(true);
-  return label;
-}
-
-QFrame *StatusRow(const QString &name, QLabel **valueOut, QWidget *parent) {
-  auto *row = new QFrame(parent);
-  row->setProperty("scRole", "statusRow");
-  auto *layout = new QHBoxLayout(row);
-  layout->setContentsMargins(0, 0, 0, 0);
-  layout->setSpacing(12);
-
-  auto *nameLabel = MutedLabel(name, row);
-  nameLabel->setMinimumWidth(120);
-  layout->addWidget(nameLabel, 0);
-
-  auto *valueLabel = ValueLabel(row);
-  layout->addWidget(valueLabel, 1);
-
-  if (valueOut)
-    *valueOut = valueLabel;
-  return row;
-}
-
-QPlainTextEdit *RawStatusBox(QWidget *parent) {
-  auto *text = new QPlainTextEdit(parent);
-  text->setReadOnly(true);
-  text->setLineWrapMode(QPlainTextEdit::NoWrap);
-  text->setMinimumHeight(240);
-  text->setPlaceholderText(QStringLiteral("Daemon status has not been read."));
-  return text;
-}
-
-QString RawStatusText(const DaemonStatusSnapshot &snapshot) {
-  if (!snapshot.rawJson.isEmpty())
-    return snapshot.rawJson;
-  if (!snapshot.transportError.isEmpty())
-    return QStringLiteral("Daemon unavailable: %1").arg(snapshot.transportError);
-  if (!snapshot.parseError.isEmpty())
-    return QStringLiteral("Daemon status parse error: %1")
-        .arg(snapshot.parseError);
-  return QStringLiteral("Daemon status has not been read.");
 }
 
 void SetStatusProperty(QWidget *widget, const QString &value) {
@@ -221,21 +174,8 @@ void MainWindow::BuildUi() {
   settingsPage_ = new SettingsPage(pages_);
   pages_->addWidget(WrapScrollable(settingsPage_, pages_));
 
-  auto *advanced = new QWidget(pages_);
-  auto *advancedLayout = new QVBoxLayout(advanced);
-  advancedLayout->setContentsMargins(16, 16, 16, 16);
-  advancedLayout->setSpacing(12);
-  auto *advancedBox =
-      new QGroupBox(QStringLiteral("Daemon Details"), advanced);
-  auto *advancedBoxLayout = new QVBoxLayout(advancedBox);
-  advancedBoxLayout->setSpacing(10);
-  advancedBoxLayout->addWidget(
-      StatusRow(QStringLiteral("Socket"), &advancedSocketLabel_, advancedBox));
-  advancedRawStatus_ = RawStatusBox(advancedBox);
-  advancedBoxLayout->addWidget(advancedRawStatus_);
-  advancedLayout->addWidget(advancedBox);
-  advancedLayout->addStretch(1);
-  pages_->addWidget(WrapScrollable(advanced, pages_));
+  advancedPage_ = new AdvancedPage(pages_);
+  pages_->addWidget(WrapScrollable(advancedPage_, pages_));
 
   contentLayout->addWidget(pages_, 1);
   root->addWidget(content, 1);
@@ -309,16 +249,8 @@ void MainWindow::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
     supportPage_->UpdateStatus(snapshot);
   if (settingsPage_)
     settingsPage_->UpdateStatus(snapshot);
-
-  if (advancedSocketLabel_) {
-    advancedSocketLabel_->setText(snapshot.socketPath.isEmpty()
-                                      ? QStringLiteral("Unknown")
-                                      : snapshot.socketPath);
-  }
-
-  const QString raw = RawStatusText(snapshot);
-  if (advancedRawStatus_)
-    advancedRawStatus_->setPlainText(raw);
+  if (advancedPage_)
+    advancedPage_->UpdateStatus(snapshot);
 }
 
 } // namespace studiocast::gui

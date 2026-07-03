@@ -93,6 +93,21 @@ bool DaemonRequest(const std::string &request, std::string *outJson,
     *outJson = res.json;
   return true;
 }
+
+bool ConfirmDestructiveAction(QWidget *parent, const QString &title,
+                              const QString &text, const QString &detail) {
+  QMessageBox box(parent);
+  box.setIcon(QMessageBox::Warning);
+  box.setWindowTitle(title);
+  box.setText(text);
+  box.setInformativeText(detail);
+  auto *destroyButton =
+      box.addButton(QStringLiteral("Destroy"), QMessageBox::AcceptRole);
+  box.addButton(QMessageBox::Cancel);
+  box.setDefaultButton(QMessageBox::Cancel);
+  box.exec();
+  return box.clickedButton() == destroyButton;
+}
 QString FirstLine(const QString &s) {
   const QString t = s.trimmed();
   const int nl = t.indexOf('\n');
@@ -2480,6 +2495,14 @@ void AudioPage::OnCreateVirtualMic() {
 }
 
 void AudioPage::OnDestroyVirtualMic() {
+  if (!ConfirmDestructiveAction(
+          this, QStringLiteral("Destroy Virtual Microphone"),
+          QStringLiteral("Destroy StudioCast Microphone?"),
+          QStringLiteral("This stops microphone processing and removes the "
+                         "StudioCast virtual microphone device."))) {
+    return;
+  }
+
   if (daemonAiSupported_) {
     QJsonObject patch;
     patch.insert("enabled", false);
@@ -2631,6 +2654,14 @@ void AudioPage::OnStopSpeakersRouting() {
 }
 
 void AudioPage::OnDestroyVirtualSpeakers() {
+  if (!ConfirmDestructiveAction(
+          this, QStringLiteral("Destroy StudioCast Speakers"),
+          QStringLiteral("Destroy StudioCast Speakers?"),
+          QStringLiteral("This stops speaker routing and removes the "
+                         "StudioCast Speakers virtual device."))) {
+    return;
+  }
+
   if (daemonAiSupported_) {
     QJsonObject patch;
     patch.insert("speakers_enabled", false);
