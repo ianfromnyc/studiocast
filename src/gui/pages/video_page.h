@@ -96,6 +96,12 @@ private:
   QSpinBox *fpsSpin_ = nullptr;
 
   QComboBox *engineCombo_ = nullptr;
+  QCheckBox *mirrorCheck_ = nullptr;
+
+  QLabel *cameraStateLabel_ = nullptr;
+  QLabel *cameraDetailLabel_ = nullptr;
+  QLabel *setupLockLabel_ = nullptr;
+  QLineEdit *suggestedCmdEdit_ = nullptr;
 
   QComboBox *backgroundCombo_ = nullptr;
   QSpinBox *backgroundStrengthSpin_ = nullptr;

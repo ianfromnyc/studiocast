@@ -145,6 +145,23 @@ QLabel[scRole="muted"] {
   background: transparent;
 }
 
+QLabel[scRole="sectionTitle"] {
+  font-size: 13px;
+  font-weight: 700;
+  color: #E7EEF8;
+  background: transparent;
+}
+
+QGroupBox[scRole="cameraPrimary"] {
+  border-color: rgba(45, 212, 255, 0.32);
+}
+
+QFrame[scRole="cameraEffect"] {
+  background: #0F1520;
+  border: 1px solid #273247;
+  border-radius: 8px;
+}
+
 /* Home readiness dashboard */
 QFrame[scRole="homeSummary"],
 QFrame[scRole="homeCard"],
