@@ -30,10 +30,26 @@ QMainWindow::separator {
 }
 
 
-/* Top bar */
+/* Shell */
 QFrame#scTopBar {
   background: #121A26;
   border-bottom: 1px solid #273247;
+}
+
+QFrame#scSidebar {
+  background: #121A26;
+  border-right: 1px solid #273247;
+}
+
+QFrame#scPageHeader {
+  background: #0B0F14;
+  border-bottom: 1px solid #273247;
+}
+
+QFrame#scServiceStatus {
+  background: #121A26;
+  border: 1px solid #273247;
+  border-radius: 8px;
 }
 
 QLabel[scRole="brand"] {
@@ -112,9 +128,89 @@ QLabel[scRole="value"] {
   background: transparent;
 }
 
+QLabel[scStatus="good"] {
+  color: #75E0A7;
+}
+
+QLabel[scStatus="warning"] {
+  color: #FFCF70;
+}
+
+QLabel[scStatus="error"] {
+  color: #FF8C90;
+}
+
 QLabel[scRole="muted"] {
   color: #A9B4C5;
   background: transparent;
+}
+
+/* Home readiness dashboard */
+QFrame[scRole="homeSummary"],
+QFrame[scRole="homeCard"],
+QFrame[scRole="homeRepairItem"] {
+  background: #121A26;
+  border: 1px solid #273247;
+  border-radius: 8px;
+}
+
+QFrame[scRole="homeSummary"] {
+  border-color: rgba(45, 212, 255, 0.28);
+}
+
+QFrame[scRole="homeCard"][scStatus="good"] {
+  border-color: rgba(117, 224, 167, 0.45);
+}
+
+QFrame[scRole="homeCard"][scStatus="warning"] {
+  border-color: rgba(255, 207, 112, 0.45);
+}
+
+QFrame[scRole="homeCard"][scStatus="error"] {
+  border-color: rgba(255, 140, 144, 0.50);
+}
+
+QLabel[scRole="homeHeadline"] {
+  font-size: 22px;
+  font-weight: 700;
+  background: transparent;
+}
+
+QLabel[scRole="homeCardTitle"] {
+  font-size: 15px;
+  font-weight: 700;
+  background: transparent;
+}
+
+QLabel[scRole="statusPill"] {
+  border-radius: 8px;
+  padding: 5px 10px;
+  min-width: 118px;
+  font-weight: 700;
+  background: rgba(169, 180, 197, 0.10);
+  border: 1px solid rgba(169, 180, 197, 0.25);
+}
+
+QLabel[scRole="statusPill"][scStatus="good"] {
+  color: #75E0A7;
+  background: rgba(117, 224, 167, 0.10);
+  border-color: rgba(117, 224, 167, 0.35);
+}
+
+QLabel[scRole="statusPill"][scStatus="warning"] {
+  color: #FFCF70;
+  background: rgba(255, 207, 112, 0.10);
+  border-color: rgba(255, 207, 112, 0.35);
+}
+
+QLabel[scRole="statusPill"][scStatus="error"] {
+  color: #FF8C90;
+  background: rgba(255, 140, 144, 0.10);
+  border-color: rgba(255, 140, 144, 0.35);
+}
+
+QLineEdit[scRole="copyValue"] {
+  font-family: monospace;
 }
 
 /* Banners */
