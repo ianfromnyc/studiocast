@@ -16,6 +16,7 @@ public:
 
   void Start(int intervalMs = 2000);
   void Stop();
+  void PollNow();
   const DaemonStatusSnapshot &snapshot() const { return snapshot_; }
 
 signals:

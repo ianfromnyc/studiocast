@@ -10,7 +10,7 @@ Installed model packs live at:
 
 For sourcing, conversion, and hosting of the actual model binaries (ONNX / dlib data files), see:
 
-- `docs/open_video_model_conversion.md`
+- `docs/open_source_video_model_conversion_to_onnx.md`
 
 ## Subject areas
 

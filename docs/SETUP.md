@@ -181,7 +181,7 @@ via ONNX Runtime, using user-supplied model packs.
 
 Install/usage docs:
 
-- `docs/open_audio_install.md`
+- `docs/open_source_audio_models_install.md`
 
 Install the curated model pack:
 

@@ -429,6 +429,10 @@ target_include_directories(studiocast PRIVATE
         "${STUDIOCAST_GENERATED_DIR}"
 )
 
+target_compile_definitions(studiocast PRIVATE
+        STUDIOCAST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
 studiocast_set_project_warnings(studiocast)
 studiocast_enable_sanitizers(studiocast)
 

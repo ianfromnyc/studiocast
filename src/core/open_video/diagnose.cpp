@@ -39,6 +39,9 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
   od.install_hints.push_back("Example: " + openVideoRoot +
                              "/matting/Good Quality/model.json");
   od.install_hints.push_back(
+      "Source builds: run ./scripts/install.sh open-video-models to install "
+      "curated Open Video packs.");
+  od.install_hints.push_back(
       "Each pack must contain: model.json, model.onnx, LICENSE.txt");
 
   const auto block_open_cuda_effects = [&](const char *reason_code) {

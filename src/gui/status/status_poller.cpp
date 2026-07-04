@@ -19,6 +19,8 @@ void StatusPoller::Start(int intervalMs) {
 
 void StatusPoller::Stop() { timer_->stop(); }
 
+void StatusPoller::PollNow() { Poll(); }
+
 void StatusPoller::Poll() {
   studiocast::ipc::DaemonCallResult res;
   studiocast::ipc::DaemonCallOptions options;

@@ -300,7 +300,7 @@ main() {
   echo "  - Inspect: build/studiocastctl status"
   echo
   echo "Docs:"
-  echo "  - docs/open_audio_install.md"
+  echo "  - docs/open_source_audio_models_install.md"
 }
 
 main "$@"
