@@ -628,16 +628,24 @@ set_target_properties(studiocastd PROPERTIES
 # Install step
 # -----------------------------
 include(GNUInstallDirs)
-install(TARGETS studiocast studiocast-installer studiocast-probe studiocast-maxine studiocast-open studiocast-audio studiocast-video studiocastctl
+install(TARGETS studiocast studiocast-probe studiocast-maxine studiocast-open studiocast-audio studiocast-video studiocastctl
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+        COMPONENT Runtime
+)
+
+install(TARGETS studiocast-installer
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+        COMPONENT Installer
 )
 
 install(TARGETS studiocastd
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+        COMPONENT Runtime
 )
 
 install(PROGRAMS installer/backend/studiocast-installer-backend
         DESTINATION "${CMAKE_INSTALL_DATADIR}/studiocast/installer"
+        COMPONENT Installer
 )
 
 if (BUILD_TESTING AND PULSE_SIMPLE_FOUND)

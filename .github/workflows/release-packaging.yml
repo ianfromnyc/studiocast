@@ -1,0 +1,83 @@
+name: release packaging
+
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-packaging-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  gui-installer-appimage:
+    name: GUI installer AppImage (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config git curl ca-certificates \
+            gcc-12 g++-12 \
+            qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \
+            libxkbcommon-dev libpulse-dev libsqlite3-dev \
+            libjpeg-turbo8-dev libpng-dev libgl1-mesa-dev \
+            desktop-file-utils file patchelf
+
+      - name: Download AppImage packaging tools
+        run: |
+          mkdir -p "${HOME}/.local/bin"
+          curl --fail --location --retry 3 \
+            --output "${HOME}/.local/bin/linuxdeploy-x86_64.AppImage" \
+            "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          curl --fail --location --retry 3 \
+            --output "${HOME}/.local/bin/linuxdeploy-plugin-qt-x86_64.AppImage" \
+            "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
+          chmod +x "${HOME}/.local/bin/linuxdeploy-x86_64.AppImage" \
+            "${HOME}/.local/bin/linuxdeploy-plugin-qt-x86_64.AppImage"
+          ln -sf "${HOME}/.local/bin/linuxdeploy-plugin-qt-x86_64.AppImage" \
+            "${HOME}/.local/bin/linuxdeploy-plugin-qt"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Build GUI installer bundle
+        env:
+          CC: gcc-12
+          CXX: g++-12
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          packaging/appimage/build_appimage.sh --clean --appimage-required
+
+      - name: Create source archive
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          source_archive="StudioCast-${version}-source.tar.gz"
+          git archive --format=tar.gz --prefix="StudioCast-${version}/" \
+            --output="dist/appimage/${source_archive}" HEAD
+          checksum_file="dist/appimage/StudioCast-Installer-${version}-$(uname -m).sha256"
+          (cd dist/appimage && sha256sum "${source_archive}") >> "${checksum_file}"
+
+      - name: Upload release packaging artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: studiocast-gui-installer-ubuntu-22.04
+          if-no-files-found: error
+          path: |
+            dist/appimage/StudioCast-Installer-*.AppImage
+            dist/appimage/StudioCast-Installer-*.AppDir.tar.gz
+            dist/appimage/StudioCast-Installer-*.sha256
+            dist/appimage/StudioCast-*-source.tar.gz

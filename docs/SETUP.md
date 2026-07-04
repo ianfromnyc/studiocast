@@ -6,6 +6,31 @@ scripts below remain the CLI fallback for CI, SSH, recovery, and debugging.
 
 ## GUI installer wizard
 
+Release downloads may include:
+
+- `StudioCast-Installer-<version>-<arch>.AppImage`: GUI installer bundle when
+  AppImage packaging tools succeeded in CI.
+- `StudioCast-Installer-<version>-<arch>.AppDir.tar.gz`: staged AppDir archive
+  for inspection or fallback testing.
+- `StudioCast-<version>-source.tar.gz`: source archive to select in the GUI for
+  install/update workflows.
+- `StudioCast-Installer-<version>-<arch>.sha256`: checksums for the release
+  artifacts.
+
+Run the GUI as your normal user, not with `sudo`. If using the AppImage, make it
+executable and launch it:
+
+```bash
+chmod +x StudioCast-Installer-<version>-<arch>.AppImage
+./StudioCast-Installer-<version>-<arch>.AppImage
+```
+
+The packaged installer includes its backend at
+`usr/share/studiocast/installer/studiocast-installer-backend`, which matches the
+GUI lookup path. The current installer package does not embed the full
+StudioCast source tree; choose the matching release source archive in the
+"Build from selected release archive" option, or choose a local checkout.
+
 Build and run the installer from a checkout:
 
 ```bash
@@ -14,7 +39,7 @@ cmake --build build --target studiocast-installer
 ./build/studiocast-installer
 ```
 
-The GUI must be run as your normal user, not with `sudo`. It calls the scriptable
+The GUI calls the scriptable
 backend at `installer/backend/studiocast-installer-backend`, which uses the
 existing setup/install/uninstall helpers for privileged package/module steps,
 builds, binary links, and the systemd user service.

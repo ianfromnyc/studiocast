@@ -94,6 +94,8 @@ change, merge it to `main`, and tag the resulting commit if it is a release.
   curated model packs. Model binaries are downloaded separately.
 - [../packaging/systemd/user](../packaging/systemd/user): systemd user service
   template for `studiocastd`.
+- [../packaging/appimage](../packaging/appimage): release packaging scaffold
+  for the standalone GUI installer bundle.
 - [../docs](../docs): architecture, setup, model installation, manual testing,
   trademark, roadmap, and design notes.
 
@@ -168,18 +170,44 @@ selected. Uninstall removes app symlinks, service files, desktop entries, and
 runtime artifacts. Clean install preserves user config, downloaded models, logs,
 and cache unless `--remove-user-data` is explicitly selected.
 
-Release packaging plan:
+Release packaging:
 
-- CI builds `studiocast-installer` on Ubuntu 22.04, Ubuntu 24.04, and Linux Mint
-  alongside the main targets.
-- A release should publish the GUI installer artifact, a source archive, and
-  checksums.
-- The backend already supports local source directories and selected source
-  archives for update/install workflows.
-- Remaining packaging work is to wrap `studiocast-installer`, the backend
-  script, and required Qt/runtime libraries into a self-contained downloadable
-  artifact such as an AppImage. Keep that packaging isolated under installer or
-  packaging paths and avoid requiring network access for normal local builds.
+- `packaging/appimage/build_appimage.sh` configures an isolated Release build,
+  builds only `studiocast-installer`, installs the `Installer` CMake component
+  into an AppDir, adds desktop/icon metadata, archives the AppDir, and writes
+  SHA256 checksums.
+- The AppDir layout places the backend at
+  `usr/share/studiocast/installer/studiocast-installer-backend`, which is the
+  installed path the GUI already probes relative to the installer binary.
+- Local packaging does not download tools. If `linuxdeploy` and
+  `linuxdeploy-plugin-qt` are available, the script also creates
+  `StudioCast-Installer-<version>-<arch>.AppImage`; otherwise it leaves the
+  staged AppDir tarball as the local artifact.
+- Release CI is in `.github/workflows/release-packaging.yml`. It runs only from
+  `workflow_dispatch` or a published GitHub Release event, downloads AppImage
+  packaging tools explicitly, requires AppImage generation, creates a source
+  tarball from `HEAD`, and uploads the installer bundle, AppDir archive, source
+  archive, and checksum file as workflow artifacts. It does not tag commits or
+  publish release assets by itself.
+- The workflow currently uses the upstream `linuxdeploy` and
+  `linuxdeploy-plugin-qt` continuous AppImage URLs. The URLs are explicit, but
+  hard checksum pinning for those external packaging tools is still a release
+  hardening item.
+- The packaged installer is still a source-build installer. It includes the GUI
+  and backend, but not the full StudioCast source tree. Users should select the
+  matching release source archive in the GUI, or point it at a local checkout.
+
+Maintainer command:
+
+```bash
+packaging/appimage/build_appimage.sh --clean
+```
+
+For release-equivalent local validation with preinstalled packaging tools:
+
+```bash
+packaging/appimage/build_appimage.sh --clean --appimage-required
+```
 
 ## Daemon architecture
 
