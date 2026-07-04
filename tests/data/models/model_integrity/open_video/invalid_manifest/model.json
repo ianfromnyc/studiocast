@@ -1,0 +1,6 @@
+{
+  "schema_version": 2,
+  "id": "video_invalid_manifest",
+  "display_name": "Video Invalid Manifest",
+  "task": "face_detection"
+}

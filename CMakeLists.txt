@@ -701,6 +701,31 @@ if (BUILD_TESTING)
 
     add_test(NAME studiocast-maxine-paths-tests COMMAND studiocast-maxine-paths-tests)
 
+    add_executable(studiocast-model-registry-tests
+            tests/model_pack_registry_tests.cpp
+    )
+
+    target_link_libraries(studiocast-model-registry-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-model-registry-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-model-registry-tests)
+    studiocast_enable_sanitizers(studiocast-model-registry-tests)
+
+    set_target_properties(studiocast-model-registry-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-model-registry-tests COMMAND studiocast-model-registry-tests)
+    set_tests_properties(studiocast-model-registry-tests PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+
     add_executable(studiocast-ipc-tests
             tests/ipc_client_tests.cpp
     )

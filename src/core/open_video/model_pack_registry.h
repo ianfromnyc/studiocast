@@ -82,6 +82,41 @@ struct ModelPack {
   std::optional<std::filesystem::path> license_path;
 };
 
+struct ModelFileVerification {
+  std::string name;
+  std::string kind;
+  std::string role;
+  std::filesystem::path path;
+
+  // Expected/actual installed-file SHA-256. Empty expected_sha256 means the
+  // manifest did not provide a checksum and the file is not hashed.
+  std::string expected_sha256;
+  std::string actual_sha256;
+  std::string checksum_kind; // installed_sha256, download_sha256, or empty.
+
+  // Stable-ish classification: ok, unchecked, missing, checksum_mismatch,
+  // invalid_manifest, or read_error.
+  std::string status;
+  std::string message;
+  bool ok = false;
+};
+
+struct ModelPackVerification {
+  std::string id;
+  std::string display_name;
+  std::string task;
+  std::filesystem::path root_dir;
+  std::filesystem::path manifest_path;
+
+  // Stable-ish classification: ok, missing, checksum_mismatch,
+  // invalid_manifest, placeholder, or read_error.
+  std::string status;
+  std::string message;
+  bool ok = false;
+
+  std::vector<ModelFileVerification> files;
+};
+
 // Registry for model packs under:
 //   <models_root>/open_video/<subject>/<pack_dir>/
 // where <models_root> is normally ~/.local/share/studiocast/models.
@@ -97,6 +132,12 @@ public:
 
   // Convenience for scanning the default XDG location.
   static ModelPackRegistry ScanDefault();
+
+  // Explicit integrity verification. This may hash large model files and should
+  // be used from tools/self-tests rather than polling status paths.
+  static std::vector<ModelPackVerification>
+  Verify(const std::filesystem::path &open_video_models_dir);
+  static std::vector<ModelPackVerification> VerifyDefault();
 
   const std::vector<ModelPack> &ListModels() const { return models_; }
   std::optional<ModelPack> ResolveModel(const std::string &id) const;

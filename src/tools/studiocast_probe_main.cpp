@@ -9,6 +9,7 @@
 #include <fstream>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -39,11 +40,13 @@
 #include "core/maxine/paths.h"
 #include "core/maxine/reason_codes.h"
 #include "core/maxine/vfx_api.h"
+#include "core/open_audio/model_pack_registry.h"
 #include "core/open_video/model_pack_registry.h"
 #include "core/probe/probe.h"
 #include "core/util/json.h"
 #include "core/util/strings.h"
 #include "core/util/ttl_cache.h"
+#include "core/util/xdg.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/broadcast_camera_effects_legacy_adapter.h"
 #include "core/video/camera_effects_json.h"
@@ -69,6 +72,269 @@ bool hasArg(int argc, char **argv, std::string_view flag) {
       return true;
   }
   return false;
+}
+
+struct VerifyFileResult {
+  std::string name;
+  std::string kind;
+  std::string role;
+  std::filesystem::path path;
+  std::string expected_sha256;
+  std::string actual_sha256;
+  std::string checksum_kind;
+  std::string status;
+  std::string message;
+  bool ok = false;
+};
+
+struct VerifyModelResult {
+  std::string engine;
+  std::string id;
+  std::string display_name;
+  std::string task;
+  std::filesystem::path root_dir;
+  std::filesystem::path manifest_path;
+  std::string status;
+  std::string message;
+  bool ok = false;
+  std::vector<VerifyFileResult> files;
+};
+
+struct VerifyEngineResult {
+  std::string engine;
+  std::filesystem::path root;
+  std::vector<VerifyModelResult> models;
+
+  bool Ok() const {
+    for (const auto &m : models) {
+      if (!m.ok)
+        return false;
+    }
+    return true;
+  }
+};
+
+std::string JsonEscape(const std::string &s) {
+  return studiocast::util::json::EscapeString(s);
+}
+
+std::string BoolJson(bool v) { return v ? "true" : "false"; }
+
+std::filesystem::path DefaultModelsRoot() {
+  const auto root = studiocast::util::StudioCastModelsDir();
+  if (!root.empty())
+    return root;
+  return std::filesystem::path{"~/.local/share/studiocast/models"};
+}
+
+VerifyFileResult
+ConvertVerifyFile(const studiocast::open_video::ModelFileVerification &f) {
+  VerifyFileResult out;
+  out.name = f.name;
+  out.kind = f.kind;
+  out.role = f.role;
+  out.path = f.path;
+  out.expected_sha256 = f.expected_sha256;
+  out.actual_sha256 = f.actual_sha256;
+  out.checksum_kind = f.checksum_kind;
+  out.status = f.status;
+  out.message = f.message;
+  out.ok = f.ok;
+  return out;
+}
+
+VerifyFileResult
+ConvertVerifyFile(const studiocast::open_audio::ModelFileVerification &f) {
+  VerifyFileResult out;
+  out.name = f.name;
+  out.kind = f.kind;
+  out.path = f.path;
+  out.expected_sha256 = f.expected_sha256;
+  out.actual_sha256 = f.actual_sha256;
+  out.checksum_kind = f.checksum_kind;
+  out.status = f.status;
+  out.message = f.message;
+  out.ok = f.ok;
+  return out;
+}
+
+VerifyModelResult ConvertVerifyModel(
+    const std::string &engine,
+    const studiocast::open_video::ModelPackVerification &m) {
+  VerifyModelResult out;
+  out.engine = engine;
+  out.id = m.id;
+  out.display_name = m.display_name;
+  out.task = m.task;
+  out.root_dir = m.root_dir;
+  out.manifest_path = m.manifest_path;
+  out.status = m.status;
+  out.message = m.message;
+  out.ok = m.ok;
+  out.files.reserve(m.files.size());
+  for (const auto &f : m.files)
+    out.files.push_back(ConvertVerifyFile(f));
+  return out;
+}
+
+VerifyModelResult ConvertVerifyModel(
+    const std::string &engine,
+    const studiocast::open_audio::ModelPackVerification &m) {
+  VerifyModelResult out;
+  out.engine = engine;
+  out.id = m.id;
+  out.display_name = m.display_name;
+  out.root_dir = m.root_dir;
+  out.manifest_path = m.manifest_path;
+  out.status = m.status;
+  out.message = m.message;
+  out.ok = m.ok;
+  out.files.reserve(m.files.size());
+  for (const auto &f : m.files)
+    out.files.push_back(ConvertVerifyFile(f));
+  return out;
+}
+
+std::vector<VerifyEngineResult> VerifyDefaultModels() {
+  const auto modelsRoot = DefaultModelsRoot();
+  VerifyEngineResult video;
+  video.engine = "open_video";
+  video.root = modelsRoot / "open_video";
+  for (const auto &m :
+       studiocast::open_video::ModelPackRegistry::Verify(video.root)) {
+    video.models.push_back(ConvertVerifyModel(video.engine, m));
+  }
+
+  VerifyEngineResult audio;
+  audio.engine = "open_audio";
+  audio.root = modelsRoot / "open_audio";
+  for (const auto &m :
+       studiocast::open_audio::ModelPackRegistry::Verify(audio.root)) {
+    audio.models.push_back(ConvertVerifyModel(audio.engine, m));
+  }
+
+  std::vector<VerifyEngineResult> engines;
+  engines.push_back(std::move(video));
+  engines.push_back(std::move(audio));
+  return engines;
+}
+
+bool VerifyEnginesOk(const std::vector<VerifyEngineResult> &engines) {
+  for (const auto &engine : engines) {
+    if (!engine.Ok())
+      return false;
+  }
+  return true;
+}
+
+std::string StatusText(const std::string &status, const std::string &message) {
+  if (message.empty() || message == "ok" || message == status)
+    return status;
+  if (message.starts_with(status + ":"))
+    return message;
+  return status + ": " + message;
+}
+
+std::string VerifyModelsToText(const std::vector<VerifyEngineResult> &engines) {
+  std::ostringstream oss;
+  oss << "StudioCast model verification\n";
+  for (const auto &engine : engines) {
+    oss << "\n" << engine.engine << " (" << engine.root.string() << ")\n";
+    if (engine.models.empty()) {
+      oss << "  no model packs found\n";
+      continue;
+    }
+    for (const auto &m : engine.models) {
+      oss << "  " << (m.ok ? "OK" : "FAIL") << " " << m.id;
+      if (!m.task.empty())
+        oss << " [" << m.task << "]";
+      oss << " - " << StatusText(m.status, m.message) << "\n";
+      for (const auto &f : m.files) {
+        oss << "    " << (f.ok ? "OK" : "FAIL") << " " << f.name;
+        if (!f.kind.empty())
+          oss << " (" << f.kind << ")";
+        oss << " - " << StatusText(f.status, f.message) << "\n";
+      }
+    }
+  }
+  return oss.str();
+}
+
+void AppendJsonFile(std::ostringstream *oss, const VerifyFileResult &f) {
+  *oss << "{";
+  *oss << "\"name\":\"" << JsonEscape(f.name) << "\",";
+  *oss << "\"kind\":\"" << JsonEscape(f.kind) << "\",";
+  *oss << "\"role\":\"" << JsonEscape(f.role) << "\",";
+  *oss << "\"path\":\"" << JsonEscape(f.path.string()) << "\",";
+  *oss << "\"expected_sha256\":\"" << JsonEscape(f.expected_sha256)
+       << "\",";
+  *oss << "\"actual_sha256\":\"" << JsonEscape(f.actual_sha256) << "\",";
+  *oss << "\"checksum_kind\":\"" << JsonEscape(f.checksum_kind) << "\",";
+  *oss << "\"status\":\"" << JsonEscape(f.status) << "\",";
+  *oss << "\"message\":\"" << JsonEscape(f.message) << "\",";
+  *oss << "\"ok\":" << BoolJson(f.ok);
+  *oss << "}";
+}
+
+void AppendJsonModel(std::ostringstream *oss, const VerifyModelResult &m) {
+  *oss << "{";
+  *oss << "\"engine\":\"" << JsonEscape(m.engine) << "\",";
+  *oss << "\"id\":\"" << JsonEscape(m.id) << "\",";
+  *oss << "\"display_name\":\"" << JsonEscape(m.display_name) << "\",";
+  *oss << "\"task\":\"" << JsonEscape(m.task) << "\",";
+  *oss << "\"root_dir\":\"" << JsonEscape(m.root_dir.string()) << "\",";
+  *oss << "\"manifest_path\":\"" << JsonEscape(m.manifest_path.string())
+       << "\",";
+  *oss << "\"status\":\"" << JsonEscape(m.status) << "\",";
+  *oss << "\"message\":\"" << JsonEscape(m.message) << "\",";
+  *oss << "\"ok\":" << BoolJson(m.ok) << ",";
+  *oss << "\"files\":[";
+  for (std::size_t i = 0; i < m.files.size(); ++i) {
+    if (i)
+      *oss << ",";
+    AppendJsonFile(oss, m.files[i]);
+  }
+  *oss << "]";
+  *oss << "}";
+}
+
+std::string VerifyModelsToJson(const std::vector<VerifyEngineResult> &engines) {
+  std::ostringstream oss;
+  oss << "{";
+  oss << "\"ok\":" << BoolJson(VerifyEnginesOk(engines)) << ",";
+  oss << "\"engines\":[";
+  for (std::size_t i = 0; i < engines.size(); ++i) {
+    if (i)
+      oss << ",";
+    const auto &engine = engines[i];
+    oss << "{";
+    oss << "\"engine\":\"" << JsonEscape(engine.engine) << "\",";
+    oss << "\"root\":\"" << JsonEscape(engine.root.string()) << "\",";
+    oss << "\"ok\":" << BoolJson(engine.Ok()) << ",";
+    oss << "\"models\":[";
+    for (std::size_t j = 0; j < engine.models.size(); ++j) {
+      if (j)
+        oss << ",";
+      AppendJsonModel(&oss, engine.models[j]);
+    }
+    oss << "]";
+    oss << "}";
+  }
+  oss << "]";
+  oss << "}";
+  return oss.str();
+}
+
+int RunVerifyModels(bool json, bool strict) {
+  const auto engines = VerifyDefaultModels();
+  if (json) {
+    std::printf("%s\n", VerifyModelsToJson(engines).c_str());
+  } else {
+    std::printf("%s", VerifyModelsToText(engines).c_str());
+  }
+  if (!strict)
+    return 0;
+  return VerifyEnginesOk(engines) ? 0 : 1;
 }
 
 bool WritePngRgb24File(const std::filesystem::path &path, int w, int h,
@@ -3534,6 +3800,10 @@ int main(int argc, char **argv) {
   const bool json = hasArg(argc, argv, "--json");
   const bool verbose = hasArg(argc, argv, "--verbose");
   const bool strict = hasArg(argc, argv, "--strict");
+
+  if (hasArg(argc, argv, "--verify-models")) {
+    return RunVerifyModels(json, strict);
+  }
 
   const auto report = studiocast::probe::Run(verbose);
 

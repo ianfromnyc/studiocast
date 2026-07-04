@@ -1,0 +1,7 @@
+{
+  "id": "audio_invalid_manifest",
+  "display_name": "Audio Invalid Manifest",
+  "sample_rate": 44100,
+  "channels": 1,
+  "onnx_filename": "model.fixture"
+}
