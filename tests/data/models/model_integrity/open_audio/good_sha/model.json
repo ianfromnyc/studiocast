@@ -1,0 +1,10 @@
+{
+  "id": "audio_good_sha",
+  "display_name": "Audio Good SHA",
+  "sample_rate": 16000,
+  "channels": 1,
+  "onnx_filename": "model.fixture",
+  "origin": {
+    "sha256": "0fb0fbc0fc5b6c4ddff835be62dfaa50e204ad86b993a4c4695eee5fba8e5c2a"
+  }
+}
