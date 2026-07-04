@@ -322,7 +322,8 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
              const studiocast::audio::VirtualAudioServiceConfig &acfg,
              const std::filesystem::path &socketPath,
              const std::string &maxineJson, const std::string &openCudaJson,
-             const std::string &openAudioJson) {
+             const std::string &openAudioJson,
+             const std::string &loopbackJson) {
   std::ostringstream oss;
   oss << "{";
   oss << "\"version\":\"" << JsonEscape(STUDIOCAST_VERSION) << "\",";
@@ -392,6 +393,9 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"input_device\":\"" << JsonEscape(st.pipeline.input_device) << "\",";
   oss << "\"output_device\":\"" << JsonEscape(st.pipeline.output_device)
       << "\",";
+  if (!loopbackJson.empty()) {
+    oss << "\"virtual_device_diagnostics\":" << loopbackJson << ",";
+  }
 
   // Negotiated formats (what the driver actually gave us / accepted).
   oss << "\"capture_format\":" << CaptureFormatToJson(st.pipeline.capture)
@@ -1381,9 +1385,23 @@ int main(int argc, char **argv) {
                         .ToJson();
                   });
 
+              // Cache loopback diagnostics because they may scan /proc and run
+              // v4l2-ctl with a timeout.
+              static studiocast::util::TtlCache<std::string>
+                  loopbackDiagCache;
+              constexpr auto kLoopbackDiagTtl = std::chrono::seconds(5);
+
+              const std::string loopbackJson =
+                  loopbackDiagCache.GetOrCompute(
+                      std::chrono::steady_clock::now(), kLoopbackDiagTtl, []() {
+                        return studiocast::video::ProbeLoopbackDiagnostics()
+                            .ToJson();
+                      });
+
               return std::string("OK ") +
                      StatusToJson(st, current, ast, acurrent, socketPath,
-                                  diagJson, openCudaJson, openAudioJson);
+                                  diagJson, openCudaJson, openAudioJson,
+                                  loopbackJson);
             }
 
             if (pc.cmd == "GET_CONFIG") {

@@ -770,4 +770,27 @@ if (BUILD_TESTING)
     )
 
     add_test(NAME studiocast-video-tests COMMAND studiocast-video-tests)
+
+    add_executable(studiocast-v4l2loopback-diagnostics-tests
+            tests/v4l2loopback_diagnostics_tests.cpp
+    )
+
+    target_link_libraries(studiocast-v4l2loopback-diagnostics-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-v4l2loopback-diagnostics-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-v4l2loopback-diagnostics-tests)
+    studiocast_enable_sanitizers(studiocast-v4l2loopback-diagnostics-tests)
+
+    set_target_properties(studiocast-v4l2loopback-diagnostics-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-v4l2loopback-diagnostics-tests
+            COMMAND studiocast-v4l2loopback-diagnostics-tests)
 endif()

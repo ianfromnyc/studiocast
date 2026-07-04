@@ -22,6 +22,7 @@
 #include "core/util/json.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/broadcast_effects.h"
+#include "core/video/v4l2loopback.h"
 #include "studiocast/version.h"
 
 namespace {
@@ -937,6 +938,15 @@ int main(int argc, char **argv) {
       } else {
         out << res.json << "\n";
       }
+    }
+
+    section("Video: v4l2loopback diagnostics");
+    {
+      const auto rep = studiocast::video::ProbeLoopbackDiagnostics();
+      const auto text = rep.ToText();
+      out << text;
+      if (!text.empty() && text.back() != '\n')
+        out << "\n";
     }
 
     section("IPC: GET_AUDIO_CONFIG");
