@@ -208,6 +208,9 @@ Expected:
 - Installed model packs, missing model packs, blocked effects, configured
   missing model IDs, explicit model paths, and install hints are visible when
   reported by the daemon.
+- Open Video/Open Audio cards expose a download button when default or missing
+  model packs are needed, run the model installer without freezing the GUI, and
+  refresh diagnostics after completion.
 - Raw engine diagnostics remain visible and copyable from the page text boxes.
 
 - [ ] Open Support.

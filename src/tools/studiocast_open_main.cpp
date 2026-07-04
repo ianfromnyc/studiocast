@@ -341,6 +341,9 @@ static int CmdVideoInstallHints(const char *argv0) {
   std::cout << "StudioCast Open Video Install Hints\n\n";
   std::cout << "Model packs root:\n  " << OpenCudaRootForDisplay() << "\n\n";
 
+  std::cout << "Quick install (source builds):\n";
+  std::cout << "  ./scripts/install.sh open-video-models\n\n";
+
   std::cout << "A model pack is a directory containing model.json + model "
                "assets + LICENSE.txt.\n";
   std::cout << "The directory name does NOT need to match model.json:id "
@@ -617,10 +620,10 @@ static int CmdAudioInstallHints(const char *argv0) {
   std::cout << "Model packs root:\n  " << OpenAudioRootForDisplay() << "\n\n";
 
   std::cout << "Quick install (source builds):\n";
-  std::cout << "  ./scripts/install_open_audio_models.sh\n\n";
+  std::cout << "  ./scripts/install.sh open-audio-models\n\n";
   std::cout << "Curated pack IDs: fastenhancer_s_vd_v1, fastenhancer_m_vd_v1, "
                "fastenhancer_l_vd_v1\n";
-  std::cout << "Docs: docs/open_audio_install.md\n\n";
+  std::cout << "Docs: docs/open_source_audio_models_install.md\n\n";
 
   std::cout << "A model pack is a directory containing model.json, model.onnx, "
                "LICENSE.txt.\n";

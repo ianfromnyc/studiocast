@@ -844,7 +844,11 @@ ServiceOptionsPage::ServiceOptionsPage(QWidget *parent) : QWizardPage(parent) {
   persistLoopback_ = new QCheckBox(
       QStringLiteral("Persist the virtual camera across reboot"), this);
   installModels_ = new QCheckBox(
-      QStringLiteral("Download curated Open Audio/Open Video model packs"), this);
+      QStringLiteral("Download default Open Audio/Open Video model packs"),
+      this);
+  installModels_->setToolTip(
+      QStringLiteral("Downloads the default model packs used by automatic "
+                     "Open Audio and Open Video model selection."));
   removeUserData_ = new QCheckBox(
       QStringLiteral("Remove user config, downloaded models, logs, and cache"),
       this);
@@ -858,7 +862,8 @@ ServiceOptionsPage::ServiceOptionsPage(QWidget *parent) : QWizardPage(parent) {
   layout->addWidget(installModels_);
   layout->addWidget(removeUserData_);
   layout->addWidget(mutedLabel(
-      QStringLiteral("NVIDIA Maxine SDK files are optional and are not shipped "
+      QStringLiteral("Default model packs are optional network downloads. "
+                     "NVIDIA Maxine SDK files are optional and are not shipped "
                      "by StudioCast. Missing SDKs do not block the open-source "
                      "build; the installed app reports unavailable engines with "
                      "diagnostic hints."),

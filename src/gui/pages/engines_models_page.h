@@ -1,10 +1,13 @@
 #pragma once
 
+#include <QStringList>
 #include <QWidget>
 
 class QFrame;
 class QLabel;
 class QPlainTextEdit;
+class QProcess;
+class QPushButton;
 
 namespace studiocast::gui {
 
@@ -19,6 +22,9 @@ public:
 
   void UpdateStatus(const DaemonStatusSnapshot &snapshot);
 
+signals:
+  void ModelsInstallFinished();
+
 private:
   struct EngineCard {
     QFrame *frame = nullptr;
@@ -26,14 +32,23 @@ private:
     QLabel *state = nullptr;
     QLabel *summary = nullptr;
     QLabel *models = nullptr;
+    QPushButton *downloadButton = nullptr;
+    QLabel *downloadStatus = nullptr;
     QPlainTextEdit *details = nullptr;
     QPlainTextEdit *installHints = nullptr;
     QPlainTextEdit *rawDetails = nullptr;
+    QString engineId;
+    QStringList installArgs;
+    bool installRecommended = false;
   };
 
-  EngineCard CreateEngineCard(const QString &title, QWidget *parent);
+  EngineCard CreateEngineCard(const QString &title, const QString &engineId,
+                              QWidget *parent);
   void UpdateEngineCard(EngineCard *card, const EngineStatus &engine,
                         bool selectedByPreference);
+  void StartModelInstall(EngineCard *card);
+  void RefreshDownloadButtons();
+  QString ResolveInstallScript(QString *error) const;
 
   QLabel *videoPreferenceLabel_ = nullptr;
   QLabel *videoActiveLabel_ = nullptr;
@@ -44,6 +59,10 @@ private:
   EngineCard maxineCard_;
   EngineCard openVideoCard_;
   EngineCard openAudioCard_;
+
+  QProcess *modelInstallProcess_ = nullptr;
+  EngineCard *activeInstallCard_ = nullptr;
+  QString modelInstallOutput_;
 };
 
 } // namespace studiocast::gui

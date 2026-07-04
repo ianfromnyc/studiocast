@@ -198,6 +198,12 @@ void MainWindow::ConnectSignals() {
   connect(homePage_, &HomePage::SupportRequested, this,
           [navigateTo] { navigateTo(QStringLiteral("Support")); });
 
+  connect(enginesModelsPage_, &EnginesModelsPage::ModelsInstallFinished, this,
+          [this] {
+            if (statusPoller_)
+              statusPoller_->PollNow();
+          });
+
   connect(nav_, &QListWidget::currentRowChanged, this, [this](int row) {
     if (row < 0 || row >= pages_->count())
       return;

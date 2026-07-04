@@ -14,7 +14,7 @@ The repo includes a helper script that downloads curated, **streaming-capable** 
 them as StudioCast model packs:
 
 ```bash
-./scripts/install_open_audio_models.sh
+./scripts/install.sh open-audio-models
 ```
 
 Default install location:
@@ -26,13 +26,13 @@ ${XDG_DATA_HOME:-~/.local/share}/studiocast/models/open_audio/<model_id>/
 You can override:
 
 ```bash
-./scripts/install_open_audio_models.sh --dest /opt/studiocast/models/open_audio
+./scripts/install.sh open-audio-models --dest /opt/studiocast/models/open_audio
 ```
 
 List curated packs:
 
 ```bash
-./scripts/install_open_audio_models.sh --list
+./scripts/install.sh open-audio-models --list
 ```
 
 Curated pack IDs (FastEnhancer, VCTK-Demand v1, 16kHz):
