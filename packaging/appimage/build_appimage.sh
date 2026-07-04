@@ -128,6 +128,38 @@ find_linuxdeploy() {
   return 1
 }
 
+find_qmake6() {
+  local candidates=()
+  if [[ -n "${QMAKE:-}" ]]; then
+    candidates+=("${QMAKE}")
+  fi
+  candidates+=(
+    /usr/lib/qt6/bin/qmake6
+    /usr/lib/qt6/bin/qmake
+    qmake6
+    qmake
+  )
+
+  local candidate resolved qt_version
+  for candidate in "${candidates[@]}"; do
+    resolved=""
+    if [[ -x "${candidate}" ]]; then
+      resolved="${candidate}"
+    elif command -v "${candidate}" >/dev/null 2>&1; then
+      resolved="$(command -v "${candidate}")"
+    fi
+
+    if [[ -n "${resolved}" ]] &&
+        qt_version="$("${resolved}" -query QT_VERSION 2>/dev/null)" &&
+        [[ "${qt_version}" == 6.* ]]; then
+      printf '%s\n' "${resolved}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -308,11 +340,27 @@ build_appimage() {
   fi
 
   log "Running linuxdeploy from ${linuxdeploy}"
+  local qmake6 qmake_shim_dir
+  if ! qmake6="$(find_qmake6)"; then
+    if [[ "${APPIMAGE_REQUIRED}" -eq 1 ]]; then
+      die "Qt 6 qmake was not found; linuxdeploy-plugin-qt requires qmake -query"
+    fi
+    log "Qt 6 qmake not found; leaving staged AppDir archive as the local artifact"
+    return 1
+  fi
+
+  qmake_shim_dir="${CMAKE_BUILD_DIR}/appimage-tools/bin"
+  log "Using Qt qmake from ${qmake6}"
+  run install -d -m 0755 "${qmake_shim_dir}"
+  run ln -sf "${qmake6}" "${qmake_shim_dir}/qmake"
+
   run rm -f -- "${APPIMAGE_PATH}"
   if ! run env \
     VERSION="${VERSION}" \
     OUTPUT="${APPIMAGE_PATH}" \
     APPIMAGE_EXTRACT_AND_RUN="${APPIMAGE_EXTRACT_AND_RUN:-1}" \
+    QMAKE="${qmake6}" \
+    PATH="${qmake_shim_dir}:${PATH}" \
     "${linuxdeploy}" \
     --appdir "${APPDIR}" \
     --executable "${APPDIR}/usr/bin/studiocast-installer" \
