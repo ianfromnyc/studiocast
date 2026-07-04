@@ -6,6 +6,8 @@
 #include <QCoreApplication>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFrame>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -27,6 +29,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStandardItemModel>
+#include <QStyle>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -49,6 +52,7 @@
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/effect_descriptors.h"
 #include "core/video/v4l2loopback.h"
+#include "gui/text_edit_utils.h"
 
 namespace studiocast::gui {
 
@@ -716,110 +720,235 @@ bool DaemonRequest(const std::string &request, std::string *outJson,
   return true;
 }
 
+QLabel *MutedLabel(const QString &text, QWidget *parent) {
+  auto *label = new QLabel(text, parent);
+  label->setProperty("scRole", "muted");
+  label->setWordWrap(true);
+  return label;
+}
+
+QLabel *ValueLabel(const QString &text, QWidget *parent) {
+  auto *label = new QLabel(text, parent);
+  label->setProperty("scRole", "value");
+  label->setWordWrap(true);
+  return label;
+}
+
+QLabel *SectionLabel(const QString &text, QWidget *parent) {
+  auto *label = new QLabel(text, parent);
+  label->setProperty("scRole", "sectionTitle");
+  return label;
+}
+
+void SetDynamicProperty(QWidget *widget, const char *name,
+                        const QString &value) {
+  if (!widget)
+    return;
+  widget->setProperty(name, value);
+  widget->style()->unpolish(widget);
+  widget->style()->polish(widget);
+}
+
+QFrame *EffectPanel(const QString &title, QWidget *parent,
+                    QVBoxLayout **layoutOut) {
+  auto *panel = new QFrame(parent);
+  panel->setProperty("scRole", "cameraEffect");
+  auto *layout = new QVBoxLayout(panel);
+  layout->setContentsMargins(12, 10, 12, 12);
+  layout->setSpacing(10);
+  layout->addWidget(SectionLabel(title, panel));
+  if (layoutOut)
+    *layoutOut = layout;
+  return panel;
+}
+
+void ConfigureModelCombo(QComboBox *combo) {
+  if (!combo)
+    return;
+  combo->setMinimumContentsLength(28);
+  combo->setSizeAdjustPolicy(
+      QComboBox::AdjustToMinimumContentsLengthWithIcon);
+  combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+}
+
 } // namespace
 
 VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   auto *root = new QVBoxLayout(this);
+  root->setContentsMargins(16, 16, 16, 16);
   root->setSpacing(12);
+
+  auto *titleRow = new QHBoxLayout();
+  titleRow->setContentsMargins(0, 0, 0, 0);
 
   auto *title = new QLabel("Camera", this);
   title->setProperty("scRole", "title");
-  root->addWidget(title);
+  titleRow->addWidget(title);
 
-  auto *box =
-      new QGroupBox("Processed Camera → Virtual Camera (daemon-driven)", this);
-  auto *boxLayout = new QVBoxLayout(box);
+  titleRow->addStretch(1);
 
-  // Preview
-  preview_ = new VideoPreviewWidget(box);
+  diagnosticsToggle_ = new QToolButton(this);
+  diagnosticsToggle_->setText("Show Diagnostics");
+  diagnosticsToggle_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  diagnosticsToggle_->setCheckable(true);
+  diagnosticsToggle_->setChecked(false);
+  titleRow->addWidget(diagnosticsToggle_);
+
+  root->addLayout(titleRow);
+
+  auto *workspace = new QWidget(this);
+  auto *workspaceLayout = new QHBoxLayout(workspace);
+  workspaceLayout->setContentsMargins(0, 0, 0, 0);
+  workspaceLayout->setSpacing(12);
+
+  auto *previewBox = new QGroupBox("Preview", workspace);
+  previewBox->setProperty("scRole", "cameraPrimary");
+  auto *previewLayout = new QVBoxLayout(previewBox);
+  previewLayout->setSpacing(10);
+  preview_ = new VideoPreviewWidget(previewBox);
+  preview_->setMinimumHeight(360);
   preview_->SetStatusText("Preview off");
-  boxLayout->addWidget(preview_);
+  previewLayout->addWidget(preview_, 1);
 
   auto *previewRow = new QHBoxLayout();
-  previewCheck_ = new QCheckBox("Preview", box);
+  previewCheck_ = new QCheckBox("Preview", previewBox);
   previewCheck_->setToolTip(
       "Opens the virtual camera in this GUI. This counts as a consumer.");
   previewRow->addWidget(previewCheck_);
   previewRow->addStretch(1);
-  boxLayout->addLayout(previewRow);
+  previewLayout->addLayout(previewRow);
 
-  // Input row
-  auto *inRow = new QHBoxLayout();
-  inRow->addWidget(new QLabel("Input camera:", box));
-  inputCombo_ = new QComboBox(box);
-  inRow->addWidget(inputCombo_, 1);
-  refreshBtn_ = new QPushButton("Refresh", box);
-  inRow->addWidget(refreshBtn_);
-  boxLayout->addLayout(inRow);
+  previewLayout->addWidget(MutedLabel(
+      "Preview opens StudioCast Camera in this GUI and counts as a camera "
+      "consumer.",
+      previewBox));
 
-  // Output row
-  auto *outRow = new QHBoxLayout();
-  outRow->addWidget(new QLabel("Output (v4l2loopback):", box));
-  outputCombo_ = new QComboBox(box);
-  outRow->addWidget(outputCombo_, 1);
-  copyCmdBtn_ = new QPushButton("Copy modprobe command", box);
-  outRow->addWidget(copyCmdBtn_);
-  boxLayout->addLayout(outRow);
+  auto *runBox = new QGroupBox("Run Camera", workspace);
+  runBox->setMaximumWidth(360);
+  auto *runLayout = new QVBoxLayout(runBox);
+  runLayout->setSpacing(10);
 
-  // Size row
-  auto *sizeRow = new QHBoxLayout();
-  sizeRow->addWidget(new QLabel("Width:", box));
-  widthSpin_ = new QSpinBox(box);
-  widthSpin_->setRange(160, 3840);
-  widthSpin_->setValue(1280);
-  sizeRow->addWidget(widthSpin_);
+  cameraStateLabel_ = new QLabel("Checking daemon", runBox);
+  cameraStateLabel_->setProperty("scRole", "statusPill");
+  cameraStateLabel_->setAlignment(Qt::AlignCenter);
+  runLayout->addWidget(cameraStateLabel_);
 
-  sizeRow->addWidget(new QLabel("Height:", box));
-  heightSpin_ = new QSpinBox(box);
-  heightSpin_->setRange(120, 2160);
-  heightSpin_->setValue(720);
-  sizeRow->addWidget(heightSpin_);
+  cameraDetailLabel_ = MutedLabel(QString(), runBox);
+  runLayout->addWidget(cameraDetailLabel_);
 
-  sizeRow->addWidget(new QLabel("FPS:", box));
-  fpsSpin_ = new QSpinBox(box);
-  fpsSpin_->setRange(1, 120);
-  fpsSpin_->setValue(30);
-  sizeRow->addWidget(fpsSpin_);
+  auto *ctlRow = new QHBoxLayout();
+  startBtn_ = new QPushButton("Start Camera", runBox);
+  startBtn_->setProperty("scVariant", "primary");
+  startBtn_->setMinimumHeight(40);
+  stopBtn_ = new QPushButton("Stop", runBox);
+  stopBtn_->setProperty("scVariant", "danger");
+  stopBtn_->setMinimumHeight(40);
+  ctlRow->addWidget(startBtn_, 1);
+  ctlRow->addWidget(stopBtn_, 0);
+  runLayout->addLayout(ctlRow);
 
-  sizeRow->addStretch(1);
-  boxLayout->addLayout(sizeRow);
-
-  // Backend preference (Auto / Maxine / Open Source)
   auto *engineRow = new QHBoxLayout();
-  engineRow->addWidget(new QLabel("Backend:", box));
-  engineCombo_ = new QComboBox(box);
+  engineRow->addWidget(new QLabel("Backend:", runBox));
+  engineCombo_ = new QComboBox(runBox);
   engineCombo_->addItem("Auto", "auto");
   engineCombo_->addItem("Maxine", "maxine");
   engineCombo_->addItem("Open Source", "open_cuda");
-  engineRow->addWidget(engineCombo_);
-  engineRow->addSpacing(12);
-  engineRow->addWidget(new QLabel("Active:", box));
-  effectEngineValue_ = new QLabel("—", box);
-  effectEngineValue_->setProperty("scRole", "value");
-  engineRow->addWidget(effectEngineValue_);
-  engineRow->addStretch(1);
-  boxLayout->addLayout(engineRow);
+  engineRow->addWidget(engineCombo_, 1);
+  runLayout->addLayout(engineRow);
 
-  engineInfoBanner_ = new QLabel(box);
+  auto *activeRow = new QHBoxLayout();
+  activeRow->addWidget(new QLabel("Active:", runBox));
+  effectEngineValue_ = ValueLabel("—", runBox);
+  activeRow->addWidget(effectEngineValue_, 1);
+  runLayout->addLayout(activeRow);
+
+  engineInfoBanner_ = new QLabel(runBox);
   engineInfoBanner_->setWordWrap(true);
   engineInfoBanner_->setProperty("scBanner", "info");
   engineInfoBanner_->setVisible(false);
-  boxLayout->addWidget(engineInfoBanner_);
+  runLayout->addWidget(engineInfoBanner_);
 
-  maxineBanner_ = new QLabel(box);
+  maxineBanner_ = new QLabel(runBox);
   maxineBanner_->setWordWrap(true);
   maxineBanner_->setProperty("scBanner", "warning");
   maxineBanner_->setVisible(false);
-  boxLayout->addWidget(maxineBanner_);
+  runLayout->addWidget(maxineBanner_);
+  runLayout->addStretch(1);
 
-  // Mirror
-  auto *fxRow = new QHBoxLayout();
-  fxRow->addStretch(1);
-  boxLayout->addLayout(fxRow);
+  workspaceLayout->addWidget(previewBox, 3);
+  workspaceLayout->addWidget(runBox, 1);
+  root->addWidget(workspace);
+
+  auto *setupBox = new QGroupBox("Setup", this);
+  auto *setupLayout = new QVBoxLayout(setupBox);
+  setupLayout->setSpacing(10);
+
+  setupLockLabel_ = MutedLabel(
+      "Setup is locked while camera processing is running.", setupBox);
+  setupLockLabel_->setVisible(false);
+  setupLayout->addWidget(setupLockLabel_);
+
+  auto *setupGrid = new QGridLayout();
+  setupGrid->setColumnStretch(1, 1);
+  setupGrid->setHorizontalSpacing(10);
+  setupGrid->setVerticalSpacing(10);
+
+  setupGrid->addWidget(new QLabel("Input camera:", setupBox), 0, 0);
+  inputCombo_ = new QComboBox(setupBox);
+  setupGrid->addWidget(inputCombo_, 0, 1);
+  refreshBtn_ = new QPushButton("Refresh", setupBox);
+  setupGrid->addWidget(refreshBtn_, 0, 2);
+
+  setupGrid->addWidget(new QLabel("Output (v4l2loopback):", setupBox), 1, 0);
+  outputCombo_ = new QComboBox(setupBox);
+  setupGrid->addWidget(outputCombo_, 1, 1, 1, 2);
+
+  auto *formatRow = new QHBoxLayout();
+  formatRow->addWidget(new QLabel("Width:", setupBox));
+  widthSpin_ = new QSpinBox(setupBox);
+  widthSpin_->setRange(160, 3840);
+  widthSpin_->setValue(1280);
+  formatRow->addWidget(widthSpin_);
+
+  formatRow->addWidget(new QLabel("Height:", setupBox));
+  heightSpin_ = new QSpinBox(setupBox);
+  heightSpin_->setRange(120, 2160);
+  heightSpin_->setValue(720);
+  formatRow->addWidget(heightSpin_);
+
+  formatRow->addWidget(new QLabel("FPS:", setupBox));
+  fpsSpin_ = new QSpinBox(setupBox);
+  fpsSpin_->setRange(1, 120);
+  fpsSpin_->setValue(30);
+  formatRow->addWidget(fpsSpin_);
+  formatRow->addStretch(1);
+  auto *formatWidget = new QWidget(setupBox);
+  formatWidget->setLayout(formatRow);
+  setupGrid->addWidget(formatWidget, 2, 1, 1, 2);
+  setupLayout->addLayout(setupGrid);
+  root->addWidget(setupBox);
+
+  auto *effectsBox = new QGroupBox("Effects", this);
+  auto *effectsLayout = new QVBoxLayout(effectsBox);
+  effectsLayout->setSpacing(10);
+
+  auto *quickFxRow = new QHBoxLayout();
+  mirrorCheck_ = new QCheckBox("Mirror", effectsBox);
+  mirrorCheck_->setToolTip(
+      "Writes the canonical camera mirror setting through daemon effects JSON.");
+  quickFxRow->addWidget(mirrorCheck_);
+  quickFxRow->addStretch(1);
+  effectsLayout->addLayout(quickFxRow);
+
+  auto *effectsGrid = new QGridLayout();
+  effectsGrid->setHorizontalSpacing(10);
+  effectsGrid->setVerticalSpacing(10);
+  effectsGrid->setColumnStretch(0, 1);
+  effectsGrid->setColumnStretch(1, 1);
 
   // Virtual Background
-  auto *vbBox = new QGroupBox("Virtual Background", box);
-  auto *vbLayout = new QVBoxLayout(vbBox);
+  QVBoxLayout *vbLayout = nullptr;
+  auto *vbBox = EffectPanel("Virtual Background", effectsBox, &vbLayout);
 
   auto *vbRow = new QHBoxLayout();
   vbRow->addWidget(new QLabel("Mode:", vbBox));
@@ -830,7 +959,8 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   backgroundCombo_->addItem("Replace", "replace");
   vbRow->addWidget(backgroundCombo_, 1);
   vbRow->addSpacing(12);
-  vbRow->addWidget(new QLabel("Blur strength:", vbBox));
+  backgroundStrengthLabel_ = new QLabel("Blur strength:", vbBox);
+  vbRow->addWidget(backgroundStrengthLabel_);
   backgroundStrengthSpin_ = new QSpinBox(vbBox);
   backgroundStrengthSpin_->setRange(0, 100);
   backgroundStrengthSpin_->setValue(50);
@@ -842,7 +972,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   auto *vbModelRow = new QHBoxLayout();
   vbModelLabel_ = new QLabel("Model:", vbBox);
   vbModelCombo_ = new QComboBox(vbBox);
-  vbModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  ConfigureModelCombo(vbModelCombo_);
   vbModelRow->addWidget(vbModelLabel_);
   vbModelRow->addWidget(vbModelCombo_, 1);
   vbLayout->addLayout(vbModelRow);
@@ -851,25 +981,25 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   vbModelCombo_->setVisible(false);
 
   auto *vbParamRow = new QHBoxLayout();
-  vbParamRow->addWidget(new QLabel("Remove color (#RRGGBB):", vbBox));
+  backgroundRemoveColorLabel_ = new QLabel("Remove color (#RRGGBB):", vbBox);
+  vbParamRow->addWidget(backgroundRemoveColorLabel_);
   backgroundRemoveColorEdit_ = new QLineEdit(vbBox);
   backgroundRemoveColorEdit_->setPlaceholderText("#000000");
   backgroundRemoveColorEdit_->setMaximumWidth(110);
   vbParamRow->addWidget(backgroundRemoveColorEdit_);
 
   vbParamRow->addSpacing(12);
-  vbParamRow->addWidget(new QLabel("Replace image:", vbBox));
+  backgroundReplaceImageLabel_ = new QLabel("Replace image:", vbBox);
+  vbParamRow->addWidget(backgroundReplaceImageLabel_);
   backgroundReplaceImageEdit_ = new QLineEdit(vbBox);
   vbParamRow->addWidget(backgroundReplaceImageEdit_, 1);
   browseReplaceImageBtn_ = new QPushButton("Browse…", vbBox);
   vbParamRow->addWidget(browseReplaceImageBtn_);
   vbLayout->addLayout(vbParamRow);
 
-  boxLayout->addWidget(vbBox);
-
   // Auto Frame
-  auto *afBox = new QGroupBox("Auto Frame", box);
-  auto *afLayout = new QVBoxLayout(afBox);
+  QVBoxLayout *afLayout = nullptr;
+  auto *afBox = EffectPanel("Auto Frame", effectsBox, &afLayout);
 
   auto *afRow = new QHBoxLayout();
   autoFrameCheck_ = new QCheckBox("Enable", afBox);
@@ -889,17 +1019,16 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   auto *afModelRow = new QHBoxLayout();
   autoFrameModelLabel_ = new QLabel("Model:", afBox);
   autoFrameModelCombo_ = new QComboBox(afBox);
-  autoFrameModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  ConfigureModelCombo(autoFrameModelCombo_);
   afModelRow->addWidget(autoFrameModelLabel_);
   afModelRow->addWidget(autoFrameModelCombo_, 1);
   afLayout->addLayout(afModelRow);
   autoFrameModelLabel_->setVisible(false);
   autoFrameModelCombo_->setVisible(false);
-  boxLayout->addWidget(afBox);
 
   // Eye Contact
-  auto *ecBox = new QGroupBox("Eye Contact", box);
-  auto *ecLayout = new QVBoxLayout(ecBox);
+  QVBoxLayout *ecLayout = nullptr;
+  auto *ecBox = EffectPanel("Eye Contact", effectsBox, &ecLayout);
 
   auto *ecRow = new QHBoxLayout();
   eyeContactCheck_ = new QCheckBox("Enable", ecBox);
@@ -923,17 +1052,16 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   auto *ecModelRow = new QHBoxLayout();
   eyeContactModelLabel_ = new QLabel("Model:", ecBox);
   eyeContactModelCombo_ = new QComboBox(ecBox);
-  eyeContactModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  ConfigureModelCombo(eyeContactModelCombo_);
   ecModelRow->addWidget(eyeContactModelLabel_);
   ecModelRow->addWidget(eyeContactModelCombo_, 1);
   ecLayout->addLayout(ecModelRow);
   eyeContactModelLabel_->setVisible(false);
   eyeContactModelCombo_->setVisible(false);
-  boxLayout->addWidget(ecBox);
 
   // Video Noise Removal
-  auto *dnBox = new QGroupBox("Video Noise Removal", box);
-  auto *dnLayout = new QVBoxLayout(dnBox);
+  QVBoxLayout *dnLayout = nullptr;
+  auto *dnBox = EffectPanel("Video Noise Removal", effectsBox, &dnLayout);
 
   auto *dnRow = new QHBoxLayout();
   denoiseCheck_ = new QCheckBox("Enable", dnBox);
@@ -953,17 +1081,16 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   auto *dnModelRow = new QHBoxLayout();
   denoiseModelLabel_ = new QLabel("Model:", dnBox);
   denoiseModelCombo_ = new QComboBox(dnBox);
-  denoiseModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  ConfigureModelCombo(denoiseModelCombo_);
   dnModelRow->addWidget(denoiseModelLabel_);
   dnModelRow->addWidget(denoiseModelCombo_, 1);
   dnLayout->addLayout(dnModelRow);
   denoiseModelLabel_->setVisible(false);
   denoiseModelCombo_->setVisible(false);
-  boxLayout->addWidget(dnBox);
 
   // Virtual Key Light
-  auto *vklBox = new QGroupBox("Virtual Key Light", box);
-  auto *vklLayout = new QVBoxLayout(vklBox);
+  QVBoxLayout *vklLayout = nullptr;
+  auto *vklBox = EffectPanel("Virtual Key Light", effectsBox, &vklLayout);
 
   auto *vklRow = new QHBoxLayout();
   virtualKeyLightCheck_ = new QCheckBox("Enable", vklBox);
@@ -1006,11 +1133,10 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   vklRow2->addWidget(browseVirtualKeyLightHdriBtn_);
   vklLayout->addLayout(vklRow2);
 
-  boxLayout->addWidget(vklBox);
-
   // Vignette
-  auto *vigBox = new QGroupBox("Vignette", box);
-  auto *vigLayout = new QHBoxLayout(vigBox);
+  QVBoxLayout *vigOuterLayout = nullptr;
+  auto *vigBox = EffectPanel("Vignette", effectsBox, &vigOuterLayout);
+  auto *vigLayout = new QHBoxLayout();
   vignetteCheck_ = new QCheckBox("Enable", vigBox);
   vigLayout->addWidget(vignetteCheck_);
   vigLayout->addSpacing(12);
@@ -1028,45 +1154,74 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
       new QCheckBox("Center on Auto Frame subject", vigBox);
   vignetteCenterOnFaceCheck_->setChecked(true);
   vigLayout->addWidget(vignetteCenterOnFaceCheck_);
-  boxLayout->addWidget(vigBox);
+  vigOuterLayout->addLayout(vigLayout);
 
-  // Diagnostics expander
-  auto *diagBox = new QGroupBox("Diagnostics", box);
-  diagBox->setCheckable(true);
-  diagBox->setChecked(false);
-  auto *diagLayout = new QVBoxLayout(diagBox);
-  openInstallHintsBtn_ = new QPushButton("Open install hints", diagBox);
-  openInstallHintsBtn_->setVisible(false);
-  diagLayout->addWidget(openInstallHintsBtn_, 0, Qt::AlignLeft);
-  diagnosticsText_ = new QPlainTextEdit(diagBox);
+  effectsGrid->addWidget(vbBox, 0, 0, 1, 2);
+  effectsGrid->addWidget(afBox, 1, 0);
+  effectsGrid->addWidget(ecBox, 1, 1);
+  effectsGrid->addWidget(dnBox, 2, 0);
+  effectsGrid->addWidget(vklBox, 2, 1);
+  effectsGrid->addWidget(vigBox, 3, 0, 1, 2);
+  effectsLayout->addLayout(effectsGrid);
+  root->addWidget(effectsBox);
+
+  diagnosticsBox_ = new QGroupBox("Diagnostics", this);
+  diagnosticsBox_->setVisible(false);
+  auto *detailsLayout = new QVBoxLayout(diagnosticsBox_);
+  detailsLayout->setSpacing(10);
+
+  diagnosticsContent_ = new QWidget(diagnosticsBox_);
+  auto *detailsContentLayout = new QVBoxLayout(diagnosticsContent_);
+  detailsContentLayout->setContentsMargins(0, 0, 0, 0);
+  detailsContentLayout->setSpacing(10);
+
+  detailsContentLayout->addWidget(MutedLabel(
+      "Technical camera details stay here for setup and support.",
+      diagnosticsContent_));
+
+  auto *cmdRow = new QHBoxLayout();
+  cmdRow->addWidget(new QLabel("v4l2loopback command:", diagnosticsContent_));
+  suggestedCmdEdit_ = new QLineEdit(diagnosticsContent_);
+  suggestedCmdEdit_->setReadOnly(true);
+  suggestedCmdEdit_->setProperty("scRole", "copyValue");
+  suggestedCmdEdit_->setPlaceholderText("No suggested modprobe command.");
+  cmdRow->addWidget(suggestedCmdEdit_, 1);
+  copyCmdBtn_ = new QPushButton("Copy command", diagnosticsContent_);
+  cmdRow->addWidget(copyCmdBtn_);
+  detailsContentLayout->addLayout(cmdRow);
+
+  auto *detailsActionsRow = new QHBoxLayout();
+  openInstallHintsBtn_ =
+      new QPushButton("Open install hints", diagnosticsContent_);
+  detailsActionsRow->addWidget(openInstallHintsBtn_, 0, Qt::AlignLeft);
+  auto *copyStatusBtn =
+      new QPushButton("Copy raw camera details", diagnosticsContent_);
+  detailsActionsRow->addWidget(copyStatusBtn, 0, Qt::AlignLeft);
+  detailsActionsRow->addStretch(1);
+  detailsContentLayout->addLayout(detailsActionsRow);
+
+  diagnosticsText_ = new QPlainTextEdit(diagnosticsContent_);
   diagnosticsText_->setReadOnly(true);
-  diagnosticsText_->setMinimumHeight(120);
-  diagnosticsText_->setVisible(false);
-  diagLayout->addWidget(diagnosticsText_, 1);
-  connect(diagBox, &QGroupBox::toggled, this, [this](bool on) {
-    if (openInstallHintsBtn_)
-      openInstallHintsBtn_->setVisible(on);
-    if (diagnosticsText_)
-      diagnosticsText_->setVisible(on);
-  });
-  boxLayout->addWidget(diagBox);
+  diagnosticsText_->setMinimumHeight(140);
+  detailsContentLayout->addWidget(
+      new QLabel("Engine diagnostics:", diagnosticsContent_));
+  detailsContentLayout->addWidget(diagnosticsText_);
 
-  // Controls row
-  auto *ctlRow = new QHBoxLayout();
-  startBtn_ = new QPushButton("Start", box);
-  stopBtn_ = new QPushButton("Stop", box);
-  ctlRow->addWidget(startBtn_);
-  ctlRow->addWidget(stopBtn_);
-  ctlRow->addStretch(1);
-  boxLayout->addLayout(ctlRow);
-
-  // Status
-  statusText_ = new QPlainTextEdit(box);
+  statusText_ = new QPlainTextEdit(diagnosticsContent_);
   statusText_->setReadOnly(true);
   statusText_->setMinimumHeight(260);
-  boxLayout->addWidget(statusText_, 1);
+  detailsContentLayout->addWidget(
+      new QLabel("Raw camera status:", diagnosticsContent_));
+  detailsContentLayout->addWidget(statusText_, 1);
 
-  root->addWidget(box);
+  diagnosticsContent_->setVisible(false);
+  detailsLayout->addWidget(diagnosticsContent_);
+  connect(copyStatusBtn, &QPushButton::clicked, this, [this] {
+    if (auto *cb = QGuiApplication::clipboard())
+      cb->setText(statusText_ ? statusText_->toPlainText() : QString());
+  });
+
+  root->addWidget(diagnosticsBox_);
   root->addStretch(1);
 
   connect(refreshBtn_, &QPushButton::clicked, this, &VideoPage::Refresh);
@@ -1076,9 +1231,13 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   connect(stopBtn_, &QPushButton::clicked, this, &VideoPage::OnStop);
   connect(previewCheck_, &QCheckBox::toggled, this,
           &VideoPage::OnPreviewToggled);
+  connect(diagnosticsToggle_, &QToolButton::toggled, this,
+          &VideoPage::SetDiagnosticsVisible);
 
   connect(engineCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
           this, &VideoPage::OnEnginePreferenceChanged);
+  connect(mirrorCheck_, &QCheckBox::toggled, this,
+          &VideoPage::OnMirrorToggled);
 
   connect(backgroundCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
           this, &VideoPage::OnBackgroundChanged);
@@ -1166,6 +1325,43 @@ void VideoPage::ShowError(const QString &title, const QString &details) {
   QMessageBox::critical(this, title, details);
 }
 
+void VideoPage::SetDiagnosticsVisible(bool visible) {
+  if (diagnosticsToggle_) {
+    diagnosticsToggle_->setChecked(visible);
+    diagnosticsToggle_->setText(visible ? QStringLiteral("Hide Diagnostics")
+                                        : QStringLiteral("Show Diagnostics"));
+  }
+  if (diagnosticsBox_)
+    diagnosticsBox_->setVisible(visible);
+  if (diagnosticsContent_)
+    diagnosticsContent_->setVisible(visible);
+}
+
+void VideoPage::UpdateBackgroundModeOptionVisibility() {
+  const QString bgMode =
+      backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  const bool showBlur = (bgMode == QStringLiteral("blur"));
+  const bool showRemove = (bgMode == QStringLiteral("remove"));
+  const bool showReplace = (bgMode == QStringLiteral("replace"));
+
+  if (backgroundStrengthLabel_)
+    backgroundStrengthLabel_->setVisible(showBlur);
+  if (backgroundStrengthSpin_)
+    backgroundStrengthSpin_->setVisible(showBlur);
+
+  if (backgroundRemoveColorLabel_)
+    backgroundRemoveColorLabel_->setVisible(showRemove);
+  if (backgroundRemoveColorEdit_)
+    backgroundRemoveColorEdit_->setVisible(showRemove);
+
+  if (backgroundReplaceImageLabel_)
+    backgroundReplaceImageLabel_->setVisible(showReplace);
+  if (backgroundReplaceImageEdit_)
+    backgroundReplaceImageEdit_->setVisible(showReplace);
+  if (browseReplaceImageBtn_)
+    browseReplaceImageBtn_->setVisible(showReplace);
+}
+
 void VideoPage::Refresh() {
   const auto rep = studiocast::video::ProbeLoopback();
   baseStatusText_ = rep.ToText();
@@ -1227,6 +1423,8 @@ void VideoPage::Refresh() {
 
   suggestedCmd_ = QString::fromStdString(rep.suggested_modprobe_cmd);
   copyCmdBtn_->setEnabled(!suggestedCmd_.isEmpty());
+  if (suggestedCmdEdit_)
+    suggestedCmdEdit_->setText(suggestedCmd_);
 
   SyncFromDaemonConfig();
   UpdateStatusText();
@@ -1292,6 +1490,12 @@ bool VideoPage::SyncFromDaemonConfig() {
     const int idx = engineCombo_->findData(v);
     engineCombo_->setCurrentIndex(idx >= 0 ? idx : 0);
     engineCombo_->blockSignals(false);
+  }
+
+  if (mirrorCheck_) {
+    mirrorCheck_->blockSignals(true);
+    mirrorCheck_->setChecked(effects_.mirror);
+    mirrorCheck_->blockSignals(false);
   }
 
   const bool autoFrame = effects_.auto_frame.enabled;
@@ -1487,14 +1691,15 @@ bool VideoPage::SyncFromDaemonConfig() {
   // Enable per-effect parameter controls.
   const QString bgMode =
       backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  UpdateBackgroundModeOptionVisibility();
   if (backgroundStrengthSpin_)
-    backgroundStrengthSpin_->setEnabled(bgMode == "blur");
+    backgroundStrengthSpin_->setEnabled(bgMode == QStringLiteral("blur"));
   if (backgroundRemoveColorEdit_)
-    backgroundRemoveColorEdit_->setEnabled(bgMode == "remove");
+    backgroundRemoveColorEdit_->setEnabled(bgMode == QStringLiteral("remove"));
   if (backgroundReplaceImageEdit_)
-    backgroundReplaceImageEdit_->setEnabled(bgMode == "replace");
+    backgroundReplaceImageEdit_->setEnabled(bgMode == QStringLiteral("replace"));
   if (browseReplaceImageBtn_)
-    browseReplaceImageBtn_->setEnabled(bgMode == "replace");
+    browseReplaceImageBtn_->setEnabled(bgMode == QStringLiteral("replace"));
 
   if (autoFrameZoomSlider_ && autoFrameCheck_)
     autoFrameZoomSlider_->setEnabled(autoFrameCheck_->isChecked());
@@ -1585,6 +1790,8 @@ bool VideoPage::SendDaemonVideoEffects() {
       effects_.engine = ep;
     }
   }
+  if (mirrorCheck_)
+    effects_.mirror = mirrorCheck_->isChecked();
 
   const QString bg =
       backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
@@ -1719,14 +1926,15 @@ void VideoPage::OnBackgroundChanged(int /*index*/) {
   // Enable per-effect parameter controls.
   const QString bg =
       backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  UpdateBackgroundModeOptionVisibility();
   if (backgroundStrengthSpin_)
-    backgroundStrengthSpin_->setEnabled(bg == "blur");
+    backgroundStrengthSpin_->setEnabled(bg == QStringLiteral("blur"));
   if (backgroundRemoveColorEdit_)
-    backgroundRemoveColorEdit_->setEnabled(bg == "remove");
+    backgroundRemoveColorEdit_->setEnabled(bg == QStringLiteral("remove"));
   if (backgroundReplaceImageEdit_)
-    backgroundReplaceImageEdit_->setEnabled(bg == "replace");
+    backgroundReplaceImageEdit_->setEnabled(bg == QStringLiteral("replace"));
   if (browseReplaceImageBtn_)
-    browseReplaceImageBtn_->setEnabled(bg == "replace");
+    browseReplaceImageBtn_->setEnabled(bg == QStringLiteral("replace"));
   UpdateUiEnabled();
   (void)SendDaemonVideoEffects();
 }
@@ -2237,6 +2445,8 @@ void VideoPage::UpdateUiEnabled() {
   widthSpin_->setEnabled(!enabled);
   heightSpin_->setEnabled(!enabled);
   fpsSpin_->setEnabled(!enabled);
+  if (setupLockLabel_)
+    setupLockLabel_->setVisible(enabled);
 
   if (engineCombo_) {
     engineCombo_->setEnabled(daemonReachable_);
@@ -2391,11 +2601,13 @@ void VideoPage::UpdateUiEnabled() {
         note += QStringLiteral("\n\n");
       }
 
-      diagnosticsText_->setPlainText(
+      SetPlainTextPreservingScroll(
+          diagnosticsText_,
           note + QString::fromUtf8(
                      QJsonDocument(diag).toJson(QJsonDocument::Indented)));
     } else {
-      diagnosticsText_->setPlainText("(failed to parse status JSON)\n" + perr);
+      SetPlainTextPreservingScroll(
+          diagnosticsText_, "(failed to parse status JSON)\n" + perr);
     }
   }
 
@@ -2537,9 +2749,25 @@ void VideoPage::UpdateUiEnabled() {
     w->setToolTip(avail ? QString() : tooltip);
   };
 
+  if (mirrorCheck_) {
+    const bool mirrorAvailable = effectAvailable(QStringLiteral("mirror"));
+    const bool mirrorOn = mirrorCheck_->isChecked();
+    mirrorCheck_->setEnabled(daemonReachable_ && (mirrorAvailable || mirrorOn));
+    if (!daemonReachable_) {
+      mirrorCheck_->setToolTip(QStringLiteral("Daemon unreachable."));
+    } else if (st.effects_plan_disabled.contains(QStringLiteral("mirror"))) {
+      mirrorCheck_->setToolTip(
+          st.effects_plan_disabled.value(QStringLiteral("mirror")));
+    } else {
+      mirrorCheck_->setToolTip(QStringLiteral(
+          "Writes the canonical camera mirror setting through daemon effects JSON."));
+    }
+  }
+
   // Virtual Background
   const QString vbMode =
       backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  UpdateBackgroundModeOptionVisibility();
   const bool vbBlurAvail =
       effectAvailable(QStringLiteral("virtual_background.blur"));
   const bool vbRemoveAvail =
@@ -2582,16 +2810,41 @@ void VideoPage::UpdateUiEnabled() {
     }
   }
   if (backgroundStrengthSpin_ && backgroundCombo_) {
-    backgroundStrengthSpin_->setEnabled(vbMode == "blur" && vbBlurAvail);
+    const bool on = (vbMode == QStringLiteral("blur"));
+    const QString tip =
+        on && !vbBlurAvail
+            ? effectUnavailableTooltip(QStringLiteral("virtual_background.blur"))
+            : QString();
+    backgroundStrengthSpin_->setEnabled(on);
+    backgroundStrengthSpin_->setToolTip(tip);
+    if (backgroundStrengthLabel_)
+      backgroundStrengthLabel_->setToolTip(tip);
   }
   if (backgroundRemoveColorEdit_ && backgroundCombo_) {
-    backgroundRemoveColorEdit_->setEnabled(vbMode == "remove" && vbRemoveAvail);
+    const bool on = (vbMode == QStringLiteral("remove"));
+    const QString tip =
+        on && !vbRemoveAvail
+            ? effectUnavailableTooltip(QStringLiteral("virtual_background.remove"))
+            : QString();
+    backgroundRemoveColorEdit_->setEnabled(on);
+    backgroundRemoveColorEdit_->setToolTip(tip);
+    if (backgroundRemoveColorLabel_)
+      backgroundRemoveColorLabel_->setToolTip(tip);
   }
   if (backgroundReplaceImageEdit_ && backgroundCombo_) {
-    const bool on = vbMode == "replace" && vbReplaceAvail;
+    const bool on = (vbMode == QStringLiteral("replace"));
+    const QString tip =
+        on && !vbReplaceAvail
+            ? effectUnavailableTooltip(QStringLiteral("virtual_background.replace"))
+            : QString();
     backgroundReplaceImageEdit_->setEnabled(on);
-    if (browseReplaceImageBtn_)
+    backgroundReplaceImageEdit_->setToolTip(tip);
+    if (backgroundReplaceImageLabel_)
+      backgroundReplaceImageLabel_->setToolTip(tip);
+    if (browseReplaceImageBtn_) {
       browseReplaceImageBtn_->setEnabled(on);
+      browseReplaceImageBtn_->setToolTip(tip);
+    }
   }
 
   // Virtual Background model selection (Open Source-only).
@@ -3069,6 +3322,20 @@ void VideoPage::UpdateStatusText() {
   oss << baseStatusText_ << "\n\n---\nDaemon (studiocastd)\n";
 
   if (!daemonReachable_) {
+    if (cameraStateLabel_) {
+      cameraStateLabel_->setText(QStringLiteral("Daemon unavailable"));
+      SetDynamicProperty(cameraStateLabel_, "scStatus", QStringLiteral("error"));
+    }
+    if (cameraDetailLabel_) {
+      QStringList lines;
+      lines << QStringLiteral("StudioCast background service is not reachable.");
+      if (!derr.isEmpty())
+        lines << derr;
+      if (!parseErr.isEmpty())
+        lines << parseErr;
+      cameraDetailLabel_->setText(lines.join(QStringLiteral("\n")));
+    }
+
     oss << "  status: not running / not reachable";
     if (!parseErr.isEmpty())
       oss << " (invalid status JSON)";
@@ -3082,7 +3349,8 @@ void VideoPage::UpdateStatusText() {
         << "      ./build/studiocastd\n"
         << "  - Or enable the systemd user service (packaging step).\n";
 
-    statusText_->setPlainText(QString::fromStdString(oss.str()));
+    SetPlainTextPreservingScroll(statusText_,
+                                 QString::fromStdString(oss.str()));
     return;
   }
 
@@ -3093,6 +3361,49 @@ void VideoPage::UpdateStatusText() {
                                   : (st.pipeline_starting ? "starting"
                                                           : "stopped"))
           : st.pipeline_state;
+
+  if (cameraStateLabel_ || cameraDetailLabel_) {
+    QString state = QStringLiteral("Ready");
+    QString statusProperty = QStringLiteral("good");
+    QStringList details;
+
+    if (!st.virtual_device_present || !st.virtual_device_available) {
+      state = QStringLiteral("Needs setup");
+      statusProperty = QStringLiteral("warning");
+      details << QStringLiteral(
+          "StudioCast Camera is not available to other apps.");
+      if (!st.virtual_device_error.isEmpty())
+        details << st.virtual_device_error;
+    } else if (st.enabled && st.pipeline_running) {
+      state = QStringLiteral("Running");
+      details << QStringLiteral("Processing is active.");
+    } else if (st.enabled && st.pipeline_starting) {
+      state = QStringLiteral("Starting");
+      statusProperty = QStringLiteral("warning");
+      details << QStringLiteral("Camera processing is starting.");
+    } else if (st.enabled) {
+      state = QStringLiteral("Waiting for consumer");
+      details << QStringLiteral(
+          "Ready. Processing starts when an app opens StudioCast Camera.");
+    } else {
+      details << QStringLiteral("Ready to start StudioCast Camera.");
+    }
+
+    details << QStringLiteral("Consumers: %1").arg(st.consumer_count);
+    if (!pipelineState.isEmpty())
+      details << QStringLiteral("Pipeline: %1").arg(pipelineState);
+    if (!st.last_error.isEmpty()) {
+      statusProperty = QStringLiteral("error");
+      details << QStringLiteral("Last error: %1").arg(st.last_error);
+    }
+
+    if (cameraStateLabel_) {
+      cameraStateLabel_->setText(state);
+      SetDynamicProperty(cameraStateLabel_, "scStatus", statusProperty);
+    }
+    if (cameraDetailLabel_)
+      cameraDetailLabel_->setText(details.join(QStringLiteral("\n")));
+  }
 
   oss << "  enabled:    " << (st.enabled ? "yes" : "no") << "\n";
   oss << "  virtual:    "
@@ -3296,7 +3607,8 @@ void VideoPage::UpdateStatusText() {
       << "  - Preview counts as a consumer: it opens the v4l2loopback device "
          "for capture.\n";
 
-  statusText_->setPlainText(QString::fromStdString(oss.str()));
+  SetPlainTextPreservingScroll(statusText_,
+                               QString::fromStdString(oss.str()));
 }
 
 } // namespace studiocast::gui

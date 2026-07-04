@@ -381,9 +381,25 @@ add_executable(studiocast
         src/main.cpp
         src/gui/theme.h
         src/gui/theme.cpp
+        src/gui/text_edit_utils.h
+        src/gui/text_edit_utils.cpp
         src/gui/resources/gui_resources.qrc
         src/gui/main_window.h
         src/gui/main_window.cpp
+        src/gui/status/daemon_status_snapshot.h
+        src/gui/status/daemon_status_snapshot.cpp
+        src/gui/status/status_poller.h
+        src/gui/status/status_poller.cpp
+        src/gui/pages/home_page.h
+        src/gui/pages/home_page.cpp
+        src/gui/pages/engines_models_page.h
+        src/gui/pages/engines_models_page.cpp
+        src/gui/pages/support_page.h
+        src/gui/pages/support_page.cpp
+        src/gui/pages/settings_page.h
+        src/gui/pages/settings_page.cpp
+        src/gui/pages/advanced_page.h
+        src/gui/pages/advanced_page.cpp
         src/gui/pages/audio_page.h
         src/gui/pages/audio_page.cpp
         src/gui/pages/video_page.h
@@ -648,6 +664,32 @@ if (BUILD_TESTING)
     )
 
     add_test(NAME studiocast-ipc-tests COMMAND studiocast-ipc-tests)
+
+    add_executable(studiocast-gui-status-tests
+            tests/gui_status_snapshot_tests.cpp
+            src/gui/status/daemon_status_snapshot.h
+            src/gui/status/daemon_status_snapshot.cpp
+    )
+
+    target_link_libraries(studiocast-gui-status-tests PRIVATE
+            Qt${QT_VERSION_MAJOR}::Widgets
+    )
+
+    target_include_directories(studiocast-gui-status-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-gui-status-tests)
+    studiocast_enable_sanitizers(studiocast-gui-status-tests)
+
+    set_target_properties(studiocast-gui-status-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-gui-status-tests COMMAND studiocast-gui-status-tests)
 
     add_executable(studiocast-video-tests
             tests/video_service_tests.cpp

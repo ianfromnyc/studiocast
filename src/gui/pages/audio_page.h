@@ -74,6 +74,12 @@ private:
   void PushDaemonAudioConfig();
   void PushDaemonSourceSelection();
   void SetAiControlsEnabled(bool enabled, const QString &reason);
+  void SetMicStatusSummary(const QString &state, const QString &detail,
+                           const QString &status);
+  void SetSpeakerRouteSummary(const QString &state, const QString &detail,
+                              const QString &status,
+                              const QString &routeMode,
+                              const QString &target);
 
   void SyncSourceSelectionFromDaemon(const QString &source);
   void SyncSpeakerTargetSelectionFromDaemon(const QString &target);
@@ -101,9 +107,15 @@ private:
   QLabel *aiInfoBanner_ = nullptr;
 
   // --- Microphone UI (may be nullptr in Speakers mode)
+  QGroupBox *micSourceBox_ = nullptr;
   QGroupBox *micEffectsBox_ = nullptr;
+  QGroupBox *micDetailsBox_ = nullptr;
+  QWidget *micDetailsContent_ = nullptr;
   QComboBox *sourceCombo_ = nullptr;
   QPushButton *refreshSourcesBtn_ = nullptr;
+  QLabel *micStateLabel_ = nullptr;
+  QLabel *micDetailLabel_ = nullptr;
+  QLabel *micSourceStatusLabel_ = nullptr;
 
   // Broadcast-like single effect selector.
   QComboBox *micEffectCombo_ = nullptr;
@@ -133,6 +145,12 @@ private:
   QPushButton *stopBtn_ = nullptr;
 
   // --- Speakers UI (may be nullptr in Microphone mode)
+  QGroupBox *speakerRouteStateBox_ = nullptr;
+  QLabel *speakerRouteStateLabel_ = nullptr;
+  QLabel *speakerRouteDetailLabel_ = nullptr;
+  QLabel *speakerRouteModeValue_ = nullptr;
+  QLabel *speakerRouteTargetValue_ = nullptr;
+
   QGroupBox *speakerEffectsBox_ = nullptr;
   QComboBox *speakerEffectCombo_ = nullptr;
 
@@ -149,9 +167,13 @@ private:
   QGroupBox *speakersBox_ = nullptr;
   QComboBox *speakerTargetCombo_ = nullptr;
   QPushButton *refreshSpeakerTargetsBtn_ = nullptr;
+  QLabel *speakerTargetStatusLabel_ = nullptr;
   QPushButton *enableSpeakersBtn_ = nullptr;
   QPushButton *stopSpeakersBtn_ = nullptr;
   QPushButton *destroySpeakersBtn_ = nullptr;
+  QGroupBox *speakerDetailsBox_ = nullptr;
+  QWidget *speakerDetailsContent_ = nullptr;
+  QGroupBox *speakerLifecycleBox_ = nullptr;
 
   // --- Status
   QGroupBox *statusBox_ = nullptr;

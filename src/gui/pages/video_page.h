@@ -11,6 +11,7 @@
 
 class QCheckBox;
 class QComboBox;
+class QGroupBox;
 class QSlider;
 class QPlainTextEdit;
 class QPushButton;
@@ -18,6 +19,7 @@ class QSpinBox;
 class QLabel;
 class QTimer;
 class QLineEdit;
+class QToolButton;
 
 namespace studiocast::gui {
 class VideoPreviewWidget;
@@ -77,6 +79,7 @@ private slots:
 private:
   void ShowError(const QString &title, const QString &details);
   void UpdateUiEnabled();
+  void UpdateBackgroundModeOptionVisibility();
   void UpdateStatusText();
   bool SyncFromDaemonConfig();
 
@@ -87,6 +90,7 @@ private:
   void StartPreview();
   void StopPreview();
   void OnPreviewTick();
+  void SetDiagnosticsVisible(bool visible);
 
   QComboBox *inputCombo_ = nullptr;
   QComboBox *outputCombo_ = nullptr;
@@ -96,14 +100,23 @@ private:
   QSpinBox *fpsSpin_ = nullptr;
 
   QComboBox *engineCombo_ = nullptr;
+  QCheckBox *mirrorCheck_ = nullptr;
+
+  QLabel *cameraStateLabel_ = nullptr;
+  QLabel *cameraDetailLabel_ = nullptr;
+  QLabel *setupLockLabel_ = nullptr;
+  QLineEdit *suggestedCmdEdit_ = nullptr;
 
   QComboBox *backgroundCombo_ = nullptr;
+  QLabel *backgroundStrengthLabel_ = nullptr;
   QSpinBox *backgroundStrengthSpin_ = nullptr;
 
   QLabel *vbModelLabel_ = nullptr;
   QComboBox *vbModelCombo_ = nullptr;
 
+  QLabel *backgroundRemoveColorLabel_ = nullptr;
   QLineEdit *backgroundRemoveColorEdit_ = nullptr;  // #RRGGBB
+  QLabel *backgroundReplaceImageLabel_ = nullptr;
   QLineEdit *backgroundReplaceImageEdit_ = nullptr; // path (PPM/P6 for now)
   QPushButton *browseReplaceImageBtn_ = nullptr;
 
@@ -148,6 +161,9 @@ private:
   QLabel *maxineBanner_ = nullptr;
 
   QPushButton *openInstallHintsBtn_ = nullptr;
+  QToolButton *diagnosticsToggle_ = nullptr;
+  QGroupBox *diagnosticsBox_ = nullptr;
+  QWidget *diagnosticsContent_ = nullptr;
   QPlainTextEdit *diagnosticsText_ = nullptr;
 
   QPushButton *refreshBtn_ = nullptr;

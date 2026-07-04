@@ -8,6 +8,12 @@ Status: early preview / proof-of-concept. It is usable on Ubuntu 22.04+ and is s
 
 > **Open-source eye tracking disclaimer:** The eye-contact/eye-tracking portion of the open-source models is currently glitchy and best-effort.
 
+## UI preview
+
+<p align="center">
+  <img src="docs/assets/studiocast-ui-preview.gif" alt="StudioCast UI preview" width="760">
+</p>
+
 ## Not affiliated with NVIDIA
 
 StudioCast is independent and does not ship or redistribute NVIDIA Broadcast binaries.

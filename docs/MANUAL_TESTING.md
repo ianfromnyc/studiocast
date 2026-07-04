@@ -1,6 +1,7 @@
 # Manual Testing
 
-Status: starter plan for hardware and desktop workflow validation.
+Status: manual regression plan for the refaced GUI and hardware desktop
+workflows.
 Last updated: 2026-07-03.
 
 This document tracks manual tests that cannot be covered deterministically in
@@ -16,7 +17,11 @@ Primary scope:
 - v4l2loopback output selection and consumer detection.
 - GUI preview behavior.
 - Daemon IPC failure and recovery behavior.
+- Refaced GUI navigation: Home, Camera, Microphone, Speakers, Engines &
+  Models, Support, Settings, and Advanced.
 - Effect availability as reported by the daemon.
+- Raw diagnostics access from Support and Advanced.
+- Advanced lifecycle, legacy/debug, and destructive-confirmation behavior.
 - Config persistence across GUI and daemon restarts.
 
 Out of scope for this first pass:
@@ -66,7 +71,7 @@ Useful artifacts:
 - StudioCast built:
 
 ```bash
-cmake --build build --target studiocast studiocastd studiocastctl
+cmake --build build --target studiocast studiocastd studiocastctl studiocast-gui-status-tests
 ```
 
 - v4l2loopback installed and loaded.
@@ -120,9 +125,13 @@ Expected:
 Expected:
 
 - GUI remains responsive.
+- The Home page reports daemon unavailable instead of showing a healthy setup
+  checklist.
+- The header service status reports the daemon is unavailable.
 - Start/effects controls that require the daemon are disabled or fail with an
   actionable message.
-- Status text explains how to start `studiocastd`.
+- Support and Advanced still show copyable raw diagnostics with the transport
+  error.
 - Preview stays off.
 
 - [ ] Start the daemon while the GUI is already open.
@@ -130,7 +139,7 @@ Expected:
 Expected:
 
 - GUI recovers without restart on the next poll or refresh.
-- Status text switches from unreachable to reachable.
+- Header and Home status switch from unreachable to reachable.
 - Device and effect state match daemon status.
 
 - [ ] Kill the daemon while the GUI is open, then restart it.
@@ -152,6 +161,92 @@ Expected:
 
 - GUI state, daemon status, and persisted config agree.
 - Failed daemon/config writes are not shown as successful GUI state.
+
+## Refaced GUI Navigation And Status
+
+- [ ] Open each top-level page from the sidebar:
+  Home, Camera, Microphone, Speakers, Engines & Models, Support, Settings, and
+  Advanced.
+
+Expected:
+
+- Sidebar selection changes the page without resetting device state.
+- Header service status remains visible and continues polling while navigating.
+- Camera preview remains off unless the Camera page preview checkbox is
+  explicitly enabled.
+- Settings reset actions appear only on Settings.
+- System/debug lifecycle controls appear only in Advanced or in demoted
+  device-page details.
+
+- [ ] With daemon healthy and no current blockers, inspect Home.
+
+Expected:
+
+- Home shows Camera, Microphone, and Speakers readiness cards.
+- Home shows the external app device names:
+  `StudioCast Camera`, `StudioCast Microphone`, and `StudioCast Speakers`.
+- Copy buttons put the exact device names on the clipboard.
+- Healthy Home does not show a setup checklist or repair queue.
+
+- [ ] Introduce or simulate a blocker, such as stopping the daemon, unloading
+  v4l2loopback, selecting a missing model ID, or disconnecting a configured
+  physical source/sink.
+
+Expected:
+
+- Home shows a repair/setup queue only while a blocker exists.
+- Repair items link to the relevant page: Camera, Microphone, Speakers,
+  Engines & Models, or Support.
+- The issue summary matches daemon status and does not rely on stale GUI state.
+
+- [ ] Open Engines & Models with the daemon running.
+
+Expected:
+
+- Camera and audio backend preference are distinct from active backend state.
+- Maxine, Open Video, and Open Audio health comes from daemon diagnostics.
+- Installed model packs, missing model packs, blocked effects, configured
+  missing model IDs, explicit model paths, and install hints are visible when
+  reported by the daemon.
+- Raw engine diagnostics remain visible and copyable from the page text boxes.
+
+- [ ] Open Support.
+
+Expected:
+
+- Plain-language issue summaries are shown above technical details.
+- Raw daemon status remains visible in the Raw Daemon Status box.
+- Copy Issue Details, Copy Install Hints, and Copy Raw Status buttons work.
+- Generate Support Report runs `studiocastctl debug-report --out ...` and shows
+  a clear failure if the tool cannot be started.
+- Version, git SHA, and service state are visible.
+
+- [ ] Open Advanced.
+
+Expected:
+
+- Socket path and raw daemon JSON/status are visible and copyable.
+- Explicit Open Video raw model IDs and Open Audio raw model IDs/paths remain
+  editable through existing daemon config writes.
+- Always-on camera reflects daemon status and writes with
+  `SET_VIDEO_CONFIG always_on=0|1`.
+- Advanced does not hide Support raw diagnostics; both pages provide a raw
+  status path for support.
+
+## Settings And Reset Actions
+
+- [ ] Use each Settings scoped reset independently:
+  reset camera effects, reset microphone effects, reset speaker effects, reset
+  device selections to Auto, and restore all defaults.
+
+Expected:
+
+- Each reset asks for confirmation before persistent write-through changes.
+- Scoped resets only modify the named surface.
+- Restore all defaults requires confirmation and reports each write step.
+- After each reset, GUI state and `build/studiocastctl status` agree.
+- Failed writes leave the previous daemon state visible rather than claiming a
+  reset succeeded.
 
 ## Device Selection
 
@@ -367,6 +462,56 @@ Expected:
 - Status reports disconnected/unavailable source or target state.
 - The GUI preserves the missing persisted selection visibly.
 - Selecting another physical source/sink recovers without restarting the GUI.
+
+## Advanced Lifecycle And Debug Controls
+
+- [ ] In Advanced, create the StudioCast virtual microphone with the daemon
+  reachable.
+
+Expected:
+
+- The action writes through the daemon using the existing audio config command.
+- Advanced lifecycle status and `build/studiocastctl status` report the
+  configured/present virtual microphone state.
+
+- [ ] In Advanced, destroy the StudioCast virtual microphone.
+
+Expected:
+
+- A destructive confirmation dialog appears before the daemon write.
+- Cancelling the dialog leaves daemon status unchanged.
+- Confirming sends the existing daemon-managed destroy/disable config.
+- In debug builds only, direct `pactl` fallback may be used if the daemon is
+  unreachable.
+- In release builds, daemon-unreachable direct virtual microphone mutation is
+  blocked with an error.
+
+- [ ] In Advanced, enable, stop, and destroy StudioCast Speakers.
+
+Expected:
+
+- Enable is non-destructive and writes the existing daemon audio config fields.
+- Stop routing leaves the virtual speakers device configured/present when the
+  daemon succeeds.
+- Destroy shows a destructive confirmation dialog.
+- Cancelling destroy leaves daemon status unchanged.
+- Confirming destroy sends the existing daemon-managed
+  `speakers_enabled=false` and `create_virtual_speakers=false` config.
+- In debug builds only, direct `pactl` fallback may be used if the daemon is
+  unreachable.
+- In release builds, daemon-unreachable direct virtual speakers mutation is
+  blocked with an error.
+
+- [ ] Inspect the Legacy Loopback / Debug group in Advanced.
+
+Expected:
+
+- Debug builds allow the existing direct module-loopback start/stop controls
+  when `pactl` is available.
+- Release builds label the group as disabled and hide or disable mutation
+  buttons.
+- Local PulseAudio status remains readable so stale modules can be diagnosed.
+- These controls are clearly separate from the daemon-managed audio pipeline.
 
 ## Effects Availability
 

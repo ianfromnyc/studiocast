@@ -7,19 +7,27 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLayout>
+#include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QScreen>
 #include <QScrollArea>
 #include <QStackedWidget>
-#include <QTabBar>
+#include <QStyle>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <algorithm>
 
+#include "gui/pages/advanced_page.h"
 #include "gui/pages/audio_page.h"
+#include "gui/pages/engines_models_page.h"
+#include "gui/pages/home_page.h"
+#include "gui/pages/settings_page.h"
+#include "gui/pages/support_page.h"
 #include "gui/pages/video_page.h"
+#include "gui/status/daemon_status_snapshot.h"
+#include "gui/status/status_poller.h"
 #include "studiocast/version.h"
 
 namespace studiocast::gui {
@@ -33,13 +41,27 @@ QScrollArea *WrapScrollable(QWidget *page, QWidget *parent) {
   scroll->setWidget(page);
   return scroll;
 }
+
+QLabel *MutedLabel(const QString &text, QWidget *parent) {
+  auto *label = new QLabel(text, parent);
+  label->setProperty("scRole", "muted");
+  label->setWordWrap(true);
+  return label;
+}
+
+void SetStatusProperty(QWidget *widget, const QString &value) {
+  widget->setProperty("scStatus", value);
+  widget->style()->unpolish(widget);
+  widget->style()->polish(widget);
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   setWindowTitle("StudioCast");
 
   // Choose a sane initial size that fits on smaller displays.
-  constexpr QSize kDesiredSize{1100, 720};
+  constexpr QSize kDesiredSize{1180, 760};
   const QScreen *screen = QGuiApplication::primaryScreen();
   if (screen) {
     const QSize avail = screen->availableGeometry().size();
@@ -53,48 +75,110 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   BuildUi();
   BuildMenu();
   ConnectSignals();
+
+  statusPoller_ = new StatusPoller(this);
+  connect(statusPoller_, &StatusPoller::StatusChanged, this,
+          &MainWindow::UpdateStatus);
+  statusPoller_->Start(2000);
 }
 
 void MainWindow::BuildUi() {
   auto *central = new QWidget(this);
-  auto *root = new QVBoxLayout(central);
+  auto *root = new QHBoxLayout(central);
   root->setContentsMargins(0, 0, 0, 0);
   root->setSpacing(0);
 
-  // Top bar (Broadcast-style tabs).
-  topBar_ = new QFrame(central);
-  topBar_->setObjectName("scTopBar");
-  auto *topLayout = new QHBoxLayout(topBar_);
-  topLayout->setContentsMargins(16, 12, 16, 12);
-  topLayout->setSpacing(12);
+  sidebar_ = new QFrame(central);
+  sidebar_->setObjectName("scSidebar");
+  sidebar_->setFixedWidth(220);
+  auto *sideLayout = new QVBoxLayout(sidebar_);
+  sideLayout->setContentsMargins(14, 14, 14, 14);
+  sideLayout->setSpacing(14);
 
-  brandLabel_ = new QLabel("StudioCast", topBar_);
+  brandLabel_ = new QLabel("StudioCast", sidebar_);
   brandLabel_->setProperty("scRole", "brand");
-  topLayout->addWidget(brandLabel_);
+  sideLayout->addWidget(brandLabel_);
 
-  tabs_ = new QTabBar(topBar_);
-  tabs_->setExpanding(false);
-  tabs_->setDrawBase(false);
-  tabs_->addTab("Microphone");
-  tabs_->addTab("Speakers");
-  tabs_->addTab("Camera");
-  tabs_->setCurrentIndex(0);
-  topLayout->addStretch(1);
-  topLayout->addWidget(tabs_, 0, Qt::AlignCenter);
-  topLayout->addStretch(1);
+  nav_ = new QListWidget(sidebar_);
+  nav_->setProperty("scRole", "nav");
+  nav_->setFrameShape(QFrame::NoFrame);
+  nav_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  nav_->setSelectionMode(QAbstractItemView::SingleSelection);
 
-  root->addWidget(topBar_, 0);
+  pageTitles_ = {
+      QStringLiteral("Home"),
+      QStringLiteral("Camera"),
+      QStringLiteral("Microphone"),
+      QStringLiteral("Speakers"),
+      QStringLiteral("Engines & Models"),
+      QStringLiteral("Support"),
+      QStringLiteral("Settings"),
+      QStringLiteral("Advanced"),
+  };
+  nav_->addItems(pageTitles_);
+  nav_->setCurrentRow(0);
+  sideLayout->addWidget(nav_, 1);
 
-  pages_ = new QStackedWidget(central);
+  root->addWidget(sidebar_, 0);
 
-  // Each page gets its own scroll area so the header stays fixed.
+  auto *content = new QWidget(central);
+  auto *contentLayout = new QVBoxLayout(content);
+  contentLayout->setContentsMargins(0, 0, 0, 0);
+  contentLayout->setSpacing(0);
+
+  header_ = new QFrame(content);
+  header_->setObjectName("scPageHeader");
+  auto *headerLayout = new QHBoxLayout(header_);
+  headerLayout->setContentsMargins(18, 12, 18, 12);
+  headerLayout->setSpacing(12);
+
+  pageTitleLabel_ = new QLabel(pageTitles_.value(0), header_);
+  pageTitleLabel_->setProperty("scRole", "title");
+  headerLayout->addWidget(pageTitleLabel_, 1);
+
+  auto *serviceBox = new QFrame(header_);
+  serviceBox->setObjectName("scServiceStatus");
+  auto *serviceLayout = new QVBoxLayout(serviceBox);
+  serviceLayout->setContentsMargins(10, 6, 10, 6);
+  serviceLayout->setSpacing(2);
+  serviceStateLabel_ = new QLabel(QStringLiteral("Checking service"), serviceBox);
+  serviceStateLabel_->setProperty("scRole", "value");
+  serviceDetailLabel_ = MutedLabel(QString(), serviceBox);
+  serviceLayout->addWidget(serviceStateLabel_);
+  serviceLayout->addWidget(serviceDetailLabel_);
+  headerLayout->addWidget(serviceBox, 0);
+
+  contentLayout->addWidget(header_, 0);
+
+  pages_ = new QStackedWidget(content);
+
+  homePage_ = new HomePage(pages_);
+  pages_->addWidget(WrapScrollable(homePage_, pages_));
+
+  // Existing device pages stay intact for Milestone 1.
+  // TODO(gui-reface): Add microphone meters only after daemon-provided meter
+  // data exists.
+  // TODO(gui-reface): Add speaker test tone only after backend support exists.
+  pages_->addWidget(WrapScrollable(new VideoPage(pages_), pages_));
   pages_->addWidget(
       WrapScrollable(new AudioPage(AudioPageMode::Microphone, pages_), pages_));
   pages_->addWidget(
       WrapScrollable(new AudioPage(AudioPageMode::Speakers, pages_), pages_));
-  pages_->addWidget(WrapScrollable(new VideoPage(pages_), pages_));
 
-  root->addWidget(pages_, 1);
+  enginesModelsPage_ = new EnginesModelsPage(pages_);
+  pages_->addWidget(WrapScrollable(enginesModelsPage_, pages_));
+
+  supportPage_ = new SupportPage(pages_);
+  pages_->addWidget(WrapScrollable(supportPage_, pages_));
+
+  settingsPage_ = new SettingsPage(pages_);
+  pages_->addWidget(WrapScrollable(settingsPage_, pages_));
+
+  advancedPage_ = new AdvancedPage(pages_);
+  pages_->addWidget(WrapScrollable(advancedPage_, pages_));
+
+  contentLayout->addWidget(pages_, 1);
+  root->addWidget(content, 1);
 
   setCentralWidget(central);
 }
@@ -117,8 +201,56 @@ void MainWindow::BuildMenu() {
 }
 
 void MainWindow::ConnectSignals() {
-  connect(tabs_, &QTabBar::currentChanged, pages_,
-          &QStackedWidget::setCurrentIndex);
+  auto navigateTo = [this](const QString &title) {
+    for (qsizetype row = 0; row < pageTitles_.size(); ++row) {
+      if (pageTitles_.at(row) == title) {
+        nav_->setCurrentRow(static_cast<int>(row));
+        return;
+      }
+    }
+  };
+
+  connect(homePage_, &HomePage::CameraRequested, this,
+          [navigateTo] { navigateTo(QStringLiteral("Camera")); });
+  connect(homePage_, &HomePage::MicrophoneRequested, this,
+          [navigateTo] { navigateTo(QStringLiteral("Microphone")); });
+  connect(homePage_, &HomePage::SpeakersRequested, this,
+          [navigateTo] { navigateTo(QStringLiteral("Speakers")); });
+  connect(homePage_, &HomePage::EnginesRequested, this,
+          [navigateTo] { navigateTo(QStringLiteral("Engines & Models")); });
+  connect(homePage_, &HomePage::SupportRequested, this,
+          [navigateTo] { navigateTo(QStringLiteral("Support")); });
+
+  connect(nav_, &QListWidget::currentRowChanged, this, [this](int row) {
+    if (row < 0 || row >= pages_->count())
+      return;
+    pages_->setCurrentIndex(row);
+    pageTitleLabel_->setText(pageTitles_.value(row));
+  });
+}
+
+void MainWindow::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
+  serviceStateLabel_->setText(snapshot.ServiceSummary());
+  serviceDetailLabel_->setText(snapshot.ServiceDetail());
+
+  if (!snapshot.reachable || !snapshot.parsed) {
+    SetStatusProperty(serviceStateLabel_, QStringLiteral("error"));
+  } else if (!snapshot.serviceRunning) {
+    SetStatusProperty(serviceStateLabel_, QStringLiteral("warning"));
+  } else {
+    SetStatusProperty(serviceStateLabel_, QStringLiteral("good"));
+  }
+
+  if (homePage_)
+    homePage_->UpdateStatus(snapshot);
+  if (enginesModelsPage_)
+    enginesModelsPage_->UpdateStatus(snapshot);
+  if (supportPage_)
+    supportPage_->UpdateStatus(snapshot);
+  if (settingsPage_)
+    settingsPage_->UpdateStatus(snapshot);
+  if (advancedPage_)
+    advancedPage_->UpdateStatus(snapshot);
 }
 
 } // namespace studiocast::gui
