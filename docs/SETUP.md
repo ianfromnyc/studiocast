@@ -12,8 +12,8 @@ Release downloads may include:
   AppImage packaging tools succeeded in CI.
 - `StudioCast-Installer-<version>-<arch>.AppDir.tar.gz`: staged AppDir archive
   for inspection or fallback testing.
-- `StudioCast-<version>-source.tar.gz`: source archive to select in the GUI for
-  install/update workflows.
+- `StudioCast-<version>-source.tar.gz`: the same source archive bundled in the
+  installer and also uploaded separately for inspection or manual use.
 - `StudioCast-Installer-<version>-<arch>.sha256`: checksums for the release
   artifacts.
 
@@ -27,9 +27,17 @@ chmod +x StudioCast-Installer-<version>-<arch>.AppImage
 
 The packaged installer includes its backend at
 `usr/share/studiocast/installer/studiocast-installer-backend`, which matches the
-GUI lookup path. The current installer package does not embed the full
-StudioCast source tree; choose the matching release source archive in the
-"Build from selected release archive" option, or choose a local checkout.
+GUI lookup path. It also includes the matching release source archive at
+`usr/share/studiocast/source/StudioCast-<version>-source.tar.gz`; the GUI
+automatically selects "Build from selected release archive" with that archive
+prefilled. You can still choose a different release archive manually or build
+from a local checkout.
+
+The release AppImage/AppDir is self-contained for the installer GUI, backend,
+and matching source archive. Runtime dependencies such as Qt build packages,
+v4l2loopback support, PulseAudio tools, ONNX Runtime, and optional model/SDK
+assets are installed or checked through supported system packages and the
+backend scripts.
 
 Build and run the installer from a checkout:
 

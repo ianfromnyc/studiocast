@@ -1,0 +1,18 @@
+# Pinned AppImage packaging tools for release CI.
+#
+# Keep these URLs on fixed release tags, not upstream "continuous" builds.
+# To update:
+# 1. Pick the linuxdeploy and linuxdeploy-plugin-qt release assets to use.
+# 2. Download each AppImage and run: sha256sum <file>
+# 3. Update the URL, VERSION, and SHA256 values below in the same change.
+# 4. Let release-packaging CI verify the checksums before either tool runs.
+
+APPIMAGE_TOOL_ARCH="x86_64"
+
+LINUXDEPLOY_VERSION="1-alpha-20251107-1"
+LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage"
+LINUXDEPLOY_SHA256="c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d"
+
+LINUXDEPLOY_PLUGIN_QT_VERSION="1-alpha-20250213-1"
+LINUXDEPLOY_PLUGIN_QT_URL="https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-qt-x86_64.AppImage"
+LINUXDEPLOY_PLUGIN_QT_SHA256="15106be885c1c48a021198e7e1e9a48ce9d02a86dd0a1848f00bdbf3c1c92724"

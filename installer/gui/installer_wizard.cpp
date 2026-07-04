@@ -5,6 +5,7 @@
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -80,6 +81,19 @@ QString findBackendPath() {
   }
 
   return sourcePath;
+}
+
+QString findBundledSourceArchive() {
+  const QDir appDir(QCoreApplication::applicationDirPath());
+  const QString archiveName =
+      QStringLiteral("StudioCast-%1-source.tar.gz")
+          .arg(QStringLiteral(STUDIOCAST_VERSION));
+  const QString installed = appDir.filePath(
+      QStringLiteral("../share/studiocast/source/%1").arg(archiveName));
+  if (QFileInfo(installed).isFile()) {
+    return QFileInfo(installed).absoluteFilePath();
+  }
+  return QString();
 }
 
 QString jsonString(const QJsonObject &object, const QString &key,
@@ -183,6 +197,11 @@ InstallerWizard::InstallerWizard(QWidget *parent) : QWizard(parent) {
   sourceDir_ = QString::fromUtf8(STUDIOCAST_SOURCE_DIR);
   if (sourceDir_.isEmpty() || !QFileInfo(sourceDir_).isDir()) {
     sourceDir_ = QDir::currentPath();
+  }
+  const QString bundledSourceArchive = findBundledSourceArchive();
+  if (!bundledSourceArchive.isEmpty()) {
+    releaseArchive_ = bundledSourceArchive;
+    useReleaseArchive_ = true;
   }
   buildDir_ = defaultCacheBuildDir();
 

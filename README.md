@@ -53,12 +53,14 @@ StudioCast does not ship NVIDIA Maxine SDK files or model binaries in git.
 
 - Download GUI installer: release packaging builds a versioned
   `StudioCast-Installer-<version>-<arch>.AppImage` when AppImage tooling is
-  available, plus a staged AppDir archive, source archive, and SHA256 checksums.
-  Run the installer as your normal user, not with `sudo`. The bundle includes
-  the scriptable backend and delegates only specific privileged setup steps
-  through those backend scripts. The installer currently builds StudioCast from
-  a selected checkout or release source archive; it is not a binary-only
-  StudioCast application bundle.
+  available, plus a staged AppDir archive, standalone source archive, and
+  SHA256 checksums. Run the installer as your normal user, not with `sudo`. The
+  AppImage/AppDir is self-contained for the installer GUI, scriptable backend,
+  and matching StudioCast source archive; the GUI preselects that bundled
+  archive for install/update workflows. Runtime dependencies still come from
+  supported system packages and the backend setup scripts. The installer builds
+  StudioCast on the target system; it is not a binary-only StudioCast
+  application bundle.
 
 - Build the GUI installer package locally:
 

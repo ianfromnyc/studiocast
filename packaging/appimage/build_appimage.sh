@@ -13,6 +13,9 @@ APPDIR="${DIST_DIR}/StudioCast-Installer-${VERSION}-${ARCH}.AppDir"
 BUNDLE_BASENAME="StudioCast-Installer-${VERSION}-${ARCH}"
 APPIMAGE_PATH="${DIST_DIR}/${BUNDLE_BASENAME}.AppImage"
 APPDIR_TARBALL="${DIST_DIR}/${BUNDLE_BASENAME}.AppDir.tar.gz"
+SOURCE_ARCHIVE_NAME="StudioCast-${VERSION}-source.tar.gz"
+SOURCE_ARCHIVE_PATH="${DIST_DIR}/${SOURCE_ARCHIVE_NAME}"
+STAGED_SOURCE_ARCHIVE="${APPDIR}/usr/share/studiocast/source/${SOURCE_ARCHIVE_NAME}"
 CHECKSUM_FILE="${DIST_DIR}/${BUNDLE_BASENAME}.sha256"
 LINUXDEPLOY_PATH="${LINUXDEPLOY:-}"
 DRY_RUN=0
@@ -53,9 +56,14 @@ Options:
 Artifacts:
   ${APPIMAGE_PATH}
   ${APPDIR_TARBALL}
+  ${SOURCE_ARCHIVE_PATH}
   ${CHECKSUM_FILE}
 
 Notes:
+  The script creates ${SOURCE_ARCHIVE_NAME} with git archive from HEAD when
+  possible, stages it into the AppDir at usr/share/studiocast/source/, and also
+  leaves the standalone archive in the artifact directory.
+
   Local builds do not download packaging tools. To produce a self-contained
   AppImage, install linuxdeploy and linuxdeploy-plugin-qt, or pass
   --linuxdeploy. CI downloads those tools explicitly before calling this script.
@@ -188,6 +196,9 @@ refresh_artifact_paths() {
   fi
   APPIMAGE_PATH="${DIST_DIR}/${BUNDLE_BASENAME}.AppImage"
   APPDIR_TARBALL="${DIST_DIR}/${BUNDLE_BASENAME}.AppDir.tar.gz"
+  SOURCE_ARCHIVE_NAME="StudioCast-${VERSION}-source.tar.gz"
+  SOURCE_ARCHIVE_PATH="${DIST_DIR}/${SOURCE_ARCHIVE_NAME}"
+  STAGED_SOURCE_ARCHIVE="${APPDIR}/usr/share/studiocast/source/${SOURCE_ARCHIVE_NAME}"
   CHECKSUM_FILE="${DIST_DIR}/${BUNDLE_BASENAME}.sha256"
 }
 
@@ -201,6 +212,38 @@ configure_and_build() {
   run cmake --build "${CMAKE_BUILD_DIR}" --target studiocast-installer
 }
 
+create_source_archive() {
+  log "Creating source archive ${SOURCE_ARCHIVE_PATH}"
+  run rm -f -- "${SOURCE_ARCHIVE_PATH}"
+
+  if command -v git >/dev/null 2>&1 &&
+      git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
+      git -C "${REPO_ROOT}" rev-parse --verify HEAD^{commit} >/dev/null 2>&1; then
+    run git -C "${REPO_ROOT}" archive \
+      --format=tar.gz \
+      --prefix="StudioCast-${VERSION}/" \
+      --output="${SOURCE_ARCHIVE_PATH}" \
+      HEAD
+  else
+    log "git archive is unavailable; falling back to a working-tree tarball"
+    local parent_dir repo_dir
+    parent_dir="$(dirname "${REPO_ROOT}")"
+    repo_dir="$(basename "${REPO_ROOT}")"
+    run tar -C "${parent_dir}" \
+      --exclude="${repo_dir}/.git" \
+      --exclude="${repo_dir}/build" \
+      --exclude="${repo_dir}/dist" \
+      --exclude="${repo_dir}/cmake-build-*" \
+      -czf "${SOURCE_ARCHIVE_PATH}" \
+      --transform "s#^${repo_dir}#StudioCast-${VERSION}#" \
+      "${repo_dir}"
+  fi
+
+  if [[ "${DRY_RUN}" -eq 0 && ! -f "${SOURCE_ARCHIVE_PATH}" ]]; then
+    die "source archive was not created: ${SOURCE_ARCHIVE_PATH}"
+  fi
+}
+
 stage_appdir() {
   log "Staging AppDir at ${APPDIR}"
   run rm -rf -- "${APPDIR}"
@@ -208,11 +251,13 @@ stage_appdir() {
 
   local desktop_dir="${APPDIR}/usr/share/applications"
   local icon_dir="${APPDIR}/usr/share/icons/hicolor/scalable/apps"
+  local source_dir="${APPDIR}/usr/share/studiocast/source"
   local desktop_path="${desktop_dir}/studiocast-installer.desktop"
   local icon_path="${icon_dir}/studiocast-installer.svg"
 
-  run install -d -m 0755 "${desktop_dir}" "${icon_dir}"
+  run install -d -m 0755 "${desktop_dir}" "${icon_dir}" "${source_dir}"
   run install -m 0644 "${REPO_ROOT}/VERSION" "${APPDIR}/usr/share/VERSION"
+  run install -m 0644 "${SOURCE_ARCHIVE_PATH}" "${STAGED_SOURCE_ARCHIVE}"
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     print_cmd sed "s/@VERSION@/${VERSION}/g" \
@@ -241,6 +286,9 @@ stage_appdir() {
   if [[ "${DRY_RUN}" -eq 0 &&
         ! -x "${APPDIR}/usr/share/studiocast/installer/studiocast-installer-backend" ]]; then
     die "staged installer backend is missing: ${APPDIR}/usr/share/studiocast/installer/studiocast-installer-backend"
+  fi
+  if [[ "${DRY_RUN}" -eq 0 && ! -f "${STAGED_SOURCE_ARCHIVE}" ]]; then
+    die "staged source archive is missing: ${STAGED_SOURCE_ARCHIVE}"
   fi
 }
 
@@ -308,13 +356,14 @@ archive_appdir() {
 write_checksums() {
   log "Writing checksums"
   if [[ "${DRY_RUN}" -eq 1 ]]; then
-    print_cmd sha256sum "${APPIMAGE_PATH}" "${APPDIR_TARBALL}" ">" "${CHECKSUM_FILE}"
+    print_cmd sha256sum "${APPIMAGE_PATH}" "${APPDIR_TARBALL}" \
+      "${SOURCE_ARCHIVE_PATH}" ">" "${CHECKSUM_FILE}"
     return 0
   fi
 
   : > "${CHECKSUM_FILE}"
   local artifact
-  for artifact in "${APPIMAGE_PATH}" "${APPDIR_TARBALL}"; do
+  for artifact in "${APPIMAGE_PATH}" "${APPDIR_TARBALL}" "${SOURCE_ARCHIVE_PATH}"; do
     if [[ -f "${artifact}" ]]; then
       (cd "${DIST_DIR}" && sha256sum "$(basename "${artifact}")") >> "${CHECKSUM_FILE}"
     fi
@@ -328,11 +377,12 @@ main() {
   if [[ "${CLEAN}" -eq 1 ]]; then
     log "Cleaning previous build and artifacts"
     run rm -rf -- "${CMAKE_BUILD_DIR}" "${APPDIR}" "${APPIMAGE_PATH}" \
-      "${APPDIR_TARBALL}" "${CHECKSUM_FILE}"
+      "${APPDIR_TARBALL}" "${SOURCE_ARCHIVE_PATH}" "${CHECKSUM_FILE}"
   fi
 
   run install -d -m 0755 "${DIST_DIR}"
   configure_and_build
+  create_source_archive
   stage_appdir
   build_appimage || true
   archive_appdir
@@ -341,6 +391,7 @@ main() {
   log "Artifacts:"
   [[ "${DRY_RUN}" -eq 1 || -f "${APPIMAGE_PATH}" ]] && log "  ${APPIMAGE_PATH}"
   log "  ${APPDIR_TARBALL}"
+  log "  ${SOURCE_ARCHIVE_PATH}"
   log "  ${CHECKSUM_FILE}"
 }
 

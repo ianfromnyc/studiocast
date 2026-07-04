@@ -179,23 +179,38 @@ Release packaging:
 - The AppDir layout places the backend at
   `usr/share/studiocast/installer/studiocast-installer-backend`, which is the
   installed path the GUI already probes relative to the installer binary.
+- The same packaging script creates `StudioCast-<version>-source.tar.gz` from
+  `HEAD` with `git archive` when available, stages it at
+  `usr/share/studiocast/source/StudioCast-<version>-source.tar.gz`, and leaves
+  the standalone source archive in `dist/appimage/`.
+- Release AppImages are self-contained for the installer GUI, backend, and
+  matching source archive. Runtime dependencies still come from supported system
+  packages, ONNX Runtime/model helpers, optional SDK assets, and the installer
+  backend scripts.
 - Local packaging does not download tools. If `linuxdeploy` and
   `linuxdeploy-plugin-qt` are available, the script also creates
   `StudioCast-Installer-<version>-<arch>.AppImage`; otherwise it leaves the
   staged AppDir tarball as the local artifact.
 - Release CI is in `.github/workflows/release-packaging.yml`. It runs only from
   `workflow_dispatch` or a published GitHub Release event, downloads AppImage
-  packaging tools explicitly, requires AppImage generation, creates a source
-  tarball from `HEAD`, and uploads the installer bundle, AppDir archive, source
-  archive, and checksum file as workflow artifacts. It does not tag commits or
-  publish release assets by itself.
-- The workflow currently uses the upstream `linuxdeploy` and
-  `linuxdeploy-plugin-qt` continuous AppImage URLs. The URLs are explicit, but
-  hard checksum pinning for those external packaging tools is still a release
-  hardening item.
-- The packaged installer is still a source-build installer. It includes the GUI
-  and backend, but not the full StudioCast source tree. Users should select the
-  matching release source archive in the GUI, or point it at a local checkout.
+  packaging tools from `packaging/appimage/tools.lock`, verifies each tool's
+  SHA256 before making it executable, requires AppImage generation, and uploads
+  the installer bundle, AppDir archive, source archive, and checksum file as
+  workflow artifacts. It does not tag commits or publish release assets by
+  itself.
+- The packaged installer is still a source-build installer. The GUI defaults to
+  the bundled source archive, and users can still point it at another release
+  archive or a local checkout.
+
+Pinned AppImage tool updates:
+
+1. Choose fixed release asset URLs for `linuxdeploy` and
+   `linuxdeploy-plugin-qt`; do not pin to upstream `continuous` URLs.
+2. Download each AppImage and record `sha256sum <file>`.
+3. Update `packaging/appimage/tools.lock` with the matching version, URL, and
+   SHA256 values in one change.
+4. Run release packaging or a workflow-dispatch dry run so CI verifies the
+   checksums before either packaging tool is executed.
 
 Maintainer command:
 
