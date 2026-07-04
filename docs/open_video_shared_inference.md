@@ -53,3 +53,17 @@ if (!cache.face_detections) {
 
 - Caching is **best-effort**: if a model is missing, too slow, or fails, the cache entry can remain empty.
 - Effects must always implement a safe fallback path.
+
+## Low-latency scheduling primitive
+
+Workstream 5 adds `src/core/open_video/latest_frame_wins_worker.h` as a small
+standalone primitive for future heavy video inference integration.
+
+The worker keeps one persistent thread and at most one pending frame. When a
+processor is busy, a newer submission replaces the pending frame instead of
+growing a queue. Each task carries the current generation; model, configuration,
+or frame-size changes can advance the generation so late results from older
+work are rejected instead of being published.
+
+This is not wired into the Open CUDA virtual-background path yet. The current
+matting and VB behavior remains synchronous and deterministic by default.
