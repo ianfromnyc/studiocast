@@ -1,7 +1,19 @@
 cmake_minimum_required(VERSION 3.22)
 
+set(STUDIOCAST_VERSION_FILE "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+if (NOT EXISTS "${STUDIOCAST_VERSION_FILE}")
+    message(FATAL_ERROR "VERSION file not found: ${STUDIOCAST_VERSION_FILE}")
+endif ()
+
+file(READ "${STUDIOCAST_VERSION_FILE}" STUDIOCAST_PROJECT_VERSION)
+string(STRIP "${STUDIOCAST_PROJECT_VERSION}" STUDIOCAST_PROJECT_VERSION)
+if (NOT STUDIOCAST_PROJECT_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR
+            "VERSION must contain a numeric MAJOR.MINOR.PATCH version, got '${STUDIOCAST_PROJECT_VERSION}'")
+endif ()
+
 project(StudioCast
-        VERSION 0.1.0
+        VERSION ${STUDIOCAST_PROJECT_VERSION}
         DESCRIPTION "Broadcast-style audio/video effects manager for Linux (Maxine-ready)"
         LANGUAGES CXX
 )
