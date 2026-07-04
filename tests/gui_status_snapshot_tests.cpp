@@ -198,6 +198,13 @@ bool TestEngineModelDetailsAndConfiguredSelections() {
 
   const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
   return Expect(s.parsed, "engine model details payload should parse") &&
+         Expect(s.camera.state == studiocast::gui::ReadinessState::Processing,
+                "running camera should report processing") &&
+         Expect(s.microphone.state ==
+                    studiocast::gui::ReadinessState::Processing,
+                "running microphone should report processing") &&
+         Expect(s.speakers.state == studiocast::gui::ReadinessState::Processing,
+                "active speaker routing should report processing") &&
          Expect(s.videoEffectsActiveBackends.contains(QStringLiteral("open_cuda")),
                 "video active backends should parse") &&
          Expect(s.microphoneActiveBackend == QStringLiteral("open_audio"),
@@ -232,6 +239,200 @@ bool TestEngineModelDetailsAndConfiguredSelections() {
                 "explicit model paths should be preserved in details");
 }
 
+bool TestMissingVirtualDevices() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "video":{
+          "enabled":true,
+          "virtual_device_present":false,
+          "virtual_device_available":false,
+          "virtual_device_error":"v4l2loopback device is missing.",
+          "consumer_count":0,
+          "pipeline":{"running":false,"starting":false,"state":"device_unavailable"}
+        },
+        "audio":{
+          "enabled":true,
+          "mic_present":false,
+          "source_error":"",
+          "pipeline":{"running":false,"starting":false,"state":"disabled","last_error":""},
+          "speakers":{
+            "enabled":true,
+            "present":false,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
+  return Expect(s.parsed, "missing virtual device payload should parse") &&
+         Expect(s.camera.state ==
+                    studiocast::gui::ReadinessState::MissingVirtualDevice,
+                "camera should report missing virtual camera") &&
+         Expect(s.microphone.state ==
+                    studiocast::gui::ReadinessState::MissingVirtualDevice,
+                "microphone should report missing virtual microphone") &&
+         Expect(s.speakers.state ==
+                    studiocast::gui::ReadinessState::MissingVirtualDevice,
+                "speakers should report missing virtual speakers");
+}
+
+bool TestMissingPhysicalDevices() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "video":{
+          "enabled":true,
+          "virtual_device_present":true,
+          "virtual_device_available":true,
+          "consumer_count":1,
+          "last_error":"Pipeline start failed: No readable camera device found (no non-loopback /dev/video* with read access).",
+          "pipeline":{"running":false,"starting":false,"state":"backing_off"}
+        },
+        "audio":{
+          "enabled":true,
+          "mic_present":true,
+          "source_error":"Select a physical microphone/input source before enabling audio.",
+          "pipeline":{"running":false,"starting":false,"state":"idle_no_consumer","last_error":""},
+          "speakers":{
+            "enabled":true,
+            "present":true,
+            "target_sink_error":"Failed to choose a physical speaker target sink. Choose a physical output sink.",
+            "routing_active":false,
+            "route_mode":"pipeline",
+            "pipeline_running":false,
+            "pipeline_starting":false,
+            "pipeline_state":"idle_no_consumer",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
+  return Expect(s.parsed, "missing physical device payload should parse") &&
+         Expect(s.camera.state == studiocast::gui::ReadinessState::NoPhysicalDevice,
+                "camera should report physical input problem when supported") &&
+         Expect(s.microphone.state ==
+                    studiocast::gui::ReadinessState::NoPhysicalDevice,
+                "microphone should report physical source problem") &&
+         Expect(s.speakers.state ==
+                    studiocast::gui::ReadinessState::NoPhysicalDevice,
+                "speakers should report physical target problem");
+}
+
+bool TestIdleNoConsumerStates() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "video":{
+          "enabled":true,
+          "virtual_device_present":true,
+          "virtual_device_available":true,
+          "consumer_present":false,
+          "consumer_count":0,
+          "pipeline":{
+            "running":false,
+            "starting":false,
+            "state":"idle_no_consumer",
+            "idle_reason":"no_consumer"
+          }
+        },
+        "audio":{
+          "enabled":true,
+          "mic_present":true,
+          "source_error":"",
+          "mic_consumer_present":false,
+          "mic_consumer_count":0,
+          "mic_consumer_error":"",
+          "pipeline":{
+            "running":false,
+            "starting":false,
+            "state":"idle_no_consumer",
+            "idle_reason":"No active virtual microphone consumer.",
+            "last_error":""
+          },
+          "speakers":{
+            "enabled":true,
+            "present":true,
+            "target_sink_error":"",
+            "consumer_present":false,
+            "consumer_count":0,
+            "consumer_error":"",
+            "routing_active":false,
+            "route_mode":"pipeline",
+            "pipeline_running":false,
+            "pipeline_starting":false,
+            "pipeline_active_needed":false,
+            "pipeline_state":"idle_no_consumer",
+            "pipeline_idle_reason":"No active virtual speakers consumer.",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
+  return Expect(s.parsed, "idle no-consumer payload should parse") &&
+         Expect(s.camera.state == studiocast::gui::ReadinessState::Idle,
+                "camera should report idle no-consumer") &&
+         Expect(s.microphone.state == studiocast::gui::ReadinessState::Idle,
+                "microphone should report idle no-consumer") &&
+         Expect(s.speakers.state == studiocast::gui::ReadinessState::Idle,
+                "speakers should report idle no-consumer");
+}
+
+bool TestConsumerDetectionErrorsAreNotIdle() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "video":{
+          "enabled":true,
+          "virtual_device_present":true,
+          "virtual_device_available":true,
+          "consumer_error":"Failed to scan consumers.",
+          "consumer_count":0,
+          "pipeline":{"running":false,"starting":false,"state":"consumer_detection_error"}
+        },
+        "audio":{
+          "enabled":true,
+          "mic_present":true,
+          "source_error":"",
+          "mic_consumer_error":"PulseAudio consumer detection unavailable.",
+          "pipeline":{"running":false,"starting":false,"state":"idle_no_consumer","last_error":""},
+          "speakers":{
+            "enabled":true,
+            "present":true,
+            "target_sink_error":"",
+            "consumer_error":"PulseAudio consumer detection unavailable.",
+            "routing_active":false,
+            "route_mode":"pipeline",
+            "pipeline_running":false,
+            "pipeline_starting":false,
+            "pipeline_state":"idle_no_consumer",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
+  return Expect(s.parsed, "consumer detection error payload should parse") &&
+         Expect(s.camera.state ==
+                    studiocast::gui::ReadinessState::RecoverableError,
+                "camera consumer detection error should not report idle") &&
+         Expect(s.microphone.state ==
+                    studiocast::gui::ReadinessState::RecoverableError,
+                "microphone consumer detection error should not report idle") &&
+         Expect(s.speakers.state ==
+                    studiocast::gui::ReadinessState::RecoverableError,
+                "speakers consumer detection error should not report idle");
+}
+
 bool TestInvalidJsonPreservesRawPayload() {
   const QString json = QStringLiteral("{not-json");
   const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
@@ -262,6 +463,10 @@ int main() {
   ok = TestUnreachableStatus() && ok;
   ok = TestStatusJsonCompatibilityShapes() && ok;
   ok = TestEngineModelDetailsAndConfiguredSelections() && ok;
+  ok = TestMissingVirtualDevices() && ok;
+  ok = TestMissingPhysicalDevices() && ok;
+  ok = TestIdleNoConsumerStates() && ok;
+  ok = TestConsumerDetectionErrorsAreNotIdle() && ok;
   ok = TestInvalidJsonPreservesRawPayload() && ok;
   ok = TestRawDiagnosticsFallbacks() && ok;
   return ok ? 0 : 1;

@@ -27,7 +27,6 @@ public:
 private:
   void BuildUi();
   void ConnectSignals();
-  void BuildMenu();
   void UpdateStatus(const DaemonStatusSnapshot &snapshot);
 
   QFrame *sidebar_ = nullptr;

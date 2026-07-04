@@ -437,6 +437,40 @@ set_target_properties(studiocast PROPERTIES
 )
 
 # -----------------------------
+# GUI installer executable
+# -----------------------------
+add_executable(studiocast-installer
+        installer/gui/main.cpp
+        installer/gui/installer_wizard.h
+        installer/gui/installer_wizard.cpp
+        src/gui/theme.h
+        src/gui/theme.cpp
+        src/gui/resources/gui_resources.qrc
+)
+
+target_link_libraries(studiocast-installer PRIVATE
+        Qt${QT_VERSION_MAJOR}::Widgets
+)
+
+target_include_directories(studiocast-installer PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/installer/gui"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${STUDIOCAST_GENERATED_DIR}"
+)
+
+target_compile_definitions(studiocast-installer PRIVATE
+        STUDIOCAST_INSTALLER_BACKEND_SOURCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/installer/backend/studiocast-installer-backend"
+        STUDIOCAST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+studiocast_set_project_warnings(studiocast-installer)
+studiocast_enable_sanitizers(studiocast-installer)
+
+set_target_properties(studiocast-installer PROPERTIES
+        OUTPUT_NAME "studiocast-installer"
+)
+
+# -----------------------------
 # Probe tool 
 # -----------------------------
 add_executable(studiocast-probe
@@ -600,10 +634,22 @@ set_target_properties(studiocastd PROPERTIES
 include(GNUInstallDirs)
 install(TARGETS studiocast studiocast-probe studiocast-maxine studiocast-open studiocast-audio studiocast-video studiocastctl
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+        COMPONENT Runtime
+)
+
+install(TARGETS studiocast-installer
+        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+        COMPONENT Installer
 )
 
 install(TARGETS studiocastd
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+        COMPONENT Runtime
+)
+
+install(PROGRAMS installer/backend/studiocast-installer-backend
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/studiocast/installer"
+        COMPONENT Installer
 )
 
 if (BUILD_TESTING AND PULSE_SIMPLE_FOUND)

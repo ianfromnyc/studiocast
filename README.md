@@ -23,9 +23,10 @@ streaming, and recording.
 
 ## Project status
 
-StudioCast is an early-preview source-build project. It is usable for testing on
-Ubuntu 22.04 and 24.04, but packaging, model installation, hardware behavior,
-and some effects are still evolving.
+StudioCast is an early-preview Linux project. It is usable for testing on
+Ubuntu 22.04 and 24.04, with a source-build flow and an installer wizard target
+for release packaging. Packaging, model installation, hardware behavior, and
+some effects are still evolving.
 
 Known caveats:
 
@@ -48,7 +49,50 @@ Known caveats:
 
 StudioCast does not ship NVIDIA Maxine SDK files or model binaries in git.
 
-## Quick start
+## Install options
+
+- Download GUI installer: release packaging builds a versioned
+  `StudioCast-Installer-<version>-<arch>.AppImage` when AppImage tooling is
+  available, plus a staged AppDir archive, standalone source archive, and
+  SHA256 checksums. Run the installer as your normal user, not with `sudo`. The
+  AppImage/AppDir is self-contained for the installer GUI, scriptable backend,
+  and matching StudioCast source archive; the GUI preselects that bundled
+  archive for install/update workflows. Runtime dependencies still come from
+  supported system packages and the backend setup scripts. The installer builds
+  StudioCast on the target system; it is not a binary-only StudioCast
+  application bundle.
+
+- Build the GUI installer package locally:
+
+```bash
+packaging/appimage/build_appimage.sh
+```
+
+  If `linuxdeploy` and `linuxdeploy-plugin-qt` are installed, this also produces
+  an AppImage. Without those tools, it produces a staged AppDir tarball and
+  checksum for inspection/testing.
+
+- Build the GUI installer target from source:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target studiocast-installer
+./build/studiocast-installer
+```
+
+- Build from source manually: use the commands below when developing,
+  installing over SSH, debugging setup, or recovering from a failed install.
+
+The same backend used by the GUI is available as a CLI fallback:
+
+```bash
+./scripts/installer.sh status
+./scripts/installer.sh plan install
+./scripts/installer.sh install --yes
+./scripts/installer.sh uninstall --yes
+```
+
+## Quick start from source
 
 Run these commands from the repository root.
 

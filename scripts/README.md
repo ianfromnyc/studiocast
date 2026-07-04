@@ -8,10 +8,14 @@ Top-level scripts are intended to be stable entrypoints. Implementation lives in
 
 - `./scripts/setup.sh` — setup helper (Ubuntu-family distro dispatcher)
 - `./scripts/install.sh` — installer helper (subcommands)
+- `./scripts/installer.sh` — GUI/CLI installer backend entrypoint
 - `./scripts/uninstall.sh` — uninstall helper
 
 Common installs:
 
+- GUI/backend installer status + plan:
+  - `./scripts/installer.sh status`
+  - `./scripts/installer.sh plan install`
 - Full install (builds required targets, installs/enables the user service, installs curated Open Audio+Video model packs):
   - `./scripts/install.sh full -y --build-dir ./build`
 - List curated model packs without downloading:

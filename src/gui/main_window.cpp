@@ -1,6 +1,5 @@
 #include "main_window.h"
 
-#include <QAction>
 #include <QApplication>
 #include <QFrame>
 #include <QGuiApplication>
@@ -8,9 +7,6 @@
 #include <QLabel>
 #include <QLayout>
 #include <QListWidget>
-#include <QMenu>
-#include <QMenuBar>
-#include <QMessageBox>
 #include <QScreen>
 #include <QScrollArea>
 #include <QStackedWidget>
@@ -28,7 +24,6 @@
 #include "gui/pages/video_page.h"
 #include "gui/status/daemon_status_snapshot.h"
 #include "gui/status/status_poller.h"
-#include "studiocast/version.h"
 
 namespace studiocast::gui {
 
@@ -73,7 +68,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   }
 
   BuildUi();
-  BuildMenu();
   ConnectSignals();
 
   statusPoller_ = new StatusPoller(this);
@@ -183,23 +177,6 @@ void MainWindow::BuildUi() {
   setCentralWidget(central);
 }
 
-void MainWindow::BuildMenu() {
-  auto *helpMenu = menuBar()->addMenu("&Help");
-
-  auto *aboutAction = new QAction("&About", this);
-  connect(aboutAction, &QAction::triggered, this, [] {
-    QMessageBox::about(
-        nullptr, "About StudioCast",
-        QString("StudioCast %1 (%2)\n\n"
-                "An open-source Linux app with a Broadcast-style UI.\n"
-                "Not affiliated with NVIDIA.\n")
-            .arg(STUDIOCAST_VERSION)
-            .arg(STUDIOCAST_GIT_SHA));
-  });
-
-  helpMenu->addAction(aboutAction);
-}
-
 void MainWindow::ConnectSignals() {
   auto navigateTo = [this](const QString &title) {
     for (qsizetype row = 0; row < pageTitles_.size(); ++row) {
@@ -230,8 +207,8 @@ void MainWindow::ConnectSignals() {
 }
 
 void MainWindow::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
-  serviceStateLabel_->setText(snapshot.ServiceSummary());
-  serviceDetailLabel_->setText(snapshot.ServiceDetail());
+  serviceStateLabel_->setText(snapshot.UserServiceSummary());
+  serviceDetailLabel_->setText(snapshot.UserServiceDetail());
 
   if (!snapshot.reachable || !snapshot.parsed) {
     SetStatusProperty(serviceStateLabel_, QStringLiteral("error"));

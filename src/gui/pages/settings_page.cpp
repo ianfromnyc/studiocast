@@ -57,7 +57,7 @@ void SetDynamicProperty(QWidget *widget, const char *name,
 QString HumanDaemonError(const QString &raw) {
   const QString trimmed = raw.trimmed();
   if (trimmed.isEmpty())
-    return QStringLiteral("Unknown daemon error.");
+    return QStringLiteral("Unknown service error.");
 
   QJsonParseError parseError;
   const QJsonDocument doc =
@@ -107,7 +107,7 @@ QJsonObject NormalizedCurrentAudioEffects(const QJsonObject &audioConfig,
 
   if (current.isEmpty()) {
     if (error) {
-      *error = QStringLiteral("Daemon audio config did not include "
+      *error = QStringLiteral("Background service audio config did not include "
                               "audio_effects; no settings were changed.");
     }
     return {};
@@ -170,12 +170,12 @@ SettingsPage::SettingsPage(QWidget *parent) : QWidget(parent) {
   root->setContentsMargins(16, 16, 16, 16);
   root->setSpacing(12);
 
-  auto *statusBox = new QGroupBox(QStringLiteral("Daemon"), this);
+  auto *statusBox = new QGroupBox(QStringLiteral("Background Service"), this);
   auto *statusLayout = new QVBoxLayout(statusBox);
   statusLayout->setSpacing(6);
   daemonStateLabel_ = ValueLabel(QStringLiteral("Checking service"), statusBox);
   daemonDetailLabel_ =
-      MutedLabel(QStringLiteral("Waiting for daemon status."), statusBox);
+      MutedLabel(QStringLiteral("Waiting for service status."), statusBox);
   resultLabel_ = MutedLabel(QString(), statusBox);
   resultLabel_->setVisible(false);
   statusLayout->addWidget(daemonStateLabel_);
@@ -214,7 +214,7 @@ SettingsPage::SettingsPage(QWidget *parent) : QWidget(parent) {
   restoreLayout->addWidget(ActionRow(
       QStringLiteral("All normal settings"),
       QStringLiteral("Reset effects and device selections. Lifecycle, debug, "
-                     "and raw path controls are not changed."),
+                     "and advanced path controls are not changed."),
       QStringLiteral("Restore All"), &restoreAllButton_, restoreBox));
   root->addWidget(restoreBox);
   root->addStretch(1);
@@ -237,7 +237,7 @@ void SettingsPage::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
   daemonReachable_ = snapshot.reachable;
 
   if (daemonStateLabel_) {
-    daemonStateLabel_->setText(snapshot.ServiceSummary());
+    daemonStateLabel_->setText(snapshot.UserServiceSummary());
     if (!snapshot.reachable) {
       SetDynamicProperty(daemonStateLabel_, "scStatus",
                          QStringLiteral("error"));
@@ -250,7 +250,7 @@ void SettingsPage::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
   }
 
   if (daemonDetailLabel_)
-    daemonDetailLabel_->setText(snapshot.ServiceDetail());
+    daemonDetailLabel_->setText(snapshot.UserServiceDetail());
 
   UpdateButtons();
 }
@@ -259,7 +259,7 @@ void SettingsPage::ResetCameraEffects() {
   if (!ConfirmReset(
           QStringLiteral("Reset Camera Effects"),
           QStringLiteral("Reset camera effects to defaults?"),
-          QStringLiteral("This writes the reset to studiocastd immediately. "
+          QStringLiteral("This saves the reset immediately. "
                          "Camera device selections and lifecycle controls are "
                          "not changed."))) {
     SetResult(QStringLiteral("Reset cancelled. No settings were changed."),
@@ -281,7 +281,7 @@ void SettingsPage::ResetMicrophoneEffects() {
   if (!ConfirmReset(
           QStringLiteral("Reset Microphone Effects"),
           QStringLiteral("Reset microphone effects to defaults?"),
-          QStringLiteral("This writes the reset to studiocastd immediately. "
+          QStringLiteral("This saves the reset immediately. "
                          "Speaker effects, device selections, and lifecycle "
                          "controls are not changed."))) {
     SetResult(QStringLiteral("Reset cancelled. No settings were changed."),
@@ -303,7 +303,7 @@ void SettingsPage::ResetSpeakerEffects() {
   if (!ConfirmReset(
           QStringLiteral("Reset Speaker Effects"),
           QStringLiteral("Reset speaker effects to defaults?"),
-          QStringLiteral("This writes the reset to studiocastd immediately. "
+          QStringLiteral("This saves the reset immediately. "
                          "Microphone effects, device selections, and lifecycle "
                          "controls are not changed."))) {
     SetResult(QStringLiteral("Reset cancelled. No settings were changed."),
@@ -349,7 +349,7 @@ void SettingsPage::RestoreAllDefaults() {
           QStringLiteral("Restore all normal StudioCast settings to defaults?"),
           QStringLiteral("Camera, microphone, and speaker effects will reset. "
                          "Device selections return to Auto. Lifecycle, debug, "
-                         "and raw path controls are not changed."),
+                         "and advanced path controls are not changed."),
           QStringLiteral("Restore"))) {
     SetResult(QStringLiteral("Restore cancelled. No settings were changed."),
               QStringLiteral("warning"));
@@ -421,7 +421,7 @@ bool SettingsPage::SendDaemonRequest(const std::string &request,
   std::string transportError;
   if (!studiocast::ipc::DaemonCall(request, &res, &transportError, options)) {
     if (error)
-      *error = QStringLiteral("Daemon unavailable: %1")
+      *error = QStringLiteral("Background service unavailable: %1")
                    .arg(QString::fromStdString(transportError));
     return false;
   }
@@ -449,7 +449,7 @@ bool SettingsPage::FetchDaemonJson(const std::string &request,
   std::string transportError;
   if (!studiocast::ipc::DaemonCall(request, &res, &transportError, options)) {
     if (error)
-      *error = QStringLiteral("Daemon unavailable: %1")
+      *error = QStringLiteral("Background service unavailable: %1")
                    .arg(QString::fromStdString(transportError));
     return false;
   }
@@ -547,13 +547,20 @@ void SettingsPage::SetResult(const QString &text, const QString &status) {
 
 void SettingsPage::ShowWriteFailure(const QString &title,
                                     const QString &details) {
-  SetResult(QStringLiteral("Reset failed. Daemon settings were not reported as "
-                           "fully saved."),
+  SetResult(QStringLiteral("Reset failed. Settings were not saved."),
             QStringLiteral("error"));
-  QMessageBox::critical(this, title,
-                        details.trimmed().isEmpty()
-                            ? QStringLiteral("The daemon rejected the write.")
-                            : details);
+  QMessageBox box(this);
+  box.setIcon(QMessageBox::Critical);
+  box.setWindowTitle(title);
+  box.setText(QStringLiteral("Settings were not saved."));
+  box.setInformativeText(
+      QStringLiteral("Open Support for technical details."));
+  const QString detailText =
+      details.trimmed().isEmpty()
+          ? QStringLiteral("The background service rejected the write.")
+          : details;
+  box.setDetailedText(detailText);
+  box.exec();
 }
 
 void SettingsPage::UpdateButtons() {

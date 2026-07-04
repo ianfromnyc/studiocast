@@ -99,16 +99,84 @@ QString JoinNonEmpty(const QStringList &lines) {
   return out.join(QStringLiteral("\n"));
 }
 
-QString DeviceIssueDetail(const DeviceReadiness &readiness) {
-  QStringList lines;
-  lines << readiness.summary << readiness.detail;
-  return JoinNonEmpty(lines);
+QString PrimaryDeviceSummary(const QString &deviceName,
+                             const DeviceReadiness &readiness) {
+  switch (readiness.state) {
+  case ReadinessState::DaemonUnavailable:
+    return QStringLiteral(
+        "StudioCast background service is unavailable.");
+  case ReadinessState::MissingVirtualDevice:
+    if (deviceName == QStringLiteral("Camera"))
+      return QStringLiteral("Virtual camera is missing.");
+    if (deviceName == QStringLiteral("Microphone"))
+      return QStringLiteral("StudioCast Microphone is missing.");
+    return QStringLiteral("StudioCast Speakers are missing.");
+  case ReadinessState::NoPhysicalDevice:
+    if (deviceName == QStringLiteral("Speakers"))
+      return QStringLiteral("No speaker output is selected.");
+    if (deviceName == QStringLiteral("Camera"))
+      return QStringLiteral("No camera input is selected.");
+    return QStringLiteral("No microphone input is selected.");
+  case ReadinessState::RecoverableError:
+  case ReadinessState::FatalError:
+    return QStringLiteral("%1 needs attention.").arg(deviceName);
+  case ReadinessState::Unknown:
+    return QStringLiteral("%1 status is unavailable.").arg(deviceName);
+  case ReadinessState::NeedsSetup:
+    return QStringLiteral("%1 needs setup.").arg(deviceName);
+  case ReadinessState::MissingModel:
+    return QStringLiteral("%1 needs a model pack.").arg(deviceName);
+  case ReadinessState::Ready:
+  case ReadinessState::Idle:
+  case ReadinessState::Processing:
+    return readiness.summary.isEmpty()
+               ? QStringLiteral("%1 is ready.").arg(deviceName)
+               : readiness.summary;
+  }
+  return readiness.summary.isEmpty()
+             ? QStringLiteral("%1 status is unavailable.").arg(deviceName)
+             : readiness.summary;
+}
+
+QString PrimaryDeviceDetail(const QString &deviceName,
+                            const DeviceReadiness &readiness) {
+  switch (readiness.state) {
+  case ReadinessState::DaemonUnavailable:
+    return QStringLiteral("Open Support for technical details.");
+  case ReadinessState::MissingVirtualDevice:
+    if (deviceName == QStringLiteral("Camera"))
+      return QStringLiteral("Open Camera for virtual camera setup.");
+    return QStringLiteral("Open %1 to recreate the StudioCast device.")
+        .arg(deviceName);
+  case ReadinessState::NoPhysicalDevice:
+    if (deviceName == QStringLiteral("Speakers"))
+      return QStringLiteral("Open Speakers to choose a physical output.");
+    if (deviceName == QStringLiteral("Camera"))
+      return QStringLiteral("Open Camera to choose a physical input.");
+    return QStringLiteral("Open Microphone to choose a physical input.");
+  case ReadinessState::RecoverableError:
+  case ReadinessState::FatalError:
+    return QStringLiteral(
+        "Open %1 for next steps, or open Support for technical details.")
+        .arg(deviceName);
+  case ReadinessState::Unknown:
+    return QStringLiteral("Open Support for technical details.");
+  case ReadinessState::NeedsSetup:
+    return QStringLiteral("Open %1 for setup.").arg(deviceName);
+  case ReadinessState::MissingModel:
+    return QStringLiteral("Open Engines & Models for install hints.");
+  case ReadinessState::Ready:
+  case ReadinessState::Idle:
+  case ReadinessState::Processing:
+    return {};
+  }
+  return {};
 }
 
 QString DeviceGuidance(const QString &deviceName, ReadinessState state) {
   if (state == ReadinessState::MissingVirtualDevice) {
     if (deviceName == QStringLiteral("Camera")) {
-      return QStringLiteral("Open Camera for v4l2loopback setup details.");
+      return QStringLiteral("Open Camera for virtual camera setup.");
     }
     if (deviceName == QStringLiteral("Microphone")) {
       return QStringLiteral(
@@ -119,10 +187,11 @@ QString DeviceGuidance(const QString &deviceName, ReadinessState state) {
   }
 
   if (state == ReadinessState::NoPhysicalDevice) {
-    return deviceName == QStringLiteral("Speakers")
-               ? QStringLiteral("Open Speakers to choose a physical output.")
-               : QStringLiteral(
-                     "Open Microphone to choose a physical input.");
+    if (deviceName == QStringLiteral("Camera"))
+      return QStringLiteral("Open Camera to choose a physical input.");
+    if (deviceName == QStringLiteral("Microphone"))
+      return QStringLiteral("Open Microphone to choose a physical input.");
+    return QStringLiteral("Open Speakers to choose a physical output.");
   }
 
   return QStringLiteral("Open the device page for details.");
@@ -171,19 +240,14 @@ void AddDeviceIssues(std::vector<RepairIssue> *issues, const QString &name,
                      const DeviceReadiness &readiness,
                      HomePage::Destination destination) {
   if (IsBlockingState(readiness.state)) {
-    AddIssue(issues,
-             QStringLiteral("%1: %2").arg(name, ReadinessLabel(readiness.state)),
-             DeviceIssueDetail(readiness),
+    AddIssue(issues, PrimaryDeviceSummary(name, readiness),
+             PrimaryDeviceDetail(name, readiness),
              DeviceGuidance(name, readiness.state), destination);
   }
 
-  if (!readiness.disabledReasons.isEmpty()) {
-    AddIssue(issues, QStringLiteral("%1 effects: Needs attention").arg(name),
-             JoinNonEmpty(readiness.disabledReasons),
-             QStringLiteral("Open the device page for effect details; use "
-                            "Engines & Models for backend diagnostics."),
-             destination);
-  }
+  // Effect disable notes can be informational or intentional. Backend/model
+  // blockers are added separately by AddEngineIssue, so keep this repair queue
+  // limited to actual readiness blockers.
 }
 
 QString EngineIssueDetail(const EngineStatus &engine) {
@@ -227,25 +291,26 @@ std::vector<RepairIssue> BuildRepairIssues(
   std::vector<RepairIssue> issues;
 
   if (!snapshot.reachable) {
-    AddIssue(&issues, QStringLiteral("Service: Daemon unavailable"),
-             snapshot.ServiceDetail(),
-             QStringLiteral("Open Support for raw daemon details."),
+    AddIssue(&issues,
+             QStringLiteral("StudioCast background service is unavailable"),
+             snapshot.UserServiceDetail(),
+             QStringLiteral("Open Support for technical details."),
              HomePage::Destination::Support);
     return issues;
   }
 
   if (!snapshot.parsed) {
-    AddIssue(&issues, QStringLiteral("Service: Status unreadable"),
-             snapshot.ServiceDetail(),
-             QStringLiteral("Open Support for the raw daemon response."),
+    AddIssue(&issues, QStringLiteral("Status needs attention"),
+             snapshot.UserServiceDetail(),
+             QStringLiteral("Open Support for technical details."),
              HomePage::Destination::Support);
     return issues;
   }
 
   if (!snapshot.serviceRunning) {
-    AddIssue(&issues, QStringLiteral("Service: Not ready"),
-             snapshot.ServiceDetail(),
-             QStringLiteral("Open Support for raw daemon details."),
+    AddIssue(&issues, QStringLiteral("Background service is not ready"),
+             snapshot.UserServiceDetail(),
+             QStringLiteral("Open Support for technical details."),
              HomePage::Destination::Support);
     return issues;
   }
@@ -291,7 +356,7 @@ HomePage::HomePage(QWidget *parent) : QWidget(parent) {
   overallLabel_ = ValueLabel(QStringLiteral("Checking StudioCast"), summaryFrame);
   overallLabel_->setProperty("scRole", "homeHeadline");
   overallDetailLabel_ =
-      MutedLabel(QStringLiteral("Waiting for daemon status."), summaryFrame);
+      MutedLabel(QStringLiteral("Waiting for service status."), summaryFrame);
   summaryLayout->addWidget(overallLabel_);
   summaryLayout->addWidget(overallDetailLabel_);
   root->addWidget(summaryFrame);
@@ -392,13 +457,9 @@ void HomePage::UpdateCard(ReadinessCard *card,
   SetDynamicProperty(card->state, "scStatus", status);
   SetDynamicProperty(card->frame, "scStatus", status);
 
-  card->summary->setText(readiness.summary.isEmpty()
-                             ? QStringLiteral("Status unavailable.")
-                             : readiness.summary);
+  card->summary->setText(PrimaryDeviceSummary(card->title->text(), readiness));
 
-  QString detail = readiness.detail.trimmed();
-  if (detail.isEmpty() && !readiness.notes.isEmpty())
-    detail = readiness.notes.first().trimmed();
+  QString detail = PrimaryDeviceDetail(card->title->text(), readiness).trimmed();
   card->detail->setVisible(!detail.isEmpty());
   card->detail->setText(detail);
 }
@@ -410,13 +471,14 @@ void HomePage::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
 
   const std::vector<RepairIssue> issues = BuildRepairIssues(snapshot);
   if (!snapshot.reachable || !snapshot.parsed || !snapshot.serviceRunning) {
-    overallLabel_->setText(snapshot.ServiceSummary());
-    overallDetailLabel_->setText(snapshot.ServiceDetail());
+    overallLabel_->setText(snapshot.UserServiceSummary());
+    overallDetailLabel_->setText(snapshot.UserServiceDetail());
     SetDynamicProperty(overallLabel_, "scStatus", "error");
   } else if (issues.empty()) {
-    overallLabel_->setText(QStringLiteral("Ready for calls"));
+    overallLabel_->setText(QStringLiteral("No blockers reported"));
     overallDetailLabel_->setText(
-        QStringLiteral("Use the device names below in other apps."));
+        QStringLiteral("Use the device names below in other apps; each card "
+                       "shows the current device state."));
     SetDynamicProperty(overallLabel_, "scStatus", "good");
   } else {
     overallLabel_->setText(
@@ -424,7 +486,7 @@ void HomePage::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
             .arg(issues.size())
             .arg(issues.size() == 1 ? QString() : QStringLiteral("s")));
     overallDetailLabel_->setText(
-        QStringLiteral("Open the linked page for details from daemon status."));
+        QStringLiteral("Open the linked page for next steps."));
     SetDynamicProperty(overallLabel_, "scStatus", "warning");
   }
 

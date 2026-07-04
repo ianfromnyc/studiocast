@@ -29,6 +29,7 @@ Useful development commands:
 
 ```bash
 ./build/studiocast --version
+./build/studiocast-installer --version
 ./build/studiocastd
 ./build/studiocastctl status --pretty
 ctest --test-dir build --output-on-failure
@@ -82,6 +83,9 @@ change, merge it to `main`, and tag the resulting commit if it is a release.
   owns runtime state and device orchestration.
 - [../src/gui](../src/gui): Qt GUI controller.
 - [../src/tools](../src/tools): command-line helpers.
+- [../installer/gui](../installer/gui): standalone Qt installer wizard.
+- [../installer/backend](../installer/backend): scriptable installer backend
+  used by the GUI and CLI fallback.
 - [../tests](../tests): unit and integration-style tests that do not require
   full desktop hardware workflows.
 - [../scripts](../scripts): setup, install, uninstall, model, and developer
@@ -90,6 +94,8 @@ change, merge it to `main`, and tag the resulting commit if it is a release.
   curated model packs. Model binaries are downloaded separately.
 - [../packaging/systemd/user](../packaging/systemd/user): systemd user service
   template for `studiocastd`.
+- [../packaging/appimage](../packaging/appimage): release packaging scaffold
+  for the standalone GUI installer bundle.
 - [../docs](../docs): architecture, setup, model installation, manual testing,
   trademark, roadmap, and design notes.
 
@@ -98,6 +104,7 @@ change, merge it to `main`, and tag the resulting commit if it is a release.
 | Binary | Purpose |
 | --- | --- |
 | `studiocast` | Qt GUI controller for users. |
+| `studiocast-installer` | Qt installer wizard that calls the scriptable backend. |
 | `studiocastd` | Background daemon that owns camera/audio services, config, status, and effect availability. |
 | `studiocastctl` | CLI client for daemon status, config, effects, audio/video controls, and debug reports. |
 | `studiocast-open` | Open Video/Open Audio model path, listing, validation, and benchmark helper. |
@@ -111,6 +118,110 @@ service workflow:
 
 ```bash
 ./scripts/install.sh user-service --build-dir ./build --yes
+```
+
+## Installer architecture
+
+The installer is intentionally split into a GUI front end and a scriptable
+backend:
+
+- `studiocast-installer` is a separate Qt Widgets target. It does not require
+  StudioCast to already be installed and refuses to run as root.
+- `installer/backend/studiocast-installer-backend` owns OS detection, planning,
+  install/update/repair/uninstall/clean-install execution, and manifest writes.
+- `scripts/installer.sh` is the stable CLI entrypoint for CI, SSH, recovery,
+  and debugging.
+- Existing `scripts/setup.sh`, `scripts/install.sh`, and `scripts/uninstall.sh`
+  remain compatibility entrypoints. The backend delegates dependency setup,
+  v4l2loopback setup, binary linking, model installs, and systemd user service
+  setup to those scripts instead of duplicating their logic.
+
+Backend examples:
+
+```bash
+./scripts/installer.sh detect-os --json
+./scripts/installer.sh status --json
+./scripts/installer.sh plan install --json
+./scripts/installer.sh install --yes
+./scripts/installer.sh update --source-dir /path/to/release-source --yes
+./scripts/installer.sh update --release-archive ~/Downloads/studiocast.tar.gz --yes
+./scripts/installer.sh repair --yes
+./scripts/installer.sh uninstall --yes
+./scripts/installer.sh clean-install --yes
+```
+
+The installer backend supports Ubuntu 22.04/Jammy, Ubuntu 24.04/Noble, and Linux
+Mint when `/etc/os-release` exposes a reliable Ubuntu base. Mint
+`UBUNTU_CODENAME=jammy` maps to Ubuntu 22.04; `UBUNTU_CODENAME=noble` maps to
+Ubuntu 24.04. If that field is absent, Mint 21.x maps to Jammy and Mint 22.x
+maps to Noble.
+
+The install manifest lives at:
+
+```text
+~/.local/share/studiocast/install-manifest.json
+```
+
+It records installed version, source/build/install paths, installed binaries,
+systemd user service path/status, dependency install method, install timestamp,
+and whether config/models/logs/cache were preserved. Update and repair prefer
+manifest paths unless a source directory or release archive is explicitly
+selected. Uninstall removes app symlinks, service files, desktop entries, and
+runtime artifacts. Clean install preserves user config, downloaded models, logs,
+and cache unless `--remove-user-data` is explicitly selected.
+
+Release packaging:
+
+- `packaging/appimage/build_appimage.sh` configures an isolated Release build,
+  builds only `studiocast-installer`, installs the `Installer` CMake component
+  into an AppDir, adds desktop/icon metadata, archives the AppDir, and writes
+  SHA256 checksums.
+- The AppDir layout places the backend at
+  `usr/share/studiocast/installer/studiocast-installer-backend`, which is the
+  installed path the GUI already probes relative to the installer binary.
+- The same packaging script creates `StudioCast-<version>-source.tar.gz` from
+  `HEAD` with `git archive` when available, stages it at
+  `usr/share/studiocast/source/StudioCast-<version>-source.tar.gz`, and leaves
+  the standalone source archive in `dist/appimage/`.
+- Release AppImages are self-contained for the installer GUI, backend, and
+  matching source archive. Runtime dependencies still come from supported system
+  packages, ONNX Runtime/model helpers, optional SDK assets, and the installer
+  backend scripts.
+- Local packaging does not download tools. If `linuxdeploy` and
+  `linuxdeploy-plugin-qt` are available, the script also creates
+  `StudioCast-Installer-<version>-<arch>.AppImage`; otherwise it leaves the
+  staged AppDir tarball as the local artifact.
+- Release CI is in `.github/workflows/release-packaging.yml`. It runs only from
+  `workflow_dispatch` or a published GitHub Release event, downloads AppImage
+  packaging tools from `packaging/appimage/tools.lock`, verifies each tool's
+  SHA256 before making it executable, requires AppImage generation, and uploads
+  the installer bundle, AppDir archive, source archive, and checksum file as
+  workflow artifacts. It does not tag commits or publish release assets by
+  itself.
+- The packaged installer is still a source-build installer. The GUI defaults to
+  the bundled source archive, and users can still point it at another release
+  archive or a local checkout.
+
+Pinned AppImage tool updates:
+
+1. Choose fixed release asset URLs for `linuxdeploy` and
+   `linuxdeploy-plugin-qt`; do not pin to upstream `continuous` URLs.
+2. Download each AppImage and record `sha256sum <file>`.
+3. Update `packaging/appimage/tools.lock` with the matching version, URL, and
+   SHA256 values in one change.
+4. Run release packaging or a workflow-dispatch dry run so CI verifies the
+   checksums before either packaging tool is executed.
+
+Maintainer command:
+
+```bash
+packaging/appimage/build_appimage.sh --clean
+```
+
+For release-equivalent local validation with preinstalled packaging tools:
+
+```bash
+packaging/appimage/build_appimage.sh --clean --appimage-required
 ```
 
 ## Daemon architecture

@@ -40,6 +40,7 @@ namespace studiocast::gui {
 namespace {
 constexpr const char *kAutoPulseSource = "auto";
 constexpr const char *kAutoPulseSink = "auto";
+constexpr const char *kAudioControlsUnavailable = "Audio controls unavailable";
 
 bool IsBadLoopbackSourceCandidate(const std::string &name) {
   std::string reason;
@@ -250,7 +251,7 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
     backendLayout->setSpacing(10);
 
     if (mode_ == AudioPageMode::Microphone) {
-      micStateLabel_ = new QLabel("Checking daemon", backendBox_);
+      micStateLabel_ = new QLabel("Checking service", backendBox_);
       micStateLabel_->setProperty("scRole", "statusPill");
       micStateLabel_->setAlignment(Qt::AlignCenter);
       backendLayout->addWidget(micStateLabel_, 0, Qt::AlignLeft);
@@ -559,7 +560,7 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
       auto *routeLayout = new QVBoxLayout(speakerRouteStateBox_);
       routeLayout->setSpacing(10);
 
-      speakerRouteStateLabel_ = new QLabel("Checking daemon",
+      speakerRouteStateLabel_ = new QLabel("Checking service",
                                            speakerRouteStateBox_);
       speakerRouteStateLabel_->setProperty("scRole", "statusPill");
       speakerRouteStateLabel_->setAlignment(Qt::AlignCenter);
@@ -616,7 +617,7 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
 
       spkLayout->addWidget(MutedLabel(
           "Set Effect to Off for pass-through. Cleanup applies when the "
-          "daemon routes StudioCast Speakers through the processed pipeline.",
+          "StudioCast Speakers use the processed pipeline.",
           speakerEffectsBox_));
     }
     root->addWidget(speakerEffectsBox_);
@@ -952,12 +953,19 @@ void AudioPage::RefreshSources() {
 
   std::string pactlDetails;
   if (!studiocast::audio::pulse::PactlAvailable(&pactlDetails)) {
-    sourceCombo_->addItem("pactl not available");
+    sourceCombo_->addItem(QString::fromLatin1(kAudioControlsUnavailable));
     sourceCombo_->setEnabled(false);
     sourceCombo_->blockSignals(false);
     updatingSourceUi_ = false;
-    ShowError("Audio", QString("pactl not available.\n\nDetails:\n%1")
-                           .arg(QString::fromStdString(pactlDetails)));
+    if (statusText_) {
+      SetPlainTextPreservingScroll(
+          statusText_,
+          QStringLiteral("Audio input control error:\n%1")
+              .arg(QString::fromStdString(pactlDetails)));
+    }
+    ShowError("Audio",
+              QStringLiteral("Microphone inputs cannot be listed.\n\nOpen "
+                             "Support for technical details."));
     return;
   }
 
@@ -1047,18 +1055,25 @@ void AudioPage::RefreshSpeakerTargets() {
 
   std::string pactlDetails;
   if (!studiocast::audio::pulse::PactlAvailable(&pactlDetails)) {
-    speakerTargetCombo_->addItem("pactl not available");
+    speakerTargetCombo_->addItem(QString::fromLatin1(kAudioControlsUnavailable));
     speakerTargetCombo_->setEnabled(false);
     if (speakerTargetStatusLabel_) {
       speakerTargetStatusLabel_->setText(QStringLiteral(
-          "PulseAudio controls are unavailable, so physical outputs cannot be "
-          "listed."));
+          "Speaker outputs cannot be listed. Open Support for technical "
+          "details."));
       speakerTargetStatusLabel_->setVisible(true);
     }
     speakerTargetCombo_->blockSignals(false);
     updatingSpeakerTargetUi_ = false;
-    ShowError("Audio", QString("pactl not available.\n\nDetails:\n%1")
-                           .arg(QString::fromStdString(pactlDetails)));
+    if (statusText_) {
+      SetPlainTextPreservingScroll(
+          statusText_,
+          QStringLiteral("Audio output control error:\n%1")
+              .arg(QString::fromStdString(pactlDetails)));
+    }
+    ShowError("Audio",
+              QStringLiteral("Speaker outputs cannot be listed.\n\nOpen "
+                             "Support for technical details."));
     return;
   }
 
@@ -1172,7 +1187,14 @@ void AudioPage::OnSpeakerTargetChanged(int /*index*/) {
   QString err;
   if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(),
                      &out, &err)) {
-    ShowError("Audio", "Failed to update speaker output:\n\n" + err);
+    if (statusText_) {
+      SetPlainTextPreservingScroll(
+          statusText_,
+          QStringLiteral("Speaker output save failed:\n%1").arg(err));
+    }
+    ShowError("Audio",
+              QStringLiteral("Speaker output was not changed.\n\nOpen Support "
+                             "for technical details."));
     SyncSpeakerTargetSelectionFromDaemon(daemonSpeakerTarget_);
     return;
   }
@@ -1457,7 +1479,8 @@ void AudioPage::SetAiControlsEnabled(bool enabled, const QString &reason) {
   if (sourceCombo_) {
     const bool pactlUnavailable =
         sourceCombo_->count() > 0 &&
-        sourceCombo_->itemText(0) == QStringLiteral("pactl not available");
+        sourceCombo_->itemText(0) ==
+            QString::fromLatin1(kAudioControlsUnavailable);
     sourceCombo_->setEnabled(enabled && !pactlUnavailable);
   }
   if (micEffectCombo_)
@@ -1471,7 +1494,8 @@ void AudioPage::SetAiControlsEnabled(bool enabled, const QString &reason) {
   if (speakerTargetCombo_) {
     const bool pactlUnavailable = speakerTargetCombo_->count() > 0 &&
                                   speakerTargetCombo_->itemText(0) ==
-                                      QStringLiteral("pactl not available");
+                                      QString::fromLatin1(
+                                          kAudioControlsUnavailable);
     speakerTargetCombo_->setEnabled(enabled && !pactlUnavailable);
   }
   if (speakerEffectCombo_)
@@ -1487,7 +1511,7 @@ void AudioPage::SetAiControlsEnabled(bool enabled, const QString &reason) {
   }
 
   if (!enabled && micStateLabel_) {
-    SetMicStatusSummary(QStringLiteral("Daemon unavailable"), reason,
+    SetMicStatusSummary(QStringLiteral("Service unavailable"), reason,
                         QStringLiteral("error"));
     if (micSourceStatusLabel_)
       micSourceStatusLabel_->setVisible(false);
@@ -1496,7 +1520,7 @@ void AudioPage::SetAiControlsEnabled(bool enabled, const QString &reason) {
   }
 
   if (!enabled && speakerRouteStateLabel_) {
-    SetSpeakerRouteSummary(QStringLiteral("Daemon unavailable"), reason,
+    SetSpeakerRouteSummary(QStringLiteral("Service unavailable"), reason,
                            QStringLiteral("error"),
                            QStringLiteral("Unknown"),
                            QStringLiteral("Unknown"));
@@ -1606,7 +1630,10 @@ void AudioPage::RefreshDaemonAudioStatus() {
   std::string json;
   QString err;
   if (!DaemonRequest("GET_STATUS", &json, &err)) {
-    SetAiControlsEnabled(false, "Daemon unavailable: " + err);
+    SetAiControlsEnabled(
+        false,
+        QStringLiteral("StudioCast background service is unavailable. Open "
+                       "Support for technical details."));
     daemonStatusText_ = "daemon_unavailable: " + err;
     return;
   }
@@ -1614,8 +1641,13 @@ void AudioPage::RefreshDaemonAudioStatus() {
   QJsonObject root;
   QString jerr;
   if (!ParseJsonObject(json, &root, &jerr)) {
-    SetAiControlsEnabled(false, "Daemon returned invalid JSON: " + jerr);
+    SetAiControlsEnabled(
+        false,
+        QStringLiteral("StudioCast received an unreadable status update. Open "
+                       "Support for technical details."));
     daemonStatusText_ = "invalid_json";
+    if (!jerr.trimmed().isEmpty())
+      daemonStatusText_ += ": " + jerr;
     return;
   }
 
@@ -1674,9 +1706,19 @@ void AudioPage::RefreshDaemonAudioStatus() {
   const auto pipeline = audio.value("pipeline").toObject();
   const bool running = pipeline.value("running").toBool(false);
   const bool starting = pipeline.value("starting").toBool(false);
+  const bool activeNeeded = pipeline.value("active_needed").toBool(false);
+  const QString pipelineState =
+      pipeline.value("state").toString().trimmed().toLower();
+  const QString pipelineIdleReason =
+      pipeline.value("idle_reason").toString().trimmed();
   const QString lastErr = pipeline.value("last_error").toString();
   const QString backendActive = pipeline.value("backend_active").toString();
   const QString effectsNote = pipeline.value("effects_note").toString();
+  const bool micConsumerPresent =
+      audio.value("mic_consumer_present").toBool(false);
+  const int micConsumerCount = audio.value("mic_consumer_count").toInt(0);
+  const QString micConsumerError =
+      audio.value("mic_consumer_error").toString().trimmed();
 
   if (mode_ == AudioPageMode::Microphone) {
     const bool micPresent = audio.value("mic_present").toBool(
@@ -1687,47 +1729,80 @@ void AudioPage::RefreshDaemonAudioStatus() {
         QStringLiteral("StudioCast Microphone is available to other apps.");
     QString status = QStringLiteral("good");
 
-    if (!lastErr.trimmed().isEmpty()) {
-      state = QStringLiteral("Processing error");
-      detail = lastErr.trimmed();
-      status = QStringLiteral("error");
-    } else if (!sourceErr.trimmed().isEmpty()) {
-      state = QStringLiteral("Source needs attention");
-      detail = sourceErr.trimmed();
+    if (!sourceErr.trimmed().isEmpty()) {
+      state = QStringLiteral("No microphone input is selected");
+      detail = QStringLiteral(
+          "Choose a microphone input, or open Support for technical details.");
       status = QStringLiteral("warning");
     } else if (!micPresent) {
-      state = QStringLiteral("Virtual mic missing");
+      state = QStringLiteral("StudioCast Microphone is missing");
       detail = QStringLiteral(
           "The StudioCast Microphone virtual device is not present.");
       status = QStringLiteral("warning");
-    } else if (running) {
+    } else if (!lastErr.trimmed().isEmpty()) {
+      state = QStringLiteral("Needs attention");
+      detail = QStringLiteral("Microphone processing stopped. Open Support "
+                              "for technical details.");
+      status = QStringLiteral("error");
+    } else if (running || pipelineState == QStringLiteral("running")) {
       state = QStringLiteral("Processing active");
       detail = backendActive.trimmed().isEmpty()
                    ? QStringLiteral("Microphone cleanup is running.")
                    : QStringLiteral("Microphone cleanup is running with %1.")
                          .arg(FriendlyBackendLabel(backendActive));
-    } else if (starting) {
+    } else if (starting || pipelineState == QStringLiteral("starting")) {
       state = QStringLiteral("Starting");
       detail = QStringLiteral("Microphone cleanup is starting.");
-    } else if (!audioEnabled) {
+      status = QStringLiteral("warning");
+    } else if (!micConsumerError.isEmpty() && audioEnabled) {
+      state = QStringLiteral("Consumer detection error");
+      detail = QStringLiteral(
+          "StudioCast cannot tell when other apps are using the microphone. "
+          "Open Support for technical details.");
+      status = QStringLiteral("error");
+    } else if (audioEnabled &&
+               pipelineState == QStringLiteral("idle_no_consumer")) {
+      state = QStringLiteral("Waiting for app");
+      detail = pipelineIdleReason.isEmpty()
+                   ? QStringLiteral("Ready. Processing starts when an app uses "
+                                    "StudioCast Microphone.")
+                   : pipelineIdleReason;
+    } else if (!audioEnabled || pipelineState == QStringLiteral("disabled")) {
       state = QStringLiteral("Off");
       detail = QStringLiteral(
           "Microphone processing is disabled by the current backend setting.");
       status = QStringLiteral("warning");
+    } else {
+      // Older daemon payloads did not expose enough state to prove
+      // idle/no-consumer, so keep this generic.
+      state = QStringLiteral("Not processing");
+      detail = QStringLiteral("Microphone status is reported, but processing "
+                              "is not active.");
     }
     SetMicStatusSummary(state, detail, status);
 
     if (micSourceStatusLabel_) {
       QStringList sourceLines;
       if (!sourceResolved.trimmed().isEmpty()) {
-        sourceLines << QStringLiteral("Resolved source: %1")
+        sourceLines << QStringLiteral("Using input: %1")
                            .arg(sourceResolved.trimmed());
       }
+      if (micConsumerCount > 0 || micConsumerPresent) {
+        sourceLines << QStringLiteral("Apps using microphone: %1")
+                           .arg(micConsumerCount);
+      }
+      bool hasWarning = false;
       for (const auto &v : sourceWarnings) {
         const QString warning = v.toString().trimmed();
-        if (!warning.isEmpty())
-          sourceLines << warning;
+        if (!warning.isEmpty()) {
+          hasWarning = true;
+          break;
+        }
       }
+      if (hasWarning)
+        sourceLines << QStringLiteral(
+            "The selected microphone input needs attention. Open Support for "
+            "technical details.");
       micSourceStatusLabel_->setText(sourceLines.join(QStringLiteral("\n")));
       micSourceStatusLabel_->setVisible(!sourceLines.isEmpty());
     }
@@ -1786,11 +1861,16 @@ void AudioPage::RefreshDaemonAudioStatus() {
     aiInfoBanner_->setToolTip(full);
   }
 
+  const QString pipelineLabel =
+      pipelineState.isEmpty()
+          ? QString(running ? "running" : (starting ? "starting" : "stopped"))
+          : pipelineState;
   daemonStatusText_ =
-      QString("enabled=%1\nmic_mode=%2\npipeline=%3\n")
+      QString("enabled=%1\nmic_mode=%2\npipeline=%3 active_needed=%4\n")
           .arg(audioEnabled ? "true" : "false")
           .arg(micMode.isEmpty() ? "(none)" : micMode)
-          .arg(running ? "running" : (starting ? "starting" : "stopped"));
+          .arg(pipelineLabel)
+          .arg(activeNeeded ? "true" : "false");
 
   if (pipeline.contains("gpu")) {
     const auto gpu = pipeline.value("gpu").toObject();
@@ -1810,6 +1890,11 @@ void AudioPage::RefreshDaemonAudioStatus() {
     daemonStatusText_ += "source_resolved: " + sourceResolved + "\n";
   if (!sourceErr.isEmpty())
     daemonStatusText_ += "source_error: " + sourceErr + "\n";
+  daemonStatusText_ += QString("mic_consumer_present=%1 mic_consumer_count=%2\n")
+                           .arg(micConsumerPresent ? "true" : "false")
+                           .arg(micConsumerCount);
+  if (!micConsumerError.isEmpty())
+    daemonStatusText_ += "mic_consumer_error: " + micConsumerError + "\n";
   for (const auto &v : sourceWarnings) {
     const QString warning = v.toString();
     if (!warning.isEmpty())
@@ -1836,6 +1921,17 @@ void AudioPage::RefreshDaemonAudioStatus() {
 
     const bool spkPipeRunning = spk.value("pipeline_running").toBool(false);
     const bool spkPipeStarting = spk.value("pipeline_starting").toBool(false);
+    const bool spkPipeActiveNeeded =
+        spk.value("pipeline_active_needed").toBool(false);
+    const QString spkPipeState =
+        spk.value("pipeline_state").toString().trimmed().toLower();
+    const QString spkPipeIdleReason =
+        spk.value("pipeline_idle_reason").toString().trimmed();
+    const bool spkConsumerPresent =
+        spk.value("consumer_present").toBool(false);
+    const int spkConsumerCount = spk.value("consumer_count").toInt(0);
+    const QString spkConsumerError =
+        spk.value("consumer_error").toString().trimmed();
     const QString spkBackend = spk.value("backend_active").toString();
     const QString spkNote = spk.value("effects_note").toString();
     const QString spkPipeErr = spk.value("pipeline_last_error").toString();
@@ -1857,15 +1953,17 @@ void AudioPage::RefreshDaemonAudioStatus() {
       QString status = QStringLiteral("warning");
 
       if (!routeError.isEmpty()) {
-        state = QStringLiteral("Route error");
-        detail = routeError;
+        state = QStringLiteral("Needs attention");
+        detail = QStringLiteral("Speaker routing stopped. Open Support for "
+                                "technical details.");
         status = QStringLiteral("error");
       } else if (!spkTargetErr.trimmed().isEmpty()) {
-        state = QStringLiteral("Output needs attention");
-        detail = spkTargetErr.trimmed();
+        state = QStringLiteral("No speaker output is selected");
+        detail = QStringLiteral(
+            "Choose a speaker output, or open Support for technical details.");
         status = QStringLiteral("warning");
       } else if (!spkPresent) {
-        state = QStringLiteral("Device missing");
+        state = QStringLiteral("StudioCast Speakers are missing");
         detail = QStringLiteral(
             "The StudioCast Speakers virtual device is not present.");
         status = QStringLiteral("warning");
@@ -1879,7 +1977,8 @@ void AudioPage::RefreshDaemonAudioStatus() {
         status = spkRouting ? QStringLiteral("good")
                             : QStringLiteral("warning");
       } else if (rm == QStringLiteral("pipeline")) {
-        if (spkPipeRunning) {
+        if (spkPipeRunning || spkRouting ||
+            spkPipeState == QStringLiteral("running")) {
           state = QStringLiteral("Processed pipeline active");
           detail = backendLabel == QStringLiteral("—")
                        ? QStringLiteral("Speaker cleanup is processing audio.")
@@ -1887,15 +1986,30 @@ void AudioPage::RefreshDaemonAudioStatus() {
                                         "with %1.")
                              .arg(backendLabel);
           status = QStringLiteral("good");
-        } else if (spkPipeStarting) {
+        } else if (spkPipeStarting ||
+                   spkPipeState == QStringLiteral("starting")) {
           state = QStringLiteral("Processed pipeline starting");
           detail = QStringLiteral("Speaker cleanup is starting.");
           status = QStringLiteral("warning");
-        } else if (spkRouting) {
-          state = QStringLiteral("Processed pipeline ready");
+        } else if (!spkConsumerError.isEmpty()) {
+          state = QStringLiteral("Consumer detection error");
           detail = QStringLiteral(
-              "Waiting for an app to send audio through StudioCast Speakers.");
+              "StudioCast cannot tell when other apps are using the speakers. "
+              "Open Support for technical details.");
+          status = QStringLiteral("error");
+        } else if (spkPipeState == QStringLiteral("idle_no_consumer")) {
+          state = QStringLiteral("Waiting for app");
+          detail = spkPipeIdleReason.isEmpty()
+                       ? QStringLiteral("Ready. Processing starts when an app "
+                                        "uses StudioCast Speakers.")
+                       : spkPipeIdleReason;
           status = QStringLiteral("good");
+        } else if (spkPipeState.isEmpty()) {
+          // Older daemon payloads did not expose enough state to prove
+          // idle/no-consumer, so keep this generic.
+          state = QStringLiteral("Processed pipeline stopped");
+          detail = QStringLiteral("Processed speaker routing is not active.");
+          status = QStringLiteral("warning");
         } else {
           state = QStringLiteral("Processed pipeline stopped");
           detail = QStringLiteral("Processed speaker routing is stopped.");
@@ -1919,24 +2033,43 @@ void AudioPage::RefreshDaemonAudioStatus() {
                              .arg(spkConfiguredTarget.trimmed());
         }
         if (!spkResolvedTarget.trimmed().isEmpty()) {
-          targetLines << QStringLiteral("Resolved output: %1")
+          targetLines << QStringLiteral("Using output: %1")
                              .arg(spkResolvedTarget.trimmed());
         }
         if (!spkTargetErr.trimmed().isEmpty())
-          targetLines << spkTargetErr.trimmed();
+          targetLines << QStringLiteral(
+              "The selected speaker output needs attention. Open Support for "
+              "technical details.");
+        if (spkConsumerCount > 0 || spkConsumerPresent) {
+          targetLines << QStringLiteral("Apps using speakers: %1")
+                             .arg(spkConsumerCount);
+        }
         if (!targetLines.isEmpty()) {
           speakerTargetStatusLabel_->setText(
               targetLines.join(QStringLiteral("\n")));
           speakerTargetStatusLabel_->setVisible(true);
+        } else {
+          speakerTargetStatusLabel_->clear();
+          speakerTargetStatusLabel_->setVisible(false);
         }
       }
     }
 
     daemonStatusText_ +=
-        QString("speakers_present=%1 speakers_route=%2 route_mode=%3\n")
+        QString("speakers_present=%1 speakers_route=%2 route_mode=%3 "
+                "pipeline_state=%4 active_needed=%5\n")
             .arg(spkPresent ? "true" : "false")
             .arg(spkRouting ? "true" : "false")
-            .arg(spkRouteMode.isEmpty() ? "(none)" : spkRouteMode);
+            .arg(spkRouteMode.isEmpty() ? "(none)" : spkRouteMode)
+            .arg(spkPipeState.isEmpty() ? "(none)" : spkPipeState)
+            .arg(spkPipeActiveNeeded ? "true" : "false");
+    daemonStatusText_ +=
+        QString("speakers_consumer_present=%1 speakers_consumer_count=%2\n")
+            .arg(spkConsumerPresent ? "true" : "false")
+            .arg(spkConsumerCount);
+    if (!spkConsumerError.isEmpty())
+      daemonStatusText_ +=
+          "speakers_consumer_error: " + spkConsumerError + "\n";
     if (!spkConfiguredTarget.isEmpty())
       daemonStatusText_ +=
           "speakers_target_sink_configured: " + spkConfiguredTarget + "\n";
@@ -1989,17 +2122,22 @@ void AudioPage::RefreshDaemonAudioStatus() {
               .arg(frames);
     }
 
-    // Mirror the most user-relevant pipeline state.
-    daemonStatusText_ +=
-        QString("speakers_pipeline=%1\n")
-            .arg(spkPipeRunning ? "running"
-                                : (spkPipeStarting ? "starting" : "stopped"));
+	    // Mirror the most user-relevant pipeline state.
+	    daemonStatusText_ +=
+	        QString("speakers_pipeline=%1\n")
+	            .arg(spkPipeState.isEmpty()
+	                     ? QString(spkPipeRunning
+	                                   ? "running"
+	                                   : (spkPipeStarting ? "starting" : "stopped"))
+	                     : spkPipeState);
 
     SyncSpeakerTargetSelectionFromDaemon(spkConfiguredTarget);
   } else if (mode_ == AudioPageMode::Speakers) {
     SetSpeakerRouteSummary(
         QStringLiteral("Unknown"),
-        QStringLiteral("Daemon status did not include speaker routing details."),
+        QStringLiteral(
+            "Speaker routing status is unavailable. Open Support for "
+            "technical details."),
         QStringLiteral("warning"), QStringLiteral("Unknown"),
         QStringLiteral("Unknown"));
   }
@@ -2245,7 +2383,14 @@ void AudioPage::PushDaemonSourceSelection() {
   if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(),
                      &out, &err)) {
     daemonStatusText_ += "\nfailed_to_set_source: " + err;
-    ShowError("Audio", "Failed to update microphone source:\n\n" + err);
+    if (statusText_) {
+      SetPlainTextPreservingScroll(
+          statusText_,
+          QStringLiteral("Microphone source save failed:\n%1").arg(err));
+    }
+    ShowError("Audio",
+              QStringLiteral("Microphone input was not changed.\n\nOpen "
+                             "Support for technical details."));
     SyncSourceSelectionFromDaemon(daemonSource_);
     return;
   }
@@ -2333,7 +2478,15 @@ void AudioPage::PushDaemonAudioConfig() {
   QString err;
   if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(),
                      &out, &err)) {
-    ShowError("Audio", "Failed to update daemon audio config:\n\n" + err);
+    daemonStatusText_ += "\nfailed_to_set_audio_config: " + err;
+    if (statusText_) {
+      SetPlainTextPreservingScroll(
+          statusText_,
+          QStringLiteral("Audio settings save failed:\n%1").arg(err));
+    }
+    ShowError("Audio",
+              QStringLiteral("Audio settings were not saved.\n\nOpen Support "
+                             "for technical details."));
   }
   RefreshDaemonAudioStatus();
 }
@@ -2373,7 +2526,7 @@ void AudioPage::OnAiBrowseOpenAudioModel() {
 
 void AudioPage::OnOpenAudioInstallHints() {
   if (openAudioInstallHints_.isEmpty()) {
-    ShowError("Open Audio", "No install hints were reported by the daemon.");
+    ShowError("Open Audio", "No install hints are available.");
     return;
   }
   QString msg;
@@ -2469,8 +2622,14 @@ void AudioPage::OnCreateVirtualMic() {
     QString err;
     if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(),
                        &out, &err)) {
+      if (statusText_) {
+        SetPlainTextPreservingScroll(
+            statusText_,
+            QStringLiteral("Virtual microphone create failed:\n%1").arg(err));
+      }
       ShowError("Create virtual mic failed",
-                "Failed to update daemon audio config:\n\n" + err);
+                QStringLiteral("StudioCast Microphone was not created.\n\nOpen "
+                               "Support for technical details."));
       return;
     }
     RefreshStatus();
@@ -2480,7 +2639,8 @@ void AudioPage::OnCreateVirtualMic() {
 
 #ifdef NDEBUG
   ShowError("Create virtual mic failed",
-            "Daemon unavailable. Start studiocastd and try again.");
+            "StudioCast background service is unavailable. Open Support for "
+            "technical details.");
   return;
 #else
   std::string err;
@@ -2511,8 +2671,14 @@ void AudioPage::OnDestroyVirtualMic() {
     QString err;
     if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(),
                        &out, &err)) {
+      if (statusText_) {
+        SetPlainTextPreservingScroll(
+            statusText_,
+            QStringLiteral("Virtual microphone remove failed:\n%1").arg(err));
+      }
       ShowError("Destroy virtual mic failed",
-                "Failed to update daemon audio config:\n\n" + err);
+                QStringLiteral("StudioCast Microphone was not removed.\n\nOpen "
+                               "Support for technical details."));
       return;
     }
     RefreshStatus();
@@ -2522,7 +2688,8 @@ void AudioPage::OnDestroyVirtualMic() {
 
 #ifdef NDEBUG
   ShowError("Destroy virtual mic failed",
-            "Daemon unavailable. Start studiocastd and try again.");
+            "StudioCast background service is unavailable. Open Support for "
+            "technical details.");
   return;
 #else
   std::string err;
@@ -2594,7 +2761,14 @@ void AudioPage::OnEnableVirtualSpeakers() {
     QString err;
     if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(),
                        &out, &err)) {
-      ShowError("Audio", "Failed to enable speakers via daemon:\n\n" + err);
+      if (statusText_) {
+        SetPlainTextPreservingScroll(
+            statusText_,
+            QStringLiteral("Speakers enable failed:\n%1").arg(err));
+      }
+      ShowError("Audio",
+                QStringLiteral("StudioCast Speakers were not enabled.\n\nOpen "
+                               "Support for technical details."));
       return;
     }
     RefreshStatus();
@@ -2602,7 +2776,9 @@ void AudioPage::OnEnableVirtualSpeakers() {
   }
 
 #ifdef NDEBUG
-  ShowError("Audio", "Daemon unavailable. Start studiocastd and try again.");
+  ShowError("Audio",
+            "StudioCast background service is unavailable. Open Support for "
+            "technical details.");
   return;
 #else
   // Fallback: direct pactl manipulation (debug/dev only).
@@ -2631,8 +2807,14 @@ void AudioPage::OnStopSpeakersRouting() {
     QString err;
     if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(),
                        &out, &err)) {
+      if (statusText_) {
+        SetPlainTextPreservingScroll(
+            statusText_,
+            QStringLiteral("Speakers stop failed:\n%1").arg(err));
+      }
       ShowError("Audio",
-                "Failed to stop speakers routing via daemon:\n\n" + err);
+                QStringLiteral("Speaker routing was not stopped.\n\nOpen "
+                               "Support for technical details."));
       return;
     }
     RefreshStatus();
@@ -2640,7 +2822,9 @@ void AudioPage::OnStopSpeakersRouting() {
   }
 
 #ifdef NDEBUG
-  ShowError("Audio", "Daemon unavailable. Start studiocastd and try again.");
+  ShowError("Audio",
+            "StudioCast background service is unavailable. Open Support for "
+            "technical details.");
   return;
 #else
   std::string err;
@@ -2670,7 +2854,14 @@ void AudioPage::OnDestroyVirtualSpeakers() {
     QString err;
     if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(),
                        &out, &err)) {
-      ShowError("Audio", "Failed to destroy speakers via daemon:\n\n" + err);
+      if (statusText_) {
+        SetPlainTextPreservingScroll(
+            statusText_,
+            QStringLiteral("Speakers remove failed:\n%1").arg(err));
+      }
+      ShowError("Audio",
+                QStringLiteral("StudioCast Speakers were not removed.\n\nOpen "
+                               "Support for technical details."));
       return;
     }
     RefreshStatus();
@@ -2678,7 +2869,9 @@ void AudioPage::OnDestroyVirtualSpeakers() {
   }
 
 #ifdef NDEBUG
-  ShowError("Audio", "Daemon unavailable. Start studiocastd and try again.");
+  ShowError("Audio",
+            "StudioCast background service is unavailable. Open Support for "
+            "technical details.");
   return;
 #else
   std::string err;

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=StudioCast Installer
+Comment=Install or update StudioCast on supported Linux systems
+Exec=studiocast-installer
+Icon=studiocast-installer
+Terminal=false
+Categories=Utility;AudioVideo;
+StartupNotify=true
+X-AppImage-Version=@VERSION@
