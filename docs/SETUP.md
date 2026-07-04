@@ -73,6 +73,9 @@ Supported installer OS bases:
   `UBUNTU_CODENAME=jammy` maps to Ubuntu 22.04 and
   `UBUNTU_CODENAME=noble` maps to Ubuntu 24.04. Mint 21.x and 22.x are mapped
   to those bases if `UBUNTU_CODENAME` is missing.
+- Other Ubuntu-family distributions may also pass installer checks when
+  `/etc/os-release` declares `ID_LIKE=ubuntu` and exposes
+  `UBUNTU_CODENAME=jammy` or `UBUNTU_CODENAME=noble`.
 
 Unsupported distros fail clearly with the detected `/etc/os-release` fields and
 should use the manual source-build flow below.
