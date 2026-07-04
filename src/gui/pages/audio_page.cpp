@@ -2190,8 +2190,12 @@ void AudioPage::RefreshDaemonAudioStatus() {
   }
 
   if (openAudioStatusPresent_) {
+    daemonStatusText_ += QStringLiteral("open_audio:\n");
     daemonStatusText_ +=
-        QString("open_audio_ok: %1\n").arg(openAudioOk_ ? "true" : "false");
+        QString::fromUtf8(QJsonDocument(openAudio)
+                              .toJson(QJsonDocument::Indented))
+            .trimmed();
+    daemonStatusText_ += QStringLiteral("\n");
   }
 
   if (openAudioInstallHintsBtn_) {

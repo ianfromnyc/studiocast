@@ -41,6 +41,7 @@
 #include "core/maxine/reason_codes.h"
 #include "core/maxine/vfx_api.h"
 #include "core/open_audio/model_pack_registry.h"
+#include "core/open_audio/open_audio_diagnostics.h"
 #include "core/open_video/model_pack_registry.h"
 #include "core/probe/probe.h"
 #include "core/util/json.h"
@@ -730,6 +731,18 @@ int RunSelfTest() {
     {
       studiocast::open_cuda::OpenCudaDiagnostics od;
       od.ok = true;
+      od.onnxruntime_version = "1.20.0";
+      od.onnxruntime_providers = {"CUDAExecutionProvider",
+                                  "CPUExecutionProvider"};
+      od.onnxruntime_cuda_provider_present = true;
+      od.onnxruntime_tensorrt_provider_present = false;
+      od.onnxruntime_cpu_provider_present = true;
+      od.onnxruntime_cuda_ep_v2_build = true;
+      od.onnxruntime_library_path = "/opt/ort/lib/libonnxruntime.so";
+      od.cuda_driver_api_available = true;
+      od.cuda_context_available = true;
+      od.cuda_device_count = 1;
+      od.cuda_driver_version = 12040;
       od.default_model_id = reg.DefaultModelIdForTask("matting");
       for (const auto &m : reg.ListModels()) {
         if (m.task != "matting")
@@ -748,6 +761,30 @@ int RunSelfTest() {
       od.missing_models = reg.Problems();
 
       const std::string j = od.ToJson();
+      expectContains("OpenCudaDiagnosticsJson.onnxruntime_version", j,
+                     "\"onnxruntime_version\":\"1.20.0\"");
+      expectContains("OpenCudaDiagnosticsJson.onnxruntime_providers", j,
+                     "\"onnxruntime_providers\":[\"CUDAExecutionProvider\","
+                     "\"CPUExecutionProvider\"]");
+      expectContains("OpenCudaDiagnosticsJson.cuda_provider_present", j,
+                     "\"onnxruntime_cuda_provider_present\":true");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_provider_present", j,
+                     "\"onnxruntime_tensorrt_provider_present\":false");
+      expectContains("OpenCudaDiagnosticsJson.cpu_provider_present", j,
+                     "\"onnxruntime_cpu_provider_present\":true");
+      expectContains("OpenCudaDiagnosticsJson.cuda_ep_v2_build", j,
+                     "\"onnxruntime_cuda_ep_v2_build\":true");
+      expectContains("OpenCudaDiagnosticsJson.ort_library_path", j,
+                     "\"onnxruntime_library_path\":\"/opt/ort/lib/"
+                     "libonnxruntime.so\"");
+      expectContains("OpenCudaDiagnosticsJson.cuda_driver_api_available", j,
+                     "\"cuda_driver_api_available\":true");
+      expectContains("OpenCudaDiagnosticsJson.cuda_context_available", j,
+                     "\"cuda_context_available\":true");
+      expectContains("OpenCudaDiagnosticsJson.cuda_device_count", j,
+                     "\"cuda_device_count\":1");
+      expectContains("OpenCudaDiagnosticsJson.cuda_driver_version", j,
+                     "\"cuda_driver_version\":12040");
       expectContains("OpenCudaDiagnosticsJson.default_model_id", j,
                      "\"default_model_id\":\"mock_model\"");
       expectContains("OpenCudaDiagnosticsJson.models", j, "\"models\":[");
@@ -764,6 +801,44 @@ int RunSelfTest() {
       // Backward compatibility field.
       expectContains("OpenCudaDiagnosticsJson.installed_models", j,
                      "\"installed_models\":[");
+    }
+
+    // Open Audio diagnostics JSON keeps legacy ORT fields and includes
+    // provider/runtime details used by daemon/GUI/CLI diagnostics.
+    {
+      studiocast::open_audio::OpenAudioDiagnostics od;
+      od.ok = true;
+      od.onnxruntime_version = "1.20.0";
+      od.onnxruntime_providers = {"CPUExecutionProvider"};
+      od.onnxruntime_cuda_provider_present = false;
+      od.onnxruntime_tensorrt_provider_present = false;
+      od.onnxruntime_cpu_provider_present = true;
+      od.onnxruntime_cuda_ep_v2_build = false;
+      od.onnxruntime_library_path = "/opt/ort/lib/libonnxruntime.so";
+      od.acceleration_likely = "cpu_fallback";
+      od.installed_models = {"fastenhancer_s_vd_v1"};
+      od.default_model_id = "fastenhancer_s_vd_v1";
+
+      const std::string j = od.ToJson();
+      expectContains("OpenAudioDiagnosticsJson.onnxruntime_version", j,
+                     "\"onnxruntime_version\":\"1.20.0\"");
+      expectContains("OpenAudioDiagnosticsJson.onnxruntime_providers", j,
+                     "\"onnxruntime_providers\":[\"CPUExecutionProvider\"]");
+      expectContains("OpenAudioDiagnosticsJson.cuda_provider_present", j,
+                     "\"onnxruntime_cuda_provider_present\":false");
+      expectContains("OpenAudioDiagnosticsJson.tensorrt_provider_present", j,
+                     "\"onnxruntime_tensorrt_provider_present\":false");
+      expectContains("OpenAudioDiagnosticsJson.cpu_provider_present", j,
+                     "\"onnxruntime_cpu_provider_present\":true");
+      expectContains("OpenAudioDiagnosticsJson.cuda_ep_v2_build", j,
+                     "\"onnxruntime_cuda_ep_v2_build\":false");
+      expectContains("OpenAudioDiagnosticsJson.ort_library_path", j,
+                     "\"onnxruntime_library_path\":\"/opt/ort/lib/"
+                     "libonnxruntime.so\"");
+      expectContains("OpenAudioDiagnosticsJson.acceleration_likely", j,
+                     "\"acceleration_likely\":\"cpu_fallback\"");
+      expectContains("OpenAudioDiagnosticsJson.installed_models", j,
+                     "\"installed_models\":[\"fastenhancer_s_vd_v1\"]");
     }
   }
 
@@ -3220,6 +3295,29 @@ int RunSelfTest() {
       const auto gate2 =
           studiocast::video::effects::EvaluateOpenCudaGate(fx, available);
       expectTrue("open_cuda_gate blur allowed when available", gate2.ok);
+
+      {
+        using studiocast::video::effects::contract::
+            kEffectIdVideoNoiseRemoval;
+
+        studiocast::video::effects::BroadcastCameraEffects fx_denoise;
+        fx_denoise.engine =
+            studiocast::video::effects::EffectsEnginePreference::open_cuda;
+        fx_denoise.video_noise_removal.enabled = true;
+
+        studiocast::open_cuda::OpenCudaDiagnostics ort_cuda_missing;
+        ort_cuda_missing.ok = true;
+        ort_cuda_missing.available_effects = {
+            std::string(kEffectIdVideoNoiseRemoval)};
+        ort_cuda_missing.blocked_effects[std::string(
+            kEffectIdVirtualBackgroundBlur)] =
+            "onnxruntime_cuda_provider_unavailable";
+
+        const auto gate_denoise = studiocast::video::effects::
+            EvaluateOpenCudaGate(fx_denoise, ort_cuda_missing);
+        expectTrue("open_cuda_gate denoise allowed without ort cuda ep",
+                   gate_denoise.ok);
+      }
 
       // Auto Frame (Open CUDA) is also gated by the Open CUDA diagnostics.
       {

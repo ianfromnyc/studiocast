@@ -66,6 +66,32 @@ std::string OpenCudaDiagnostics::ToJson() const {
 
   oss << "\"ok\":" << BoolJson(ok) << ",";
 
+  oss << "\"onnxruntime_version\":\"" << JsonEscape(onnxruntime_version)
+      << "\",";
+  oss << "\"onnxruntime_providers\":";
+  AppendJsonStringArray(&oss, onnxruntime_providers);
+  oss << ",";
+  oss << "\"onnxruntime_cuda_provider_present\":"
+      << BoolJson(onnxruntime_cuda_provider_present) << ",";
+  oss << "\"onnxruntime_tensorrt_provider_present\":"
+      << BoolJson(onnxruntime_tensorrt_provider_present) << ",";
+  oss << "\"onnxruntime_cpu_provider_present\":"
+      << BoolJson(onnxruntime_cpu_provider_present) << ",";
+  oss << "\"onnxruntime_cuda_ep_v2_build\":"
+      << BoolJson(onnxruntime_cuda_ep_v2_build) << ",";
+  oss << "\"onnxruntime_library_path\":\""
+      << JsonEscape(onnxruntime_library_path) << "\",";
+
+  oss << "\"cuda_driver_api_available\":"
+      << BoolJson(cuda_driver_api_available) << ",";
+  oss << "\"cuda_context_available\":"
+      << BoolJson(cuda_context_available) << ",";
+  oss << "\"cuda_device_count\":" << cuda_device_count << ",";
+  oss << "\"cuda_driver_version\":" << cuda_driver_version << ",";
+  oss << "\"cuda_driver_error\":\"" << JsonEscape(cuda_driver_error) << "\",";
+  oss << "\"cuda_context_error\":\"" << JsonEscape(cuda_context_error)
+      << "\",";
+
   oss << "\"installed_models\":";
   AppendJsonStringArray(&oss, installed_models);
   oss << ",";

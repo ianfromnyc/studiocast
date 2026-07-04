@@ -112,6 +112,30 @@ std::string GetArgValue(int argc, char **argv, std::string_view key) {
   return "";
 }
 
+const char *YesNo(bool v) { return v ? "yes" : "no"; }
+
+void PrintOrtRuntimeInfo(const studiocast::onnx::OrtRuntimeInfo &ort) {
+  std::cout << "ONNX Runtime version: "
+            << (ort.version.empty() ? "(unknown)" : ort.version) << "\n";
+  std::cout << "ONNX Runtime library: "
+            << (ort.library_path.empty() ? "(unknown)" : ort.library_path)
+            << "\n";
+  std::cout << "ORT CUDA EP V2 build: " << YesNo(ort.cuda_ep_v2_build)
+            << "\n";
+  std::cout << "Provider present: CUDA="
+            << YesNo(ort.cuda_provider_present)
+            << " TensorRT=" << YesNo(ort.tensorrt_provider_present)
+            << " CPU=" << YesNo(ort.cpu_provider_present) << "\n";
+  if (ort.providers.empty()) {
+    std::cout << "Available providers: (unknown)\n";
+  } else {
+    std::cout << "Available providers:\n";
+    for (const auto &p : ort.providers) {
+      std::cout << "  - " << p << "\n";
+    }
+  }
+}
+
 static int CmdPaths() {
   std::cout << "StudioCast Paths (Open CUDA)\n";
   std::cout << "  Open CUDA models root: " << OpenCudaRootForDisplay() << "\n";
@@ -339,16 +363,7 @@ static int CmdVideoSelfTest(int argc, char **argv) {
   return 2;
 #else
   const auto ort = studiocast::onnx::OrtSession::QueryRuntimeInfo();
-  std::cout << "ONNX Runtime version: "
-            << (ort.version.empty() ? "(unknown)" : ort.version) << "\n";
-  if (ort.providers.empty()) {
-    std::cout << "Available providers: (unknown)\n";
-  } else {
-    std::cout << "Available providers:\n";
-    for (const auto &p : ort.providers) {
-      std::cout << "  - " << p << "\n";
-    }
-  }
+  PrintOrtRuntimeInfo(ort);
 
   std::vector<fs::path> onnx_paths;
   std::string chosen;
@@ -580,18 +595,13 @@ static int CmdAudioSelfTest(int argc, char **argv) {
                "install onnxruntime dev package).\n";
   return 2;
 #else
-  const auto ort =
-      studiocast::open_audio::OpenAudioOrtSession::QueryRuntimeInfo();
-  std::cout << "ONNX Runtime version: "
-            << (ort.version.empty() ? "(unknown)" : ort.version) << "\n";
-  if (ort.providers.empty()) {
-    std::cout << "Available providers: (unknown)\n";
-  } else {
-    std::cout << "Available providers:\n";
-    for (const auto &p : ort.providers) {
-      std::cout << "  - " << p << "\n";
-    }
-  }
+  const auto ort = studiocast::onnx::OrtSession::QueryRuntimeInfo();
+  PrintOrtRuntimeInfo(ort);
+  std::cout << "Open Audio acceleration likely: "
+            << (ort.cuda_provider_present
+                    ? "cuda"
+                    : ort.cpu_provider_present ? "cpu_fallback" : "unknown")
+            << "\n";
 
   studiocast::audio::effects::BroadcastAudioEffects fx;
   fx.microphone.model_id = model_id;
@@ -782,16 +792,13 @@ static int CmdAudioBench(int argc, char **argv) {
   std::cout << "Provider pref : "
             << (cpu_only ? "CPU-only" : "CUDA (fallback to CPU)") << "\n\n";
 
-  const auto ort =
-      studiocast::open_audio::OpenAudioOrtSession::QueryRuntimeInfo();
-  std::cout << "ONNX Runtime version: "
-            << (ort.version.empty() ? "(unknown)" : ort.version) << "\n";
-  if (!ort.providers.empty()) {
-    std::cout << "Available providers:\n";
-    for (const auto &p : ort.providers) {
-      std::cout << "  - " << p << "\n";
-    }
-  }
+  const auto ort = studiocast::onnx::OrtSession::QueryRuntimeInfo();
+  PrintOrtRuntimeInfo(ort);
+  std::cout << "Open Audio acceleration likely: "
+            << (ort.cuda_provider_present
+                    ? "cuda"
+                    : ort.cpu_provider_present ? "cpu_fallback" : "unknown")
+            << "\n";
   std::cout << "\n";
 
   studiocast::open_audio::OrtSessionOptions opts;

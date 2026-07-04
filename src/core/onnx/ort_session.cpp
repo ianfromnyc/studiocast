@@ -8,11 +8,33 @@
 #include <vector>
 
 #if STUDIOCAST_HAVE_ONNXRUNTIME
+#include <dlfcn.h>
+
 #include <onnxruntime_c_api.h>
 #include <onnxruntime_cxx_api.h>
 #endif
 
 namespace studiocast::onnx {
+namespace {
+
+bool HasProvider(const std::vector<std::string> &providers,
+                 const char *provider) {
+  return std::find(providers.begin(), providers.end(), std::string(provider)) !=
+         providers.end();
+}
+
+#if STUDIOCAST_HAVE_ONNXRUNTIME
+std::string QueryOrtLibraryPath() {
+  Dl_info info{};
+  if (dladdr(reinterpret_cast<const void *>(&OrtGetApiBase), &info) != 0 &&
+      info.dli_fname && *info.dli_fname) {
+    return info.dli_fname;
+  }
+  return {};
+}
+#endif
+
+} // namespace
 
 bool OrtErrorLooksLikeVramOom(const std::string &ort_msg) {
   // Common failure strings seen from ORT CUDA EP when VRAM is exhausted or
@@ -49,11 +71,16 @@ std::string HumanizeOrtError(const std::string &ort_msg,
 OrtRuntimeInfo OrtSession::QueryRuntimeInfo() {
   OrtRuntimeInfo out;
 
+#if defined(STUDIOCAST_ORT_HAS_CUDA_EP_V2) && STUDIOCAST_ORT_HAS_CUDA_EP_V2
+  out.cuda_ep_v2_build = true;
+#endif
+
 #if STUDIOCAST_HAVE_ONNXRUNTIME
   const char *v = OrtGetApiBase()->GetVersionString();
   if (v) {
     out.version = v;
   }
+  out.library_path = QueryOrtLibraryPath();
 
   try {
     auto &api = Ort::GetApi();
@@ -78,6 +105,12 @@ OrtRuntimeInfo OrtSession::QueryRuntimeInfo() {
     // Best-effort only.
   }
 #endif
+
+  out.cuda_provider_present =
+      HasProvider(out.providers, "CUDAExecutionProvider");
+  out.tensorrt_provider_present =
+      HasProvider(out.providers, "TensorrtExecutionProvider");
+  out.cpu_provider_present = HasProvider(out.providers, "CPUExecutionProvider");
 
   return out;
 }

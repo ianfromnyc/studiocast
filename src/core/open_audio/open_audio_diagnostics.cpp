@@ -75,6 +75,19 @@ std::string OpenAudioDiagnostics::ToJson() const {
   AppendJsonStringArray(&oss, onnxruntime_providers);
   oss << ",";
 
+  oss << "\"onnxruntime_cuda_provider_present\":"
+      << BoolJson(onnxruntime_cuda_provider_present) << ",";
+  oss << "\"onnxruntime_tensorrt_provider_present\":"
+      << BoolJson(onnxruntime_tensorrt_provider_present) << ",";
+  oss << "\"onnxruntime_cpu_provider_present\":"
+      << BoolJson(onnxruntime_cpu_provider_present) << ",";
+  oss << "\"onnxruntime_cuda_ep_v2_build\":"
+      << BoolJson(onnxruntime_cuda_ep_v2_build) << ",";
+  oss << "\"onnxruntime_library_path\":\""
+      << JsonEscape(onnxruntime_library_path) << "\",";
+  oss << "\"acceleration_likely\":\"" << JsonEscape(acceleration_likely)
+      << "\",";
+
   oss << "\"installed_models\":";
   AppendJsonStringArray(&oss, installed_models);
   oss << ",";

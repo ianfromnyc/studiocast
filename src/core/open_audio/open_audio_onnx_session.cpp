@@ -2,9 +2,10 @@
 
 #include <algorithm>
 #include <sstream>
-#include <type_traits>
 #include <utility>
 #include <vector>
+
+#include "core/onnx/ort_session.h"
 
 #if STUDIOCAST_HAVE_ONNXRUNTIME
 #include <onnxruntime_c_api.h>
@@ -35,37 +36,14 @@ const OrtSessionInfo &OpenAudioOrtSession::info() const { return impl_->info; }
 
 OrtRuntimeInfo OpenAudioOrtSession::QueryRuntimeInfo() {
   OrtRuntimeInfo out;
-
-#if STUDIOCAST_HAVE_ONNXRUNTIME
-  const char *v = OrtGetApiBase()->GetVersionString();
-  if (v) {
-    out.version = v;
-  }
-
-  try {
-    auto &api = Ort::GetApi();
-    char **providers = nullptr;
-    int num = 0;
-    Ort::ThrowOnError(api.GetAvailableProviders(&providers, &num));
-    for (int i = 0; i < num; ++i) {
-      if (providers && providers[i]) {
-        out.providers.emplace_back(providers[i]);
-      }
-    }
-
-    // ORT changed this API from `void` to returning `OrtStatus*`
-    // (warn_unused_result).
-    if constexpr (std::is_void_v<decltype(api.ReleaseAvailableProviders(
-                      providers, num))>) {
-      api.ReleaseAvailableProviders(providers, num);
-    } else {
-      Ort::ThrowOnError(api.ReleaseAvailableProviders(providers, num));
-    }
-  } catch (const Ort::Exception &) {
-    // Best-effort only.
-  }
-#endif
-
+  const auto shared = studiocast::onnx::OrtSession::QueryRuntimeInfo();
+  out.version = shared.version;
+  out.providers = shared.providers;
+  out.cuda_provider_present = shared.cuda_provider_present;
+  out.tensorrt_provider_present = shared.tensorrt_provider_present;
+  out.cpu_provider_present = shared.cpu_provider_present;
+  out.cuda_ep_v2_build = shared.cuda_ep_v2_build;
+  out.library_path = shared.library_path;
   return out;
 }
 
