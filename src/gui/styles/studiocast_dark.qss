@@ -18,9 +18,21 @@
 
 /* Base */
 QWidget {
-  background: #0B0F14;
   color: #E7EEF8;
   font-size: 10.5pt;
+}
+
+QMainWindow,
+QDialog,
+QStackedWidget {
+  background: #0B0F14;
+}
+
+QLabel,
+QCheckBox,
+QRadioButton,
+QSlider {
+  background: transparent;
 }
 
 QMainWindow::separator {
