@@ -762,6 +762,15 @@ QFrame *EffectPanel(const QString &title, QWidget *parent,
   return panel;
 }
 
+void ConfigureModelCombo(QComboBox *combo) {
+  if (!combo)
+    return;
+  combo->setMinimumContentsLength(28);
+  combo->setSizeAdjustPolicy(
+      QComboBox::AdjustToMinimumContentsLengthWithIcon);
+  combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+}
+
 } // namespace
 
 VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
@@ -963,7 +972,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   auto *vbModelRow = new QHBoxLayout();
   vbModelLabel_ = new QLabel("Model:", vbBox);
   vbModelCombo_ = new QComboBox(vbBox);
-  vbModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  ConfigureModelCombo(vbModelCombo_);
   vbModelRow->addWidget(vbModelLabel_);
   vbModelRow->addWidget(vbModelCombo_, 1);
   vbLayout->addLayout(vbModelRow);
@@ -1010,7 +1019,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   auto *afModelRow = new QHBoxLayout();
   autoFrameModelLabel_ = new QLabel("Model:", afBox);
   autoFrameModelCombo_ = new QComboBox(afBox);
-  autoFrameModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  ConfigureModelCombo(autoFrameModelCombo_);
   afModelRow->addWidget(autoFrameModelLabel_);
   afModelRow->addWidget(autoFrameModelCombo_, 1);
   afLayout->addLayout(afModelRow);
@@ -1043,7 +1052,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   auto *ecModelRow = new QHBoxLayout();
   eyeContactModelLabel_ = new QLabel("Model:", ecBox);
   eyeContactModelCombo_ = new QComboBox(ecBox);
-  eyeContactModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  ConfigureModelCombo(eyeContactModelCombo_);
   ecModelRow->addWidget(eyeContactModelLabel_);
   ecModelRow->addWidget(eyeContactModelCombo_, 1);
   ecLayout->addLayout(ecModelRow);
@@ -1072,7 +1081,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   auto *dnModelRow = new QHBoxLayout();
   denoiseModelLabel_ = new QLabel("Model:", dnBox);
   denoiseModelCombo_ = new QComboBox(dnBox);
-  denoiseModelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+  ConfigureModelCombo(denoiseModelCombo_);
   dnModelRow->addWidget(denoiseModelLabel_);
   dnModelRow->addWidget(denoiseModelCombo_, 1);
   dnLayout->addLayout(dnModelRow);
