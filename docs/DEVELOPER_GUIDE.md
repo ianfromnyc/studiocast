@@ -51,27 +51,27 @@ before `project()`, so `PROJECT_VERSION`, the generated
 surfaces all use the same value.
 
 The current automatic versioning line starts at `0.2.0`. On every normal push
-to `main`, `.github/workflows/version-bump.yml` increments the patch component
-and commits the updated `VERSION` file back to `main` with a `[skip ci]`
+to `master`, `.github/workflows/version-bump.yml` increments the patch component
+and commits the updated `VERSION` file back to `master` with a `[skip ci]`
 message. The workflow skips bot commits and skips pushes that already changed
 `VERSION`, which prevents commit loops and lets maintainers intentionally set a
 new baseline such as `0.3.0`.
 
-If `main` is protected, repository settings must allow the GitHub Actions bot to
-push the version-bump commit.
+If `master` is protected, repository settings must allow the GitHub Actions bot
+to push the version-bump commit.
 
-For releases, wait for the automatic version-bump commit to land on `main`,
+For releases, wait for the automatic version-bump commit to land on `master`,
 then tag that commit with the matching version:
 
 ```bash
-git fetch origin main --tags
-git checkout origin/main
+git fetch origin master --tags
+git checkout origin/master
 git tag -a v0.2.1 -m "StudioCast 0.2.1"
 git push origin v0.2.1
 ```
 
 If maintainers need a new minor or major line, update `VERSION` in a normal
-change, merge it to `main`, and tag the resulting commit if it is a release.
+change, merge it to `master`, and tag the resulting commit if it is a release.
 
 ## Repo layout
 
@@ -201,6 +201,39 @@ Release packaging:
 - The packaged installer is still a source-build installer. The GUI defaults to
   the bundled source archive, and users can still point it at another release
   archive or a local checkout.
+
+First release checklist:
+
+1. Merge the release change to `master`.
+2. Wait for `.github/workflows/version-bump.yml` to commit the next `VERSION`
+   value back to `master`.
+3. Fetch the updated branch and tags:
+
+   ```bash
+   git fetch origin master --tags
+   git checkout origin/master
+   ```
+
+4. Confirm the release version:
+
+   ```bash
+   cat VERSION
+   ```
+
+5. Create and push an annotated tag that matches `VERSION`:
+
+   ```bash
+   version="$(cat VERSION)"
+   git tag -a "v${version}" -m "StudioCast ${version}"
+   git push origin "v${version}"
+   ```
+
+6. In GitHub, create and publish a Release for that tag. Publishing the Release
+   triggers `.github/workflows/release-packaging.yml`.
+7. After release packaging finishes, download the
+   `studiocast-gui-installer-ubuntu-22.04` workflow artifact and attach the
+   AppImage, AppDir archive, source archive, and SHA256 file to the GitHub
+   Release.
 
 Pinned AppImage tool updates:
 
