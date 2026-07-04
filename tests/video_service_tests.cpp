@@ -9,6 +9,13 @@
 
 #include "core/video/virtual_camera_service.h"
 
+namespace studiocast::tests {
+bool TestLatestFrameWinsOverwritesPendingWithBlockedProcessor();
+bool TestLatestFrameWinsStopWakesAndJoins();
+bool TestLatestFrameWinsGenerationRejectsStaleResults();
+bool TestLatestFrameWinsStatsCountersAndLastError();
+} // namespace studiocast::tests
+
 namespace {
 
 using studiocast::video::CameraPipelineConfig;
@@ -684,6 +691,15 @@ int main() {
        &TestVideoOutputDisappearanceStopsPipelineAndMarksUnavailable},
       {"video output recovery clears unavailable error",
        &TestVideoOutputRecoveryClearsUnavailableError},
+      {"latest-frame worker overwrites pending blocked work",
+       &studiocast::tests::
+           TestLatestFrameWinsOverwritesPendingWithBlockedProcessor},
+      {"latest-frame worker Stop wakes and joins",
+       &studiocast::tests::TestLatestFrameWinsStopWakesAndJoins},
+      {"latest-frame worker generation rejects stale results",
+       &studiocast::tests::TestLatestFrameWinsGenerationRejectsStaleResults},
+      {"latest-frame worker stats counters and last error",
+       &studiocast::tests::TestLatestFrameWinsStatsCountersAndLastError},
   };
 
   int failed = 0;

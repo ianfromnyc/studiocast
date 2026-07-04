@@ -127,6 +127,7 @@ add_library(studiocast_core
         src/core/open_video/model_pack_registry.h
         src/core/open_video/model_pack_registry.cpp
         src/core/open_video/frame_analysis_cache.h
+        src/core/open_video/latest_frame_wins_worker.h
         src/core/open_video/yunet_face_detector.h
         src/core/open_video/yunet_face_detector.cpp
         src/core/open_video/fastdvdnet_denoiser.h
@@ -751,6 +752,7 @@ if (BUILD_TESTING)
 
     add_executable(studiocast-video-tests
             tests/video_service_tests.cpp
+            tests/latest_frame_wins_worker_tests.cpp
     )
 
     target_link_libraries(studiocast-video-tests PRIVATE studiocast_core)
