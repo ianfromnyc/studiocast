@@ -46,6 +46,23 @@ QStringList StringListValue(const QJsonObject &obj, const QString &key) {
   return out;
 }
 
+QString LowerTrimmed(const QString &value) { return value.trimmed().toLower(); }
+
+QString PipelineState(const QJsonObject &obj) {
+  return LowerTrimmed(obj.value(QStringLiteral("state")).toString());
+}
+
+bool StateIs(const QString &state, const QString &want) {
+  return state == want;
+}
+
+bool LooksLikeCameraInputError(const QString &error) {
+  const QString trimmed = error.trimmed();
+  return trimmed.contains(QStringLiteral("Failed to open capture device")) ||
+         trimmed.contains(QStringLiteral("No readable camera device found")) ||
+         trimmed.contains(QStringLiteral("Failed to auto-select a usable camera"));
+}
+
 QStringList StringMapDetails(const QJsonObject &obj, const QString &key) {
   QStringList out;
   const QJsonObject map = ObjectValue(obj, key);
@@ -469,23 +486,29 @@ DeviceReadiness ParseCamera(const QJsonObject &video) {
   const QStringList disabledReasons = DisabledEffectReasons(video);
 
   const QString lastError = video.value(QStringLiteral("last_error")).toString();
+  const QString inputDeviceError =
+      video.value(QStringLiteral("input_device_error")).toString();
   const QString virtualDeviceError =
       video.value(QStringLiteral("virtual_device_error")).toString();
   const QString consumerError =
       video.value(QStringLiteral("consumer_error")).toString();
-  if (!lastError.isEmpty()) {
-    return WithNotes(
-        MakeDevice(ReadinessState::RecoverableError,
-                   QStringLiteral("Camera reported an error."), lastError),
-        notes, disabledReasons);
-  }
-  if (!virtualDeviceError.isEmpty()) {
+  const bool virtualPresent =
+      video.value(QStringLiteral("virtual_device_present")).toBool(false);
+  const bool virtualAvailable =
+      video.value(QStringLiteral("virtual_device_available")).toBool(false);
+  if (!virtualPresent || !virtualAvailable || !virtualDeviceError.isEmpty()) {
     return WithNotes(
         MakeDevice(ReadinessState::MissingVirtualDevice,
-                   QStringLiteral("StudioCast Camera is not available."),
-                   virtualDeviceError),
+                   !virtualDeviceError.isEmpty()
+                       ? QStringLiteral("StudioCast Camera is not available.")
+                       : QStringLiteral("StudioCast Camera needs setup."),
+                   virtualDeviceError.isEmpty()
+                       ? QStringLiteral("No writable virtual camera is "
+                                        "available.")
+                       : virtualDeviceError),
         notes, disabledReasons);
   }
+
   if (!consumerError.isEmpty()) {
     return WithNotes(
         MakeDevice(ReadinessState::RecoverableError,
@@ -495,15 +518,23 @@ DeviceReadiness ParseCamera(const QJsonObject &video) {
         notes, disabledReasons);
   }
 
-  const bool virtualPresent =
-      video.value(QStringLiteral("virtual_device_present")).toBool(false);
-  const bool virtualAvailable =
-      video.value(QStringLiteral("virtual_device_available")).toBool(false);
-  if (!virtualPresent || !virtualAvailable) {
+  // Newer payloads may report a structured input_device_error. Older daemon
+  // builds only expose physical capture failures via known pipeline start
+  // messages, so keep that fallback narrow.
+  if (!inputDeviceError.trimmed().isEmpty() ||
+      LooksLikeCameraInputError(lastError)) {
     return WithNotes(
-        MakeDevice(ReadinessState::MissingVirtualDevice,
-                   QStringLiteral("StudioCast Camera needs setup."),
-                   QStringLiteral("No writable virtual camera is available.")),
+        MakeDevice(ReadinessState::NoPhysicalDevice,
+                   QStringLiteral("Choose a physical camera input."),
+                   inputDeviceError.trimmed().isEmpty() ? lastError
+                                                        : inputDeviceError),
+        notes, disabledReasons);
+  }
+
+  if (!lastError.isEmpty()) {
+    return WithNotes(
+        MakeDevice(ReadinessState::RecoverableError,
+                   QStringLiteral("Camera reported an error."), lastError),
         notes, disabledReasons);
   }
 
@@ -511,16 +542,23 @@ DeviceReadiness ParseCamera(const QJsonObject &video) {
   const bool running = pipeline.value(QStringLiteral("running")).toBool(false);
   const bool starting = pipeline.value(QStringLiteral("starting")).toBool(false);
   const int consumers = video.value(QStringLiteral("consumer_count")).toInt(0);
-  if (enabled && (running || starting)) {
+  const QString pipelineState = PipelineState(pipeline);
+  if (enabled &&
+      (running || starting || StateIs(pipelineState, QStringLiteral("running")) ||
+       StateIs(pipelineState, QStringLiteral("starting")))) {
     return WithNotes(
         MakeDevice(ReadinessState::Processing,
-                   QStringLiteral("Camera processing is active.")),
+                   starting || StateIs(pipelineState, QStringLiteral("starting"))
+                       ? QStringLiteral("Camera processing is starting.")
+                       : QStringLiteral("Camera processing is active.")),
         notes, disabledReasons);
   }
   if (enabled) {
     return WithNotes(
         MakeDevice(ReadinessState::Idle,
-                   consumers > 0
+                   StateIs(pipelineState, QStringLiteral("backing_off"))
+                       ? QStringLiteral("Camera is waiting before retrying.")
+                       : consumers > 0
                        ? QStringLiteral("Camera is enabled and waiting.")
                        : QStringLiteral("Ready. Waiting for an app to use "
                                         "StudioCast Camera."),
@@ -541,6 +579,8 @@ DeviceReadiness ParseMicrophone(const QJsonObject &audio) {
 
   const QString sourceError =
       audio.value(QStringLiteral("source_error")).toString();
+  const QString consumerError =
+      audio.value(QStringLiteral("mic_consumer_error")).toString().trimmed();
   QStringList notes = StringListValue(audio, QStringLiteral("source_warnings"));
   const QJsonObject pipeline = ObjectValue(audio, QStringLiteral("pipeline"));
   const QString effectsNote =
@@ -575,17 +615,54 @@ DeviceReadiness ParseMicrophone(const QJsonObject &audio) {
         notes);
   }
 
+  const bool enabled = audio.value(QStringLiteral("enabled")).toBool(false);
   const bool running = pipeline.value(QStringLiteral("running")).toBool(false);
   const bool starting = pipeline.value(QStringLiteral("starting")).toBool(false);
-  if (running || starting) {
+  const QString pipelineState = PipelineState(pipeline);
+  if (running || starting || StateIs(pipelineState, QStringLiteral("running")) ||
+      StateIs(pipelineState, QStringLiteral("starting"))) {
     return WithNotes(
         MakeDevice(ReadinessState::Processing,
-                   QStringLiteral("Microphone processing is active.")),
+                   starting || StateIs(pipelineState, QStringLiteral("starting"))
+                       ? QStringLiteral("Microphone processing is starting.")
+                       : QStringLiteral("Microphone processing is active.")),
         notes);
   }
+
+  if (!consumerError.isEmpty() && enabled) {
+    return WithNotes(
+        MakeDevice(ReadinessState::RecoverableError,
+                   QStringLiteral("Microphone consumer detection reported an "
+                                  "error."),
+                   consumerError),
+        notes);
+  }
+
+  if (enabled && StateIs(pipelineState, QStringLiteral("idle_no_consumer"))) {
+    return WithNotes(
+        MakeDevice(ReadinessState::Idle,
+                   QStringLiteral("Ready. Waiting for an app to use "
+                                  "StudioCast Microphone."),
+                   pipeline.value(QStringLiteral("idle_reason")).toString()),
+        notes);
+  }
+
+  if (!enabled || StateIs(pipelineState, QStringLiteral("disabled"))) {
+    return WithNotes(
+        MakeDevice(ReadinessState::Ready,
+                   QStringLiteral("StudioCast Microphone is present; processing "
+                                  "is off.")),
+        notes);
+  }
+
+  // Older daemon payloads did not expose enough microphone consumer/pipeline
+  // state to prove idle-no-consumer. Keep this generic instead of claiming
+  // no-consumer readiness from absence of activity.
   return WithNotes(
       MakeDevice(ReadinessState::Ready,
-                 QStringLiteral("StudioCast Microphone is available.")),
+                 QStringLiteral("Microphone status is reported; processing is "
+                                "not active."),
+                 pipeline.value(QStringLiteral("idle_reason")).toString()),
       notes);
 }
 
@@ -621,6 +698,7 @@ DeviceReadiness ParseSpeakers(const QJsonObject &audio) {
         notes);
   }
 
+  const bool enabled = speakers.value(QStringLiteral("enabled")).toBool(false);
   const bool present = speakers.value(QStringLiteral("present")).toBool(
       audio.value(QStringLiteral("create_virtual_speakers")).toBool(false));
   if (!present) {
@@ -647,19 +725,76 @@ DeviceReadiness ParseSpeakers(const QJsonObject &audio) {
   const bool routing =
       speakers.value(QStringLiteral("routing_active")).toBool(false);
   const QString routeMode =
-      speakers.value(QStringLiteral("route_mode")).toString();
-  if (routing) {
+      LowerTrimmed(speakers.value(QStringLiteral("route_mode")).toString());
+  const bool pipelineRunning =
+      speakers.value(QStringLiteral("pipeline_running")).toBool(false);
+  const bool pipelineStarting =
+      speakers.value(QStringLiteral("pipeline_starting")).toBool(false);
+  const QString pipelineState =
+      LowerTrimmed(speakers.value(QStringLiteral("pipeline_state")).toString());
+  const QString pipelineIdleReason =
+      speakers.value(QStringLiteral("pipeline_idle_reason")).toString();
+
+  if (routing || pipelineRunning ||
+      StateIs(pipelineState, QStringLiteral("running"))) {
     return WithNotes(
         MakeDevice(ReadinessState::Processing,
-                   routeMode == QStringLiteral("pipeline")
+                   routeMode == QStringLiteral("pipeline") || pipelineRunning
                        ? QStringLiteral("Processed speaker routing is active.")
                        : QStringLiteral("Speaker pass-through routing is "
                                         "active.")),
         notes);
   }
+  if (pipelineStarting || StateIs(pipelineState, QStringLiteral("starting"))) {
+    return WithNotes(
+        MakeDevice(ReadinessState::Processing,
+                   QStringLiteral("Speaker routing is starting.")),
+        notes);
+  }
+
+  if (!consumerError.isEmpty() && enabled &&
+      routeMode == QStringLiteral("pipeline")) {
+    return WithNotes(
+        MakeDevice(ReadinessState::RecoverableError,
+                   QStringLiteral("Speaker consumer detection reported an "
+                                  "error."),
+                   consumerError),
+        notes);
+  }
+
+  if (enabled && routeMode == QStringLiteral("pipeline") &&
+      StateIs(pipelineState, QStringLiteral("idle_no_consumer"))) {
+    return WithNotes(
+        MakeDevice(ReadinessState::Idle,
+                   QStringLiteral("Ready. Waiting for an app to use "
+                                  "StudioCast Speakers."),
+                   pipelineIdleReason),
+        notes);
+  }
+
+  if (!enabled || routeMode == QStringLiteral("off") ||
+      StateIs(pipelineState, QStringLiteral("disabled"))) {
+    return WithNotes(
+        MakeDevice(ReadinessState::Ready,
+                   QStringLiteral("StudioCast Speakers are present; routing is "
+                                  "off.")),
+        notes);
+  }
+
+  if (routeMode == QStringLiteral("loopback")) {
+    return WithNotes(
+        MakeDevice(ReadinessState::Ready,
+                   QStringLiteral("Speaker pass-through routing is configured "
+                                  "but not active.")),
+        notes);
+  }
+
+  // Older daemon payloads reported present/routing booleans without enough
+  // consumer pipeline state to distinguish idle-no-consumer from stopped.
   return WithNotes(
       MakeDevice(ReadinessState::Ready,
-                 QStringLiteral("StudioCast Speakers are available.")),
+                 QStringLiteral("Speaker routing status is reported; routing is "
+                                "not active.")),
       notes);
 }
 
@@ -791,6 +926,31 @@ QString DaemonStatusSnapshot::ServiceDetail() const {
                          : parts.join(QStringLiteral(" - "));
 }
 
+QString DaemonStatusSnapshot::UserServiceSummary() const {
+  if (!reachable)
+    return QStringLiteral("Background service unavailable");
+  if (!parsed)
+    return QStringLiteral("Status needs attention");
+  if (!serviceRunning)
+    return QStringLiteral("Background service not ready");
+  return QStringLiteral("Background service connected");
+}
+
+QString DaemonStatusSnapshot::UserServiceDetail() const {
+  if (!reachable)
+    return QStringLiteral(
+        "StudioCast background service is unavailable. Open Support for "
+        "technical details.");
+  if (!parsed)
+    return QStringLiteral(
+        "StudioCast received an unreadable status update. Open Support for "
+        "technical details.");
+  if (!serviceRunning)
+    return QStringLiteral(
+        "StudioCast background service is starting or not ready yet.");
+  return QStringLiteral("StudioCast is connected to the background service.");
+}
+
 QString DaemonStatusSnapshot::RawDiagnosticsText() const {
   if (!rawJson.trimmed().isEmpty())
     return rawJson;
@@ -808,11 +968,11 @@ QString ReadinessLabel(ReadinessState state) {
   case ReadinessState::NeedsSetup:
     return QStringLiteral("Needs setup");
   case ReadinessState::DaemonUnavailable:
-    return QStringLiteral("Daemon unavailable");
+    return QStringLiteral("Service unavailable");
   case ReadinessState::MissingVirtualDevice:
-    return QStringLiteral("Missing virtual device");
+    return QStringLiteral("Device missing");
   case ReadinessState::NoPhysicalDevice:
-    return QStringLiteral("No physical device");
+    return QStringLiteral("Needs selection");
   case ReadinessState::Idle:
     return QStringLiteral("Idle");
   case ReadinessState::Processing:

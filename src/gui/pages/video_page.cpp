@@ -72,6 +72,13 @@ void GuiPreviewDbg(const std::string &msg) {
   std::cerr << "[gui_preview_dbg] " << msg << "\n";
 }
 
+bool LooksLikeCameraInputError(const QString &error) {
+  const QString trimmed = error.trimmed();
+  return trimmed.contains(QStringLiteral("Failed to open capture device")) ||
+         trimmed.contains(QStringLiteral("No readable camera device found")) ||
+         trimmed.contains(QStringLiteral("Failed to auto-select a usable camera"));
+}
+
 } // namespace
 
 class VideoPreviewWidget final : public QWidget {
@@ -828,7 +835,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   auto *runLayout = new QVBoxLayout(runBox);
   runLayout->setSpacing(10);
 
-  cameraStateLabel_ = new QLabel("Checking daemon", runBox);
+  cameraStateLabel_ = new QLabel("Checking service", runBox);
   cameraStateLabel_->setProperty("scRole", "statusPill");
   cameraStateLabel_->setAlignment(Qt::AlignCenter);
   runLayout->addWidget(cameraStateLabel_);
@@ -899,7 +906,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   refreshBtn_ = new QPushButton("Refresh", setupBox);
   setupGrid->addWidget(refreshBtn_, 0, 2);
 
-  setupGrid->addWidget(new QLabel("Output (v4l2loopback):", setupBox), 1, 0);
+  setupGrid->addWidget(new QLabel("Virtual camera:", setupBox), 1, 0);
   outputCombo_ = new QComboBox(setupBox);
   setupGrid->addWidget(outputCombo_, 1, 1, 1, 2);
 
@@ -934,8 +941,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
 
   auto *quickFxRow = new QHBoxLayout();
   mirrorCheck_ = new QCheckBox("Mirror", effectsBox);
-  mirrorCheck_->setToolTip(
-      "Writes the canonical camera mirror setting through daemon effects JSON.");
+  mirrorCheck_->setToolTip("Saves the camera mirror setting.");
   quickFxRow->addWidget(mirrorCheck_);
   quickFxRow->addStretch(1);
   effectsLayout->addLayout(quickFxRow);
@@ -1414,7 +1420,7 @@ void VideoPage::Refresh() {
   }
 
   if (outAdded == 0) {
-    outputCombo_->addItem("<no writable v4l2loopback found>", "");
+    outputCombo_->addItem("<virtual camera missing>", "");
     outputCombo_->setEnabled(false);
   } else {
     outputCombo_->setEnabled(true);
@@ -1720,10 +1726,8 @@ bool VideoPage::SendDaemonVideoConfig() {
 
   if (outDev.isEmpty()) {
     ShowError("Start failed",
-              "No v4l2loopback output found.\n\nLoad v4l2loopback (use the "
-              "suggested modprobe command).\n\n"
-              "Note: studiocastd keeps the virtual device discoverable, but it "
-              "cannot create the kernel module.");
+              "Virtual camera is missing.\n\nOpen Diagnostics for the setup "
+              "command, or open Support for technical details.");
     return false;
   }
 
@@ -1742,9 +1746,9 @@ bool VideoPage::SendDaemonVideoConfig() {
     }
     if (!resolvedDifferentOutput) {
       ShowError("Start failed",
-                "The selected input is also the only writable v4l2loopback "
-                "output.\n\nChoose a different input device or create a "
-                "separate StudioCast output loopback.");
+                "The selected input is also the only virtual camera output.\n\n"
+                "Choose a different input camera or create a separate virtual "
+                "camera.");
       return false;
     }
   }
@@ -1752,9 +1756,9 @@ bool VideoPage::SendDaemonVideoConfig() {
   if (explicitInput && !outDev.isEmpty() && outDev != "auto" &&
       inDev == outDev) {
     ShowError("Start failed",
-              "The input camera and virtual output cannot be the same device.\n\n"
+              "The input camera and virtual camera cannot be the same device.\n\n"
               "Choose a physical/readable input device and a different "
-              "writable v4l2loopback output.");
+              "virtual camera.");
     return false;
   }
 
@@ -1768,9 +1772,14 @@ bool VideoPage::SendDaemonVideoConfig() {
 
   QString err;
   if (!DaemonRequest(req.str(), nullptr, &err)) {
+    if (statusText_) {
+      SetPlainTextPreservingScroll(
+          statusText_,
+          QStringLiteral("Camera settings save failed:\n%1").arg(err));
+    }
     ShowError("Start failed",
-              "Failed to configure studiocastd:\n\n" + err +
-                  "\n\nIs studiocastd running?\nTry: ./build/studiocastd");
+              "Camera settings were not saved.\n\nStudioCast background "
+              "service is unavailable. Open Support for technical details.");
     return false;
   }
 
@@ -1896,7 +1905,14 @@ bool VideoPage::SendDaemonVideoEffects() {
 
   QString err;
   if (!DaemonRequest(req, nullptr, &err)) {
-    ShowError("Effects update failed", err);
+    if (statusText_) {
+      SetPlainTextPreservingScroll(
+          statusText_,
+          QStringLiteral("Camera effects save failed:\n%1").arg(err));
+    }
+    ShowError("Effects update failed",
+              QStringLiteral("Camera effects were not saved.\n\nOpen Support "
+                             "for technical details."));
     return false;
   }
   return true;
@@ -1906,7 +1922,14 @@ bool VideoPage::SendDaemonEnabled(bool enabled) {
   std::string req = std::string("SET_ENABLED enabled=") + (enabled ? "1" : "0");
   QString err;
   if (!DaemonRequest(req, nullptr, &err)) {
-    ShowError("Start/Stop failed", err);
+    if (statusText_) {
+      SetPlainTextPreservingScroll(
+          statusText_,
+          QStringLiteral("Camera start/stop failed:\n%1").arg(err));
+    }
+    ShowError("Start/Stop failed",
+              QStringLiteral("Camera state was not changed.\n\nOpen Support "
+                             "for technical details."));
     return false;
   }
   return true;
@@ -2507,7 +2530,7 @@ void VideoPage::UpdateUiEnabled() {
       const auto fmtOpenCudaBlocked = [&]() -> QString {
         QString s = "Open Source unavailable.";
         if (!st.open_cuda_present) {
-          s += "\nStatus not reported by daemon.";
+          s += "\nStatus is not available.";
         } else if (!st.open_cuda_ok) {
           if (st.open_cuda_installed_models.isEmpty()) {
             s += "\nNo usable model packs were found.";
@@ -2662,7 +2685,7 @@ void VideoPage::UpdateUiEnabled() {
 
   auto effectUnavailableTooltip = [&](const QString &id) -> QString {
     if (!daemonReachable_)
-      return "Daemon unreachable.";
+      return "Background service unavailable.";
 
     if (st.effects_plan_disabled.contains(id)) {
       return st.effects_plan_disabled.value(id);
@@ -2682,7 +2705,7 @@ void VideoPage::UpdateUiEnabled() {
     if (enginePref ==
         studiocast::video::effects::EffectsEnginePreference::open_cuda) {
       if (!st.open_cuda_present) {
-        return "Open Source status not reported by daemon.";
+        return "Open Source status is not available.";
       }
       if (!st.open_cuda_ok) {
         QStringList lines;
@@ -2737,7 +2760,7 @@ void VideoPage::UpdateUiEnabled() {
 
     if (st.maxine_available_effects.isEmpty() &&
         st.maxine_missing_effects.isEmpty()) {
-      return "Effect availability not reported by daemon.";
+      return "Effect availability is not available.";
     }
     return "Effect is unavailable.";
   };
@@ -2754,13 +2777,14 @@ void VideoPage::UpdateUiEnabled() {
     const bool mirrorOn = mirrorCheck_->isChecked();
     mirrorCheck_->setEnabled(daemonReachable_ && (mirrorAvailable || mirrorOn));
     if (!daemonReachable_) {
-      mirrorCheck_->setToolTip(QStringLiteral("Daemon unreachable."));
+      mirrorCheck_->setToolTip(
+          QStringLiteral("Background service unavailable."));
     } else if (st.effects_plan_disabled.contains(QStringLiteral("mirror"))) {
       mirrorCheck_->setToolTip(
           st.effects_plan_disabled.value(QStringLiteral("mirror")));
     } else {
       mirrorCheck_->setToolTip(QStringLiteral(
-          "Writes the canonical camera mirror setting through daemon effects JSON."));
+          "Saves the camera mirror setting."));
     }
   }
 
@@ -3267,7 +3291,7 @@ void VideoPage::UpdateUiEnabled() {
   if (previewCheck_) {
     previewCheck_->setEnabled(daemonReachable_);
     if (!daemonReachable_) {
-      previewCheck_->setToolTip("Daemon unreachable.");
+      previewCheck_->setToolTip("Background service unavailable.");
     } else if (!enabled) {
       previewCheck_->setToolTip("Start the camera before opening preview.");
     } else {
@@ -3323,16 +3347,14 @@ void VideoPage::UpdateStatusText() {
 
   if (!daemonReachable_) {
     if (cameraStateLabel_) {
-      cameraStateLabel_->setText(QStringLiteral("Daemon unavailable"));
+      cameraStateLabel_->setText(QStringLiteral("Service unavailable"));
       SetDynamicProperty(cameraStateLabel_, "scStatus", QStringLiteral("error"));
     }
     if (cameraDetailLabel_) {
       QStringList lines;
-      lines << QStringLiteral("StudioCast background service is not reachable.");
-      if (!derr.isEmpty())
-        lines << derr;
-      if (!parseErr.isEmpty())
-        lines << parseErr;
+      lines << QStringLiteral(
+          "StudioCast background service is unavailable.");
+      lines << QStringLiteral("Open Support for technical details.");
       cameraDetailLabel_->setText(lines.join(QStringLiteral("\n")));
     }
 
@@ -3366,21 +3388,45 @@ void VideoPage::UpdateStatusText() {
     QString state = QStringLiteral("Ready");
     QString statusProperty = QStringLiteral("good");
     QStringList details;
+    const QString pipelineStateLower = pipelineState.trimmed().toLower();
+    const bool inputError = LooksLikeCameraInputError(st.last_error);
 
     if (!st.virtual_device_present || !st.virtual_device_available) {
-      state = QStringLiteral("Needs setup");
+      state = QStringLiteral("Virtual camera missing");
       statusProperty = QStringLiteral("warning");
+      details << QStringLiteral("Virtual camera is missing.");
+      details << QStringLiteral("Open Diagnostics for setup guidance.");
+    } else if (!st.consumer_error.trimmed().isEmpty()) {
+      state = QStringLiteral("Needs attention");
+      statusProperty = QStringLiteral("error");
       details << QStringLiteral(
-          "StudioCast Camera is not available to other apps.");
-      if (!st.virtual_device_error.isEmpty())
-        details << st.virtual_device_error;
-    } else if (st.enabled && st.pipeline_running) {
+          "StudioCast cannot tell when other apps are using the camera. Open "
+          "Support for technical details.");
+    } else if (inputError) {
+      state = QStringLiteral("No camera input is selected");
+      statusProperty = QStringLiteral("warning");
+      details << QStringLiteral("Choose a readable physical camera input.");
+    } else if (st.enabled && (st.pipeline_running ||
+                              pipelineStateLower == QStringLiteral("running"))) {
       state = QStringLiteral("Running");
       details << QStringLiteral("Processing is active.");
-    } else if (st.enabled && st.pipeline_starting) {
+    } else if (st.enabled && (st.pipeline_starting ||
+                              pipelineStateLower == QStringLiteral("starting"))) {
       state = QStringLiteral("Starting");
       statusProperty = QStringLiteral("warning");
       details << QStringLiteral("Camera processing is starting.");
+    } else if (st.enabled &&
+               pipelineStateLower == QStringLiteral("backing_off")) {
+      state = QStringLiteral("Retry pending");
+      statusProperty = QStringLiteral("warning");
+      details << QStringLiteral("Camera processing will retry shortly.");
+    } else if (st.enabled &&
+               pipelineStateLower ==
+                   QStringLiteral("waiting_for_stable_consumer")) {
+      state = QStringLiteral("Waiting for consumer");
+      details << QStringLiteral(
+          "An app opened StudioCast Camera; processing starts after the "
+          "consumer is stable.");
     } else if (st.enabled) {
       state = QStringLiteral("Waiting for consumer");
       details << QStringLiteral(
@@ -3389,12 +3435,15 @@ void VideoPage::UpdateStatusText() {
       details << QStringLiteral("Ready to start StudioCast Camera.");
     }
 
-    details << QStringLiteral("Consumers: %1").arg(st.consumer_count);
-    if (!pipelineState.isEmpty())
-      details << QStringLiteral("Pipeline: %1").arg(pipelineState);
+    details << QStringLiteral("Apps using camera: %1").arg(st.consumer_count);
     if (!st.last_error.isEmpty()) {
-      statusProperty = QStringLiteral("error");
-      details << QStringLiteral("Last error: %1").arg(st.last_error);
+      if (!inputError)
+        statusProperty = QStringLiteral("error");
+      if (!inputError) {
+        details << QStringLiteral(
+            "Camera processing reported a problem. Open Support for technical "
+            "details.");
+      }
     }
 
     if (cameraStateLabel_) {
