@@ -189,7 +189,7 @@ Install + enable it for dev/MVP testing:
 systemctl --user status studiocastd.service
 ```
 
-## Effects model and availability (canonical)
+## Effects model and availability
 
 * Canonical effect schema type: `BroadcastCameraEffects` in `src/core/video/effects/broadcast_effects.h`
 * Stable effect IDs / parameter IDs / ranges for IPC + JSON: `src/core/video/effects/broadcast_effect_contract.h`
@@ -203,8 +203,6 @@ systemctl --user status studiocastd.service
 
 ## TODO
 
-* Test all open-source models end-to-end
-* Improve stability under load and consumer connect/disconnect behavior
 * Improve packaging and install flow for non-developers
 * Adaptive streaming (e.g. adaptive bitrates/frame sizes to reduce latency on the fly)
 * Add additional open-source models
