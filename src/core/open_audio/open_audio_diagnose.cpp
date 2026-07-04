@@ -41,6 +41,28 @@ OpenAudioDiagnostics DiagnoseOpenAudioDefault() {
       "Each pack must contain: model.json, the ONNX file referenced by "
       "onnx_filename, and LICENSE.txt.");
 
+  {
+    const auto ort = OpenAudioOrtSession::QueryRuntimeInfo();
+    od.onnxruntime_version = ort.version;
+    od.onnxruntime_providers = ort.providers;
+    od.onnxruntime_cuda_provider_present = ort.cuda_provider_present;
+    od.onnxruntime_tensorrt_provider_present = ort.tensorrt_provider_present;
+    od.onnxruntime_cpu_provider_present = ort.cpu_provider_present;
+    od.onnxruntime_cuda_ep_v2_build = ort.cuda_ep_v2_build;
+    od.onnxruntime_library_path = ort.library_path;
+#if STUDIOCAST_HAVE_ONNXRUNTIME
+    if (ort.cuda_provider_present) {
+      od.acceleration_likely = "cuda";
+    } else if (ort.cpu_provider_present) {
+      od.acceleration_likely = "cpu_fallback";
+    } else {
+      od.acceleration_likely = "unknown";
+    }
+#else
+    od.acceleration_likely = "unavailable";
+#endif
+  }
+
   const auto block_effects = [&](const char *reason_code) {
     od.blocked_effects[std::string(
         studiocast::audio::effects::contract::kEffectIdNoiseRemoval)] =
@@ -60,12 +82,6 @@ OpenAudioDiagnostics DiagnoseOpenAudioDefault() {
   od.install_hints.push_back("Rebuild with -DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON "
                              "(requires ONNX Runtime).");
 #elif STUDIOCAST_HAVE_ONNXRUNTIME
-  {
-    const auto ort = OpenAudioOrtSession::QueryRuntimeInfo();
-    od.onnxruntime_version = ort.version;
-    od.onnxruntime_providers = ort.providers;
-  }
-
   if (od.installed_models.empty()) {
     od.ok = false;
     block_effects("missing_model_packs");

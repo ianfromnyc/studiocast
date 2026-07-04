@@ -104,6 +104,7 @@ public:
   using cuCtxSetCurrent_t = CUresult (*)(CUcontext ctx);
   using cuCtxGetCurrent_t = CUresult (*)(CUcontext *pctx);
   using cuGetErrorString_t = CUresult (*)(CUresult error, const char **pStr);
+  using cuDriverGetVersion_t = CUresult (*)(int *driverVersion);
 
   struct Functions {
     cuInit_t cuInit = nullptr;
@@ -124,6 +125,7 @@ public:
     cuCtxSetCurrent_t cuCtxSetCurrent = nullptr;
     cuCtxGetCurrent_t cuCtxGetCurrent = nullptr;
     cuGetErrorString_t cuGetErrorString = nullptr;
+    cuDriverGetVersion_t cuDriverGetVersion = nullptr;
   };
 
   CudaDriverApi();

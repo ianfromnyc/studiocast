@@ -1,6 +1,7 @@
 #include "core/open_video/diagnose.h"
 
 #include "core/maxine/cuda_driver_api.h"
+#include "core/onnx/ort_session.h"
 #include "core/open_video/model_pack_registry.h"
 #include "core/util/xdg.h"
 #include "core/video/effects/broadcast_effect_contract.h"
@@ -40,6 +41,17 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
                              "/matting/Good Quality/model.json");
   od.install_hints.push_back(
       "Each pack must contain: model.json, model.onnx, LICENSE.txt");
+
+  {
+    const auto ort = studiocast::onnx::OrtSession::QueryRuntimeInfo();
+    od.onnxruntime_version = ort.version;
+    od.onnxruntime_providers = ort.providers;
+    od.onnxruntime_cuda_provider_present = ort.cuda_provider_present;
+    od.onnxruntime_tensorrt_provider_present = ort.tensorrt_provider_present;
+    od.onnxruntime_cpu_provider_present = ort.cpu_provider_present;
+    od.onnxruntime_cuda_ep_v2_build = ort.cuda_ep_v2_build;
+    od.onnxruntime_library_path = ort.library_path;
+  }
 
   const auto block_open_cuda_effects = [&](const char *reason_code) {
     od.blocked_effects[std::string(
@@ -90,32 +102,72 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
   // CUDA driver/device gate. This avoids repeatedly attempting to start the
   // pipeline only to fail deep in Open CUDA initialization when no NVIDIA
   // driver/GPU is available.
-  bool cuda_ok = true;
+  bool cuda_ok = false;
   std::string cuda_err;
   {
     studiocast::maxine::CudaDriverApi cuda;
     std::string e;
     if (!cuda.Initialize(&e)) {
-      cuda_ok = false;
       cuda_err = e.empty() ? std::string("CUDA driver API not available.") : e;
-    } else if (!cuda.EnsureContext(&e)) {
-      cuda_ok = false;
-      cuda_err = e.empty() ? std::string("Failed to ensure CUDA context.") : e;
+    } else {
+      od.cuda_driver_api_available = true;
+
+      if (cuda.f().cuDriverGetVersion) {
+        int version = 0;
+        const auto st = cuda.f().cuDriverGetVersion(&version);
+        if (st == studiocast::maxine::CUDA_SUCCESS) {
+          od.cuda_driver_version = version;
+        } else if (od.cuda_driver_error.empty()) {
+          od.cuda_driver_error =
+              "cuDriverGetVersion failed: " + cuda.StatusToString(st);
+        }
+      }
+
+      if (cuda.f().cuDeviceGetCount) {
+        int count = 0;
+        const auto st = cuda.f().cuDeviceGetCount(&count);
+        if (st == studiocast::maxine::CUDA_SUCCESS) {
+          od.cuda_device_count = count;
+        } else if (od.cuda_driver_error.empty()) {
+          od.cuda_driver_error =
+              "cuDeviceGetCount failed: " + cuda.StatusToString(st);
+        }
+      }
+
+      if (!cuda.EnsureContext(&e)) {
+        od.cuda_context_error =
+            e.empty() ? std::string("Failed to ensure CUDA context.") : e;
+        cuda_err = od.cuda_context_error;
+      } else {
+        od.cuda_context_available = true;
+        cuda_ok = true;
+      }
     }
   }
 
   if (!cuda_ok) {
     od.ok = false;
     block_open_cuda_effects("cuda_unavailable");
+    if (od.cuda_driver_error.empty() && !cuda_err.empty() &&
+        !od.cuda_driver_api_available) {
+      od.cuda_driver_error = cuda_err;
+    }
     od.install_hints.push_back(std::string("CUDA not available: ") + cuda_err);
   } else {
     od.ok = true;
 
-    // Open CUDA Video Noise Removal is implemented without model packs.
+    // Open CUDA Video Noise Removal has a CUDA-kernel fallback and must not be
+    // blocked only because the ORT CUDA EP is unavailable.
     od.available_effects.push_back(std::string(
         studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval));
 
-    if (od.installed_models.empty()) {
+    if (!od.onnxruntime_cuda_provider_present) {
+      block_open_cuda_matting_effects(
+          "onnxruntime_cuda_provider_unavailable");
+      od.install_hints.push_back(
+          "ONNX Runtime CUDAExecutionProvider is not available; "
+          "matting-based Open CUDA effects require the ORT CUDA provider.");
+    } else if (od.installed_models.empty()) {
       // Segmentation/matting-based effects require at least one usable model
       // pack.
       block_open_cuda_matting_effects("missing_model_packs");

@@ -134,6 +134,9 @@ bool CudaDriverApi::LoadSymbols(std::string *error_out) {
   // Optional: cuGetErrorString.
   (void)lib_.GetSymbol("cuGetErrorString", &f_.cuGetErrorString, nullptr);
 
+  // Optional: cuDriverGetVersion (diagnostics only).
+  (void)lib_.GetSymbol("cuDriverGetVersion", &f_.cuDriverGetVersion, nullptr);
+
   // Optional: cuModuleLoadDataEx (used for PTX JIT diagnostics when available).
   (void)lib_.GetSymbol("cuModuleLoadDataEx", &f_.cuModuleLoadDataEx, nullptr);
   return true;

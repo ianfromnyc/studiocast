@@ -138,6 +138,17 @@ bool TestEngineModelDetailsAndConfiguredSelections() {
           },
           "open_cuda":{
             "ok":true,
+            "onnxruntime_version":"1.20.0",
+            "onnxruntime_providers":["CUDAExecutionProvider","CPUExecutionProvider"],
+            "onnxruntime_cuda_provider_present":true,
+            "onnxruntime_tensorrt_provider_present":false,
+            "onnxruntime_cpu_provider_present":true,
+            "onnxruntime_cuda_ep_v2_build":true,
+            "onnxruntime_library_path":"/opt/ort/lib/libonnxruntime.so",
+            "cuda_driver_api_available":true,
+            "cuda_context_available":true,
+            "cuda_device_count":1,
+            "cuda_driver_version":12040,
             "installed_models":["matting-good"],
             "default_model_id":"matting-good",
             "models":[
@@ -150,6 +161,14 @@ bool TestEngineModelDetailsAndConfiguredSelections() {
           },
           "open_audio":{
             "ok":true,
+            "onnxruntime_version":"1.20.0",
+            "onnxruntime_providers":["CPUExecutionProvider"],
+            "onnxruntime_cuda_provider_present":false,
+            "onnxruntime_tensorrt_provider_present":false,
+            "onnxruntime_cpu_provider_present":true,
+            "onnxruntime_cuda_ep_v2_build":false,
+            "onnxruntime_library_path":"/opt/ort/lib/libonnxruntime.so",
+            "acceleration_likely":"cpu_fallback",
             "installed_models":["fast-enhancer"],
             "models":[
               {"id":"fast-enhancer","display_name":"Fast Enhancer","effects":["noise_removal"],"sample_rate":48000,"channels":1}
@@ -218,6 +237,12 @@ bool TestEngineModelDetailsAndConfiguredSelections() {
                 "maxine missing feature state should parse") &&
          Expect(!s.openCuda.rawJson.isEmpty(),
                 "raw open_cuda diagnostics should be preserved") &&
+         Expect(s.openCuda.rawJson.contains(
+                    QStringLiteral("onnxruntime_cuda_provider_present")),
+                "raw open_cuda diagnostics should preserve runtime fields") &&
+         Expect(s.openCuda.rawJson.contains(
+                    QStringLiteral("cuda_driver_version")),
+                "raw open_cuda diagnostics should preserve cuda fields") &&
          Expect(s.openCuda.installedModels.size() == 1 &&
                     s.openCuda.installedModels.front().displayName ==
                         QStringLiteral("Good Matting"),
@@ -230,6 +255,12 @@ bool TestEngineModelDetailsAndConfiguredSelections() {
                     s.openAudio.installedModels.front().displayName ==
                         QStringLiteral("Fast Enhancer"),
                 "open audio model display names should parse") &&
+         Expect(s.openAudio.rawJson.contains(
+                    QStringLiteral("acceleration_likely")),
+                "raw open_audio diagnostics should preserve runtime fields") &&
+         Expect(s.openAudio.rawJson.contains(
+                    QStringLiteral("onnxruntime_cpu_provider_present")),
+                "raw open_audio diagnostics should preserve provider fields") &&
          Expect(s.openAudio.configuredModels.size() == 2,
                 "configured open audio model IDs should parse") &&
          Expect(s.openAudio.configuredMissingModelCount == 1,

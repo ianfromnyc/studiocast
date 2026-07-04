@@ -13,6 +13,11 @@ namespace studiocast::open_audio {
 struct OrtRuntimeInfo {
   std::string version;
   std::vector<std::string> providers;
+  bool cuda_provider_present = false;
+  bool tensorrt_provider_present = false;
+  bool cpu_provider_present = false;
+  bool cuda_ep_v2_build = false;
+  std::string library_path;
 };
 
 // Options for creating an ONNX Runtime session.
