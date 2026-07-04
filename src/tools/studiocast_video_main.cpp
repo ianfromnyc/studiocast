@@ -116,7 +116,7 @@ int main(int argc, char **argv) {
   const std::string cmd = argv[1];
 
   if (cmd == "status") {
-    const auto rep = studiocast::video::ProbeLoopback();
+    const auto rep = studiocast::video::ProbeLoopbackDiagnostics();
     std::cout << rep.ToText() << "\n";
     return rep.ReadyForVirtualCamera() ? 0 : 3;
   }
