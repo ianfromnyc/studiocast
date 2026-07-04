@@ -50,6 +50,7 @@ public:
            std::string *error_out);
 
   const studiocast::open_video::ModelPack &pack() const;
+  const Options &options() const;
 
 private:
   struct Impl;

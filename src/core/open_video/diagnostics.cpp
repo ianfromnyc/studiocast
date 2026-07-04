@@ -92,6 +92,17 @@ std::string OpenCudaDiagnostics::ToJson() const {
   oss << "\"cuda_context_error\":\"" << JsonEscape(cuda_context_error)
       << "\",";
 
+  oss << "\"tensorrt_supported\":" << BoolJson(tensorrt_supported) << ",";
+
+  oss << "\"tensorrt_available\":" << BoolJson(tensorrt_available) << ",";
+
+  oss << "\"tensorrt_requested\":" << BoolJson(tensorrt_requested) << ",";
+
+  oss << "\"tensorrt_cache_path\":\"" << JsonEscape(tensorrt_cache_path)
+      << "\",";
+
+  oss << "\"tensorrt_status\":\"" << JsonEscape(tensorrt_status) << "\",";
+
   oss << "\"installed_models\":";
   AppendJsonStringArray(&oss, installed_models);
   oss << ",";

@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <iomanip>
@@ -101,6 +103,28 @@ bool HasArg(int argc, char **argv, std::string_view flag) {
       return true;
   }
   return false;
+}
+
+std::string ToLowerAscii(std::string s) {
+  for (char &c : s) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    c = static_cast<char>(std::tolower(uc));
+  }
+  return s;
+}
+
+bool EnvFlagEnabled(const char *name) {
+  const char *v = std::getenv(name);
+  if (!v || !*v)
+    return false;
+  const std::string value = ToLowerAscii(v);
+  return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+bool HasProvider(const std::vector<std::string> &providers,
+                 const char *provider) {
+  return std::find(providers.begin(), providers.end(), provider) !=
+         providers.end();
 }
 
 std::string GetArgValue(int argc, char **argv, std::string_view key) {
@@ -365,6 +389,11 @@ static int CmdVideoSelfTest(int argc, char **argv) {
   const auto ort = studiocast::onnx::OrtSession::QueryRuntimeInfo();
   PrintOrtRuntimeInfo(ort);
 
+  const bool tensorrt_requested =
+      !cpu_only && EnvFlagEnabled("STUDIOCAST_OPEN_CUDA_TENSORRT");
+  const bool tensorrt_provider_available =
+      HasProvider(ort.providers, "TensorrtExecutionProvider");
+
   std::vector<fs::path> onnx_paths;
   std::string chosen;
 
@@ -427,9 +456,22 @@ static int CmdVideoSelfTest(int argc, char **argv) {
     std::cout << "Task filter: " << task << "\n";
   std::cout << "CUDA preference: "
             << (cpu_only ? "CPU-only" : "AUTO (prefer CUDA)") << "\n";
+  std::cout << "TensorRT request: "
+            << (tensorrt_requested ? "enabled" : "disabled") << "\n";
+  if (tensorrt_requested) {
+    std::cout << "TensorRT build support: "
+              << (studiocast::onnx::OrtBuildHasTensorRtEpV2() ? "yes" : "no")
+              << "\n";
+    std::cout << "TensorRT provider available: "
+              << (tensorrt_provider_available ? "yes" : "no") << "\n";
+    std::cout << "TensorRT cache: "
+              << studiocast::onnx::DefaultTensorRtCachePath(0).string()
+              << "\n";
+  }
 
   studiocast::onnx::OrtSessionOptions opts;
   opts.prefer_cuda = !cpu_only;
+  opts.enable_tensorrt = tensorrt_requested;
 
   int failures = 0;
   for (const auto &onnx : onnx_paths) {
@@ -445,7 +487,38 @@ static int CmdVideoSelfTest(int argc, char **argv) {
       continue;
     }
 
+    std::cout << "  active_provider: "
+              << (info.active_provider.empty() ? "(unknown)"
+                                               : info.active_provider)
+              << "\n";
+    std::cout << "  appended_provider: "
+              << (info.appended_provider.empty() ? "(none)"
+                                                 : info.appended_provider)
+              << "\n";
+    if (!info.appended_providers.empty()) {
+      std::cout << "  appended_providers: ";
+      for (std::size_t i = 0; i < info.appended_providers.size(); ++i) {
+        if (i)
+          std::cout << ", ";
+        std::cout << info.appended_providers[i];
+      }
+      std::cout << "\n";
+    }
+    std::cout << "  using_tensorrt: "
+              << (info.using_tensorrt ? "yes" : "no") << "\n";
     std::cout << "  using_cuda: " << (info.using_cuda ? "yes" : "no") << "\n";
+    if (tensorrt_requested || info.using_tensorrt ||
+        (!info.tensorrt_status.empty() &&
+         info.tensorrt_status != "not_requested")) {
+      std::cout << "  tensorrt_status: "
+                << (info.tensorrt_status.empty() ? "(unknown)"
+                                                 : info.tensorrt_status)
+                << "\n";
+      if (!info.tensorrt_engine_cache_path.empty()) {
+        std::cout << "  tensorrt_cache: "
+                  << info.tensorrt_engine_cache_path.string() << "\n";
+      }
+    }
     if (!info.warnings.empty()) {
       std::cout << "  warnings:\n";
       for (const auto &w : info.warnings) {

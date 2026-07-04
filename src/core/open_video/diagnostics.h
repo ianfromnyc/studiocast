@@ -26,6 +26,13 @@ struct OpenCudaDiagnostics {
   std::string cuda_driver_error;
   std::string cuda_context_error;
 
+  // TensorRT request/support status for Open CUDA matting.
+  bool tensorrt_supported = false;
+  bool tensorrt_available = false;
+  bool tensorrt_requested = false;
+  std::string tensorrt_cache_path;
+  std::string tensorrt_status;
+
   // Model pack IDs discovered/usable by this engine.
   std::vector<std::string> installed_models;
 

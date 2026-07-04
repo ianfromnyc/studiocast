@@ -90,6 +90,7 @@ struct OpenCudaMattingSession::Impl {
     studiocast::onnx::OrtSessionOptions ort_opts;
     ort_opts.prefer_cuda = true;
     ort_opts.cuda_device_id = opts.device_id;
+    ort_opts.enable_tensorrt = opts.enable_tensorrt;
     if (stream != nullptr) {
       // Treat CUstream as an opaque handle and pass it as void* to ORT.
       ort_opts.user_compute_stream = reinterpret_cast<void *>(stream);
@@ -127,10 +128,11 @@ struct OpenCudaMattingSession::Impl {
       return false;
     }
 
-    if (!ort_info.using_cuda) {
-      // Open CUDA backend requires CUDA EP.
-      std::string msg = "OpenCudaMattingSession: ONNX Runtime CUDA EP is "
-                        "unavailable (CPU-only build?).";
+    if (!ort_info.using_cuda && !ort_info.using_tensorrt) {
+      // Open CUDA backend requires a CUDA-capable EP.
+      std::string msg =
+          "OpenCudaMattingSession: ONNX Runtime CUDA-capable EP is "
+          "unavailable (CPU-only build?).";
       if (!ort_info.warnings.empty()) {
         msg += " " + ort_info.warnings[0];
       }
@@ -271,6 +273,10 @@ OpenCudaMattingSession::~OpenCudaMattingSession() = default;
 
 const studiocast::open_video::ModelPack &OpenCudaMattingSession::pack() const {
   return impl_->pack;
+}
+
+const OpenCudaMattingSession::Options &OpenCudaMattingSession::options() const {
+  return impl_->opts;
 }
 
 bool OpenCudaMattingSession::EnsureInitialized(int frame_w, int frame_h,

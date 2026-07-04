@@ -20,6 +20,14 @@ struct OrtRuntimeInfo {
   std::string library_path;
 };
 
+// Returns true when the headers used for this build expose the TensorRT EP V2
+// provider-options API. Runtime availability still depends on the ORT build and
+// installed provider libraries.
+bool OrtBuildHasTensorRtEpV2();
+
+// Default TensorRT engine cache path for a CUDA device.
+std::filesystem::path DefaultTensorRtCachePath(int cuda_device_id);
+
 // Options for creating an ONNX Runtime session.
 struct OrtSessionOptions {
   // If true, attempt to use CUDA EP and fall back to CPU EP if CUDA EP is not
@@ -38,16 +46,40 @@ struct OrtSessionOptions {
   // When null, ORT may use internal streams and the caller may need to
   // synchronize around calls that produce/consume GPU buffers.
   void *user_compute_stream = nullptr;
+
+  // If true, attempt to append TensorRT EP before CUDA EP. This is currently
+  // intended for Open CUDA matting only; callers must opt in explicitly.
+  bool enable_tensorrt = false;
+
+  // If TensorRT is requested, append CUDA EP after TensorRT so unsupported
+  // subgraphs can stay on GPU. CPU remains ORT's final fallback in code paths
+  // that already permit CPU sessions.
+  bool tensorrt_enable_cuda_fallback = true;
+
+  // TensorRT provider defaults for the Open CUDA matting path.
+  std::uint64_t tensorrt_max_workspace_size = 2ull * 1024ull * 1024ull * 1024ull;
+  bool tensorrt_fp16_enable = true;
+  bool tensorrt_engine_cache_enable = true;
+  std::filesystem::path tensorrt_engine_cache_path;
+  int tensorrt_builder_optimization_level = 3;
 };
 
 // Best-effort model I/O description extracted from the session.
 struct OrtSessionInfo {
+  bool using_tensorrt = false;
   bool using_cuda = false;
 
   // If true, the session is using CUDA EP but is not guaranteed to run on the
   // caller's stream (e.g., user_compute_stream unavailable). Callers
   // integrating with an explicit stream must synchronize for correctness.
   bool cuda_needs_stream_sync = false;
+
+  // Provider/status diagnostics for tools and engine JSON.
+  std::string active_provider;
+  std::string appended_provider;
+  std::vector<std::string> appended_providers;
+  std::string tensorrt_status;
+  std::filesystem::path tensorrt_engine_cache_path;
 
   std::vector<std::string> input_names;
   std::vector<std::string> output_names;

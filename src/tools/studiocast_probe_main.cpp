@@ -42,6 +42,7 @@
 #include "core/maxine/vfx_api.h"
 #include "core/open_audio/model_pack_registry.h"
 #include "core/open_audio/open_audio_diagnostics.h"
+#include "core/onnx/ort_session.h"
 #include "core/open_video/model_pack_registry.h"
 #include "core/probe/probe.h"
 #include "core/util/json.h"
@@ -731,11 +732,12 @@ int RunSelfTest() {
     {
       studiocast::open_cuda::OpenCudaDiagnostics od;
       od.ok = true;
-      od.onnxruntime_version = "1.20.0";
-      od.onnxruntime_providers = {"CUDAExecutionProvider",
+      od.onnxruntime_version = "1.24.1-test";
+      od.onnxruntime_providers = {"TensorrtExecutionProvider",
+                                  "CUDAExecutionProvider",
                                   "CPUExecutionProvider"};
       od.onnxruntime_cuda_provider_present = true;
-      od.onnxruntime_tensorrt_provider_present = false;
+      od.onnxruntime_tensorrt_provider_present = true;
       od.onnxruntime_cpu_provider_present = true;
       od.onnxruntime_cuda_ep_v2_build = true;
       od.onnxruntime_library_path = "/opt/ort/lib/libonnxruntime.so";
@@ -759,17 +761,23 @@ int RunSelfTest() {
         od.models.push_back(std::move(mi));
       }
       od.missing_models = reg.Problems();
+      od.tensorrt_supported = true;
+      od.tensorrt_available = true;
+      od.tensorrt_requested = true;
+      od.tensorrt_cache_path = "/tmp/studiocast/trt_cache/gpu0";
+      od.tensorrt_status = "available";
 
       const std::string j = od.ToJson();
       expectContains("OpenCudaDiagnosticsJson.onnxruntime_version", j,
-                     "\"onnxruntime_version\":\"1.20.0\"");
+                     "\"onnxruntime_version\":\"1.24.1-test\"");
       expectContains("OpenCudaDiagnosticsJson.onnxruntime_providers", j,
-                     "\"onnxruntime_providers\":[\"CUDAExecutionProvider\","
+                     "\"onnxruntime_providers\":[\"TensorrtExecutionProvider\","
+                     "\"CUDAExecutionProvider\","
                      "\"CPUExecutionProvider\"]");
       expectContains("OpenCudaDiagnosticsJson.cuda_provider_present", j,
                      "\"onnxruntime_cuda_provider_present\":true");
       expectContains("OpenCudaDiagnosticsJson.tensorrt_provider_present", j,
-                     "\"onnxruntime_tensorrt_provider_present\":false");
+                     "\"onnxruntime_tensorrt_provider_present\":true");
       expectContains("OpenCudaDiagnosticsJson.cpu_provider_present", j,
                      "\"onnxruntime_cpu_provider_present\":true");
       expectContains("OpenCudaDiagnosticsJson.cuda_ep_v2_build", j,
@@ -785,6 +793,17 @@ int RunSelfTest() {
                      "\"cuda_device_count\":1");
       expectContains("OpenCudaDiagnosticsJson.cuda_driver_version", j,
                      "\"cuda_driver_version\":12040");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_supported", j,
+                     "\"tensorrt_supported\":true");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_available", j,
+                     "\"tensorrt_available\":true");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_requested", j,
+                     "\"tensorrt_requested\":true");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_cache_path", j,
+                     "\"tensorrt_cache_path\":\"/tmp/studiocast/trt_cache/"
+                     "gpu0\"");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_status", j,
+                     "\"tensorrt_status\":\"available\"");
       expectContains("OpenCudaDiagnosticsJson.default_model_id", j,
                      "\"default_model_id\":\"mock_model\"");
       expectContains("OpenCudaDiagnosticsJson.models", j, "\"models\":[");
@@ -801,6 +820,25 @@ int RunSelfTest() {
       // Backward compatibility field.
       expectContains("OpenCudaDiagnosticsJson.installed_models", j,
                      "\"installed_models\":[");
+
+      const auto trt_cache =
+          studiocast::onnx::DefaultTensorRtCachePath(/*cuda_device_id=*/2);
+      expectEq("DefaultTensorRtCachePath.filename",
+               trt_cache.filename().string(), "gpu2");
+      expectEq("DefaultTensorRtCachePath.parent",
+               trt_cache.parent_path().filename().string(), "trt_cache");
+
+      if (packOpt) {
+        studiocast::open_cuda::OpenCudaMattingSession::Options trt_opts;
+        trt_opts.device_id = 2;
+        trt_opts.enable_tensorrt = true;
+        studiocast::open_cuda::OpenCudaMattingSession sess(nullptr, *packOpt,
+                                                           trt_opts);
+        expectTrue("OpenCudaMattingSession options propagate TensorRT",
+                   sess.options().enable_tensorrt);
+        expectIntEq("OpenCudaMattingSession options propagate device_id",
+                    sess.options().device_id, 2);
+      }
     }
 
     // Open Audio diagnostics JSON keeps legacy ORT fields and includes
