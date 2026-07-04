@@ -26,7 +26,7 @@ bool TestUnreachableStatus() {
 bool TestStatusJsonCompatibilityShapes() {
   const QString json = QStringLiteral(
       R"({
-        "version":"0.1.0",
+        "version":"0.2.0",
         "git_sha":"abc123",
         "socket":"/run/user/1000/studiocast/studiocastd.sock",
         "service_running":true,
@@ -85,7 +85,7 @@ bool TestStatusJsonCompatibilityShapes() {
   return Expect(s.reachable, "snapshot should be reachable") &&
          Expect(s.parsed, "snapshot should parse") &&
          Expect(s.rawJson == json, "raw json should be preserved") &&
-         Expect(s.version == QStringLiteral("0.1.0"),
+         Expect(s.version == QStringLiteral("0.2.0"),
                 "version should parse") &&
          Expect(s.serviceRunning, "service_running should parse") &&
          Expect(s.camera.state == studiocast::gui::ReadinessState::Ready,

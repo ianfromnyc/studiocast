@@ -41,6 +41,37 @@ CLion often uses `cmake-build-debug/` or `cmake-build-release/` instead of
 See [SETUP.md](SETUP.md) for the longer install notes and v4l2loopback fallback
 details.
 
+## Versioning
+
+The canonical project version lives in the top-level
+[../VERSION](../VERSION) file as `MAJOR.MINOR.PATCH`. CMake reads that file
+before `project()`, so `PROJECT_VERSION`, the generated
+`studiocast/version.h`, CLI `--version` output, daemon status, and GUI About
+surfaces all use the same value.
+
+The current automatic versioning line starts at `0.2.0`. On every normal push
+to `main`, `.github/workflows/version-bump.yml` increments the patch component
+and commits the updated `VERSION` file back to `main` with a `[skip ci]`
+message. The workflow skips bot commits and skips pushes that already changed
+`VERSION`, which prevents commit loops and lets maintainers intentionally set a
+new baseline such as `0.3.0`.
+
+If `main` is protected, repository settings must allow the GitHub Actions bot to
+push the version-bump commit.
+
+For releases, wait for the automatic version-bump commit to land on `main`,
+then tag that commit with the matching version:
+
+```bash
+git fetch origin main --tags
+git checkout origin/main
+git tag -a v0.2.1 -m "StudioCast 0.2.1"
+git push origin v0.2.1
+```
+
+If maintainers need a new minor or major line, update `VERSION` in a normal
+change, merge it to `main`, and tag the resulting commit if it is a release.
+
 ## Repo layout
 
 - [../CMakeLists.txt](../CMakeLists.txt): build graph, options, executable
