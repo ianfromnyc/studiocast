@@ -1,208 +1,205 @@
 # StudioCast
 
-StudioCast is an open-source Linux application that provides a virtual camera and virtual audio devices (microphone and speakers) with real-time effects for video calls, streaming, and recording.
-
-Status: early preview / proof-of-concept. It is usable on Ubuntu 22.04+ and is still under active development.
-
-> **Project status note:** Further improvements from the repository author are currently paused due to work commitments. Contributions are very welcome.
-
-> **Open-source eye tracking disclaimer:** The eye-contact/eye-tracking portion of the open-source models is currently glitchy and best-effort.
-
-## UI preview
+StudioCast is an open-source Linux application that provides a virtual camera,
+virtual microphone, and virtual speakers with real-time effects for video calls,
+streaming, and recording.
 
 <p align="center">
   <img src="docs/assets/studiocast-ui-preview.gif" alt="StudioCast UI preview" width="760">
 </p>
 
-## Not affiliated with NVIDIA
+## What it does
 
-StudioCast is independent and does not ship or redistribute NVIDIA Broadcast binaries.
+- Creates a virtual camera that can be selected in OBS, Zoom, Teams, Discord,
+  and browser/WebRTC apps.
+- Provides virtual audio devices for microphone and speaker routing.
+- Runs optional video effects such as background blur/removal/replacement,
+  denoise, relighting, eye contact, auto-framing, and mirroring when the required
+  backend is available.
+- Runs optional microphone and speaker effects such as noise removal and
+  voice enhancement when the required backend is available.
+- Uses a background daemon, `studiocastd`, so virtual devices can stay available
+  while heavier processing starts only when an app is actually consuming them.
 
-## What StudioCast is for
+## Project status
 
-- Virtual camera for apps like OBS, Zoom/Teams, Discord, and browser/WebRTC
-- Optional real-time video effects (for example background effects and eye contact, depending on what is installed and enabled)
-- Optional real-time audio effects (noise suppression / enhancement, depending on what is installed and enabled)
-- A background daemon that keeps virtual devices available and only does heavy work when an app is consuming them
+StudioCast is an early-preview source-build project. It is usable for testing on
+Ubuntu 22.04 and 24.04, but packaging, model installation, hardware behavior,
+and some effects are still evolving.
 
-## Quick start (most users)
+Known caveats:
 
-StudioCast currently targets Ubuntu 22.04 and 24.04.
+- The open-source eye-contact/eye-tracking path is best-effort and can be
+  glitchy.
+- Effect availability depends on local GPU drivers, ONNX Runtime, model packs,
+  or an optional NVIDIA Maxine SDK installation.
+- Development bandwidth may vary. Focused contributions and good bug reports are
+  welcome.
 
-### 1) Set up the system (one-time per machine)
+## Requirements
 
-This installs OS dependencies and sets up the v4l2loopback virtual camera device.
+- Ubuntu 22.04 or 24.04, or a close Ubuntu-family desktop distribution.
+- A V4L2-compatible physical camera for camera input.
+- `v4l2loopback` for the StudioCast virtual camera.
+- A PulseAudio-compatible audio stack with `pactl` for virtual audio routing.
+- CMake, Ninja, Qt, and compiler dependencies for the current source-build flow.
+- Optional: NVIDIA driver/CUDA support for Open Video model backends.
+- Optional: user-installed NVIDIA Maxine SDK assets for Maxine effects.
 
-```bash
-./scripts/setup.sh --deps --v4l2loopback --load-loopback --persist-loopback
-````
+StudioCast does not ship NVIDIA Maxine SDK files or model binaries in git.
 
-If this step fails, fix it first. Without v4l2loopback you will not get a virtual camera device.
+## Quick start
 
-### 2) Build StudioCast
+Run these commands from the repository root.
 
-```bash
-./scripts/setup.sh --build --build-type Release
-```
-
-If you prefer Debug builds during testing:
-
-```bash
-./scripts/setup.sh --build --build-type Debug
-```
-
-### 3) Start StudioCast
-
-You can run manually during development:
-
-```bash
-build/studiocastd
-```
-
-In another terminal:
-
-```bash
-build/studiocastctl status
-```
-
-### 4) Use StudioCast in OBS / Zoom / Teams / Discord / WebRTC
-
-* In your target app, select the StudioCast virtual camera (v4l2loopback device).
-* If StudioCast virtual audio devices are enabled/available on your system, select the StudioCast virtual microphone/speakers in your app’s audio settings.
-* Open the StudioCast GUI (if built) to enable/disable effects and adjust settings.
-
-Notes:
-
-* StudioCast aims to avoid heavy processing when nothing is consuming the virtual camera or virtual audio devices. If you see heavy load with no consumer, that is a bug.
-* Some effects require specific runtimes or model packs to be installed. See the “Models and engines” section below.
-
-## Common commands (users)
-
-Check status:
-
-```bash
-build/studiocastctl status
-```
-
-Generate a support bundle (useful when reporting issues):
-
-```bash
-build/studiocastctl debug-report --out studiocast-debug-report.txt
-```
-
-## Models and engines (users)
-
-StudioCast supports multiple backends. What is available depends on what is installed on your machine.
-
-* Open Video (ONNX Runtime + model packs): see `docs/open_source_video_install.md`
-* Open Audio (ONNX Runtime + model packs): see `docs/open_source_audio_install.md`
-* Maxine SDK (optional dependency): see `docs/maxine_install.md`
-
-## Troubleshooting (users)
-
-### Virtual camera does not appear
-
-* Confirm v4l2loopback is installed and loaded:
-
-  * `/dev/video*` should include the configured loopback node (for example `/dev/video10`)
-* Re-run setup if needed:
-
-  ```bash
-  ./scripts/setup.sh --v4l2loopback --load-loopback --persist-loopback
-  ```
-
-### The daemon runs but apps show no video
-
-* Verify the daemon is running and the virtual camera device is present.
-* Use:
-
-  ```bash
-  build/studiocastctl status
-  ```
-* If reporting a bug, include:
-
-  ```bash
-  build/studiocastctl debug-report --out studiocast-debug-report.txt
-  ```
-
----
-
-# Developer guide
-
-This section is for building, hacking on StudioCast, and understanding the architecture.
-
-## Build (Ubuntu 22.04 / 24.04)
-
-One-shot:
+1. Install system dependencies and create the virtual camera:
 
 ```bash
 ./scripts/setup.sh --deps --v4l2loopback --load-loopback --persist-loopback
-./scripts/setup.sh --build --build-type Debug
 ```
 
-Manual build:
+By default this creates a v4l2loopback device such as `/dev/video10` labeled
+`StudioCast Camera`.
+
+2. Build StudioCast:
 
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --target studiocast
-build/studiocast
+./scripts/setup.sh --build --build-dir ./build --build-type Release
 ```
 
-Notes:
-
-* CLion default build directory is often `cmake-build-debug/`.
-* If you hit a compiler/libstdc++ mismatch, pick a distro-matching compiler and re-configure.
-* Setup docs live in `docs/SETUP.md`.
-
-## Dev tooling
-
-* Formatting: `./scripts/format.sh`
-* Version: `build/studiocast --version`
-* Maxine install hints: `docs/maxine_install.md` or `build/studiocast-maxine install-hints`
-* Open Video model packs: `build/studiocast-open install-hints` and `build/studiocast-open list-models`
-* Support bundle: `build/studiocastctl debug-report --out studiocast-debug-report.txt`
-* Manual hardware/GUI test plan: `docs/MANUAL_TESTING.md`
-
-## Daemon mode (studiocastd)
-
-StudioCast includes a background daemon (`studiocastd`) that keeps the virtual camera available and only starts heavy video processing when a consumer opens the v4l2loopback device (OBS/Zoom/etc.). Audio virtual devices are also kept available while microphone and processed-speaker pipelines idle until an app consumes them. Speaker pass-through loopback is separate: daemon status reports it as `speakers.route_mode=loopback`, while processed speaker effects report `speakers.route_mode=pipeline` and are consumer-gated.
-
-During development you can run it manually:
+3. Start the daemon:
 
 ```bash
-build/studiocastd
-build/studiocastctl status
+./build/studiocastd
 ```
 
-The GUI (`studiocast`) acts as a controller and talks to the daemon over a Unix socket at:
-
-`$XDG_RUNTIME_DIR/studiocast/studiocastd.sock`
-
-There is also a systemd user service template in:
-
-`packaging/systemd/user/studiocastd.service`
-
-Install + enable it for dev/MVP testing:
+4. In another terminal, check status and open the GUI:
 
 ```bash
-./scripts/install.sh user-service --build-dir ./cmake-build-debug --yes
+./build/studiocastctl status --pretty
+./build/studiocast
+```
+
+Optional: once the manual run works, install the systemd user service:
+
+```bash
+./scripts/install.sh user-service --build-dir ./build --yes
 systemctl --user status studiocastd.service
 ```
 
-## Effects model and availability
+More setup detail is available in [docs/SETUP.md](docs/SETUP.md).
 
-* Canonical effect schema type: `BroadcastCameraEffects` in `src/core/video/effects/broadcast_effects.h`
-* Stable effect IDs / parameter IDs / ranges for IPC + JSON: `src/core/video/effects/broadcast_effect_contract.h`
-* Persistence + control plane use JSON:
+## Using StudioCast
 
-  * `build/studiocastctl effects get` returns the canonical effects JSON
-  * `build/studiocastctl effects set --file ...` sends a JSON patch
-* Effect availability is computed by the daemon and exposed in status.
+Start `studiocastd`, open the StudioCast GUI, then choose StudioCast devices in
+the app you want to use.
 
-  * The GUI should not try to guess availability client-side.
+- OBS: add a Video Capture Device and select `StudioCast Camera`.
+- Zoom, Teams, Discord, and browser/WebRTC apps: select `StudioCast Camera` in
+  camera settings. If the app already had its device list open, refresh or reopen
+  the settings page.
+- Audio apps: when StudioCast virtual audio devices are enabled, select
+  `StudioCast Microphone` and/or `StudioCast Speakers` in the target app.
+- GUI preview: enabling preview can act as a consumer of the virtual camera.
+  Leave it off when you only want external apps to consume the output.
 
-## TODO
+StudioCast is designed to idle when no consumer is using the virtual camera or
+processed audio path. If it stays busy while no app is consuming StudioCast
+devices, please file a bug with a support bundle.
 
-* Improve packaging and install flow for non-developers
-* Adaptive streaming (e.g. adaptive bitrates/frame sizes to reduce latency on the fly)
-* Add additional open-source models
+## Models and effects
+
+StudioCast can use multiple effect backends. The GUI and `studiocastctl status`
+report which engines are available on the current machine.
+
+- Open Video / Open CUDA: ONNX Runtime with CUDA execution provider and
+  user-installed model packs. See
+  [docs/open_source_video_models_install.md](docs/open_source_video_models_install.md).
+- Open Audio: ONNX Runtime and user-installed model packs for microphone effects.
+  See [docs/open_source_audio_models_install.md](docs/open_source_audio_models_install.md).
+- NVIDIA Maxine: optional user-installed NVIDIA SDKs and feature packs. See
+  [docs/maxine_install.md](docs/maxine_install.md).
+
+Curated model installers are available through:
+
+```bash
+./scripts/install.sh open-video-models --list
+./scripts/install.sh open-audio-models --list
+```
+
+Use the model helper to inspect installed packs:
+
+```bash
+./build/studiocast-open video-list-models
+./build/studiocast-open audio-list-models
+```
+
+## Troubleshooting
+
+Virtual camera does not appear:
+
+```bash
+v4l2-ctl --list-devices
+./scripts/setup.sh --v4l2loopback --load-loopback --persist-loopback
+```
+
+Daemon is not reachable:
+
+```bash
+./build/studiocastd
+./build/studiocastctl status --pretty
+```
+
+If using the user service:
+
+```bash
+systemctl --user status studiocastd.service
+journalctl --user -u studiocastd.service -f
+```
+
+Apps show the StudioCast camera but no video:
+
+- Confirm the daemon is running.
+- Confirm a readable physical camera is selected or available for auto-select.
+- Check `./build/studiocastctl status --pretty` for device, consumer, and
+  pipeline state.
+- Try OBS first when debugging, then browser/WebRTC apps.
+
+Effects are unavailable:
+
+- Check `./build/studiocastctl status --pretty` for engine diagnostics.
+- For Open Video, verify NVIDIA driver/CUDA, ONNX Runtime, and model packs.
+- For Open Audio, verify ONNX Runtime and model packs.
+- For Maxine, run `./build/studiocast-maxine install-hints`.
+
+Audio devices do not work:
+
+- Check `pactl info`, `pactl list short sources`, and `pactl list short sinks`.
+- In the GUI, select a physical microphone or speaker device rather than a
+  StudioCast virtual device as the processing source/target.
+
+Support bundle:
+
+```bash
+./build/studiocastctl debug-report --out studiocast-debug-report.txt
+```
+
+Attach the report when opening an issue.
+
+## Contributing
+
+Start with [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) for build,
+architecture, daemon, IPC, model, and testing notes.
+
+Project conventions are in [CONTRIBUTING.md](CONTRIBUTING.md). Please also see
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) and [SECURITY.md](SECURITY.md).
+
+## License and trademarks
+
+StudioCast is independent and is not affiliated with, endorsed by, or sponsored
+by NVIDIA. NVIDIA and NVIDIA Broadcast are trademarks of NVIDIA Corporation.
+StudioCast does not ship or redistribute NVIDIA Broadcast or Maxine SDK
+binaries.
+
+See [LICENSE](LICENSE), [NOTICE](NOTICE), and
+[docs/TRADEMARKS.md](docs/TRADEMARKS.md).
