@@ -15,6 +15,8 @@ Options:
                      Default: auto-detect first existing of:
                        <repo>/build, <repo>/cmake-build-release, <repo>/cmake-build-debug
   --no-link-bins      Do not create/update ~/.local/bin symlinks
+  --link-bins-only    Create/update ~/.local/bin symlinks, but do not install
+                     or start the systemd user service
   --dry-run           Print actions without executing
   -y, --yes           Assume yes (skip confirmation prompts)
   -h, --help          Show help
@@ -38,6 +40,7 @@ DRY_RUN=0
 YES=0
 BUILD_DIR=""
 LINK_BINS=1
+LINK_BINS_ONLY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,6 +50,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --no-link-bins) LINK_BINS=0; shift ;;
+    --link-bins-only) LINK_BINS_ONLY=1; LINK_BINS=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -y|--yes) YES=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -181,6 +185,7 @@ main() {
   log "Repo root: $REPO_ROOT"
   log "Build dir: $BUILD_DIR"
   log "Dry-run: $([[ "$DRY_RUN" -eq 1 ]] && echo yes || echo no)"
+  log "Link-bins-only: $([[ "$LINK_BINS_ONLY" -eq 1 ]] && echo yes || echo no)"
 
   if [[ "$LINK_BINS" -eq 1 ]]; then
     if ! confirm "Install/refresh ~/.local/bin symlinks from build dir?"; then
@@ -191,6 +196,12 @@ main() {
 
   if [[ "$LINK_BINS" -eq 1 ]]; then
     link_bins
+  fi
+
+  if [[ "$LINK_BINS_ONLY" -eq 1 ]]; then
+    log "Skipping systemd user service install/start (--link-bins-only)."
+    log "Done."
+    return 0
   fi
 
   install_unit

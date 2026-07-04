@@ -23,9 +23,10 @@ streaming, and recording.
 
 ## Project status
 
-StudioCast is an early-preview source-build project. It is usable for testing on
-Ubuntu 22.04 and 24.04, but packaging, model installation, hardware behavior,
-and some effects are still evolving.
+StudioCast is an early-preview Linux project. It is usable for testing on
+Ubuntu 22.04 and 24.04, with a source-build flow and an installer wizard target
+for release packaging. Packaging, model installation, hardware behavior, and
+some effects are still evolving.
 
 Known caveats:
 
@@ -48,7 +49,32 @@ Known caveats:
 
 StudioCast does not ship NVIDIA Maxine SDK files or model binaries in git.
 
-## Quick start
+## Install options
+
+- Download GUI installer: release builds are intended to publish a
+  `studiocast-installer` artifact that runs as a normal user and delegates only
+  specific privileged setup steps through the backend scripts. Until that
+  downloadable artifact is published, build the installer target from source:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target studiocast-installer
+./build/studiocast-installer
+```
+
+- Build from source manually: use the commands below when developing,
+  installing over SSH, debugging setup, or recovering from a failed install.
+
+The same backend used by the GUI is available as a CLI fallback:
+
+```bash
+./scripts/installer.sh status
+./scripts/installer.sh plan install
+./scripts/installer.sh install --yes
+./scripts/installer.sh uninstall --yes
+```
+
+## Quick start from source
 
 Run these commands from the repository root.
 

@@ -29,6 +29,7 @@ Useful development commands:
 
 ```bash
 ./build/studiocast --version
+./build/studiocast-installer --version
 ./build/studiocastd
 ./build/studiocastctl status --pretty
 ctest --test-dir build --output-on-failure
@@ -82,6 +83,9 @@ change, merge it to `main`, and tag the resulting commit if it is a release.
   owns runtime state and device orchestration.
 - [../src/gui](../src/gui): Qt GUI controller.
 - [../src/tools](../src/tools): command-line helpers.
+- [../installer/gui](../installer/gui): standalone Qt installer wizard.
+- [../installer/backend](../installer/backend): scriptable installer backend
+  used by the GUI and CLI fallback.
 - [../tests](../tests): unit and integration-style tests that do not require
   full desktop hardware workflows.
 - [../scripts](../scripts): setup, install, uninstall, model, and developer
@@ -98,6 +102,7 @@ change, merge it to `main`, and tag the resulting commit if it is a release.
 | Binary | Purpose |
 | --- | --- |
 | `studiocast` | Qt GUI controller for users. |
+| `studiocast-installer` | Qt installer wizard that calls the scriptable backend. |
 | `studiocastd` | Background daemon that owns camera/audio services, config, status, and effect availability. |
 | `studiocastctl` | CLI client for daemon status, config, effects, audio/video controls, and debug reports. |
 | `studiocast-open` | Open Video/Open Audio model path, listing, validation, and benchmark helper. |
@@ -112,6 +117,69 @@ service workflow:
 ```bash
 ./scripts/install.sh user-service --build-dir ./build --yes
 ```
+
+## Installer architecture
+
+The installer is intentionally split into a GUI front end and a scriptable
+backend:
+
+- `studiocast-installer` is a separate Qt Widgets target. It does not require
+  StudioCast to already be installed and refuses to run as root.
+- `installer/backend/studiocast-installer-backend` owns OS detection, planning,
+  install/update/repair/uninstall/clean-install execution, and manifest writes.
+- `scripts/installer.sh` is the stable CLI entrypoint for CI, SSH, recovery,
+  and debugging.
+- Existing `scripts/setup.sh`, `scripts/install.sh`, and `scripts/uninstall.sh`
+  remain compatibility entrypoints. The backend delegates dependency setup,
+  v4l2loopback setup, binary linking, model installs, and systemd user service
+  setup to those scripts instead of duplicating their logic.
+
+Backend examples:
+
+```bash
+./scripts/installer.sh detect-os --json
+./scripts/installer.sh status --json
+./scripts/installer.sh plan install --json
+./scripts/installer.sh install --yes
+./scripts/installer.sh update --source-dir /path/to/release-source --yes
+./scripts/installer.sh update --release-archive ~/Downloads/studiocast.tar.gz --yes
+./scripts/installer.sh repair --yes
+./scripts/installer.sh uninstall --yes
+./scripts/installer.sh clean-install --yes
+```
+
+The installer backend supports Ubuntu 22.04/Jammy, Ubuntu 24.04/Noble, and Linux
+Mint when `/etc/os-release` exposes a reliable Ubuntu base. Mint
+`UBUNTU_CODENAME=jammy` maps to Ubuntu 22.04; `UBUNTU_CODENAME=noble` maps to
+Ubuntu 24.04. If that field is absent, Mint 21.x maps to Jammy and Mint 22.x
+maps to Noble.
+
+The install manifest lives at:
+
+```text
+~/.local/share/studiocast/install-manifest.json
+```
+
+It records installed version, source/build/install paths, installed binaries,
+systemd user service path/status, dependency install method, install timestamp,
+and whether config/models/logs/cache were preserved. Update and repair prefer
+manifest paths unless a source directory or release archive is explicitly
+selected. Uninstall removes app symlinks, service files, desktop entries, and
+runtime artifacts. Clean install preserves user config, downloaded models, logs,
+and cache unless `--remove-user-data` is explicitly selected.
+
+Release packaging plan:
+
+- CI builds `studiocast-installer` on Ubuntu 22.04, Ubuntu 24.04, and Linux Mint
+  alongside the main targets.
+- A release should publish the GUI installer artifact, a source archive, and
+  checksums.
+- The backend already supports local source directories and selected source
+  archives for update/install workflows.
+- Remaining packaging work is to wrap `studiocast-installer`, the backend
+  script, and required Qt/runtime libraries into a self-contained downloadable
+  artifact such as an AppImage. Keep that packaging isolated under installer or
+  packaging paths and avoid requiring network access for normal local builds.
 
 ## Daemon architecture
 

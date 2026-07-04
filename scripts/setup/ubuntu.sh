@@ -355,7 +355,8 @@ if [[ "$DO_DEPS" -eq 1 ]]; then
     clang clang-format clang-tidy \
     v4l-utils \
     libdlib-dev libsqlite3-dev \
-    libjpeg-turbo8 libjpeg-turbo8-dev
+    libjpeg-turbo8 libjpeg-turbo8-dev \
+    libpng-dev
 
   ensure_onnxruntime_available
 fi

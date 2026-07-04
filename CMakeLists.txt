@@ -437,6 +437,36 @@ set_target_properties(studiocast PROPERTIES
 )
 
 # -----------------------------
+# GUI installer executable
+# -----------------------------
+add_executable(studiocast-installer
+        installer/gui/main.cpp
+        installer/gui/installer_wizard.h
+        installer/gui/installer_wizard.cpp
+)
+
+target_link_libraries(studiocast-installer PRIVATE
+        Qt${QT_VERSION_MAJOR}::Widgets
+)
+
+target_include_directories(studiocast-installer PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/installer/gui"
+        "${STUDIOCAST_GENERATED_DIR}"
+)
+
+target_compile_definitions(studiocast-installer PRIVATE
+        STUDIOCAST_INSTALLER_BACKEND_SOURCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/installer/backend/studiocast-installer-backend"
+        STUDIOCAST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
+studiocast_set_project_warnings(studiocast-installer)
+studiocast_enable_sanitizers(studiocast-installer)
+
+set_target_properties(studiocast-installer PROPERTIES
+        OUTPUT_NAME "studiocast-installer"
+)
+
+# -----------------------------
 # Probe tool 
 # -----------------------------
 add_executable(studiocast-probe
@@ -598,12 +628,16 @@ set_target_properties(studiocastd PROPERTIES
 # Install step
 # -----------------------------
 include(GNUInstallDirs)
-install(TARGETS studiocast studiocast-probe studiocast-maxine studiocast-open studiocast-audio studiocast-video studiocastctl
+install(TARGETS studiocast studiocast-installer studiocast-probe studiocast-maxine studiocast-open studiocast-audio studiocast-video studiocastctl
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
 
 install(TARGETS studiocastd
         RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+)
+
+install(PROGRAMS installer/backend/studiocast-installer-backend
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/studiocast/installer"
 )
 
 if (BUILD_TESTING AND PULSE_SIMPLE_FOUND)

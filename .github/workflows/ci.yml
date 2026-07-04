@@ -69,6 +69,7 @@ jobs:
             studiocastctl \
             studiocastd \
             studiocast \
+            studiocast-installer \
             studiocast-open
 
       - name: Self-test
@@ -119,6 +120,7 @@ jobs:
             studiocastctl \
             studiocastd \
             studiocast \
+            studiocast-installer \
             studiocast-open
 
       - name: Self-test

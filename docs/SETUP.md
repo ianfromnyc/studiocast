@@ -1,7 +1,64 @@
 # Setup / Install (Ubuntu 22.04+)
 
-This repo is a **source build** project today (POC/MVP). The scripts below exist to make it easy for
-testers and contributors to install prerequisites without guessing.
+This repo supports both a manual source-build flow and a StudioCast installer
+wizard target. The GUI installer is the polished user path for releases; the
+scripts below remain the CLI fallback for CI, SSH, recovery, and debugging.
+
+## GUI installer wizard
+
+Build and run the installer from a checkout:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target studiocast-installer
+./build/studiocast-installer
+```
+
+The GUI must be run as your normal user, not with `sudo`. It calls the scriptable
+backend at `installer/backend/studiocast-installer-backend`, which uses the
+existing setup/install/uninstall helpers for privileged package/module steps,
+builds, binary links, and the systemd user service.
+
+CLI equivalents:
+
+```bash
+./scripts/installer.sh detect-os
+./scripts/installer.sh status
+./scripts/installer.sh plan install
+./scripts/installer.sh install --yes
+./scripts/installer.sh update --source-dir /path/to/studiocast-release --yes
+./scripts/installer.sh repair --yes
+./scripts/installer.sh uninstall --yes
+./scripts/installer.sh clean-install --yes
+```
+
+Supported installer OS bases:
+
+- Ubuntu 22.04 / Jammy
+- Ubuntu 24.04 / Noble
+- Linux Mint when `/etc/os-release` exposes a reliable Ubuntu base:
+  `UBUNTU_CODENAME=jammy` maps to Ubuntu 22.04 and
+  `UBUNTU_CODENAME=noble` maps to Ubuntu 24.04. Mint 21.x and 22.x are mapped
+  to those bases if `UBUNTU_CODENAME` is missing.
+
+Unsupported distros fail clearly with the detected `/etc/os-release` fields and
+should use the manual source-build flow below.
+
+The installer writes:
+
+```text
+~/.local/share/studiocast/install-manifest.json
+```
+
+The manifest records installed version, source/build/install paths, installed
+binaries, user service path/status, dependency setup method, install timestamp,
+and whether user config/model/log/cache data was preserved. Update, repair,
+uninstall, and clean-install workflows use this manifest when available.
+
+Clean install removes app files and the user service before reinstalling. It
+preserves user config, downloaded model packs, logs, and cache by default; the
+GUI and backend require an explicit `--remove-user-data` choice before deleting
+those XDG directories.
 
 ## 1) Install dependencies + v4l2loopback
 
