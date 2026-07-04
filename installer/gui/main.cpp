@@ -1,13 +1,12 @@
 #include <QApplication>
 #include <QMessageBox>
-#include <QPalette>
-#include <QStyleFactory>
 
 #include <cstdio>
 #include <string_view>
 
 #include <unistd.h>
 
+#include "gui/theme.h"
 #include "installer_wizard.h"
 #include "studiocast/version.h"
 
@@ -23,67 +22,42 @@ bool hasArg(int argc, char **argv, std::string_view flag) {
 }
 
 void applyInstallerTheme(QApplication &app) {
-  app.setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
+  studiocast::gui::ApplyDarkTheme(app);
 
-  QPalette palette;
-  palette.setColor(QPalette::Window, QColor(0xF6, 0xF8, 0xFA));
-  palette.setColor(QPalette::WindowText, QColor(0x16, 0x1B, 0x22));
-  palette.setColor(QPalette::Base, QColor(0xFF, 0xFF, 0xFF));
-  palette.setColor(QPalette::AlternateBase, QColor(0xEA, 0xEF, 0xF4));
-  palette.setColor(QPalette::Text, QColor(0x16, 0x1B, 0x22));
-  palette.setColor(QPalette::Button, QColor(0xEA, 0xEF, 0xF4));
-  palette.setColor(QPalette::ButtonText, QColor(0x16, 0x1B, 0x22));
-  palette.setColor(QPalette::Highlight, QColor(0x0B, 0x6B, 0xA8));
-  palette.setColor(QPalette::HighlightedText, QColor(0xFF, 0xFF, 0xFF));
-  palette.setColor(QPalette::Link, QColor(0x0B, 0x6B, 0xA8));
-  app.setPalette(palette);
-
-  app.setStyleSheet(QStringLiteral(R"(
+  // The installer uses Qt's QWizard shell, which the main app does not. Keep
+  // this bridge limited to wizard-only selectors while reusing the app theme.
+  app.setStyleSheet(app.styleSheet() + QStringLiteral(R"(
 QWizard {
-  background: #F6F8FA;
+  background: #0B0F14;
 }
 QWizardPage {
-  background: #F6F8FA;
+  background: #0B0F14;
 }
-QGroupBox {
-  background: #FFFFFF;
-  border: 1px solid #D0D7DE;
-  border-radius: 6px;
-  margin-top: 14px;
-  padding: 12px;
+QWizard QLabel {
+  background: transparent;
 }
-QGroupBox::title {
-  subcontrol-origin: margin;
-  left: 10px;
-  padding: 0 4px;
-  color: #24292F;
-  font-weight: 600;
+QWizard QFrame[scRole="separator"] {
+  background: #273247;
+  border: none;
+  min-height: 1px;
+  max-height: 1px;
 }
-QLineEdit,
-QComboBox,
-QPlainTextEdit {
-  background: #FFFFFF;
-  border: 1px solid #D0D7DE;
-  border-radius: 4px;
-  padding: 5px;
+QRadioButton {
+  spacing: 8px;
 }
-QPlainTextEdit {
-  selection-background-color: #0969DA;
+QRadioButton::indicator {
+  width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  border: 1px solid #273247;
+  background: #0F1520;
 }
-QPushButton {
-  border: 1px solid #B8C0CA;
-  border-radius: 4px;
-  padding: 6px 10px;
-  background: #FFFFFF;
+QRadioButton::indicator:checked {
+  background: #2DD4FF;
+  border: 5px solid #0F1520;
 }
-QPushButton:hover {
-  background: #EEF4FA;
-}
-QPushButton:pressed {
-  background: #DDEBFA;
-}
-QLabel[muted="true"] {
-  color: #57606A;
+QRadioButton::indicator:checked:hover {
+  background: #5BE2FF;
 }
 )"));
 }

@@ -167,12 +167,13 @@ QString planTextFromObject(const QJsonObject &plan) {
 QLabel *mutedLabel(const QString &text, QWidget *parent = nullptr) {
   auto *label = new QLabel(text, parent);
   label->setWordWrap(true);
-  label->setProperty("muted", true);
+  label->setProperty("scRole", "muted");
   return label;
 }
 
 QFrame *line(QWidget *parent = nullptr) {
   auto *frame = new QFrame(parent);
+  frame->setProperty("scRole", "separator");
   frame->setFrameShape(QFrame::HLine);
   frame->setFrameShadow(QFrame::Sunken);
   return frame;

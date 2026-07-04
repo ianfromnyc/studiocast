@@ -443,6 +443,9 @@ add_executable(studiocast-installer
         installer/gui/main.cpp
         installer/gui/installer_wizard.h
         installer/gui/installer_wizard.cpp
+        src/gui/theme.h
+        src/gui/theme.cpp
+        src/gui/resources/gui_resources.qrc
 )
 
 target_link_libraries(studiocast-installer PRIVATE
@@ -451,6 +454,7 @@ target_link_libraries(studiocast-installer PRIVATE
 
 target_include_directories(studiocast-installer PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/installer/gui"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${STUDIOCAST_GENERATED_DIR}"
 )
 
