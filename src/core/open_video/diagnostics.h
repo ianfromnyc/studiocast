@@ -9,6 +9,16 @@ namespace studiocast::open_cuda {
 struct OpenCudaDiagnostics {
   bool ok = false;
 
+  // ONNX Runtime provider diagnostics (additive JSON fields).
+  std::string ort_version;
+  std::vector<std::string> ort_providers;
+
+  bool tensorrt_supported = false;
+  bool tensorrt_available = false;
+  bool tensorrt_requested = false;
+  std::string tensorrt_cache_path;
+  std::string tensorrt_status;
+
   // Model pack IDs discovered/usable by this engine.
   std::vector<std::string> installed_models;
 

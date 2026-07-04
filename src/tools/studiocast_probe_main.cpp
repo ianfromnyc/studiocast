@@ -39,6 +39,7 @@
 #include "core/maxine/paths.h"
 #include "core/maxine/reason_codes.h"
 #include "core/maxine/vfx_api.h"
+#include "core/onnx/ort_session.h"
 #include "core/open_video/model_pack_registry.h"
 #include "core/probe/probe.h"
 #include "core/util/json.h"
@@ -480,8 +481,32 @@ int RunSelfTest() {
         od.models.push_back(std::move(mi));
       }
       od.missing_models = reg.Problems();
+      od.ort_version = "1.24.1-test";
+      od.ort_providers = {"TensorrtExecutionProvider", "CUDAExecutionProvider",
+                          "CPUExecutionProvider"};
+      od.tensorrt_supported = true;
+      od.tensorrt_available = true;
+      od.tensorrt_requested = true;
+      od.tensorrt_cache_path = "/tmp/studiocast/trt_cache/gpu0";
+      od.tensorrt_status = "available";
 
       const std::string j = od.ToJson();
+      expectContains("OpenCudaDiagnosticsJson.ort_version", j,
+                     "\"ort_version\":\"1.24.1-test\"");
+      expectContains("OpenCudaDiagnosticsJson.ort_providers", j,
+                     "\"ort_providers\":[\"TensorrtExecutionProvider\","
+                     "\"CUDAExecutionProvider\",\"CPUExecutionProvider\"]");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_supported", j,
+                     "\"tensorrt_supported\":true");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_available", j,
+                     "\"tensorrt_available\":true");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_requested", j,
+                     "\"tensorrt_requested\":true");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_cache_path", j,
+                     "\"tensorrt_cache_path\":\"/tmp/studiocast/trt_cache/"
+                     "gpu0\"");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_status", j,
+                     "\"tensorrt_status\":\"available\"");
       expectContains("OpenCudaDiagnosticsJson.default_model_id", j,
                      "\"default_model_id\":\"mock_model\"");
       expectContains("OpenCudaDiagnosticsJson.models", j, "\"models\":[");
@@ -498,6 +523,25 @@ int RunSelfTest() {
       // Backward compatibility field.
       expectContains("OpenCudaDiagnosticsJson.installed_models", j,
                      "\"installed_models\":[");
+
+      const auto trt_cache =
+          studiocast::onnx::DefaultTensorRtCachePath(/*cuda_device_id=*/2);
+      expectEq("DefaultTensorRtCachePath.filename",
+               trt_cache.filename().string(), "gpu2");
+      expectEq("DefaultTensorRtCachePath.parent",
+               trt_cache.parent_path().filename().string(), "trt_cache");
+
+      if (packOpt) {
+        studiocast::open_cuda::OpenCudaMattingSession::Options trt_opts;
+        trt_opts.device_id = 2;
+        trt_opts.enable_tensorrt = true;
+        studiocast::open_cuda::OpenCudaMattingSession sess(nullptr, *packOpt,
+                                                           trt_opts);
+        expectTrue("OpenCudaMattingSession options propagate TensorRT",
+                   sess.options().enable_tensorrt);
+        expectIntEq("OpenCudaMattingSession options propagate device_id",
+                    sess.options().device_id, 2);
+      }
     }
   }
 

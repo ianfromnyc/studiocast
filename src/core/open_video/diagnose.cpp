@@ -1,14 +1,66 @@
 #include "core/open_video/diagnose.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+
 #include "core/maxine/cuda_driver_api.h"
+#include "core/onnx/ort_session.h"
 #include "core/open_video/model_pack_registry.h"
 #include "core/util/xdg.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 
 namespace studiocast::open_cuda {
 
+namespace {
+
+std::string ToLowerAscii(std::string s) {
+  for (char &c : s) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    c = static_cast<char>(std::tolower(uc));
+  }
+  return s;
+}
+
+bool OpenCudaTensorRtRequestedFromEnv() {
+  const char *v = std::getenv("STUDIOCAST_OPEN_CUDA_TENSORRT");
+  if (!v || !*v)
+    return false;
+
+  const std::string value = ToLowerAscii(v);
+  return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+bool HasProvider(const std::vector<std::string> &providers,
+                 const char *provider) {
+  return std::find(providers.begin(), providers.end(), provider) !=
+         providers.end();
+}
+
+} // namespace
+
 OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
   OpenCudaDiagnostics od;
+
+  const auto ort = studiocast::onnx::OrtSession::QueryRuntimeInfo();
+  od.ort_version = ort.version;
+  od.ort_providers = ort.providers;
+  od.tensorrt_supported = studiocast::onnx::OrtBuildHasTensorRtEpV2();
+  od.tensorrt_available =
+      HasProvider(od.ort_providers, "TensorrtExecutionProvider");
+  od.tensorrt_requested = OpenCudaTensorRtRequestedFromEnv();
+  od.tensorrt_cache_path =
+      studiocast::onnx::DefaultTensorRtCachePath(/*cuda_device_id=*/0)
+          .string();
+  if (!od.tensorrt_requested) {
+    od.tensorrt_status = "not_requested";
+  } else if (!od.tensorrt_supported) {
+    od.tensorrt_status = "unsupported_in_build";
+  } else if (!od.tensorrt_available) {
+    od.tensorrt_status = "provider_unavailable";
+  } else {
+    od.tensorrt_status = "available";
+  }
 
   const auto reg = studiocast::open_video::ModelPackRegistry::ScanDefault();
   od.default_model_id = reg.DefaultModelIdForTask("matting");

@@ -309,6 +309,91 @@ int main() {
     endif()
   endif()
 
+  # Feature probe: TensorRT EP V2 provider options.
+  # TensorRT support is optional even for GPU ONNX Runtime builds. Probe the
+  # headers/API surface and let runtime provider availability decide whether an
+  # actual session can append TensorRT.
+  set(_has_tensorrt_ep_v2 FALSE)
+  if (_found)
+    set(_probe_src [==[
+#include <onnxruntime_cxx_api.h>
+
+int main() {
+  auto& api = Ort::GetApi();
+
+  OrtTensorRTProviderOptionsV2* opts = nullptr;
+  Ort::ThrowOnError(api.CreateTensorRTProviderOptions(&opts));
+
+  const char* keys[] = {"device_id"};
+  const char* values[] = {"0"};
+  Ort::ThrowOnError(api.UpdateTensorRTProviderOptions(opts, keys, values, 1));
+  void* stream = nullptr;
+  Ort::ThrowOnError(api.UpdateTensorRTProviderOptionsWithValue(opts, "user_compute_stream", stream));
+
+  Ort::SessionOptions so;
+  Ort::ThrowOnError(api.SessionOptionsAppendExecutionProvider_TensorRT_V2(so, opts));
+  api.ReleaseTensorRTProviderOptions(opts);
+  return 0;
+}
+]==])
+
+    # Best-effort propagation of include dirs / compile defs from the chosen target.
+    # check_cxx_source_compiles does not automatically add target usage requirements.
+    get_target_property(_ort_includes "${_target}" INTERFACE_INCLUDE_DIRECTORIES)
+    if (NOT _ort_includes)
+      set(_ort_includes "")
+    endif()
+    get_target_property(_ort_compile_defs "${_target}" INTERFACE_COMPILE_DEFINITIONS)
+    if (NOT _ort_compile_defs)
+      set(_ort_compile_defs "")
+    endif()
+
+    set(_ort_includes_sanitized "")
+    foreach (d IN LISTS _ort_includes)
+      if (NOT d MATCHES "\\$<")
+        list(APPEND _ort_includes_sanitized "${d}")
+      endif()
+    endforeach()
+
+    set(_ort_compile_defs_sanitized "")
+    foreach (d IN LISTS _ort_compile_defs)
+      if (NOT d MATCHES "\\$<")
+        list(APPEND _ort_compile_defs_sanitized "${d}")
+      endif()
+    endforeach()
+
+    set(_old_required_includes "${CMAKE_REQUIRED_INCLUDES}")
+    set(_old_required_definitions "${CMAKE_REQUIRED_DEFINITIONS}")
+    set(_old_try_compile_target_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+
+    set(CMAKE_REQUIRED_INCLUDES "${_ort_includes_sanitized}")
+    set(CMAKE_REQUIRED_DEFINITIONS "${_ort_compile_defs_sanitized}")
+    # Compile-only feature probe: avoid link failures when only headers are present.
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+
+    check_cxx_source_compiles("${_probe_src}" _studiocast_ort_tensorrt_ep_v2_probe_ok)
+
+    set(CMAKE_REQUIRED_INCLUDES "${_old_required_includes}")
+    set(CMAKE_REQUIRED_DEFINITIONS "${_old_required_definitions}")
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_old_try_compile_target_type}")
+
+    if (_studiocast_ort_tensorrt_ep_v2_probe_ok)
+      set(_has_tensorrt_ep_v2 TRUE)
+    endif()
+  endif()
+
+  if (_has_tensorrt_ep_v2)
+    add_compile_definitions(STUDIOCAST_ORT_HAS_TENSORRT_EP_V2=1)
+    message(STATUS "ONNX Runtime TensorRT EP V2 provider options: available (STUDIOCAST_ORT_HAS_TENSORRT_EP_V2=1)")
+  else()
+    add_compile_definitions(STUDIOCAST_ORT_HAS_TENSORRT_EP_V2=0)
+    if (_found)
+      message(STATUS "ONNX Runtime TensorRT EP V2 provider options: unavailable (STUDIOCAST_ORT_HAS_TENSORRT_EP_V2=0)")
+    else()
+      message(STATUS "ONNX Runtime TensorRT EP V2 provider options: unavailable (onnxruntime not found; STUDIOCAST_ORT_HAS_TENSORRT_EP_V2=0)")
+    endif()
+  endif()
+
   set(${out_found} ${_found} PARENT_SCOPE)
   set(${out_target} "${_target}" PARENT_SCOPE)
 endfunction()

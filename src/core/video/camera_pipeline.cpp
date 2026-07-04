@@ -78,6 +78,15 @@ std::string ToLowerAscii(std::string s) {
   return s;
 }
 
+bool OpenCudaTensorRtEnabledFromEnv() {
+  const char *v = std::getenv("STUDIOCAST_OPEN_CUDA_TENSORRT");
+  if (!v || !*v)
+    return false;
+
+  const std::string value = ToLowerAscii(v);
+  return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
 bool ParseRgbHex(const std::string &s, std::uint32_t *out_rgb) {
   if (!out_rgb)
     return false;
@@ -1997,9 +2006,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       if (!session) {
+        studiocast::open_cuda::OpenCudaMattingSession::Options session_opts;
+        session_opts.device_id = 0;
+        session_opts.enable_tensorrt = OpenCudaTensorRtEnabledFromEnv();
         session =
             std::make_unique<studiocast::open_cuda::OpenCudaMattingSession>(
-                &cuda, *pack);
+                &cuda, *pack, session_opts);
       }
 
       // Allocate alpha tensor at model resolution.

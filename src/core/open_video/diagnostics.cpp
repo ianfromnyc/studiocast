@@ -66,6 +66,23 @@ std::string OpenCudaDiagnostics::ToJson() const {
 
   oss << "\"ok\":" << BoolJson(ok) << ",";
 
+  oss << "\"ort_version\":\"" << JsonEscape(ort_version) << "\",";
+
+  oss << "\"ort_providers\":";
+  AppendJsonStringArray(&oss, ort_providers);
+  oss << ",";
+
+  oss << "\"tensorrt_supported\":" << BoolJson(tensorrt_supported) << ",";
+
+  oss << "\"tensorrt_available\":" << BoolJson(tensorrt_available) << ",";
+
+  oss << "\"tensorrt_requested\":" << BoolJson(tensorrt_requested) << ",";
+
+  oss << "\"tensorrt_cache_path\":\"" << JsonEscape(tensorrt_cache_path)
+      << "\",";
+
+  oss << "\"tensorrt_status\":\"" << JsonEscape(tensorrt_status) << "\",";
+
   oss << "\"installed_models\":";
   AppendJsonStringArray(&oss, installed_models);
   oss << ",";
