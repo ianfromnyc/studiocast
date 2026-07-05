@@ -155,16 +155,6 @@ bool ParseRootObject(const Value &root, const Value::Object **out,
   return true;
 }
 
-bool ValidateNoBackgroundConflict(const BroadcastCameraEffects &fx,
-                                  std::string *error) {
-  if (fx.auto_frame.enabled &&
-      fx.virtual_background.mode != VirtualBackgroundMode::none) {
-    return Fail(error, "auto_frame.enabled cannot be true when "
-                       "virtual_background.mode is not 'none'");
-  }
-  return true;
-}
-
 int ClampInt(int v, int lo, int hi) {
   return studiocast::util::ClampInt(v, lo, hi);
 }
@@ -686,8 +676,6 @@ bool ParseBroadcastCameraEffectsJson(
       out->vignette.center_on_tracked_face = center;
   }
 
-  if (!ValidateNoBackgroundConflict(*out, error))
-    return false;
   return true;
 }
 

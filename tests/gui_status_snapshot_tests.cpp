@@ -92,6 +92,11 @@ bool TestStatusJsonCompatibilityShapes() {
                 "camera should be ready") &&
          Expect(s.camera.disabledReasons.size() == 1,
                 "camera disabled effect reasons should parse") &&
+         Expect(s.videoEffectPlan.disabledEffects.size() == 1,
+                "legacy video.effects_plan should parse into typed plan") &&
+         Expect(s.videoEffectPlan.disabledEffects.front().effectId ==
+                    QStringLiteral("mirror"),
+                "legacy disabled effect id should parse") &&
          Expect(s.microphone.state == studiocast::gui::ReadinessState::Ready,
                 "microphone should be ready") &&
          Expect(s.speakers.state == studiocast::gui::ReadinessState::Ready,
@@ -114,6 +119,270 @@ bool TestStatusJsonCompatibilityShapes() {
          Expect(s.openAudio.present && s.openAudio.ok &&
                     s.openAudio.installedModelCount == 1,
                 "top-level open_audio diagnostics should parse");
+}
+
+bool TestNestedPipelineEffectsPlanAndRawEffectsPreservation() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "video":{
+          "enabled":false,
+          "virtual_device_present":true,
+          "virtual_device_available":true,
+          "consumer_count":0,
+          "video_effects":{
+            "engine":"open_cuda",
+            "virtual_background":{
+              "mode":"blur",
+              "model_id":"matting-good",
+              "hidden_future_field":{"kept":true}
+            }
+          },
+          "pipeline":{
+            "running":false,
+            "starting":false,
+            "effects_plan":{
+              "ordered":["mirror","virtual_background.blur"],
+              "vignette_attach_to":"virtual_background.blur",
+              "disabled":[
+                {"id":"virtual_key_light","reason":"disabled by rule"}
+              ]
+            }
+          }
+        },
+        "audio":{
+          "enabled":false,
+          "mic_present":true,
+          "source_error":"",
+          "audio_effects":{
+            "engine":"open_source",
+            "microphone":{
+              "noise_removal_enabled":true,
+              "model_id":"rnnoise",
+              "preserve_this":{"nested":42}
+            },
+            "speaker":{"room_echo_removal_enabled":true}
+          },
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
+  return Expect(s.parsed, "nested effects plan payload should parse") &&
+         Expect(s.camera.disabledReasons.size() == 1,
+                "nested pipeline effects_plan should feed disabled reasons") &&
+         Expect(s.camera.disabledReasons.front().contains(
+                    QStringLiteral("virtual_key_light")),
+                "nested disabled reason should include effect id") &&
+         Expect(s.videoEffectPlan.orderedEffectIds.size() == 2,
+                "nested plan ordered ids should parse") &&
+         Expect(s.videoEffectPlan.orderedEffectIds.back() ==
+                    QStringLiteral("virtual_background.blur"),
+                "nested plan ordered contract id should parse") &&
+         Expect(s.videoEffectPlan.vignetteAttachToEffectId ==
+                    QStringLiteral("virtual_background.blur"),
+                "nested plan vignette attachment should parse") &&
+         Expect(s.videoEffectPlan.disabledEffects.size() == 1,
+                "nested plan disabled entries should parse") &&
+         Expect(s.videoEffectPlan.disabledEffects.front().effectId ==
+                    QStringLiteral("virtual_key_light"),
+                "nested plan disabled effect id should parse") &&
+         Expect(s.videoEffectPlan.disabledEffects.front().reason ==
+                    QStringLiteral("disabled by rule"),
+                "nested plan disabled reason should parse") &&
+         Expect(s.rawVideoEffectsJson.contains(
+                    QStringLiteral("hidden_future_field")),
+                "raw video_effects json should preserve hidden fields") &&
+         Expect(s.rawAudioEffectsJson.contains(
+                    QStringLiteral("preserve_this")),
+                "raw audio_effects json should preserve hidden fields");
+}
+
+bool TestVideoEffectReadinessMissingModelWhileIdle() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "video":{
+          "enabled":true,
+          "virtual_device_present":true,
+          "virtual_device_available":true,
+          "consumer_present":false,
+          "consumer_count":0,
+          "video_effects":{
+            "engine":"open_cuda",
+            "virtual_background":{"mode":"blur","model_id":"configured-missing"}
+          },
+          "effect_readiness":{
+            "virtual_background.blur":{
+              "state":"missing_model",
+              "summary":"Virtual background model is missing.",
+              "detail":"Configured model configured-missing is not installed.",
+              "backend":"open_cuda",
+              "requested_model_id":"configured-missing",
+              "resolved_model_id":"",
+              "reason":"missing_model"
+            },
+            "mirror":{
+              "state":"ready",
+              "summary":"Mirror is ready.",
+              "backend":"builtin"
+            }
+          },
+          "pipeline":{
+            "running":false,
+            "starting":false,
+            "state":"idle_no_consumer",
+            "idle_reason":"No active virtual camera consumer."
+          }
+        },
+        "audio":{
+          "mic_present":true,
+          "source_error":"",
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
+  const auto vb =
+      s.videoEffectReadiness.value(QStringLiteral("virtual_background.blur"));
+  const auto mirror =
+      s.videoEffectReadiness.value(QStringLiteral("mirror"));
+  return Expect(s.parsed, "effect readiness payload should parse") &&
+         Expect(s.camera.state == studiocast::gui::ReadinessState::MissingModel,
+                "missing effect model should drive camera missing-model state "
+                "while idle") &&
+         Expect(s.videoEffectReadiness.contains(
+                    QStringLiteral("virtual_background.blur")),
+                "effect readiness should be keyed by contract effect id") &&
+         Expect(vb.effectId == QStringLiteral("virtual_background.blur"),
+                "readiness effect id should parse from object key") &&
+         Expect(vb.state == studiocast::gui::ReadinessState::MissingModel,
+                "effect readiness state should parse missing_model") &&
+         Expect(vb.backend == QStringLiteral("open_cuda"),
+                "effect readiness backend should parse") &&
+         Expect(vb.requestedModelId == QStringLiteral("configured-missing"),
+                "effect readiness requested model should parse") &&
+         Expect(vb.reason == QStringLiteral("missing_model"),
+                "effect readiness reason should parse") &&
+         Expect(mirror.state == studiocast::gui::ReadinessState::Ready,
+                "other effect readiness entries should parse");
+}
+
+bool TestAudioEndpointActionReadinessFields() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "audio":{
+          "enabled":true,
+          "create_virtual_mic":true,
+          "create_virtual_speakers":true,
+          "source":"studio_usb_mic",
+          "source_resolved":"alsa_input.usb_mic",
+          "source_error":"",
+          "mic_present":true,
+          "mic_consumer_present":false,
+          "mic_consumer_count":0,
+          "microphone":{
+            "action":"choose_open_audio_model",
+            "readiness":{
+              "state":"missing_model",
+              "summary":"Microphone model is missing.",
+              "detail":"Configured Open Audio model mic-missing is not installed."
+            }
+          },
+          "audio_effects":{
+            "engine":"open_source",
+            "microphone":{"model_id":"mic-missing"},
+            "speaker":{"model_id":"speaker-good"}
+          },
+          "pipeline":{
+            "running":false,
+            "starting":false,
+            "state":"idle_no_consumer",
+            "backend_active":"open_audio",
+            "last_error":""
+          },
+          "speakers":{
+            "action":"stop_routing",
+            "readiness":{
+              "state":"processing",
+              "summary":"Processed speaker routing is active.",
+              "detail":"Speaker cleanup is processing audio."
+            },
+            "enabled":true,
+            "present":true,
+            "target_sink":"alsa_output.pci",
+            "target_sink_resolved":"alsa_output.pci",
+            "target_sink_active":"alsa_output.pci",
+            "target_sink_error":"",
+            "consumer_present":true,
+            "consumer_count":2,
+            "routing_active":true,
+            "route_mode":"pipeline",
+            "pipeline_running":true,
+            "pipeline_starting":false,
+            "pipeline_state":"running",
+            "backend_active":"open_audio",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
+  return Expect(s.parsed, "audio endpoint status payload should parse") &&
+         Expect(s.microphone.state ==
+                    studiocast::gui::ReadinessState::MissingModel,
+                "explicit microphone readiness should drive microphone state") &&
+         Expect(s.microphoneEndpoint.action ==
+                    QStringLiteral("choose_open_audio_model"),
+                "microphone action should parse from daemon status") &&
+         Expect(s.microphoneEndpoint.readiness.state ==
+                    studiocast::gui::ReadinessState::MissingModel,
+                "microphone endpoint readiness state should parse") &&
+         Expect(s.microphoneEndpoint.configuredDevice ==
+                    QStringLiteral("studio_usb_mic"),
+                "microphone configured source should parse") &&
+         Expect(s.microphoneEndpoint.resolvedDevice ==
+                    QStringLiteral("alsa_input.usb_mic"),
+                "microphone resolved source should parse") &&
+         Expect(s.microphoneEndpoint.activeBackend ==
+                    QStringLiteral("open_audio"),
+                "microphone active backend should parse") &&
+         Expect(s.speakersEndpoint.action == QStringLiteral("stop_routing"),
+                "speaker action should parse from daemon status") &&
+         Expect(s.speakersEndpoint.readiness.state ==
+                    studiocast::gui::ReadinessState::Processing,
+                "speaker endpoint readiness state should parse") &&
+         Expect(s.speakersEndpoint.configuredDevice ==
+                    QStringLiteral("alsa_output.pci"),
+                "speaker configured target should parse") &&
+         Expect(s.speakersEndpoint.resolvedDevice ==
+                    QStringLiteral("alsa_output.pci"),
+                "speaker resolved target should parse") &&
+         Expect(s.speakersEndpoint.activeDevice ==
+                    QStringLiteral("alsa_output.pci"),
+                "speaker active target should parse") &&
+         Expect(s.speakersEndpoint.routeMode == QStringLiteral("pipeline"),
+                "speaker route mode should parse") &&
+         Expect(s.speakersEndpoint.consumerCount == 2,
+                "speaker consumer count should parse");
 }
 
 bool TestEngineModelDetailsAndConfiguredSelections() {
@@ -584,6 +853,9 @@ int main() {
   bool ok = true;
   ok = TestUnreachableStatus() && ok;
   ok = TestStatusJsonCompatibilityShapes() && ok;
+  ok = TestNestedPipelineEffectsPlanAndRawEffectsPreservation() && ok;
+  ok = TestVideoEffectReadinessMissingModelWhileIdle() && ok;
+  ok = TestAudioEndpointActionReadinessFields() && ok;
   ok = TestEngineModelDetailsAndConfiguredSelections() && ok;
   ok = TestOpenAudioRuntimeStatusFields() && ok;
   ok = TestMissingVirtualDevices() && ok;

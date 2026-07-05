@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QMap>
 #include <QString>
 #include <QStringList>
 
@@ -27,6 +28,44 @@ struct DeviceReadiness {
   QString detail;
   QStringList notes;
   QStringList disabledReasons;
+};
+
+struct EffectPlanDisabledReason {
+  QString effectId;
+  QString reason;
+};
+
+struct VideoEffectPlan {
+  QStringList orderedEffectIds;
+  QString vignetteAttachToEffectId;
+  std::vector<EffectPlanDisabledReason> disabledEffects;
+};
+
+struct EffectReadiness {
+  QString effectId;
+  ReadinessState state = ReadinessState::Unknown;
+  QString summary;
+  QString detail;
+  QString backend;
+  QString requestedModelId;
+  QString resolvedModelId;
+  QString reason;
+};
+
+struct AudioEndpointStatus {
+  bool present = false;
+  bool enabled = false;
+  bool virtualDevicePresent = false;
+  bool consumerPresent = false;
+  int consumerCount = 0;
+  QString action;
+  DeviceReadiness readiness;
+  QString configuredDevice;
+  QString resolvedDevice;
+  QString activeDevice;
+  QString routeMode;
+  QString activeBackend;
+  QString rawJson;
 };
 
 struct EngineModelEntry {
@@ -97,10 +136,16 @@ struct DaemonStatusSnapshot {
   DeviceReadiness speakers;
   QString videoEffectsEnginePreference;
   QString audioEffectsEnginePreference;
+  QString rawVideoEffectsJson;
+  QString rawAudioEffectsJson;
+  VideoEffectPlan videoEffectPlan;
+  QMap<QString, EffectReadiness> videoEffectReadiness;
   QString videoEffectsActiveBackends;
   QString microphoneActiveBackend;
   QString speakersActiveBackend;
   QString speakersRouteMode;
+  AudioEndpointStatus microphoneEndpoint;
+  AudioEndpointStatus speakersEndpoint;
   OpenAudioRuntimeSnapshot microphoneOpenAudioRuntime;
   OpenAudioRuntimeSnapshot speakersOpenAudioRuntime;
 

@@ -779,6 +779,28 @@ if (BUILD_TESTING)
 
     add_test(NAME studiocast-gui-status-tests COMMAND studiocast-gui-status-tests)
 
+    add_executable(studiocast-effect-schema-tests
+            tests/effect_schema_tests.cpp
+    )
+
+    target_link_libraries(studiocast-effect-schema-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-effect-schema-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-effect-schema-tests)
+    studiocast_enable_sanitizers(studiocast-effect-schema-tests)
+
+    set_target_properties(studiocast-effect-schema-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-effect-schema-tests COMMAND studiocast-effect-schema-tests)
+
     add_executable(studiocast-video-tests
             tests/video_service_tests.cpp
             tests/latest_frame_wins_worker_tests.cpp

@@ -18,10 +18,17 @@ bool WriteAll(int fd, const void *data, std::size_t bytes, std::string *error) {
   const char *p = static_cast<const char *>(data);
   std::size_t n = 0;
   while (n < bytes) {
-    const ssize_t w = ::write(fd, p + n, bytes - n);
+    const ssize_t w = ::send(fd, p + n, bytes - n, MSG_NOSIGNAL);
     if (w < 0) {
       if (errno == EINTR)
         continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        continue;
+      if (errno == EPIPE || errno == ECONNRESET) {
+        if (error)
+          *error = "client disconnected";
+        return false;
+      }
       if (error)
         *error = std::string("write failed: ") + std::strerror(errno);
       return false;
@@ -128,12 +135,9 @@ void DaemonServer::Stop() {
   {
     std::lock_guard<std::mutex> lock(mu_);
     for (int fd : client_fds_) {
-      if (fd >= 0) {
+      if (fd >= 0)
         ::shutdown(fd, SHUT_RDWR);
-        ::close(fd);
-      }
     }
-    client_fds_.clear();
   }
 
   if (accept_th_.joinable())
@@ -141,11 +145,16 @@ void DaemonServer::Stop() {
 
   {
     std::lock_guard<std::mutex> lock(mu_);
-    for (auto &t : client_threads_) {
-      if (t.joinable())
-        t.join();
+    for (int fd : client_fds_) {
+      if (fd >= 0)
+        ::shutdown(fd, SHUT_RDWR);
     }
-    client_threads_.clear();
+  }
+
+  {
+    std::unique_lock<std::mutex> lock(mu_);
+    client_cv_.wait(lock, [this] { return active_clients_ == 0; });
+    client_fds_.clear();
   }
 
   if (!socket_path_.empty()) {
@@ -174,17 +183,42 @@ void DaemonServer::AcceptThread() {
     {
       std::lock_guard<std::mutex> lock(mu_);
       client_fds_.push_back(fd);
-      client_threads_.emplace_back(&DaemonServer::ClientThread, this, fd);
+      ++active_clients_;
+    }
+
+    try {
+      std::thread(&DaemonServer::ClientThread, this, fd).detach();
+    } catch (...) {
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = std::find(client_fds_.begin(), client_fds_.end(), fd);
+        if (it != client_fds_.end())
+          client_fds_.erase(it);
+        if (active_clients_ > 0)
+          --active_clients_;
+        client_cv_.notify_all();
+      }
+      ::close(fd);
+      continue;
     }
   }
 }
 
 void DaemonServer::ClientThread(int fd) {
-  auto removeFd = [&]() {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = std::find(client_fds_.begin(), client_fds_.end(), fd);
-    if (it != client_fds_.end())
-      client_fds_.erase(it);
+  auto markDone = [&]() {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = std::find(client_fds_.begin(), client_fds_.end(), fd);
+      if (it != client_fds_.end())
+        client_fds_.erase(it);
+    }
+    ::close(fd);
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (active_clients_ > 0)
+        --active_clients_;
+      client_cv_.notify_all();
+    }
   };
 
   std::string buffer;
@@ -197,6 +231,8 @@ void DaemonServer::ClientThread(int fd) {
     if (r < 0) {
       if (errno == EINTR)
         continue;
+      if (errno == ECONNRESET)
+        break;
       break;
     }
     if (r == 0)
@@ -233,8 +269,7 @@ void DaemonServer::ClientThread(int fd) {
     }
   }
 
-  ::close(fd);
-  removeFd();
+  markDone();
 }
 
 } // namespace studiocast::ipc

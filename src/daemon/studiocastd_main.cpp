@@ -11,6 +11,8 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -26,7 +28,6 @@
 #include "core/maxine/maxine_manager.h"
 #include "core/open_audio/open_audio_diagnose.h"
 #include "core/util/json.h"
-#include "core/util/ttl_cache.h"
 #include "core/util/xdg.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/camera_effects_json.h"
@@ -1100,18 +1101,16 @@ bool ApplyAudioConfigPatchJsonText(
   }
 
   if (fxVal) {
-    studiocast::audio::effects::BroadcastAudioEffects parsed;
     studiocast::audio::effects::BroadcastAudioEffectsJsonParseOptions options;
     options.allow_unknown_keys = true;
     std::vector<std::string> parseWarnings;
     std::string parseError;
-    if (!studiocast::audio::effects::ParseBroadcastAudioEffectsJson(
-            *fxVal, &parsed, options, &parseWarnings, &parseError)) {
+    if (!studiocast::audio::effects::ApplyBroadcastAudioEffectsPatchJson(
+            *fxVal, &cfg->effects, options, &parseWarnings, &parseError)) {
       if (error)
         *error = parseError;
       return false;
     }
-    cfg->effects = parsed;
     if (warnings)
       warnings->insert(warnings->end(), parseWarnings.begin(),
                        parseWarnings.end());
