@@ -1,8 +1,28 @@
+#include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <iostream>
+#include <string>
+#include <thread>
 
+#include <QCoreApplication>
+#include <QEventLoop>
+#include <QTimer>
+#include <unistd.h>
+
+#include "core/ipc/daemon_server.h"
+#include "core/ipc/daemon_socket.h"
+#include "gui/status/pending_daemon_write_guard.h"
 #include "gui/status/daemon_status_snapshot.h"
+#include "gui/status/status_poller.h"
 
 namespace {
+
+namespace fs = std::filesystem;
+using namespace std::chrono_literals;
 
 bool Expect(bool condition, const char *message) {
   if (!condition) {
@@ -11,6 +31,54 @@ bool Expect(bool condition, const char *message) {
   }
   return true;
 }
+
+class ScopedRuntimeDir {
+public:
+  explicit ScopedRuntimeDir(const std::string &name) {
+    hadOld_ = std::getenv("XDG_RUNTIME_DIR") != nullptr;
+    if (hadOld_)
+      old_ = std::getenv("XDG_RUNTIME_DIR");
+
+    std::error_code ec;
+    const auto tmp = fs::temp_directory_path(ec);
+    if (ec) {
+      error_ = "failed to resolve temp directory: " + ec.message();
+      return;
+    }
+
+    dir_ = tmp /
+           (name + "-" + std::to_string(static_cast<long long>(::getpid())));
+    fs::remove_all(dir_, ec);
+    fs::create_directories(dir_, ec);
+    if (ec) {
+      error_ = "failed to create temp runtime dir: " + ec.message();
+      return;
+    }
+
+    if (::setenv("XDG_RUNTIME_DIR", dir_.string().c_str(), 1) != 0)
+      error_ = std::string("setenv failed: ") + std::strerror(errno);
+  }
+
+  ~ScopedRuntimeDir() {
+    if (hadOld_) {
+      (void)::setenv("XDG_RUNTIME_DIR", old_.c_str(), 1);
+    } else {
+      (void)::unsetenv("XDG_RUNTIME_DIR");
+    }
+
+    std::error_code ec;
+    fs::remove_all(dir_, ec);
+  }
+
+  bool ok() const { return error_.empty(); }
+  const std::string &error() const { return error_; }
+
+private:
+  fs::path dir_;
+  bool hadOld_ = false;
+  std::string old_;
+  std::string error_;
+};
 
 bool TestUnreachableStatus() {
   const auto s = studiocast::gui::DaemonStatusSnapshot::Unreachable(
@@ -847,9 +915,124 @@ bool TestRawDiagnosticsFallbacks() {
                 "empty raw diagnostics should explain status is unread");
 }
 
+bool TestStatusPollerRefreshesDiagnosticsOutOfBand() {
+  ScopedRuntimeDir runtime("studiocast-gui-status-poller");
+  if (!runtime.ok()) {
+    std::cerr << runtime.error() << "\n";
+    return false;
+  }
+
+  std::string err;
+  const auto socketPath = studiocast::ipc::DaemonSocketPath(&err);
+  if (socketPath.empty()) {
+    std::cerr << "DaemonSocketPath failed: " << err << "\n";
+    return false;
+  }
+
+  std::atomic<int> statusCalls{0};
+  std::atomic<int> diagnosticsCalls{0};
+  studiocast::ipc::DaemonServer server;
+  if (!server.Start(
+          socketPath,
+          [&statusCalls, &diagnosticsCalls](const std::string &line) {
+            if (line == "GET_STATUS") {
+              ++statusCalls;
+              return std::string(
+                  "OK {\"service_running\":true,"
+                  "\"engines\":{\"open_cuda\":{\"ok\":true,"
+                  "\"summary\":\"cached diagnostics\"}},"
+                  "\"video\":{\"enabled\":false,"
+                  "\"virtual_device_present\":true,"
+                  "\"virtual_device_available\":true,"
+                  "\"consumer_count\":0,"
+                  "\"pipeline\":{\"running\":false,\"starting\":false}},"
+                  "\"audio\":{\"enabled\":false,\"mic_present\":true,"
+                  "\"source_error\":\"\","
+                  "\"pipeline\":{\"running\":false,\"starting\":false},"
+                  "\"speakers\":{\"present\":true,"
+                  "\"target_sink_error\":\"\","
+                  "\"routing_active\":false,\"route_mode\":\"off\"}}}");
+            }
+            if (line == "REFRESH_DIAGNOSTICS") {
+              ++diagnosticsCalls;
+              std::this_thread::sleep_for(50ms);
+              return std::string(
+                  "OK {\"engines\":{\"open_cuda\":{\"ok\":true}}}");
+            }
+            return std::string("ERR {\"error\":\"unexpected\"}");
+          },
+          &err)) {
+    std::cerr << "server.Start failed: " << err << "\n";
+    return false;
+  }
+
+  studiocast::gui::StatusPoller poller;
+  int changedCount = 0;
+  bool refreshFinished = false;
+  bool refreshOk = false;
+
+  QEventLoop loop;
+  QObject::connect(&poller, &studiocast::gui::StatusPoller::StatusChanged,
+                   &loop, [&](const studiocast::gui::DaemonStatusSnapshot &) {
+                     ++changedCount;
+                   });
+  QObject::connect(&poller,
+                   &studiocast::gui::StatusPoller::DiagnosticsRefreshFinished,
+                   &loop, [&](bool ok, const QString &) {
+                     refreshFinished = true;
+                     refreshOk = ok;
+                     loop.quit();
+                   });
+
+  poller.RefreshDiagnosticsNow();
+  poller.RefreshDiagnosticsNow();
+
+  QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+  loop.exec();
+  server.Stop();
+
+  return Expect(refreshFinished,
+                "diagnostics refresh should finish asynchronously") &&
+         Expect(refreshOk, "diagnostics refresh should report success") &&
+         Expect(diagnosticsCalls.load() == 1,
+                "duplicate diagnostics refreshes should coalesce") &&
+         Expect(statusCalls.load() == 1,
+                "diagnostics refresh should trigger one follow-up status poll") &&
+         Expect(changedCount == 1,
+                "follow-up status poll should emit one snapshot");
+}
+
+bool TestPendingDaemonWriteGuardSkipsRoutineStatusUntilWriteSettles() {
+  studiocast::gui::PendingDaemonWriteGuard guard;
+  if (!Expect(guard.ShouldApplyRoutineStatus(),
+              "fresh guard should allow routine status"))
+    return false;
+
+  guard.MarkPending();
+  if (!Expect(!guard.ShouldApplyRoutineStatus(),
+              "pending local write should suppress routine status resync"))
+    return false;
+
+  guard.MarkWriteAccepted();
+  if (!Expect(guard.ShouldApplyRoutineStatus(),
+              "accepted write should re-enable routine status resync"))
+    return false;
+
+  guard.MarkPending();
+  if (!Expect(!guard.ShouldApplyRoutineStatus(),
+              "second pending write should suppress routine status resync"))
+    return false;
+
+  guard.MarkWriteRejected();
+  return Expect(guard.ShouldApplyRoutineStatus(),
+                "rejected write should allow forced daemon resync");
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+  QCoreApplication app(argc, argv);
+
   bool ok = true;
   ok = TestUnreachableStatus() && ok;
   ok = TestStatusJsonCompatibilityShapes() && ok;
@@ -864,5 +1047,7 @@ int main() {
   ok = TestConsumerDetectionErrorsAreNotIdle() && ok;
   ok = TestInvalidJsonPreservesRawPayload() && ok;
   ok = TestRawDiagnosticsFallbacks() && ok;
+  ok = TestStatusPollerRefreshesDiagnosticsOutOfBand() && ok;
+  ok = TestPendingDaemonWriteGuardSkipsRoutineStatusUntilWriteSettles() && ok;
   return ok ? 0 : 1;
 }

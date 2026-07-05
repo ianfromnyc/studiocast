@@ -3118,21 +3118,26 @@ int RunSelfTest() {
       }
     }
 
-    // Validation: conflict between auto_frame and virtual_background.
+    // Validation: auto_frame and virtual_background can run together.
     {
-      const std::string conflict =
+      const std::string paired =
           "{\"schema_version\":1,\"auto_frame\":{\"enabled\":true},\"virtual_"
           "background\":{\"mode\":\"blur\"}}";
       BroadcastCameraEffects tmp;
       warnings.clear();
       err.clear();
-      if (ParseBroadcastCameraEffectsJsonText(conflict, &tmp, opt, &warnings,
-                                              &err)) {
+      if (!ParseBroadcastCameraEffectsJsonText(paired, &tmp, opt, &warnings,
+                                               &err)) {
         ++failures;
-        std::printf("[FAIL] BroadcastCameraEffects conflict should fail\n");
+        std::printf("[FAIL] BroadcastCameraEffects paired effects should pass: "
+                    "%s\n",
+                    err.c_str());
       } else {
-        expectContains("BroadcastCameraEffects conflict msg", err,
-                       "auto_frame.enabled");
+        expectTrue("BroadcastCameraEffects paired auto_frame preserved",
+                   tmp.auto_frame.enabled);
+        expectTrue("BroadcastCameraEffects paired virtual_background preserved",
+                   tmp.virtual_background.mode ==
+                       VirtualBackgroundMode::blur);
       }
     }
 

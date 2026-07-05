@@ -776,10 +776,35 @@ void EnginesModelsPage::StartModelInstall(EngineCard *card) {
                   modelInstallProcess_->readAllStandardError());
             }
           });
+  connect(modelInstallProcess_, &QProcess::errorOccurred, this,
+          [this](QProcess::ProcessError processError) {
+            if (processError != QProcess::FailedToStart ||
+                !modelInstallProcess_) {
+              return;
+            }
+
+            const QString message = modelInstallProcess_->errorString();
+            if (activeInstallCard_ && activeInstallCard_->downloadStatus) {
+              activeInstallCard_->downloadStatus->setText(
+                  QStringLiteral("Model installer failed to start."));
+            }
+            QProcess *process = modelInstallProcess_;
+            modelInstallProcess_ = nullptr;
+            activeInstallCard_ = nullptr;
+            if (process)
+              process->deleteLater();
+            RefreshDownloadButtons();
+            QMessageBox::warning(
+                this, QStringLiteral("StudioCast Models"),
+                QStringLiteral("Failed to start model installer: %1")
+                    .arg(message));
+          });
   connect(modelInstallProcess_,
           QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
           [this](int exitCode, QProcess::ExitStatus exitStatus) {
             QProcess *process = modelInstallProcess_;
+            if (!process)
+              return;
             if (process) {
               modelInstallOutput_ +=
                   QString::fromLocal8Bit(process->readAllStandardOutput());
@@ -829,16 +854,6 @@ void EnginesModelsPage::StartModelInstall(EngineCard *card) {
   card->downloadStatus->setText(QStringLiteral("Starting model download..."));
   RefreshDownloadButtons();
   modelInstallProcess_->start(bash, processArgs);
-  if (!modelInstallProcess_->waitForStarted(1000)) {
-    const QString message = modelInstallProcess_->errorString();
-    modelInstallProcess_->deleteLater();
-    modelInstallProcess_ = nullptr;
-    activeInstallCard_ = nullptr;
-    RefreshDownloadButtons();
-    QMessageBox::warning(this, QStringLiteral("StudioCast Models"),
-                         QStringLiteral("Failed to start model installer: %1")
-                             .arg(message));
-  }
 }
 
 void EnginesModelsPage::UpdateStatus(const DaemonStatusSnapshot &snapshot) {

@@ -22,7 +22,9 @@ util::ExecResult RunPactlCommand(const std::string &command) {
   }
   if (hook)
     return hook(command);
-  return util::ExecCapture(command);
+  util::ExecCaptureOptions options;
+  options.timeout_ms = 2500;
+  return util::ExecCapture(command, options);
 }
 
 std::vector<std::string> SplitTabs(const std::string &line) {

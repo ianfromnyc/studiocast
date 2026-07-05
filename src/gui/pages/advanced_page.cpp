@@ -17,9 +17,11 @@
 #include <QPushButton>
 #include <QSpinBox>
 #include <QStyle>
+#include <QThread>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -857,8 +859,8 @@ void AdvancedPage::OnSaveVideoModelOverrides() {
 
 void AdvancedPage::OnRefreshPulseState() {
   RefreshPulseState();
-  SetResult(QStringLiteral("PulseAudio state refreshed."),
-            pactlOk_ ? QStringLiteral("good") : QStringLiteral("warning"));
+  SetResult(QStringLiteral("PulseAudio refresh started."),
+            QStringLiteral("warning"));
 }
 
 void AdvancedPage::OnLegacySourceChanged(int /*index*/) {
@@ -931,8 +933,45 @@ void AdvancedPage::OnStopLegacyLoopback() {
 }
 
 void AdvancedPage::RefreshPulseState() {
-  std::string details;
-  pactlOk_ = studiocast::audio::pulse::PactlAvailable(&details);
+  if (pulseRefreshThread_)
+    return;
+
+  if (pulseStateLabel_) {
+    pulseStateLabel_->setText(QStringLiteral("Refreshing PulseAudio state..."));
+    SetDynamicProperty(pulseStateLabel_, "scStatus",
+                       QStringLiteral("warning"));
+  }
+  if (refreshPulseButton_)
+    refreshPulseButton_->setEnabled(false);
+
+  auto result = std::make_shared<PulseRefreshResult>();
+  auto *thread = QThread::create([result] {
+    result->pactlOk =
+        studiocast::audio::pulse::PactlAvailable(&result->pactlDetails);
+    result->localAudioStatusText =
+        QString::fromStdString(studiocast::audio::StatusText());
+    if (!result->pactlOk)
+      return;
+    result->modules =
+        studiocast::audio::pulse::ListModules(&result->moduleError);
+    result->sources =
+        studiocast::audio::pulse::ListSourcesDetailed(&result->sourceError);
+  });
+  pulseRefreshThread_ = thread;
+  connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+  connect(thread, &QThread::finished, this, [this, thread, result] {
+    if (pulseRefreshThread_ == thread)
+      pulseRefreshThread_ = nullptr;
+    ApplyPulseRefreshResult(*result);
+    if (refreshPulseButton_)
+      refreshPulseButton_->setEnabled(true);
+  });
+  thread->start();
+}
+
+void AdvancedPage::ApplyPulseRefreshResult(
+    const PulseRefreshResult &result) {
+  pactlOk_ = result.pactlOk;
   hasVirtualMicSink_ = false;
   hasVirtualMicSource_ = false;
   hasLegacyMicLoopback_ = false;
@@ -940,30 +979,28 @@ void AdvancedPage::RefreshPulseState() {
   hasVirtualSpeakersLoopback_ = false;
 
   if (localAudioStatusText_) {
-    SetPlainTextPreservingScroll(
-        localAudioStatusText_,
-        QString::fromStdString(studiocast::audio::StatusText()));
+    SetPlainTextPreservingScroll(localAudioStatusText_,
+                                 result.localAudioStatusText);
   }
 
   if (!pactlOk_) {
     if (pulseStateLabel_) {
       pulseStateLabel_->setText(
           QStringLiteral("pactl unavailable%1")
-              .arg(details.empty()
+              .arg(result.pactlDetails.empty()
                        ? QString()
                        : QStringLiteral(": %1")
-                             .arg(QString::fromStdString(details))));
+                             .arg(QString::fromStdString(
+                                 result.pactlDetails))));
       SetDynamicProperty(pulseStateLabel_, "scStatus",
                          QStringLiteral("warning"));
     }
-    RefreshLegacySources();
+    RefreshLegacySources({});
     UpdateButtonStates();
     return;
   }
 
-  std::string error;
-  const auto modules = studiocast::audio::pulse::ListModules(&error);
-  for (const auto &module : modules) {
+  for (const auto &module : result.modules) {
     if (module.name == "module-null-sink" &&
         Contains(module.args, "sink_name=studiocast_sink")) {
       hasVirtualMicSink_ = true;
@@ -996,20 +1033,21 @@ void AdvancedPage::RefreshPulseState() {
                  BoolLabel(hasLegacyMicLoopback_),
                  BoolLabel(hasVirtualSpeakersSink_),
                  BoolLabel(hasVirtualSpeakersLoopback_));
-    if (!error.empty())
+    if (!result.moduleError.empty())
       text += QStringLiteral("; module query warning: %1")
-                  .arg(QString::fromStdString(error));
+                  .arg(QString::fromStdString(result.moduleError));
     pulseStateLabel_->setText(text);
     SetDynamicProperty(pulseStateLabel_, "scStatus",
-                       error.empty() ? QStringLiteral("good")
-                                     : QStringLiteral("warning"));
+                       result.moduleError.empty() ? QStringLiteral("good")
+                                                  : QStringLiteral("warning"));
   }
 
-  RefreshLegacySources();
+  RefreshLegacySources(result.sources);
   UpdateButtonStates();
 }
 
-void AdvancedPage::RefreshLegacySources() {
+void AdvancedPage::RefreshLegacySources(
+    const std::vector<studiocast::audio::pulse::PactlSourceInfo> &sources) {
   if (!legacySourceCombo_)
     return;
 
@@ -1033,8 +1071,7 @@ void AdvancedPage::RefreshLegacySources() {
   legacySourceCombo_->addItem(QStringLiteral("Default Pulse source"),
                               QString());
 
-  std::string error;
-  cachedSources_ = studiocast::audio::pulse::ListSourcesDetailed(&error);
+  cachedSources_ = sources;
   for (const auto &source : cachedSources_) {
     if (source.name.empty())
       continue;

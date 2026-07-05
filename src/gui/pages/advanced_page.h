@@ -4,6 +4,7 @@
 #include <QString>
 #include <QWidget>
 
+#include <string>
 #include <vector>
 
 #include "core/audio/pulse/pactl.h"
@@ -16,6 +17,7 @@ class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
 class QSpinBox;
+class QThread;
 
 namespace studiocast::gui {
 
@@ -44,9 +46,22 @@ private slots:
   void OnStopLegacyLoopback();
 
 private:
+  struct PulseRefreshResult {
+    bool pactlOk = false;
+    std::string pactlDetails;
+    std::vector<studiocast::audio::pulse::PactlModule> modules;
+    std::string moduleError;
+    std::vector<studiocast::audio::pulse::PactlSourceInfo> sources;
+    std::string sourceError;
+    QString localAudioStatusText;
+  };
+
   void ApplySnapshotJson(const QJsonObject &root);
   void RefreshPulseState();
-  void RefreshLegacySources();
+  void ApplyPulseRefreshResult(const PulseRefreshResult &result);
+  void RefreshLegacySources(const std::vector<
+                            studiocast::audio::pulse::PactlSourceInfo>
+                                &sources);
   void UpdateLegacyPorts();
   void UpdateButtonStates();
 
@@ -120,6 +135,7 @@ private:
   bool configuredVirtualSpeakers_ = false;
   bool configuredSpeakersEnabled_ = false;
   bool speakersRoutingActive_ = false;
+  QThread *pulseRefreshThread_ = nullptr;
 
   std::vector<studiocast::audio::pulse::PactlSourceInfo> cachedSources_;
 };

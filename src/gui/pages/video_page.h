@@ -8,6 +8,7 @@
 #include "core/ipc/daemon_client.h"
 #include "core/video/effects/broadcast_effects.h"
 #include "core/video/v4l2_capture.h"
+#include "gui/status/pending_daemon_write_guard.h"
 
 class QCheckBox;
 class QComboBox;
@@ -22,6 +23,7 @@ class QLineEdit;
 class QToolButton;
 
 namespace studiocast::gui {
+struct DaemonStatusSnapshot;
 class VideoPreviewWidget;
 } // namespace studiocast::gui
 
@@ -32,6 +34,10 @@ class VideoPage final : public QWidget {
 public:
   explicit VideoPage(QWidget *parent = nullptr);
   ~VideoPage() override;
+  void UpdateStatus(const DaemonStatusSnapshot &snapshot);
+
+signals:
+  void StatusRefreshRequested();
 
 private slots:
   void Refresh();
@@ -73,7 +79,6 @@ private slots:
   void OnVignetteIntensityChanged(int value);
   void OnVignetteCenterOnFaceToggled(bool checked);
 
-  void OnPoll();
   void OnPreviewToggled(bool checked);
 
 private:
@@ -81,7 +86,11 @@ private:
   void UpdateUiEnabled();
   void UpdateBackgroundModeOptionVisibility();
   void UpdateStatusText();
-  bool SyncFromDaemonConfig();
+  bool SyncFromCachedDaemonStatus();
+  void ScheduleDaemonVideoEffectsWrite();
+  void ResyncControlsFromCachedStatus(bool force = false);
+  studiocast::video::effects::BroadcastCameraEffects
+  BuildCandidateEffectsFromUi() const;
 
   bool SendDaemonVideoConfig();
   bool SendDaemonVideoEffects();
@@ -174,9 +183,10 @@ private:
   VideoPreviewWidget *preview_ = nullptr;
   QCheckBox *previewCheck_ = nullptr;
   QTimer *previewTimer_ = nullptr;
+  QTimer *effectsWriteDebounceTimer_ = nullptr;
+  PendingDaemonWriteGuard effectsWriteGuard_;
 
   QPlainTextEdit *statusText_ = nullptr;
-  QTimer *pollTimer_ = nullptr;
 
   QString suggestedCmd_;
   std::string baseStatusText_;
@@ -191,6 +201,7 @@ private:
 
   bool daemonReachable_ = false;
   std::string daemonLastStatusJson_;
+  QString daemonStatusDetail_;
 
   // Canonical local effects model (Broadcast schema). This is the single
   // source of truth for what the GUI intends to apply.

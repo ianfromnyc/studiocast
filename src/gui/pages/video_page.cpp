@@ -33,6 +33,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QVector>
 
 #include <sstream>
 
@@ -41,17 +42,18 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <vector>
 
 #include "core/maxine/reason_codes.h"
-#include "core/open_video/model_pack_registry.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/convert.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/effect_descriptors.h"
 #include "core/video/v4l2loopback.h"
+#include "gui/status/daemon_status_snapshot.h"
 #include "gui/text_edit_utils.h"
 
 namespace studiocast::gui {
@@ -260,7 +262,7 @@ struct DaemonVideoStatus {
   QString effects_plan_vignette_attach_to;
   QMap<QString, QString> effects_plan_disabled;
 
-  // Maxine runtime diagnostics (from daemon GET_STATUS)
+  // Maxine runtime diagnostics (from daemon status)
   bool maxine_ok = false;
   bool maxine_supported = false;
   QString maxine_summary;
@@ -270,7 +272,7 @@ struct DaemonVideoStatus {
   QMap<QString, QStringList> maxine_missing_effects;
   bool virtual_key_light_available = false;
 
-  // Open CUDA runtime diagnostics (from daemon GET_STATUS)
+  // Open CUDA runtime diagnostics (from daemon status)
   bool open_cuda_present = false;
   bool open_cuda_ok = false;
   QString open_cuda_default_model_id;
@@ -620,7 +622,7 @@ QString FormatMaxineReasonCode(const QString &code) {
 }
 QString FirstLine(const QString &s) {
   const QString t = s.trimmed();
-  const int nl = t.indexOf('\n');
+  const qsizetype nl = t.indexOf('\n');
   if (nl < 0)
     return t;
   return t.left(nl).trimmed();
@@ -1310,17 +1312,17 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   connect(vignetteCenterOnFaceCheck_, &QCheckBox::toggled, this,
           &VideoPage::OnVignetteCenterOnFaceToggled);
 
-  pollTimer_ = new QTimer(this);
-  pollTimer_->setInterval(500);
-  connect(pollTimer_, &QTimer::timeout, this, &VideoPage::OnPoll);
-  pollTimer_->start();
-
   previewTimer_ = new QTimer(this);
   previewTimer_->setInterval(33);
   connect(previewTimer_, &QTimer::timeout, this, &VideoPage::OnPreviewTick);
 
+  effectsWriteDebounceTimer_ = new QTimer(this);
+  effectsWriteDebounceTimer_->setSingleShot(true);
+  effectsWriteDebounceTimer_->setInterval(180);
+  connect(effectsWriteDebounceTimer_, &QTimer::timeout, this,
+          [this] { (void)SendDaemonVideoEffects(); });
+
   Refresh();
-  SyncFromDaemonConfig();
   UpdateStatusText();
   UpdateUiEnabled();
 }
@@ -1432,7 +1434,7 @@ void VideoPage::Refresh() {
   if (suggestedCmdEdit_)
     suggestedCmdEdit_->setText(suggestedCmd_);
 
-  SyncFromDaemonConfig();
+  ResyncControlsFromCachedStatus();
   UpdateStatusText();
   UpdateUiEnabled();
 }
@@ -1444,50 +1446,45 @@ void VideoPage::CopySuggestedCommand() {
     cb->setText(suggestedCmd_);
 }
 
-bool VideoPage::SyncFromDaemonConfig() {
-  std::string json;
-  QString err;
-  // `GET_CONFIG` is canonical effects-only; GUI sync uses `GET_STATUS` for full
-  // video config.
-  if (!DaemonRequest("GET_STATUS", &json, &err)) {
-    daemonReachable_ = false;
-    daemonLastStatusJson_.clear();
-    return false;
+void VideoPage::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
+  daemonReachable_ = snapshot.reachable && snapshot.parsed;
+  daemonStatusDetail_ = snapshot.UserServiceDetail();
+  daemonLastStatusJson_ = snapshot.rawJson.toStdString();
+
+  if (daemonReachable_) {
+    ResyncControlsFromCachedStatus();
+  } else {
+    StopPreview();
   }
 
-  daemonReachable_ = true;
-  daemonLastStatusJson_ = json;
+  UpdateStatusText();
+  UpdateUiEnabled();
+}
 
-  QJsonObject root;
+bool VideoPage::SyncFromCachedDaemonStatus() {
+  if (!daemonReachable_ || daemonLastStatusJson_.empty())
+    return false;
+
+  // Transitional compatibility: the shared snapshot owns routine status
+  // delivery, but a few legacy camera controls still need fields that are not
+  // typed in DaemonStatusSnapshot yet. Parse the cached snapshot payload only;
+  // do not issue page-local status IPC here.
+  DaemonVideoStatus st;
   QString parseErr;
-  if (!ParseJsonObject(json, &root, &parseErr)) {
+  if (!ParseDaemonStatusJson(daemonLastStatusJson_, &st, &parseErr)) {
     daemonReachable_ = false;
-    daemonLastStatusJson_.clear();
+    daemonStatusDetail_ = parseErr;
     return false;
   }
 
-  // Prefer `GET_STATUS.video` shape; keep best-effort fallback for older
-  // daemons.
-  const QJsonObject video = root.value("video").toObject();
-  const QJsonObject src = video.isEmpty() ? root : video;
-
-  const QString input = src.value("input_device").toString();
-  const QString output = src.value("output_device").toString();
-  const int w = src.value("width").toInt(0);
-  const int h = src.value("height").toInt(0);
-  const int fps = src.value("fps").toInt(0);
-
-  const QJsonObject fx = src.value("video_effects").toObject();
-
-  // Canonical contract: `video_effects` is a patch object in Broadcast
-  // contract-ID form. GUI does not read any legacy effect fields here.
-  effects_ = {};
-  if (!fx.isEmpty()) {
-    const QByteArray txt = QJsonDocument(fx).toJson(QJsonDocument::Compact);
-    std::string jerr;
-    (void)studiocast::video::ApplyBroadcastCameraEffectsPatchJsonText(
-        txt.toStdString(), &effects_, &jerr);
-  }
+  const QString input = st.input_device;
+  const QString output = st.output_device;
+  const int w = st.width;
+  const int h = st.height;
+  const int fps = st.fps;
+  effects_ = st.effects_valid
+                 ? st.effects
+                 : studiocast::video::effects::BroadcastCameraEffects{};
 
   if (engineCombo_) {
     engineCombo_->blockSignals(true);
@@ -1719,6 +1716,132 @@ bool VideoPage::SyncFromDaemonConfig() {
   return true;
 }
 
+void VideoPage::ResyncControlsFromCachedStatus(bool force) {
+  if (!force && !effectsWriteGuard_.ShouldApplyRoutineStatus())
+    return;
+  (void)SyncFromCachedDaemonStatus();
+}
+
+void VideoPage::ScheduleDaemonVideoEffectsWrite() {
+  if (!effectsWriteDebounceTimer_)
+    return;
+  effectsWriteGuard_.MarkPending();
+  effectsWriteDebounceTimer_->start();
+}
+
+studiocast::video::effects::BroadcastCameraEffects
+VideoPage::BuildCandidateEffectsFromUi() const {
+  auto candidate = effects_;
+
+  candidate.engine =
+      studiocast::video::effects::EffectsEnginePreference::auto_select;
+  if (engineCombo_) {
+    const QString s = engineCombo_->currentData().toString();
+    studiocast::video::effects::EffectsEnginePreference ep = candidate.engine;
+    if (studiocast::video::effects::ParseEffectsEnginePreference(
+            s.toStdString(), &ep)) {
+      candidate.engine = ep;
+    }
+  }
+  if (mirrorCheck_)
+    candidate.mirror = mirrorCheck_->isChecked();
+
+  const QString bg =
+      backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
+  const bool bgIsAutoFrame = (bg == "auto_frame");
+
+  candidate.auto_frame.enabled =
+      (autoFrameCheck_ && autoFrameCheck_->isChecked()) || bgIsAutoFrame;
+  if (autoFrameZoomSlider_)
+    candidate.auto_frame.strength = autoFrameZoomSlider_->value();
+  if (autoFrameModelCombo_ && autoFrameModelCombo_->count() > 0) {
+    candidate.auto_frame.model_id =
+        autoFrameModelCombo_->currentData().toString().toStdString();
+  }
+
+  if (bgIsAutoFrame) {
+    candidate.virtual_background.mode =
+        studiocast::video::effects::VirtualBackgroundMode::none;
+  } else {
+    studiocast::video::effects::VirtualBackgroundMode m =
+        studiocast::video::effects::VirtualBackgroundMode::none;
+    (void)studiocast::video::effects::ParseVirtualBackgroundMode(
+        bg.toStdString(), &m);
+    candidate.virtual_background.mode = m;
+  }
+  if (vbModelCombo_ && vbModelCombo_->count() > 0) {
+    candidate.virtual_background.model_id =
+        vbModelCombo_->currentData().toString().toStdString();
+  }
+  if (backgroundStrengthSpin_)
+    candidate.virtual_background.strength = backgroundStrengthSpin_->value();
+  if (backgroundRemoveColorEdit_) {
+    candidate.virtual_background.remove_color =
+        backgroundRemoveColorEdit_->text().trimmed().toStdString();
+  }
+  if (backgroundReplaceImageEdit_) {
+    candidate.virtual_background.replace_path =
+        backgroundReplaceImageEdit_->text().trimmed().toStdString();
+  }
+
+  if (eyeContactCheck_)
+    candidate.eye_contact.enabled = eyeContactCheck_->isChecked();
+  if (eyeContactStrengthSlider_)
+    candidate.eye_contact.strength = eyeContactStrengthSlider_->value();
+  if (eyeContactLookAwayCheck_) {
+    candidate.eye_contact.look_away_enabled =
+        eyeContactLookAwayCheck_->isChecked();
+  }
+  if (eyeContactModelCombo_ && eyeContactModelCombo_->count() > 0) {
+    candidate.eye_contact.model_id =
+        eyeContactModelCombo_->currentData().toString().toStdString();
+  }
+
+  if (denoiseCheck_)
+    candidate.video_noise_removal.enabled = denoiseCheck_->isChecked();
+  if (denoiseStrengthSlider_)
+    candidate.video_noise_removal.strength = denoiseStrengthSlider_->value();
+  if (denoiseModelCombo_ && denoiseModelCombo_->count() > 0) {
+    candidate.video_noise_removal.model_id =
+        denoiseModelCombo_->currentData().toString().toStdString();
+  }
+
+  if (virtualKeyLightCheck_)
+    candidate.virtual_key_light.enabled = virtualKeyLightCheck_->isChecked();
+  if (virtualKeyLightIntensitySpin_) {
+    candidate.virtual_key_light.intensity =
+        virtualKeyLightIntensitySpin_->value();
+  }
+  if (virtualKeyLightTempCombo_) {
+    const QString t = virtualKeyLightTempCombo_->currentData().toString();
+    if (t == "warm")
+      candidate.virtual_key_light.temperature_preset = 1;
+    else if (t == "cool")
+      candidate.virtual_key_light.temperature_preset = 2;
+    else
+      candidate.virtual_key_light.temperature_preset = 0;
+  }
+  if (virtualKeyLightPanSpin_) {
+    candidate.virtual_key_light.direction_pan_degrees =
+        virtualKeyLightPanSpin_->value();
+  }
+  if (virtualKeyLightHdriEdit_) {
+    candidate.virtual_key_light.hdri_path =
+        virtualKeyLightHdriEdit_->text().trimmed().toStdString();
+  }
+
+  if (vignetteCheck_)
+    candidate.vignette.enabled = vignetteCheck_->isChecked();
+  if (vignetteIntensitySlider_)
+    candidate.vignette.intensity = vignetteIntensitySlider_->value();
+  if (vignetteCenterOnFaceCheck_) {
+    candidate.vignette.center_on_tracked_face =
+        vignetteCenterOnFaceCheck_->isChecked();
+  }
+
+  return candidate;
+}
+
 bool VideoPage::SendDaemonVideoConfig() {
   const QString inDev = inputCombo_->currentData().toString();
   const QString selectedOutDev = outputCombo_->currentData().toString();
@@ -1783,128 +1906,22 @@ bool VideoPage::SendDaemonVideoConfig() {
     return false;
   }
 
+  emit StatusRefreshRequested();
   return true;
 }
 
 bool VideoPage::SendDaemonVideoEffects() {
-  // Canonical local model is `effects_` (Broadcast schema). Sync UI -> model
-  // here, then serialize using the stable contract JSON.
-  effects_.engine =
-      studiocast::video::effects::EffectsEnginePreference::auto_select;
-  if (engineCombo_) {
-    const QString s = engineCombo_->currentData().toString();
-    studiocast::video::effects::EffectsEnginePreference ep = effects_.engine;
-    if (studiocast::video::effects::ParseEffectsEnginePreference(
-            s.toStdString(), &ep)) {
-      effects_.engine = ep;
-    }
-  }
-  if (mirrorCheck_)
-    effects_.mirror = mirrorCheck_->isChecked();
+  if (effectsWriteDebounceTimer_ && effectsWriteDebounceTimer_->isActive())
+    effectsWriteDebounceTimer_->stop();
 
-  const QString bg =
-      backgroundCombo_ ? backgroundCombo_->currentData().toString() : QString();
-  const bool bgIsAutoFrame = (bg == "auto_frame");
-
-  // Auto Frame is controlled independently from Virtual Background.
-  // (The background combo may still expose an "auto_frame" sentinel for legacy
-  // UX.)
-  effects_.auto_frame.enabled =
-      (autoFrameCheck_ && autoFrameCheck_->isChecked()) || bgIsAutoFrame;
-  if (autoFrameZoomSlider_) {
-    effects_.auto_frame.strength = autoFrameZoomSlider_->value();
-  }
-  if (autoFrameModelCombo_ && autoFrameModelCombo_->count() > 0) {
-    effects_.auto_frame.model_id =
-        autoFrameModelCombo_->currentData().toString().toStdString();
-  }
-
-  // Virtual background mode.
-  // Allow Virtual Background and Auto Frame simultaneously. If the background
-  // mode combo is set to the legacy "auto_frame" sentinel, treat it as "none".
-  if (bgIsAutoFrame) {
-    effects_.virtual_background.mode =
-        studiocast::video::effects::VirtualBackgroundMode::none;
-  } else {
-    studiocast::video::effects::VirtualBackgroundMode m =
-        studiocast::video::effects::VirtualBackgroundMode::none;
-    (void)studiocast::video::effects::ParseVirtualBackgroundMode(
-        bg.toStdString(), &m);
-    effects_.virtual_background.mode = m;
-  }
-  if (vbModelCombo_ && vbModelCombo_->count() > 0) {
-    effects_.virtual_background.model_id =
-        vbModelCombo_->currentData().toString().toStdString();
-  }
-  if (backgroundStrengthSpin_)
-    effects_.virtual_background.strength = backgroundStrengthSpin_->value();
-  if (backgroundRemoveColorEdit_)
-    effects_.virtual_background.remove_color =
-        backgroundRemoveColorEdit_->text().trimmed().toStdString();
-  if (backgroundReplaceImageEdit_)
-    effects_.virtual_background.replace_path =
-        backgroundReplaceImageEdit_->text().trimmed().toStdString();
-
-  // Eye contact.
-  if (eyeContactCheck_)
-    effects_.eye_contact.enabled = eyeContactCheck_->isChecked();
-  if (eyeContactStrengthSlider_)
-    effects_.eye_contact.strength = eyeContactStrengthSlider_->value();
-  if (eyeContactLookAwayCheck_)
-    effects_.eye_contact.look_away_enabled =
-        eyeContactLookAwayCheck_->isChecked();
-  if (eyeContactModelCombo_ && eyeContactModelCombo_->count() > 0) {
-    effects_.eye_contact.model_id =
-        eyeContactModelCombo_->currentData().toString().toStdString();
-  }
-
-  // Denoise.
-  if (denoiseCheck_)
-    effects_.video_noise_removal.enabled = denoiseCheck_->isChecked();
-  if (denoiseStrengthSlider_)
-    effects_.video_noise_removal.strength = denoiseStrengthSlider_->value();
-  if (denoiseModelCombo_ && denoiseModelCombo_->count() > 0) {
-    effects_.video_noise_removal.model_id =
-        denoiseModelCombo_->currentData().toString().toStdString();
-  }
-
-  // Virtual Key Light.
-  if (virtualKeyLightCheck_)
-    effects_.virtual_key_light.enabled = virtualKeyLightCheck_->isChecked();
-  if (virtualKeyLightIntensitySpin_)
-    effects_.virtual_key_light.intensity =
-        virtualKeyLightIntensitySpin_->value();
-  if (virtualKeyLightTempCombo_) {
-    const QString t = virtualKeyLightTempCombo_->currentData().toString();
-    if (t == "warm")
-      effects_.virtual_key_light.temperature_preset = 1;
-    else if (t == "cool")
-      effects_.virtual_key_light.temperature_preset = 2;
-    else
-      effects_.virtual_key_light.temperature_preset = 0;
-  }
-  if (virtualKeyLightPanSpin_)
-    effects_.virtual_key_light.direction_pan_degrees =
-        virtualKeyLightPanSpin_->value();
-  if (virtualKeyLightHdriEdit_)
-    effects_.virtual_key_light.hdri_path =
-        virtualKeyLightHdriEdit_->text().trimmed().toStdString();
-
-  // Vignette.
-  if (vignetteCheck_)
-    effects_.vignette.enabled = vignetteCheck_->isChecked();
-  if (vignetteIntensitySlider_)
-    effects_.vignette.intensity = vignetteIntensitySlider_->value();
-  if (vignetteCenterOnFaceCheck_)
-    effects_.vignette.center_on_tracked_face =
-        vignetteCenterOnFaceCheck_->isChecked();
-
+  const auto candidate = BuildCandidateEffectsFromUi();
   const std::string json =
-      studiocast::video::BroadcastCameraEffectsContractToJson(effects_);
+      studiocast::video::BroadcastCameraEffectsContractToJson(candidate);
   const std::string req = std::string("SET_VIDEO_EFFECTS_JSON ") + json;
 
   QString err;
   if (!DaemonRequest(req, nullptr, &err)) {
+    effectsWriteGuard_.MarkWriteRejected();
     if (statusText_) {
       SetPlainTextPreservingScroll(
           statusText_,
@@ -1913,8 +1930,14 @@ bool VideoPage::SendDaemonVideoEffects() {
     ShowError("Effects update failed",
               QStringLiteral("Camera effects were not saved.\n\nOpen Support "
                              "for technical details."));
+    ResyncControlsFromCachedStatus(/*force=*/true);
+    emit StatusRefreshRequested();
     return false;
   }
+
+  effects_ = candidate;
+  effectsWriteGuard_.MarkWriteAccepted();
+  emit StatusRefreshRequested();
   return true;
 }
 
@@ -1932,6 +1955,7 @@ bool VideoPage::SendDaemonEnabled(bool enabled) {
                              "for technical details."));
     return false;
   }
+  emit StatusRefreshRequested();
   return true;
 }
 
@@ -1965,37 +1989,29 @@ void VideoPage::OnBackgroundChanged(int /*index*/) {
 void VideoPage::OnVbModelChanged(int /*index*/) {
   if (!vbModelCombo_ || vbModelCombo_->count() <= 0)
     return;
-  effects_.virtual_background.model_id =
-      vbModelCombo_->currentData().toString().toStdString();
   (void)SendDaemonVideoEffects();
 }
 
 void VideoPage::OnAutoFrameModelChanged(int /*index*/) {
   if (!autoFrameModelCombo_ || autoFrameModelCombo_->count() <= 0)
     return;
-  effects_.auto_frame.model_id =
-      autoFrameModelCombo_->currentData().toString().toStdString();
   (void)SendDaemonVideoEffects();
 }
 
 void VideoPage::OnEyeContactModelChanged(int /*index*/) {
   if (!eyeContactModelCombo_ || eyeContactModelCombo_->count() <= 0)
     return;
-  effects_.eye_contact.model_id =
-      eyeContactModelCombo_->currentData().toString().toStdString();
   (void)SendDaemonVideoEffects();
 }
 
 void VideoPage::OnDenoiseModelChanged(int /*index*/) {
   if (!denoiseModelCombo_ || denoiseModelCombo_->count() <= 0)
     return;
-  effects_.video_noise_removal.model_id =
-      denoiseModelCombo_->currentData().toString().toStdString();
   (void)SendDaemonVideoEffects();
 }
 
 void VideoPage::OnBackgroundStrengthChanged(int /*value*/) {
-  (void)SendDaemonVideoEffects();
+  ScheduleDaemonVideoEffectsWrite();
 }
 
 void VideoPage::OnBackgroundRemoveColorChanged() {
@@ -2025,7 +2041,7 @@ void VideoPage::OnAutoFrameToggled(bool /*checked*/) {
 void VideoPage::OnAutoFrameZoomChanged(int value) {
   if (autoFrameZoomValue_)
     autoFrameZoomValue_->setText(QString::number(value) + "%");
-  (void)SendDaemonVideoEffects();
+  ScheduleDaemonVideoEffectsWrite();
 }
 
 void VideoPage::OnEyeContactToggled(bool /*checked*/) {
@@ -2036,7 +2052,7 @@ void VideoPage::OnEyeContactToggled(bool /*checked*/) {
 void VideoPage::OnEyeContactStrengthChanged(int value) {
   if (eyeContactStrengthValue_)
     eyeContactStrengthValue_->setText(QString::number(value) + "%");
-  (void)SendDaemonVideoEffects();
+  ScheduleDaemonVideoEffectsWrite();
 }
 
 void VideoPage::OnEyeContactLookAwayToggled(bool /*checked*/) {
@@ -2051,7 +2067,7 @@ void VideoPage::OnDenoiseToggled(bool /*checked*/) {
 void VideoPage::OnDenoiseStrengthChanged(int value) {
   if (denoiseStrengthValue_)
     denoiseStrengthValue_->setText(QString::number(value) + "%");
-  (void)SendDaemonVideoEffects();
+  ScheduleDaemonVideoEffectsWrite();
 }
 
 void VideoPage::OnOpenInstallHints() {
@@ -2063,24 +2079,6 @@ void VideoPage::OnOpenInstallHints() {
         s.toStdString(), &pref);
   }
 
-  const auto runHints = [&](const QString &program,
-                            const QString &title) -> QString {
-    QProcess p;
-    p.setProgram(program);
-    p.setArguments({"install-hints"});
-    p.start();
-    if (!p.waitForFinished(15000)) {
-      p.kill();
-      p.waitForFinished(2000);
-    }
-    const QString out = QString::fromUtf8(p.readAllStandardOutput());
-    const QString err = QString::fromUtf8(p.readAllStandardError());
-    const QString text = (out + (err.isEmpty() ? "" : ("\n" + err))).trimmed();
-    if (text.isEmpty())
-      return title + ": (no output)";
-    return title + ":\n" + text;
-  };
-
   const auto resolveProgram = [&](const char *exeName) -> QString {
     QString program = QCoreApplication::applicationDirPath() + "/" + exeName;
     if (QFileInfo::exists(program))
@@ -2088,27 +2086,108 @@ void VideoPage::OnOpenInstallHints() {
     return QString::fromUtf8(exeName);
   };
 
-  QString text;
   QString title;
+  QVector<QPair<QString, QString>> commands;
   if (pref == studiocast::video::effects::EffectsEnginePreference::open_cuda) {
     title = "Open Source install hints";
-    text = runHints(resolveProgram("studiocast-open"), "studiocast-open");
+    commands.push_back(
+        {resolveProgram("studiocast-open"), QStringLiteral("studiocast-open")});
   } else if (pref ==
              studiocast::video::effects::EffectsEnginePreference::maxine) {
     title = "Maxine install hints";
-    text = runHints(resolveProgram("studiocast-maxine"), "studiocast-maxine");
+    commands.push_back({resolveProgram("studiocast-maxine"),
+                        QStringLiteral("studiocast-maxine")});
   } else {
     title = "Engine install hints";
-    text = runHints(resolveProgram("studiocast-maxine"), "studiocast-maxine") +
-           "\n\n" +
-           runHints(resolveProgram("studiocast-open"), "studiocast-open");
+    commands.push_back({resolveProgram("studiocast-maxine"),
+                        QStringLiteral("studiocast-maxine")});
+    commands.push_back(
+        {resolveProgram("studiocast-open"), QStringLiteral("studiocast-open")});
   }
 
-  QMessageBox mb(this);
-  mb.setWindowTitle(title);
-  mb.setText("See details.");
-  mb.setDetailedText(text.trimmed());
-  mb.exec();
+  struct HintsState {
+    QString title;
+    QStringList sections;
+    int remaining = 0;
+  };
+
+  auto state = std::make_shared<HintsState>();
+  state->title = title;
+  state->remaining = static_cast<int>(commands.size());
+
+  if (openInstallHintsBtn_)
+    openInstallHintsBtn_->setEnabled(false);
+
+  const auto showIfDone = [this, state] {
+    if (state->remaining > 0)
+      return;
+    if (openInstallHintsBtn_)
+      openInstallHintsBtn_->setEnabled(true);
+    QMessageBox mb(this);
+    mb.setWindowTitle(state->title);
+    mb.setText("See details.");
+    mb.setDetailedText(state->sections.join(QStringLiteral("\n\n")).trimmed());
+    mb.exec();
+  };
+
+  for (const auto &command : commands) {
+    auto *process = new QProcess(this);
+    process->setProgram(command.first);
+    process->setArguments({QStringLiteral("install-hints")});
+
+    auto *timeout = new QTimer(process);
+    timeout->setSingleShot(true);
+    timeout->setInterval(15000);
+
+    const QString label = command.second;
+    const auto finishProcess = [state, showIfDone, process, timeout,
+                                label](const QString &extraError) {
+      if (process->property("studiocastDone").toBool())
+        return;
+      process->setProperty("studiocastDone", true);
+      timeout->stop();
+
+      QString out = QString::fromUtf8(process->readAllStandardOutput());
+      QString err = QString::fromUtf8(process->readAllStandardError());
+      if (!extraError.trimmed().isEmpty()) {
+        if (!err.isEmpty())
+          err += QChar('\n');
+        err += extraError.trimmed();
+      }
+      const QString text =
+          (out + (err.isEmpty() ? QString() : (QStringLiteral("\n") + err)))
+              .trimmed();
+      state->sections.push_back(label + QStringLiteral(":\n") +
+                                (text.isEmpty() ? QStringLiteral("(no output)")
+                                                : text));
+      --state->remaining;
+      process->deleteLater();
+      showIfDone();
+    };
+
+    connect(timeout, &QTimer::timeout, this, [process] {
+      process->setProperty("studiocastTimedOut", true);
+      process->kill();
+    });
+    connect(process,
+            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [finishProcess, process](int /*exitCode*/,
+                                     QProcess::ExitStatus /*status*/) {
+              const QString extra =
+                  process->property("studiocastTimedOut").toBool()
+                      ? QStringLiteral("Timed out after 15 seconds.")
+                      : QString();
+              finishProcess(extra);
+            });
+    connect(process, &QProcess::errorOccurred, this,
+            [finishProcess, process](QProcess::ProcessError error) {
+              if (error == QProcess::FailedToStart)
+                finishProcess(process->errorString());
+            });
+
+    process->start();
+    timeout->start();
+  }
 }
 
 void VideoPage::OnVirtualKeyLightToggled(bool /*checked*/) {
@@ -2117,7 +2196,7 @@ void VideoPage::OnVirtualKeyLightToggled(bool /*checked*/) {
 }
 
 void VideoPage::OnVirtualKeyLightIntensityChanged(int /*value*/) {
-  (void)SendDaemonVideoEffects();
+  ScheduleDaemonVideoEffectsWrite();
 }
 
 void VideoPage::OnVirtualKeyLightTemperatureChanged(int /*index*/) {
@@ -2125,7 +2204,7 @@ void VideoPage::OnVirtualKeyLightTemperatureChanged(int /*index*/) {
 }
 
 void VideoPage::OnVirtualKeyLightPanChanged(int /*value*/) {
-  (void)SendDaemonVideoEffects();
+  ScheduleDaemonVideoEffectsWrite();
 }
 
 void VideoPage::OnVirtualKeyLightHdriChanged() {
@@ -2151,7 +2230,7 @@ void VideoPage::OnVignetteToggled(bool checked) {
 void VideoPage::OnVignetteIntensityChanged(int value) {
   if (vignetteIntensityValue_)
     vignetteIntensityValue_->setText(QString::number(value) + "%");
-  (void)SendDaemonVideoEffects();
+  ScheduleDaemonVideoEffectsWrite();
 }
 
 void VideoPage::OnVignetteCenterOnFaceToggled(bool checked) {
@@ -2228,11 +2307,6 @@ void VideoPage::OnPreviewToggled(bool checked) {
   }
 
   StartPreview();
-}
-
-void VideoPage::OnPoll() {
-  UpdateStatusText();
-  UpdateUiEnabled();
 }
 
 void VideoPage::StartPreview() {
@@ -3011,12 +3085,9 @@ void VideoPage::UpdateUiEnabled() {
     vbModelCombo_->setVisible(showModelRow);
   }
 
-  // Open Video model selection for other effects (stored under
-  // ~/.local/share/studiocast/models/open_video/<task>/...).
+  // Open Video model selection for other effects. Model availability is
+  // daemon-reported; this routine must not scan local model directories.
   {
-    const auto reg = studiocast::open_video::ModelPackRegistry::ScanDefault();
-    const auto models = reg.ListModels();
-
     // Determine when Open Source is the active engine for each effect. In AUTO,
     // some effects may run on Maxine while others fall back to Open Source.
     QMap<QString, QString> backendById;
@@ -3086,26 +3157,44 @@ void VideoPage::UpdateUiEnabled() {
       label->setVisible(show_row);
       combo->setVisible(show_row);
 
-      std::vector<studiocast::open_video::ModelPack> packs;
-      packs.reserve(models.size());
-      for (const auto &m : models) {
-        if (m.task == task)
-          packs.push_back(m);
+      std::vector<DaemonVideoStatus::OpenCudaModelInfo> packs;
+      packs.reserve(st.open_cuda_models.size());
+      const QString taskKey = QString::fromUtf8(task);
+      bool hasTaskMeta = false;
+      for (const auto &m : st.open_cuda_models) {
+        if (!m.task.isEmpty()) {
+          hasTaskMeta = true;
+          break;
+        }
+      }
+      for (const auto &m : st.open_cuda_models) {
+        if (m.id.isEmpty())
+          continue;
+        if (hasTaskMeta && m.task != taskKey)
+          continue;
+        packs.push_back(m);
       }
       std::sort(packs.begin(), packs.end(), [](const auto &a, const auto &b) {
-        const std::string &an = a.display_name.empty() ? a.id : a.display_name;
-        const std::string &bn = b.display_name.empty() ? b.id : b.display_name;
+        const QString an = a.display_name.isEmpty() ? a.id : a.display_name;
+        const QString bn = b.display_name.isEmpty() ? b.id : b.display_name;
         return an < bn;
       });
 
-      std::string default_id = reg.DefaultModelIdForTask(task);
-      if (default_id.empty() && !packs.empty())
-        default_id = packs.front().id;
+      QString defaultId;
+      if (!st.open_cuda_default_model_id.isEmpty()) {
+        const auto it = std::find_if(
+            packs.begin(), packs.end(), [&](const auto &m) {
+              return m.id == st.open_cuda_default_model_id;
+            });
+        if (it != packs.end())
+          defaultId = st.open_cuda_default_model_id;
+      }
+      if (defaultId.isEmpty() && !packs.empty())
+        defaultId = packs.front().id;
 
-      QString sig =
-          QString::fromStdString(std::string(task) + "|" + default_id);
+      QString sig = taskKey + QChar('|') + defaultId;
       for (const auto &p : packs) {
-        sig += QString::fromStdString("|" + p.id + ":" + p.display_name);
+        sig += QChar('|') + p.id + QChar(':') + p.display_name;
       }
 
       if (sig != *items_sig) {
@@ -3113,26 +3202,22 @@ void VideoPage::UpdateUiEnabled() {
         combo->clear();
 
         if (packs.empty()) {
-          combo->addItem("<no models installed>", QString());
+          combo->addItem("<no daemon-reported models>", QString());
         } else {
-          if (!default_id.empty()) {
-            combo->addItem(
-                QString("<auto: %1>").arg(QString::fromStdString(default_id)),
-                QString());
+          if (!defaultId.isEmpty()) {
+            combo->addItem(QString("<auto: %1>").arg(defaultId), QString());
           } else {
             combo->addItem("<auto>", QString());
           }
 
           for (const auto &p : packs) {
-            QString text;
-            if (!p.display_name.empty() && p.display_name != p.id) {
-              text =
-                  QString("%1 (%2)").arg(QString::fromStdString(p.display_name),
-                                         QString::fromStdString(p.id));
+            QString text = p.id;
+            if (!p.display_name.isEmpty() && p.display_name != p.id) {
+              text = QString("%1 (%2)").arg(p.display_name, p.id);
             } else {
-              text = QString::fromStdString(p.id);
+              text = p.id;
             }
-            combo->addItem(text, QString::fromStdString(p.id));
+            combo->addItem(text, p.id);
           }
         }
 
@@ -3174,9 +3259,10 @@ void VideoPage::UpdateUiEnabled() {
       combo->setEnabled(daemonReachable_ && has_models);
       label->setEnabled(daemonReachable_);
       if (!has_models) {
-        const QString tip = QString("No models installed for task '%1'.\nRun: "
-                                    "studiocast-open video-install-hints")
-                                .arg(task);
+        const QString tip =
+            QString("No daemon-reported models for task '%1'.\nOpen Engines & "
+                    "Models for status and install hints.")
+                .arg(task);
         combo->setToolTip(tip);
         label->setToolTip(tip);
       } else {
@@ -3329,23 +3415,16 @@ void VideoPage::UpdateUiEnabled() {
 
 void VideoPage::UpdateStatusText() {
   DaemonVideoStatus st;
-  daemonReachable_ = false;
-  daemonLastStatusJson_.clear();
-
-  QString derr;
   QString parseErr;
-  std::string json;
-  if (DaemonRequest("GET_STATUS", &json, &derr)) {
-    if (ParseDaemonStatusJson(json, &st, &parseErr)) {
-      daemonReachable_ = true;
-      daemonLastStatusJson_ = json;
-    }
+  bool parsedStatus = false;
+  if (daemonReachable_ && !daemonLastStatusJson_.empty()) {
+    parsedStatus = ParseDaemonStatusJson(daemonLastStatusJson_, &st, &parseErr);
   }
 
   std::ostringstream oss;
   oss << baseStatusText_ << "\n\n---\nDaemon (studiocastd)\n";
 
-  if (!daemonReachable_) {
+  if (!daemonReachable_ || !parsedStatus) {
     if (cameraStateLabel_) {
       cameraStateLabel_->setText(QStringLiteral("Service unavailable"));
       SetDynamicProperty(cameraStateLabel_, "scStatus", QStringLiteral("error"));
@@ -3362,8 +3441,8 @@ void VideoPage::UpdateStatusText() {
     if (!parseErr.isEmpty())
       oss << " (invalid status JSON)";
     oss << "\n";
-    if (!derr.isEmpty())
-      oss << "  detail: " << derr.toStdString() << "\n";
+    if (!daemonStatusDetail_.isEmpty())
+      oss << "  detail: " << daemonStatusDetail_.toStdString() << "\n";
     if (!parseErr.isEmpty())
       oss << "  detail: " << parseErr.toStdString() << "\n";
     oss << "\nTips\n"

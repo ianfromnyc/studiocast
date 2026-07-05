@@ -757,10 +757,14 @@ if (BUILD_TESTING)
             tests/gui_status_snapshot_tests.cpp
             src/gui/status/daemon_status_snapshot.h
             src/gui/status/daemon_status_snapshot.cpp
+            src/gui/status/pending_daemon_write_guard.h
+            src/gui/status/status_poller.h
+            src/gui/status/status_poller.cpp
     )
 
     target_link_libraries(studiocast-gui-status-tests PRIVATE
             Qt${QT_VERSION_MAJOR}::Widgets
+            studiocast_core
     )
 
     target_include_directories(studiocast-gui-status-tests PRIVATE
@@ -772,7 +776,7 @@ if (BUILD_TESTING)
     studiocast_enable_sanitizers(studiocast-gui-status-tests)
 
     set_target_properties(studiocast-gui-status-tests PROPERTIES
-            AUTOMOC OFF
+            AUTOMOC ON
             AUTOUIC OFF
             AUTORCC OFF
     )
@@ -800,6 +804,51 @@ if (BUILD_TESTING)
     )
 
     add_test(NAME studiocast-effect-schema-tests COMMAND studiocast-effect-schema-tests)
+
+    add_executable(studiocast-daemon-status-tests
+            tests/daemon_status_tests.cpp
+    )
+
+    target_link_libraries(studiocast-daemon-status-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-daemon-status-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-daemon-status-tests)
+    studiocast_enable_sanitizers(studiocast-daemon-status-tests)
+
+    set_target_properties(studiocast-daemon-status-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-daemon-status-tests
+            COMMAND studiocast-daemon-status-tests)
+
+    add_executable(studiocast-exec-tests
+            tests/exec_tests.cpp
+    )
+
+    target_link_libraries(studiocast-exec-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-exec-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-exec-tests)
+    studiocast_enable_sanitizers(studiocast-exec-tests)
+
+    set_target_properties(studiocast-exec-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-exec-tests COMMAND studiocast-exec-tests)
 
     add_executable(studiocast-video-tests
             tests/video_service_tests.cpp

@@ -18,11 +18,13 @@
 #include <QPushButton>
 #include <QSlider>
 #include <QSpinBox>
+#include <QThread>
 #include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -34,6 +36,7 @@
 #include "core/audio/virtual_speaker.h"
 #include "core/ipc/daemon_client.h"
 #include "core/maxine/reason_codes.h"
+#include "gui/status/daemon_status_snapshot.h"
 #include "gui/text_edit_utils.h"
 
 namespace studiocast::gui {
@@ -45,10 +48,6 @@ constexpr const char *kAudioControlsUnavailable = "Audio controls unavailable";
 bool IsBadLoopbackSourceCandidate(const std::string &name) {
   std::string reason;
   return studiocast::audio::IsUnsafeInputSourceName(name, &reason);
-}
-
-bool Contains(const std::string &hay, const std::string &needle) {
-  return hay.find(needle) != std::string::npos;
 }
 
 bool ParseJsonObject(const std::string &json, QJsonObject *outRoot,
@@ -112,7 +111,7 @@ bool ConfirmDestructiveAction(QWidget *parent, const QString &title,
 }
 QString FirstLine(const QString &s) {
   const QString t = s.trimmed();
-  const int nl = t.indexOf('\n');
+  const qsizetype nl = t.indexOf('\n');
   if (nl < 0)
     return t;
   return t.left(nl).trimmed();
@@ -831,12 +830,11 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
             this, &AudioPage::OnSourceChanged);
   }
 
-  // Poll status so the UI reflects external changes (user unloads modules,
-  // etc.)
-  pollTimer_ = new QTimer(this);
-  pollTimer_->setInterval(1500);
-  connect(pollTimer_, &QTimer::timeout, this, &AudioPage::RefreshStatus);
-  pollTimer_->start();
+  audioWriteDebounceTimer_ = new QTimer(this);
+  audioWriteDebounceTimer_->setSingleShot(true);
+  audioWriteDebounceTimer_->setInterval(180);
+  connect(audioWriteDebounceTimer_, &QTimer::timeout, this,
+          [this] { PushDaemonAudioConfig(); });
 
   SetAdvancedVisible(false);
 
@@ -866,6 +864,34 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
 
 void AudioPage::ShowError(const QString &title, const QString &details) {
   QMessageBox::critical(this, title, details);
+}
+
+void AudioPage::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
+  daemonLastStatusJson_ = snapshot.rawJson;
+  daemonStatusDetail_ = snapshot.UserServiceDetail();
+
+  daemonMicrophoneAction_ = snapshot.microphoneEndpoint.action;
+  daemonMicVirtualDevicePresent_ =
+      snapshot.microphoneEndpoint.virtualDevicePresent;
+  daemonSpeakersAction_ = snapshot.speakersEndpoint.action;
+  daemonSpeakersVirtualDevicePresent_ =
+      snapshot.speakersEndpoint.virtualDevicePresent;
+  daemonSpeakersRoutingActive_ =
+      snapshot.speakersEndpoint.readiness.state == ReadinessState::Processing ||
+      snapshot.speakersEndpoint.action == QStringLiteral("stop_routing");
+  daemonSpeakersRouteMode_ = snapshot.speakersEndpoint.routeMode;
+  daemonSpeakerTarget_ = snapshot.speakersEndpoint.configuredDevice;
+
+  if (!snapshot.reachable || !snapshot.parsed) {
+    SetAiControlsEnabled(false, snapshot.UserServiceDetail());
+    daemonStatusText_ = snapshot.RawDiagnosticsText();
+    UpdateReleaseControlsFromCachedStatus();
+    if (statusText_)
+      SetPlainTextPreservingScroll(statusText_, daemonStatusText_);
+    return;
+  }
+
+  RefreshStatus();
 }
 
 void AudioPage::OnToggleAdvanced(bool checked) { SetAdvancedVisible(checked); }
@@ -941,6 +967,51 @@ void AudioPage::SetSpeakerRouteSummary(const QString &state,
 void AudioPage::RefreshSources() {
   if (!sourceCombo_)
     return;
+  if (sourceRefreshThread_)
+    return;
+
+  updatingSourceUi_ = true;
+  sourceCombo_->blockSignals(true);
+  sourceCombo_->clear();
+  sourceCombo_->addItem(QStringLiteral("Loading microphone inputs..."));
+  sourceCombo_->setEnabled(false);
+  if (portCombo_) {
+    portCombo_->clear();
+    portCombo_->setEnabled(false);
+  }
+  cachedSources_.clear();
+  sourceCombo_->blockSignals(false);
+  updatingSourceUi_ = false;
+  if (refreshSourcesBtn_)
+    refreshSourcesBtn_->setEnabled(false);
+
+  auto result = std::make_shared<SourceRefreshResult>();
+  auto *thread = QThread::create([result] {
+    result->pactlOk =
+        studiocast::audio::pulse::PactlAvailable(&result->pactlDetails);
+    if (!result->pactlOk)
+      return;
+    result->sources =
+        studiocast::audio::pulse::ListSourcesDetailed(&result->listError);
+    std::string defaultError;
+    result->defaultSource =
+        studiocast::audio::pulse::GetDefaultSourceName(&defaultError);
+  });
+  sourceRefreshThread_ = thread;
+  connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+  connect(thread, &QThread::finished, this, [this, thread, result] {
+    if (sourceRefreshThread_ == thread)
+      sourceRefreshThread_ = nullptr;
+    ApplySourceRefreshResult(*result);
+    if (refreshSourcesBtn_)
+      refreshSourcesBtn_->setEnabled(true);
+  });
+  thread->start();
+}
+
+void AudioPage::ApplySourceRefreshResult(const SourceRefreshResult &result) {
+  if (!sourceCombo_)
+    return;
 
   updatingSourceUi_ = true;
   sourceCombo_->blockSignals(true);
@@ -951,8 +1022,7 @@ void AudioPage::RefreshSources() {
   }
   cachedSources_.clear();
 
-  std::string pactlDetails;
-  if (!studiocast::audio::pulse::PactlAvailable(&pactlDetails)) {
+  if (!result.pactlOk) {
     sourceCombo_->addItem(QString::fromLatin1(kAudioControlsUnavailable));
     sourceCombo_->setEnabled(false);
     sourceCombo_->blockSignals(false);
@@ -961,7 +1031,7 @@ void AudioPage::RefreshSources() {
       SetPlainTextPreservingScroll(
           statusText_,
           QStringLiteral("Audio input control error:\n%1")
-              .arg(QString::fromStdString(pactlDetails)));
+              .arg(QString::fromStdString(result.pactlDetails)));
     }
     ShowError("Audio",
               QStringLiteral("Microphone inputs cannot be listed.\n\nOpen "
@@ -973,18 +1043,12 @@ void AudioPage::RefreshSources() {
   sourceCombo_->addItem("Auto (Pulse default)",
                         QVariant(QString::fromLatin1(kAutoPulseSource)));
 
-  std::string err;
-  cachedSources_ = studiocast::audio::pulse::ListSourcesDetailed(&err);
-  if (!err.empty() && statusText_) {
+  cachedSources_ = result.sources;
+  if (!result.listError.empty() && statusText_) {
     // Non-fatal warning, but useful
     SetPlainTextPreservingScroll(statusText_,
-                                 QString::fromStdString("Warning: " + err));
-  }
-
-  std::optional<std::string> defaultSource;
-  {
-    std::string derr;
-    defaultSource = studiocast::audio::pulse::GetDefaultSourceName(&derr);
+                                 QString::fromStdString("Warning: " +
+                                                        result.listError));
   }
 
   const QString daemonSource = daemonSource_.trimmed();
@@ -1004,7 +1068,7 @@ void AudioPage::RefreshSources() {
     sourceCombo_->addItem(QString::fromStdString(label),
                           QVariant(QString::fromStdString(s.name)));
 
-    if (defaultSource && s.name == *defaultSource) {
+    if (result.defaultSource && s.name == *result.defaultSource) {
       defaultIndex = added;
     }
     if (!daemonSource.isEmpty() &&
@@ -1048,13 +1112,52 @@ void AudioPage::RefreshSources() {
 void AudioPage::RefreshSpeakerTargets() {
   if (!speakerTargetCombo_)
     return;
+  if (speakerTargetRefreshThread_)
+    return;
+
+  updatingSpeakerTargetUi_ = true;
+  speakerTargetCombo_->blockSignals(true);
+  speakerTargetCombo_->clear();
+  speakerTargetCombo_->addItem(QStringLiteral("Loading speaker outputs..."));
+  speakerTargetCombo_->setEnabled(false);
+  speakerTargetCombo_->blockSignals(false);
+  updatingSpeakerTargetUi_ = false;
+  if (refreshSpeakerTargetsBtn_)
+    refreshSpeakerTargetsBtn_->setEnabled(false);
+
+  auto result = std::make_shared<SpeakerTargetRefreshResult>();
+  auto *thread = QThread::create([result] {
+    result->pactlOk =
+        studiocast::audio::pulse::PactlAvailable(&result->pactlDetails);
+    if (!result->pactlOk)
+      return;
+    result->sinks = studiocast::audio::pulse::ListSinks(&result->listError);
+    std::string defaultError;
+    result->defaultSink =
+        studiocast::audio::pulse::GetDefaultSinkName(&defaultError);
+  });
+  speakerTargetRefreshThread_ = thread;
+  connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+  connect(thread, &QThread::finished, this, [this, thread, result] {
+    if (speakerTargetRefreshThread_ == thread)
+      speakerTargetRefreshThread_ = nullptr;
+    ApplySpeakerTargetRefreshResult(*result);
+    if (refreshSpeakerTargetsBtn_)
+      refreshSpeakerTargetsBtn_->setEnabled(true);
+  });
+  thread->start();
+}
+
+void AudioPage::ApplySpeakerTargetRefreshResult(
+    const SpeakerTargetRefreshResult &result) {
+  if (!speakerTargetCombo_)
+    return;
 
   updatingSpeakerTargetUi_ = true;
   speakerTargetCombo_->blockSignals(true);
   speakerTargetCombo_->clear();
 
-  std::string pactlDetails;
-  if (!studiocast::audio::pulse::PactlAvailable(&pactlDetails)) {
+  if (!result.pactlOk) {
     speakerTargetCombo_->addItem(QString::fromLatin1(kAudioControlsUnavailable));
     speakerTargetCombo_->setEnabled(false);
     if (speakerTargetStatusLabel_) {
@@ -1069,7 +1172,7 @@ void AudioPage::RefreshSpeakerTargets() {
       SetPlainTextPreservingScroll(
           statusText_,
           QStringLiteral("Audio output control error:\n%1")
-              .arg(QString::fromStdString(pactlDetails)));
+              .arg(QString::fromStdString(result.pactlDetails)));
     }
     ShowError("Audio",
               QStringLiteral("Speaker outputs cannot be listed.\n\nOpen "
@@ -1081,17 +1184,10 @@ void AudioPage::RefreshSpeakerTargets() {
   speakerTargetCombo_->addItem("Auto (Pulse default)",
                                QVariant(QString::fromLatin1(kAutoPulseSink)));
 
-  std::string err;
-  const auto sinks = studiocast::audio::pulse::ListSinks(&err);
-  if (!err.empty() && statusText_) {
+  if (!result.listError.empty() && statusText_) {
     SetPlainTextPreservingScroll(statusText_,
-                                 QString::fromStdString("Warning: " + err));
-  }
-
-  std::optional<std::string> defaultSink;
-  {
-    std::string derr;
-    defaultSink = studiocast::audio::pulse::GetDefaultSinkName(&derr);
+                                 QString::fromStdString("Warning: " +
+                                                        result.listError));
   }
 
   const QString daemonTarget = daemonSpeakerTarget_.trimmed();
@@ -1100,7 +1196,7 @@ void AudioPage::RefreshSpeakerTargets() {
   int added = 1;
   QStringList targetNotes;
 
-  for (const auto &sink : sinks) {
+  for (const auto &sink : result.sinks) {
     if (sink.name.empty())
       continue;
 
@@ -1109,13 +1205,13 @@ void AudioPage::RefreshSpeakerTargets() {
       continue;
 
     std::string label = sink.name;
-    if (defaultSink && sink.name == *defaultSink)
+    if (result.defaultSink && sink.name == *result.defaultSink)
       label += " (default)";
 
     speakerTargetCombo_->addItem(QString::fromStdString(label),
                                  QVariant(QString::fromStdString(sink.name)));
 
-    if (defaultSink && sink.name == *defaultSink)
+    if (result.defaultSink && sink.name == *result.defaultSink)
       defaultIndex = added;
     if (!daemonTarget.isEmpty() &&
         daemonTarget != QString::fromLatin1(kAutoPulseSink) &&
@@ -1199,7 +1295,7 @@ void AudioPage::OnSpeakerTargetChanged(int /*index*/) {
     return;
   }
 
-  RefreshDaemonAudioStatus();
+  emit StatusRefreshRequested();
 }
 
 void AudioPage::UpdatePortControlsForSelectedSource(bool pushDaemon) {
@@ -1356,100 +1452,101 @@ void AudioPage::SyncSpeakerTargetSelectionFromDaemon(const QString &target) {
 }
 
 void AudioPage::RefreshStatus() {
-  // Always refresh daemon status; it also syncs UI state.
-  RefreshDaemonAudioStatus();
+  RefreshStatusFromCachedDaemon(/*forceControlResync=*/false);
+}
+
+void AudioPage::RefreshStatusFromCachedDaemon(bool forceControlResync) {
+  ApplyCachedDaemonAudioStatus(forceControlResync);
 
   if (statusText_) {
-    QString text = QString::fromStdString(studiocast::audio::StatusText());
-    if (!daemonStatusText_.isEmpty()) {
-      text += "\n\n---\nDaemon audio status:\n";
-      text += daemonStatusText_;
+    QString text;
+    if (!daemonStatusText_.trimmed().isEmpty()) {
+      text += "Daemon audio status:\n";
+      text += daemonStatusText_.trimmed();
+    } else if (!daemonStatusDetail_.trimmed().isEmpty()) {
+      text += daemonStatusDetail_.trimmed();
+    } else {
+      text += "Daemon audio status has not been read.";
+    }
+    if (!daemonLastStatusJson_.trimmed().isEmpty()) {
+      text += "\n\n---\nRaw daemon status:\n";
+      text += daemonLastStatusJson_;
     }
     SetPlainTextPreservingScroll(statusText_, text);
   }
 
-  // Enable/disable buttons based on current loaded modules (best-effort).
-  std::string pactlDetails;
-  const bool pactlOk = studiocast::audio::pulse::PactlAvailable(&pactlDetails);
+  UpdateReleaseControlsFromCachedStatus();
+}
 
-#ifdef NDEBUG
-  const bool mutationControlsOk = pactlOk && daemonAiSupported_;
-#else
-  const bool mutationControlsOk = pactlOk;
-#endif
+void AudioPage::UpdateReleaseControlsFromCachedStatus() {
+  const bool daemonOk = daemonAiSupported_;
+  constexpr bool debugPactlOk = false;
 
-  if (createBtn_)
-    createBtn_->setEnabled(mutationControlsOk);
-  if (destroyBtn_)
-    destroyBtn_->setEnabled(mutationControlsOk);
-  if (startBtn_)
-    startBtn_->setEnabled(pactlOk);
-  if (stopBtn_)
-    stopBtn_->setEnabled(pactlOk);
+  const QString speakerAction = daemonSpeakersAction_.trimmed();
 
-  if (enableSpeakersBtn_)
-    enableSpeakersBtn_->setEnabled(mutationControlsOk);
-  if (stopSpeakersBtn_)
-    stopSpeakersBtn_->setEnabled(mutationControlsOk);
-  if (destroySpeakersBtn_)
-    destroySpeakersBtn_->setEnabled(mutationControlsOk);
-
-  if (!pactlOk)
-    return;
-
-#ifdef NDEBUG
-  if (!daemonAiSupported_)
-    return;
-#endif
-
-  std::string err;
-  const auto mods = studiocast::audio::pulse::ListModules(&err);
-
-  bool hasSink = false;
-  bool hasRemap = false;
-  bool hasLoopback = false;
-
-  bool hasSpeakersSink = false;
-  bool hasSpeakersLoopback = false;
-
-  for (const auto &m : mods) {
-    if (m.name == "module-null-sink" &&
-        Contains(m.args, "sink_name=studiocast_sink")) {
-      hasSink = true;
-    }
-    if (m.name == "module-remap-source" &&
-        Contains(m.args, "source_name=studiocast_mic")) {
-      hasRemap = true;
-    }
-    if (m.name == "module-loopback" &&
-        Contains(m.args, "sink=studiocast_sink")) {
-      hasLoopback = true;
-    }
-
-    if (m.name == "module-null-sink" &&
-        Contains(m.args, "sink_name=studiocast_speakers")) {
-      hasSpeakersSink = true;
-    }
-    if (m.name == "module-loopback" &&
-        Contains(m.args, "source=studiocast_speakers.monitor")) {
-      hasSpeakersLoopback = true;
-    }
+  if (createBtn_) {
+    createBtn_->setEnabled(
+        daemonOk || (!daemonOk && debugPactlOk));
+    createBtn_->setToolTip(
+        daemonOk ? QString()
+                 : QStringLiteral(
+                       "Debug fallback requires local PulseAudio access."));
+  }
+  if (destroyBtn_) {
+    destroyBtn_->setEnabled(
+        (daemonOk && daemonMicVirtualDevicePresent_) ||
+        (!daemonOk && debugPactlOk));
+    destroyBtn_->setToolTip(
+        daemonOk ? QString()
+                 : QStringLiteral(
+                       "Debug fallback requires local PulseAudio access."));
   }
 
-  // Create is always safe; disable Destroy if nothing exists.
-  if (destroyBtn_)
-    destroyBtn_->setEnabled(mutationControlsOk && (hasSink || hasRemap));
-  if (startBtn_)
-    startBtn_->setEnabled(hasSink && hasRemap);
-  if (stopBtn_)
-    stopBtn_->setEnabled(hasLoopback);
+  if (startBtn_) {
+    startBtn_->setEnabled(debugPactlOk);
+    startBtn_->setToolTip(
+        debugPactlOk ? QString()
+                     : QStringLiteral(
+                           "Legacy loopback is a debug-only PulseAudio path."));
+  }
+  if (stopBtn_) {
+    stopBtn_->setEnabled(debugPactlOk);
+    stopBtn_->setToolTip(
+        debugPactlOk ? QString()
+                     : QStringLiteral(
+                           "Legacy loopback is a debug-only PulseAudio path."));
+  }
 
-  if (destroySpeakersBtn_)
-    destroySpeakersBtn_->setEnabled(mutationControlsOk && hasSpeakersSink);
+  const bool speakerCanStart =
+      daemonOk &&
+      (speakerAction.isEmpty() ||
+       speakerAction == QStringLiteral("start_routing") ||
+       speakerAction == QStringLiteral("create_virtual_speakers") ||
+       speakerAction == QStringLiteral("retry_routing") ||
+       speakerAction == QStringLiteral("wait_for_app") ||
+       speakerAction == QStringLiteral("choose_speaker_output"));
+  const bool speakerCanStop =
+      daemonOk &&
+      (speakerAction == QStringLiteral("stop_routing") ||
+       daemonSpeakersRoutingActive_ ||
+       (!daemonSpeakersRouteMode_.trimmed().isEmpty() &&
+        daemonSpeakersRouteMode_.trimmed().toLower() !=
+            QStringLiteral("off")));
+
+  if (enableSpeakersBtn_)
+    enableSpeakersBtn_->setEnabled(speakerCanStart);
   if (stopSpeakersBtn_)
-    stopSpeakersBtn_->setEnabled(
-        mutationControlsOk &&
-        (hasSpeakersLoopback || daemonSpeakersRoutingActive_));
+    stopSpeakersBtn_->setEnabled(speakerCanStop);
+  if (destroySpeakersBtn_)
+    destroySpeakersBtn_->setEnabled(daemonOk &&
+                                    daemonSpeakersVirtualDevicePresent_);
+}
+
+void AudioPage::ScheduleDaemonAudioConfigWrite() {
+  if (!audioWriteDebounceTimer_)
+    return;
+  audioWriteGuard_.MarkPending();
+  audioWriteDebounceTimer_->start();
 }
 
 void AudioPage::SetAiControlsEnabled(bool enabled, const QString &reason) {
@@ -1622,25 +1719,25 @@ void AudioPage::UpdateEngineUiVisibility() {
                                               : showSpeakerOpenDetails);
 }
 
-void AudioPage::RefreshDaemonAudioStatus() {
+void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
   daemonStatusText_.clear();
   daemonSpeakersRoutingActive_ = false;
   daemonSpeakersRouteMode_.clear();
 
-  std::string json;
-  QString err;
-  if (!DaemonRequest("GET_STATUS", &json, &err)) {
+  if (daemonLastStatusJson_.trimmed().isEmpty()) {
     SetAiControlsEnabled(
         false,
-        QStringLiteral("StudioCast background service is unavailable. Open "
-                       "Support for technical details."));
-    daemonStatusText_ = "daemon_unavailable: " + err;
+        daemonStatusDetail_.trimmed().isEmpty()
+            ? QStringLiteral("StudioCast background service is unavailable. "
+                             "Open Support for technical details.")
+            : daemonStatusDetail_);
+    daemonStatusText_ = "daemon_unavailable: " + daemonStatusDetail_;
     return;
   }
 
   QJsonObject root;
   QString jerr;
-  if (!ParseJsonObject(json, &root, &jerr)) {
+  if (!ParseJsonObject(daemonLastStatusJson_.toStdString(), &root, &jerr)) {
     SetAiControlsEnabled(
         false,
         QStringLiteral("StudioCast received an unreadable status update. Open "
@@ -1696,8 +1793,15 @@ void AudioPage::RefreshDaemonAudioStatus() {
 
   SetAiControlsEnabled(true, "");
 
+  // Transitional compatibility: routine delivery is centralized through
+  // DaemonStatusSnapshot, but this page still renders several legacy fields
+  // that are not all promoted to typed members. Parse only the cached shared
+  // snapshot payload; do not issue page-local status IPC here.
   const auto audio = root.value("audio").toObject();
   const bool audioEnabled = audio.value("enabled").toBool(false);
+  const auto microphoneEndpoint = audio.value("microphone").toObject();
+  daemonMicrophoneAction_ =
+      FirstLine(microphoneEndpoint.value("action").toString());
   SyncSourceSelectionFromDaemon(audio.value("source").toString());
   const QString sourceResolved = audio.value("source_resolved").toString();
   const QString sourceErr = audio.value("source_error").toString();
@@ -1723,6 +1827,7 @@ void AudioPage::RefreshDaemonAudioStatus() {
   if (mode_ == AudioPageMode::Microphone) {
     const bool micPresent = audio.value("mic_present").toBool(
         audio.value("create_virtual_mic").toBool(false));
+    daemonMicVirtualDevicePresent_ = micPresent;
 
     QString state = QStringLiteral("Available");
     QString detail =
@@ -1906,10 +2011,12 @@ void AudioPage::RefreshDaemonAudioStatus() {
     const auto spk = audio.value("speakers").toObject();
 
     daemonSpeakersRoutingActive_ = spk.value("routing_active").toBool(false);
+    daemonSpeakersAction_ = FirstLine(spk.value("action").toString());
     daemonSpeakersRouteMode_ = spk.value("route_mode").toString();
 
     const bool spkPresent = spk.value("present").toBool(
         audio.value("create_virtual_speakers").toBool(false));
+    daemonSpeakersVirtualDevicePresent_ = spkPresent;
     const bool spkRouting = spk.value("routing_active").toBool(false);
     const QString spkRouteMode = spk.value("route_mode").toString();
     const QString spkConfiguredTarget = spk.value("target_sink").toString();
@@ -2151,6 +2258,9 @@ void AudioPage::RefreshDaemonAudioStatus() {
     // Keep widget states but prevent edits.
     return;
   }
+
+  if (!forceControlResync && !audioWriteGuard_.ShouldApplyRoutineStatus())
+    return;
 
   // Sync UI from daemon config.
   const auto fx = audio.value("audio_effects").toObject();
@@ -2399,12 +2509,16 @@ void AudioPage::PushDaemonSourceSelection() {
     return;
   }
 
-  RefreshDaemonAudioStatus();
+  emit StatusRefreshRequested();
 }
 
 void AudioPage::PushDaemonAudioConfig() {
-  if (!daemonAiSupported_)
+  if (!daemonAiSupported_) {
+    audioWriteGuard_.MarkWriteRejected();
     return;
+  }
+  if (audioWriteDebounceTimer_ && audioWriteDebounceTimer_->isActive())
+    audioWriteDebounceTimer_->stop();
 
   const QString engine = engineCombo_ ? engineCombo_->currentData().toString()
                                       : QStringLiteral("auto");
@@ -2491,8 +2605,13 @@ void AudioPage::PushDaemonAudioConfig() {
     ShowError("Audio",
               QStringLiteral("Audio settings were not saved.\n\nOpen Support "
                              "for technical details."));
+    audioWriteGuard_.MarkWriteRejected();
+    RefreshStatusFromCachedDaemon(/*forceControlResync=*/true);
+    emit StatusRefreshRequested();
+    return;
   }
-  RefreshDaemonAudioStatus();
+  audioWriteGuard_.MarkWriteAccepted();
+  emit StatusRefreshRequested();
 }
 
 void AudioPage::OnAiEngineChanged(int /*index*/) {
@@ -2505,13 +2624,13 @@ void AudioPage::OnAiEngineChanged(int /*index*/) {
 void AudioPage::OnAiOpenAudioModelChanged(int /*index*/) {
   if (updatingAiUi_)
     return;
-  PushDaemonAudioConfig();
+  ScheduleDaemonAudioConfigWrite();
 }
 
 void AudioPage::OnAiOpenAudioModelPathEdited() {
   if (updatingAiUi_)
     return;
-  PushDaemonAudioConfig();
+  ScheduleDaemonAudioConfigWrite();
 }
 
 void AudioPage::OnAiBrowseOpenAudioModel() {
@@ -2578,7 +2697,7 @@ void AudioPage::OnAiSpeakerStrengthChanged(int v) {
   }
   if (updatingAiUi_)
     return;
-  PushDaemonAudioConfig();
+  ScheduleDaemonAudioConfigWrite();
 }
 
 void AudioPage::OnAiSpeakerOpenAudioModelChanged(int /*index*/) {
@@ -2614,7 +2733,7 @@ void AudioPage::OnAiStrengthChanged(int v) {
   }
   if (updatingAiUi_)
     return;
-  PushDaemonAudioConfig();
+  ScheduleDaemonAudioConfigWrite();
 }
 
 void AudioPage::OnCreateVirtualMic() {
@@ -2636,7 +2755,7 @@ void AudioPage::OnCreateVirtualMic() {
                                "Support for technical details."));
       return;
     }
-    RefreshStatus();
+    emit StatusRefreshRequested();
     RefreshSources();
     return;
   }
@@ -2685,7 +2804,7 @@ void AudioPage::OnDestroyVirtualMic() {
                                "Support for technical details."));
       return;
     }
-    RefreshStatus();
+    emit StatusRefreshRequested();
     RefreshSources();
     return;
   }
@@ -2775,7 +2894,7 @@ void AudioPage::OnEnableVirtualSpeakers() {
                                "Support for technical details."));
       return;
     }
-    RefreshStatus();
+    emit StatusRefreshRequested();
     return;
   }
 
@@ -2821,7 +2940,7 @@ void AudioPage::OnStopSpeakersRouting() {
                                "Support for technical details."));
       return;
     }
-    RefreshStatus();
+    emit StatusRefreshRequested();
     return;
   }
 
@@ -2868,7 +2987,7 @@ void AudioPage::OnDestroyVirtualSpeakers() {
                                "Support for technical details."));
       return;
     }
-    RefreshStatus();
+    emit StatusRefreshRequested();
     return;
   }
 
