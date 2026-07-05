@@ -25,4 +25,13 @@ bool ResizeBilinear(const CudaImage &src, const CudaImage &dst,
                     studiocast::maxine::CUstream stream,
                     std::string *error_out);
 
+// Bilinear crop+resize for interleaved RGB/BGR U8 pitched device images.
+//
+// Crop rectangle is expressed in source pixel coordinates. The operation is
+// enqueued on the provided stream and does not synchronize.
+bool CropResizeBilinear(const CudaImage &src, const CudaImage &dst,
+                        float crop_x, float crop_y, float crop_w, float crop_h,
+                        studiocast::maxine::CUstream stream,
+                        std::string *error_out);
+
 } // namespace studiocast::cuda::kernels

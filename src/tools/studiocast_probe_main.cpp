@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <csetjmp>
@@ -40,9 +41,9 @@
 #include "core/maxine/paths.h"
 #include "core/maxine/reason_codes.h"
 #include "core/maxine/vfx_api.h"
+#include "core/onnx/ort_session.h"
 #include "core/open_audio/model_pack_registry.h"
 #include "core/open_audio/open_audio_diagnostics.h"
-#include "core/onnx/ort_session.h"
 #include "core/open_video/model_pack_registry.h"
 #include "core/probe/probe.h"
 #include "core/util/json.h"
@@ -160,9 +161,9 @@ ConvertVerifyFile(const studiocast::open_audio::ModelFileVerification &f) {
   return out;
 }
 
-VerifyModelResult ConvertVerifyModel(
-    const std::string &engine,
-    const studiocast::open_video::ModelPackVerification &m) {
+VerifyModelResult
+ConvertVerifyModel(const std::string &engine,
+                   const studiocast::open_video::ModelPackVerification &m) {
   VerifyModelResult out;
   out.engine = engine;
   out.id = m.id;
@@ -179,9 +180,9 @@ VerifyModelResult ConvertVerifyModel(
   return out;
 }
 
-VerifyModelResult ConvertVerifyModel(
-    const std::string &engine,
-    const studiocast::open_audio::ModelPackVerification &m) {
+VerifyModelResult
+ConvertVerifyModel(const std::string &engine,
+                   const studiocast::open_audio::ModelPackVerification &m) {
   VerifyModelResult out;
   out.engine = engine;
   out.id = m.id;
@@ -268,8 +269,7 @@ void AppendJsonFile(std::ostringstream *oss, const VerifyFileResult &f) {
   *oss << "\"kind\":\"" << JsonEscape(f.kind) << "\",";
   *oss << "\"role\":\"" << JsonEscape(f.role) << "\",";
   *oss << "\"path\":\"" << JsonEscape(f.path.string()) << "\",";
-  *oss << "\"expected_sha256\":\"" << JsonEscape(f.expected_sha256)
-       << "\",";
+  *oss << "\"expected_sha256\":\"" << JsonEscape(f.expected_sha256) << "\",";
   *oss << "\"actual_sha256\":\"" << JsonEscape(f.actual_sha256) << "\",";
   *oss << "\"checksum_kind\":\"" << JsonEscape(f.checksum_kind) << "\",";
   *oss << "\"status\":\"" << JsonEscape(f.status) << "\",";
@@ -1578,6 +1578,89 @@ int RunSelfTest() {
                 std::printf("[FAIL] CudaResizeBilinear\n  max_abs_diff=%d "
                             "(want <= 1)\n",
                             max_abs_diff);
+              }
+            }
+          }
+
+          if (failures == 0) {
+            constexpr float crop_x = 2.25f;
+            constexpr float crop_y = 1.50f;
+            constexpr float crop_w = 7.50f;
+            constexpr float crop_h = 4.00f;
+            std::vector<std::uint8_t> cpu_crop(
+                dst_stride * static_cast<std::size_t>(dst_h), 0);
+            for (int y = 0; y < dst_h; ++y) {
+              const float src_y = crop_y +
+                                  (static_cast<float>(y) + 0.5f) *
+                                      (crop_h / static_cast<float>(dst_h)) -
+                                  0.5f;
+              const float sy =
+                  std::clamp(src_y, 0.0f, static_cast<float>(src_h - 1));
+              const int y0 = static_cast<int>(sy);
+              const int y1 = std::min(y0 + 1, src_h - 1);
+              const float ty = sy - static_cast<float>(y0);
+              for (int x = 0; x < dst_w; ++x) {
+                const float src_x = crop_x +
+                                    (static_cast<float>(x) + 0.5f) *
+                                        (crop_w / static_cast<float>(dst_w)) -
+                                    0.5f;
+                const float sx =
+                    std::clamp(src_x, 0.0f, static_cast<float>(src_w - 1));
+                const int x0 = static_cast<int>(sx);
+                const int x1 = std::min(x0 + 1, src_w - 1);
+                const float tx = sx - static_cast<float>(x0);
+                for (int c = 0; c < 3; ++c) {
+                  const auto ch = static_cast<std::size_t>(c);
+                  const float p00 =
+                      src_rgb[static_cast<std::size_t>(y0) * src_stride +
+                              static_cast<std::size_t>(x0) * 3u + ch];
+                  const float p10 =
+                      src_rgb[static_cast<std::size_t>(y0) * src_stride +
+                              static_cast<std::size_t>(x1) * 3u + ch];
+                  const float p01 =
+                      src_rgb[static_cast<std::size_t>(y1) * src_stride +
+                              static_cast<std::size_t>(x0) * 3u + ch];
+                  const float p11 =
+                      src_rgb[static_cast<std::size_t>(y1) * src_stride +
+                              static_cast<std::size_t>(x1) * 3u + ch];
+                  const float v0 = p00 + (p10 - p00) * tx;
+                  const float v1 = p01 + (p11 - p01) * tx;
+                  const int iv =
+                      static_cast<int>(std::lround(v0 + (v1 - v0) * ty));
+                  cpu_crop[static_cast<std::size_t>(y) * dst_stride +
+                           static_cast<std::size_t>(x) * 3u + ch] =
+                      static_cast<std::uint8_t>(std::clamp(iv, 0, 255));
+                }
+              }
+            }
+
+            if (!studiocast::cuda::kernels::CropResizeBilinear(
+                    gpu_src, gpu_dst, crop_x, crop_y, crop_w, crop_h, stream,
+                    &err)) {
+              fail("CudaCropResizeBilinear", "Kernel failed: " + err);
+            } else {
+              std::vector<std::uint8_t> gpu_crop(
+                  dst_stride * static_cast<std::size_t>(dst_h), 0xCD);
+              if (!gpu_dst.DownloadToCpuRgb24(&cuda, gpu_crop.data(),
+                                              dst_stride, stream, &err)) {
+                fail("CudaCropResizeBilinear", "Download failed: " + err);
+              } else if (!cuda.StreamSynchronize(stream, &err)) {
+                fail("CudaCropResizeBilinear",
+                     "StreamSynchronize failed: " + err);
+              } else {
+                int max_abs_diff = 0;
+                for (std::size_t i = 0;
+                     i < cpu_crop.size() && i < gpu_crop.size(); ++i) {
+                  const int d = static_cast<int>(cpu_crop[i]) -
+                                static_cast<int>(gpu_crop[i]);
+                  max_abs_diff = std::max(max_abs_diff, std::abs(d));
+                }
+                if (max_abs_diff > 1) {
+                  ++failures;
+                  std::printf("[FAIL] CudaCropResizeBilinear\n  "
+                              "max_abs_diff=%d (want <= 1)\n",
+                              max_abs_diff);
+                }
               }
             }
           }
@@ -3335,8 +3418,7 @@ int RunSelfTest() {
       expectTrue("open_cuda_gate blur allowed when available", gate2.ok);
 
       {
-        using studiocast::video::effects::contract::
-            kEffectIdVideoNoiseRemoval;
+        using studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval;
 
         studiocast::video::effects::BroadcastCameraEffects fx_denoise;
         fx_denoise.engine =
@@ -3347,12 +3429,13 @@ int RunSelfTest() {
         ort_cuda_missing.ok = true;
         ort_cuda_missing.available_effects = {
             std::string(kEffectIdVideoNoiseRemoval)};
-        ort_cuda_missing.blocked_effects[std::string(
-            kEffectIdVirtualBackgroundBlur)] =
+        ort_cuda_missing
+            .blocked_effects[std::string(kEffectIdVirtualBackgroundBlur)] =
             "onnxruntime_cuda_provider_unavailable";
 
-        const auto gate_denoise = studiocast::video::effects::
-            EvaluateOpenCudaGate(fx_denoise, ort_cuda_missing);
+        const auto gate_denoise =
+            studiocast::video::effects::EvaluateOpenCudaGate(fx_denoise,
+                                                             ort_cuda_missing);
         expectTrue("open_cuda_gate denoise allowed without ort cuda ep",
                    gate_denoise.ok);
       }

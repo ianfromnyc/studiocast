@@ -36,7 +36,7 @@ int ParseSigmaFromIdFallback(const std::string &id) {
 } // namespace
 
 FastDvdnetDenoiser::FastDvdnetDenoiser() = default;
-FastDvdnetDenoiser::~FastDvdnetDenoiser() = default;
+FastDvdnetDenoiser::~FastDvdnetDenoiser() { ResetCudaTensorIo(); }
 
 int FastDvdnetDenoiser::AlignUp(int v, int align) {
   if (align <= 1)
@@ -209,15 +209,25 @@ bool FastDvdnetDenoiser::EnsureSessionForModel(const LoadedModel &model,
   ort_session_active_ = nullptr;
   using_cpu_fallback_ = false;
   session_info_ = studiocast::onnx::OrtSessionInfo{};
+  ResetCudaTensorIo();
 
   studiocast::onnx::OrtSessionOptions cuda_opts;
   cuda_opts.prefer_cuda = true;
+
+  std::string cuda_setup_err;
+  if (cuda_.Initialize(&cuda_setup_err) &&
+      cuda_.EnsureContext(&cuda_setup_err) &&
+      cuda_.CreateStream(&cuda_stream_, &cuda_setup_err)) {
+    cuda_stream_owned_ = true;
+    cuda_opts.user_compute_stream = reinterpret_cast<void *>(cuda_stream_);
+  }
 
   std::string err;
   studiocast::onnx::OrtSessionInfo info_cuda;
   auto cuda = studiocast::onnx::OrtSession::Create(model.onnx, cuda_opts,
                                                    &info_cuda, &err);
   if (!cuda) {
+    ResetCudaTensorIo();
     if (error) {
       *error = "Open Video FastDVDnet: failed to create ORT session: " +
                (err.empty() ? std::string("unknown") : err);
@@ -246,6 +256,9 @@ bool FastDvdnetDenoiser::EnsureSessionForModel(const LoadedModel &model,
   ort_session_active_ = ort_session_cuda_.get();
   session_info_ = info_cuda;
   using_cpu_fallback_ = false;
+  if (!session_info_.using_cuda) {
+    ResetCudaTensorIo();
+  }
 
   active_model_id_ = model.id;
   active_model_path_ = model.onnx;
@@ -339,7 +352,126 @@ bool FastDvdnetDenoiser::RefreshGeometry(int src_w, int src_h,
   out_den.shape_rank = denoised_shape_.size();
   ort_outputs_.push_back(out_den);
 
+  if (session_info_.using_cuda && !using_cpu_fallback_) {
+    std::string cuda_err;
+    if (!EnsureCudaTensorIo(&cuda_err)) {
+      cuda_tensor_io_ready_ = false;
+      if (!cuda_err.empty()) {
+        sticky_warning_ =
+            "Open Video FastDVDnet: CUDA tensor IoBinding unavailable; "
+            "using CPU tensor I/O with CUDA EP. " +
+            cuda_err;
+      }
+    }
+  } else {
+    ResetCudaTensorIo();
+  }
+
   return true;
+}
+
+bool FastDvdnetDenoiser::EnsureCudaTensorIo(std::string *error) {
+  if (error)
+    error->clear();
+  cuda_tensor_io_ready_ = false;
+
+  if (!session_info_.using_cuda || using_cpu_fallback_) {
+    if (error)
+      *error = "CUDA EP is not active.";
+    return false;
+  }
+
+  std::string err;
+  if (!cuda_.IsInitialized() && !cuda_.Initialize(&err)) {
+    if (error)
+      *error = "CUDA driver initialization failed: " + err;
+    return false;
+  }
+  if (!cuda_.EnsureContext(&err)) {
+    if (error)
+      *error = "CUDA context setup failed: " + err;
+    return false;
+  }
+  if (!cuda_stream_) {
+    if (!cuda_.CreateStream(&cuda_stream_, &err)) {
+      if (error)
+        *error = "CUDA stream creation failed: " + err;
+      return false;
+    }
+    cuda_stream_owned_ = true;
+  }
+
+  if (!cuda_noisy_tensor_.ReallocIfNeededNchwF32(&cuda_, 1, 15, proc_h_,
+                                                 proc_w_, &err)) {
+    if (error)
+      *error = "failed to allocate noisy tensor: " + err;
+    return false;
+  }
+  if (!cuda_noise_map_tensor_.ReallocIfNeededNchwF32(&cuda_, 1, 1, proc_h_,
+                                                     proc_w_, &err)) {
+    if (error)
+      *error = "failed to allocate noise map tensor: " + err;
+    return false;
+  }
+  if (!cuda_denoised_tensor_.ReallocIfNeededNchwF32(&cuda_, 1, 3, proc_h_,
+                                                    proc_w_, &err)) {
+    if (error)
+      *error = "failed to allocate denoised tensor: " + err;
+    return false;
+  }
+
+  cuda_ort_inputs_.clear();
+  cuda_ort_outputs_.clear();
+
+  studiocast::onnx::OrtSession::CudaBindingInput in_noisy;
+  in_noisy.name = noisy_name_.c_str();
+  in_noisy.device_ptr = reinterpret_cast<const float *>(
+      static_cast<std::uintptr_t>(cuda_noisy_tensor_.ptr));
+  in_noisy.num_floats = cuda_noisy_tensor_.ElementCount();
+  in_noisy.shape = noisy_shape_.data();
+  in_noisy.shape_rank = noisy_shape_.size();
+
+  studiocast::onnx::OrtSession::CudaBindingInput in_noise;
+  in_noise.name = noise_map_name_.c_str();
+  in_noise.device_ptr = reinterpret_cast<const float *>(
+      static_cast<std::uintptr_t>(cuda_noise_map_tensor_.ptr));
+  in_noise.num_floats = cuda_noise_map_tensor_.ElementCount();
+  in_noise.shape = noise_map_shape_.data();
+  in_noise.shape_rank = noise_map_shape_.size();
+
+  studiocast::onnx::OrtSession::CudaBindingOutput out_den;
+  out_den.name = denoised_name_.c_str();
+  out_den.device_ptr = reinterpret_cast<float *>(
+      static_cast<std::uintptr_t>(cuda_denoised_tensor_.ptr));
+  out_den.num_floats = cuda_denoised_tensor_.ElementCount();
+  out_den.shape = denoised_shape_.data();
+  out_den.shape_rank = denoised_shape_.size();
+
+  cuda_ort_inputs_.push_back(in_noisy);
+  cuda_ort_inputs_.push_back(in_noise);
+  cuda_ort_outputs_.push_back(out_den);
+  cuda_tensor_io_ready_ = true;
+  constexpr const char *kCudaTensorIoUnavailablePrefix =
+      "Open Video FastDVDnet: CUDA tensor IoBinding unavailable;";
+  if (sticky_warning_.rfind(kCudaTensorIoUnavailablePrefix, 0) == 0) {
+    sticky_warning_.clear();
+  }
+  return true;
+}
+
+void FastDvdnetDenoiser::ResetCudaTensorIo() {
+  std::string ignored;
+  (void)cuda_noisy_tensor_.Free(&cuda_, &ignored);
+  (void)cuda_noise_map_tensor_.Free(&cuda_, &ignored);
+  (void)cuda_denoised_tensor_.Free(&cuda_, &ignored);
+  if (cuda_stream_owned_ && cuda_stream_) {
+    (void)cuda_.DestroyStream(cuda_stream_, &ignored);
+  }
+  cuda_stream_ = nullptr;
+  cuda_stream_owned_ = false;
+  cuda_tensor_io_ready_ = false;
+  cuda_ort_inputs_.clear();
+  cuda_ort_outputs_.clear();
 }
 
 bool FastDvdnetDenoiser::DetectIoNames(std::string *error) {
@@ -703,9 +835,70 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
   ort_outputs_[0].num_floats = denoised_tensor_.size();
 
   std::string ort_err;
-  if (!ort_session_active_->RunCpu(ort_inputs_.data(), ort_inputs_.size(),
-                                   ort_outputs_.data(), ort_outputs_.size(),
-                                   &ort_err)) {
+  bool ort_ok = false;
+  if (active_session_uses_cuda_tensor_io()) {
+    if (cuda_ort_inputs_.size() != 2 || cuda_ort_outputs_.size() != 1) {
+      std::string cuda_err;
+      if (!EnsureCudaTensorIo(&cuda_err)) {
+        ort_err = "FastDVDnet CUDA tensor path is unavailable: " + cuda_err;
+      }
+    }
+
+    if (ort_err.empty()) {
+      std::string cuda_err;
+      const bool upload_ok =
+          cuda_noisy_tensor_.UploadFromCpuF32(&cuda_, noisy_tensor_.data(),
+                                              noisy_tensor_.size(),
+                                              cuda_stream_, &cuda_err) &&
+          cuda_noise_map_tensor_.UploadFromCpuF32(
+              &cuda_, noise_map_tensor_.data(), noise_map_tensor_.size(),
+              cuda_stream_, &cuda_err);
+      if (!upload_ok) {
+        ort_err = "FastDVDnet CUDA tensor upload failed: " + cuda_err;
+      }
+    }
+
+    if (ort_err.empty() && session_info_.cuda_needs_stream_sync) {
+      std::string sync_err;
+      if (!cuda_.StreamSynchronize(cuda_stream_, &sync_err)) {
+        ort_err = "FastDVDnet CUDA tensor upload sync failed: " + sync_err;
+      }
+    }
+
+    if (ort_err.empty()) {
+      cuda_ort_inputs_[0].device_ptr = reinterpret_cast<const float *>(
+          static_cast<std::uintptr_t>(cuda_noisy_tensor_.ptr));
+      cuda_ort_inputs_[0].num_floats = cuda_noisy_tensor_.ElementCount();
+      cuda_ort_inputs_[1].device_ptr = reinterpret_cast<const float *>(
+          static_cast<std::uintptr_t>(cuda_noise_map_tensor_.ptr));
+      cuda_ort_inputs_[1].num_floats = cuda_noise_map_tensor_.ElementCount();
+      cuda_ort_outputs_[0].device_ptr = reinterpret_cast<float *>(
+          static_cast<std::uintptr_t>(cuda_denoised_tensor_.ptr));
+      cuda_ort_outputs_[0].num_floats = cuda_denoised_tensor_.ElementCount();
+
+      ort_ok = ort_session_active_->RunCudaIoBinding(
+          cuda_ort_inputs_.data(), cuda_ort_inputs_.size(),
+          cuda_ort_outputs_.data(), cuda_ort_outputs_.size(), &ort_err);
+    }
+
+    if (ort_ok) {
+      std::string cuda_err;
+      if (!cuda_denoised_tensor_.DownloadToCpuF32(&cuda_, &denoised_tensor_,
+                                                  cuda_stream_, &cuda_err)) {
+        ort_ok = false;
+        ort_err = "FastDVDnet CUDA tensor download failed: " + cuda_err;
+      } else if (!cuda_.StreamSynchronize(cuda_stream_, &cuda_err)) {
+        ort_ok = false;
+        ort_err = "FastDVDnet CUDA tensor download sync failed: " + cuda_err;
+      }
+    }
+  } else {
+    ort_ok = ort_session_active_->RunCpu(ort_inputs_.data(), ort_inputs_.size(),
+                                         ort_outputs_.data(),
+                                         ort_outputs_.size(), &ort_err);
+  }
+
+  if (!ort_ok) {
     std::ostringstream oss;
     oss << "Open Video FastDVDnet ORT run failed: "
         << (ort_err.empty() ? "unknown" : ort_err);
@@ -715,6 +908,7 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
         session_info_.using_cuda) {
       ort_session_active_ = ort_session_cpu_.get();
       using_cpu_fallback_ = true;
+      ResetCudaTensorIo();
       sticky_warning_ = "Open Video FastDVDnet: switched to CPU fallback after "
                         "a CUDA runtime failure.";
       runtime_failures_ = 0;

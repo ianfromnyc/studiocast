@@ -569,6 +569,13 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
         << st.pipeline.maxine_transfers.green_screen_calls << ",";
     oss << "\"duplicate_green_screen_calls\":"
         << st.pipeline.maxine_transfers.duplicate_green_screen_calls << ",";
+    oss << "\"shared_green_screen_matte_reuse_calls\":"
+        << st.pipeline.maxine_transfers.shared_green_screen_matte_reuse_calls
+        << ",";
+    oss << "\"shared_green_screen_matte_incompatible_calls\":"
+        << st.pipeline.maxine_transfers
+               .shared_green_screen_matte_incompatible_calls
+        << ",";
     oss << "\"download_calls\":" << st.pipeline.maxine_transfers.download_calls
         << ",";
     oss << "\"final_download_calls\":"

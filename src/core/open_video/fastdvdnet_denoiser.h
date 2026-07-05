@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "core/cuda/cuda_tensor.h"
+#include "core/maxine/cuda_driver_api.h"
 #include "core/onnx/ort_session.h"
 #include "core/open_video/model_pack_registry.h"
 
@@ -63,7 +65,12 @@ public:
     return ort_session_active_ != nullptr && session_info_.using_cuda &&
            !using_cpu_fallback_;
   }
+  bool active_session_uses_cuda_tensor_io() const {
+    return active_session_uses_cuda_ep() && cuda_tensor_io_ready_;
+  }
   bool active_session_uses_cpu_tensor_io() const {
+    // Preprocess, temporal packing, output readback, and RGB postprocess are
+    // still CPU-side even when CUDA IoBinding handles ORT inference buffers.
     return ort_session_active_ != nullptr;
   }
   const std::string &active_model_id() const { return active_model_id_; }
@@ -93,6 +100,8 @@ private:
   bool EnsureSessionForModel(const LoadedModel &model, std::string *error);
   bool RefreshGeometry(int src_w, int src_h, std::string *error);
   bool DetectIoNames(std::string *error);
+  bool EnsureCudaTensorIo(std::string *error);
+  void ResetCudaTensorIo();
 
   void PreprocessRgbToChwPadded(const std::uint8_t *rgb, int width, int height,
                                 std::size_t stride,
@@ -152,6 +161,19 @@ private:
   // Scratch for ORT bindings.
   std::vector<studiocast::onnx::OrtSession::RunInput> ort_inputs_;
   std::vector<studiocast::onnx::OrtSession::RunOutput> ort_outputs_;
+
+  // Optional CUDA ORT IoBinding buffers. These only cover ONNX tensor I/O;
+  // frame preprocessing and output postprocess remain CPU-side in this class.
+  studiocast::maxine::CudaDriverApi cuda_;
+  studiocast::maxine::CUstream cuda_stream_ = nullptr;
+  bool cuda_stream_owned_ = false;
+  bool cuda_tensor_io_ready_ = false;
+  studiocast::cuda::CudaTensor cuda_noisy_tensor_;
+  studiocast::cuda::CudaTensor cuda_noise_map_tensor_;
+  studiocast::cuda::CudaTensor cuda_denoised_tensor_;
+  std::vector<studiocast::onnx::OrtSession::CudaBindingInput> cuda_ort_inputs_;
+  std::vector<studiocast::onnx::OrtSession::CudaBindingOutput>
+      cuda_ort_outputs_;
 
   // Sticky warning surfaced through the daemon status (best-effort).
   std::string sticky_warning_;

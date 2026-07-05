@@ -141,6 +141,8 @@ struct CameraPipelineStatus {
     std::uint64_t upload_calls = 0;
     std::uint64_t green_screen_calls = 0;
     std::uint64_t duplicate_green_screen_calls = 0;
+    std::uint64_t shared_green_screen_matte_reuse_calls = 0;
+    std::uint64_t shared_green_screen_matte_incompatible_calls = 0;
     std::uint64_t download_calls = 0;
     std::uint64_t final_download_calls = 0;
     std::uint64_t cpu_continuation_download_calls = 0;
