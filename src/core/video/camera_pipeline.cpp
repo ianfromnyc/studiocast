@@ -1277,6 +1277,174 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     studiocast::maxine::CudaDriverApi *cuda = nullptr; // non-owning
   };
 
+  struct MaxineFrameLocalSharedHandles {
+    enum class Lifetime {
+      frame_local_producer_owned,
+    };
+
+    enum class RejectReason {
+      none,
+      no_producer,
+      ownership,
+      capture_sequence,
+      dimensions,
+      nvcv_runtime,
+      stream,
+      input_not_current_rgb,
+      input_image,
+      matte_image,
+      green_screen_config,
+    };
+
+    bool valid = false;
+
+    // All handles are non-owning and are only valid until the producing
+    // Maxine context runs again, reallocates, or is destroyed.
+    Lifetime lifetime = Lifetime::frame_local_producer_owned;
+    bool owns_input = false;
+    bool owns_matte = false;
+
+    const char *producer_stage_id = nullptr;
+    std::uint64_t capture_sequence = 0;
+    int width = 0;
+    int height = 0;
+
+    studiocast::maxine::NvcvApi *nvcv = nullptr;       // non-owning
+    studiocast::maxine::CudaDriverApi *cuda = nullptr; // non-owning
+    studiocast::maxine::CUstream stream = nullptr;
+
+    const studiocast::maxine::NvCVImage *input_bgr_gpu = nullptr;
+    const studiocast::maxine::NvCVImage *matte_gpu = nullptr;
+
+    // True only when the input handle still represents the current pipeline
+    // RGB buffer. Virtual Background publishes this as false because it has
+    // already mutated the CPU RGB continuation by the time a later stage runs.
+    bool input_matches_current_rgb = false;
+
+    // Green Screen uses NvVFX_Run(async=0), so a successful Process() makes the
+    // matte visible without adding a synchronization point here.
+    bool matte_ready_for_cross_stream_reuse = false;
+
+    studiocast::maxine::effects::VfxGreenScreenEffect::Config
+        green_screen_config{};
+
+    void Reset() { *this = MaxineFrameLocalSharedHandles{}; }
+
+    static bool GreenScreenConfigEqual(
+        const studiocast::maxine::effects::VfxGreenScreenEffect::Config &a,
+        const studiocast::maxine::effects::VfxGreenScreenEffect::Config &b) {
+      return a.mode == b.mode && a.temporal == b.temporal &&
+             a.state_count == b.state_count;
+    }
+
+    static bool SameNvcvRuntime(const studiocast::maxine::NvcvApi *a,
+                                const studiocast::maxine::NvcvApi *b) {
+      if (!a || !b || !a->IsInitialized() || !b->IsInitialized())
+        return false;
+      if (a == b)
+        return true;
+      return !a->library_path().empty() &&
+             a->library_path() == b->library_path();
+    }
+
+    static bool
+    ImageMatches(const studiocast::maxine::NvCVImage *img, int expected_width,
+                 int expected_height,
+                 studiocast::maxine::NvCVImage_PixelFormat expected_format,
+                 studiocast::maxine::NvCVImage_ComponentType expected_type,
+                 unsigned expected_layout, unsigned expected_mem) {
+      return img && img->pixels && expected_width > 0 && expected_height > 0 &&
+             img->width == static_cast<std::uint32_t>(expected_width) &&
+             img->height == static_cast<std::uint32_t>(expected_height) &&
+             img->pixelFormat == expected_format &&
+             img->componentType == expected_type &&
+             img->planar == expected_layout && img->gpuMem == expected_mem;
+    }
+
+    void PublishGreenScreen(
+        const char *producer, std::uint64_t sequence, int frame_width,
+        int frame_height, studiocast::maxine::NvcvApi *producer_nvcv,
+        studiocast::maxine::CudaDriverApi *producer_cuda,
+        studiocast::maxine::CUstream producer_stream,
+        const studiocast::maxine::NvCVImage *input_gpu,
+        const studiocast::maxine::NvCVImage *matte,
+        const studiocast::maxine::effects::VfxGreenScreenEffect::Config &cfg,
+        bool input_is_current_rgb, bool matte_ready_cross_stream) {
+      valid = true;
+      lifetime = Lifetime::frame_local_producer_owned;
+      owns_input = false;
+      owns_matte = false;
+      producer_stage_id = producer;
+      capture_sequence = sequence;
+      width = frame_width;
+      height = frame_height;
+      nvcv = producer_nvcv;
+      cuda = producer_cuda;
+      stream = producer_stream;
+      input_bgr_gpu = input_gpu;
+      matte_gpu = matte;
+      input_matches_current_rgb = input_is_current_rgb;
+      matte_ready_for_cross_stream_reuse = matte_ready_cross_stream;
+      green_screen_config = cfg;
+    }
+
+    RejectReason ValidateMatteForConsumer(
+        std::uint64_t sequence, int frame_width, int frame_height,
+        const studiocast::maxine::NvcvApi *consumer_nvcv,
+        studiocast::maxine::CUstream consumer_stream,
+        const studiocast::maxine::effects::VfxGreenScreenEffect::Config
+            &consumer_cfg) const {
+      if (!valid)
+        return RejectReason::no_producer;
+      if (owns_input || owns_matte)
+        return RejectReason::ownership;
+      if (capture_sequence != sequence)
+        return RejectReason::capture_sequence;
+      if (width != frame_width || height != frame_height)
+        return RejectReason::dimensions;
+      if (!SameNvcvRuntime(nvcv, consumer_nvcv))
+        return RejectReason::nvcv_runtime;
+      if (!matte_ready_for_cross_stream_reuse && stream != consumer_stream)
+        return RejectReason::stream;
+      if (!ImageMatches(matte_gpu, frame_width, frame_height,
+                        studiocast::maxine::NVCV_A, studiocast::maxine::NVCV_U8,
+                        studiocast::maxine::NVCV_CHUNKY,
+                        studiocast::maxine::NVCV_GPU)) {
+        return RejectReason::matte_image;
+      }
+      if (!GreenScreenConfigEqual(green_screen_config, consumer_cfg))
+        return RejectReason::green_screen_config;
+      return RejectReason::none;
+    }
+
+    RejectReason ValidateInputForCurrentRgbConsumer(
+        std::uint64_t sequence, int frame_width, int frame_height,
+        const studiocast::maxine::NvcvApi *consumer_nvcv,
+        studiocast::maxine::CUstream consumer_stream) const {
+      if (!valid)
+        return RejectReason::no_producer;
+      if (owns_input || owns_matte)
+        return RejectReason::ownership;
+      if (capture_sequence != sequence)
+        return RejectReason::capture_sequence;
+      if (width != frame_width || height != frame_height)
+        return RejectReason::dimensions;
+      if (!SameNvcvRuntime(nvcv, consumer_nvcv))
+        return RejectReason::nvcv_runtime;
+      if (!matte_ready_for_cross_stream_reuse && stream != consumer_stream)
+        return RejectReason::stream;
+      if (!input_matches_current_rgb)
+        return RejectReason::input_not_current_rgb;
+      if (!ImageMatches(
+              input_bgr_gpu, frame_width, frame_height,
+              studiocast::maxine::NVCV_BGR, studiocast::maxine::NVCV_U8,
+              studiocast::maxine::NVCV_CHUNKY, studiocast::maxine::NVCV_GPU)) {
+        return RejectReason::input_image;
+      }
+      return RejectReason::none;
+    }
+  };
+
   // GPU resize cache (allocated on demand when we can defer readback).
   studiocast::maxine::CudaBgrResizeBilinear gpu_resize_bilinear;
   studiocast::maxine::CudaDriverApi *gpu_resize_cuda = nullptr; // non-owning
@@ -1928,6 +2096,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     const studiocast::maxine::NvCVImage *GreenScreenMatteGpu() const {
       return greenscreen ? greenscreen->MatteGpu() : nullptr;
+    }
+
+    const studiocast::maxine::NvCVImage *GreenScreenInputGpu() const {
+      return gpu_bgr_allocated ? &gpu_bgr : nullptr;
+    }
+
+    studiocast::maxine::CUstream GreenScreenStream() const {
+      return greenscreen ? greenscreen->cuda_stream() : nullptr;
     }
 
     studiocast::maxine::effects::VfxGreenScreenEffect::Config
@@ -2822,17 +2998,25 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     bool have_smoothed_crop = false;
     studiocast::maxine::effects::RectF crop_smoothed_px;
     bool last_had_detection = false;
-    enum class TrackingKind {
+    enum class TrackingSource {
       kNone = 0,
       kFace = 1,
-      kMatte = 2,
+      kBody = 2,
+      kLandmarks = 3,
+      kMatte = 4,
     };
-    TrackingKind last_tracking_kind = TrackingKind::kNone;
+    TrackingSource last_tracking_source = TrackingSource::kNone;
+
+    struct TrackingBox {
+      TrackingSource source = TrackingSource::kNone;
+      studiocast::maxine::effects::RectF box_px{};
+      float confidence = 0.0f;
+    };
 
     struct CropPlan {
       bool should_crop = false;
       bool found_tracking_box = false;
-      TrackingKind tracking_kind = TrackingKind::kNone;
+      TrackingSource tracking_source = TrackingSource::kNone;
       studiocast::maxine::effects::RectF crop_px{};
     };
 
@@ -2845,7 +3029,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       active_model_id.clear();
       have_smoothed_crop = false;
       last_had_detection = false;
-      last_tracking_kind = TrackingKind::kNone;
+      last_tracking_source = TrackingSource::kNone;
       last_frame_w = 0;
       last_frame_h = 0;
       last_matte_query_sequence = 0;
@@ -2898,15 +3082,68 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       const float sy =
           static_cast<float>(frame_h) / static_cast<float>(alpha_h);
 
-      const float x0 = min_x * sx;
-      const float y0 = min_y * sy;
-      const float x1 = (max_x + 1) * sx;
-      const float y1 = (max_y + 1) * sy;
+      const float x0 = static_cast<float>(min_x) * sx;
+      const float y0 = static_cast<float>(min_y) * sy;
+      const float x1 = static_cast<float>(max_x + 1) * sx;
+      const float y1 = static_cast<float>(max_y + 1) * sy;
 
       out_box_px->x = x0;
       out_box_px->y = y0;
       out_box_px->w = x1 - x0;
       out_box_px->h = y1 - y0;
+      return true;
+    }
+
+    static bool IsUsableTrackingBox(const TrackingBox &box, int frame_w,
+                                    int frame_h) {
+      if (box.source == TrackingSource::kNone)
+        return false;
+      if (frame_w <= 0 || frame_h <= 0)
+        return false;
+      const auto &r = box.box_px;
+      return std::isfinite(r.x) && std::isfinite(r.y) && std::isfinite(r.w) &&
+             std::isfinite(r.h) && r.w > 0.5f && r.h > 0.5f &&
+             r.x < static_cast<float>(frame_w) &&
+             r.y < static_cast<float>(frame_h) && (r.x + r.w) > 0.0f &&
+             (r.y + r.h) > 0.0f;
+    }
+
+    static bool BuildBestFaceTrackingBox(
+        const std::vector<studiocast::open_video::FaceDetection> &detections,
+        TrackingBox *out_box) {
+      if (out_box)
+        *out_box = TrackingBox{};
+      if (!out_box || detections.empty())
+        return false;
+
+      // Pick the largest detected face (most stable for framing), then expand
+      // to a subject box. Future detectors can skip this adapter and publish a
+      // TrackingBox directly.
+      const studiocast::open_video::FaceDetection *best = &detections.front();
+      float best_area = best->w * best->h;
+      for (const auto &f : detections) {
+        const float a = f.w * f.h;
+        if (a > best_area) {
+          best = &f;
+          best_area = a;
+        }
+      }
+
+      const float fx0 = best->x;
+      const float fy0 = best->y;
+      const float fw = best->w;
+      const float fh = best->h;
+      const float cx = fx0 + fw * 0.5f;
+
+      const float expand_w = fw * 1.8f;
+      const float expand_h = fh * 2.6f;
+      const float new_x = cx - expand_w * 0.5f;
+      const float new_y = fy0 - fh * 0.4f;
+
+      out_box->source = TrackingSource::kFace;
+      out_box->box_px =
+          studiocast::maxine::effects::RectF{new_x, new_y, expand_w, expand_h};
+      out_box->confidence = best->score;
       return true;
     }
 
@@ -3014,7 +3251,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       have_smoothed_crop = false;
       last_had_detection = false;
-      last_tracking_kind = TrackingKind::kNone;
+      last_tracking_source = TrackingSource::kNone;
       last_matte_query_sequence = 0;
       have_last_matte_box = false;
       last_matte_box_px = {};
@@ -3027,12 +3264,90 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return true;
     }
 
-    bool ResolveCropPlan(
-        std::uint64_t capture_sequence, std::uint8_t *rgb, int width,
+    bool ResolveMatteTrackingBox(
+        std::uint64_t capture_sequence, const std::uint8_t *rgb, int width,
         int height, size_t stride,
         const studiocast::video::effects::BroadcastCameraEffects &fx,
-        const std::vector<studiocast::open_video::FaceDetection>
-            *face_detections,
+        TrackingBox *out_box, std::string *error) {
+      if (out_box)
+        *out_box = TrackingBox{};
+      if (!out_box || !matte)
+        return true;
+
+      // If another stage already computed matting for this frame (e.g.
+      // Virtual Background or Virtual Key Light), reuse the cached result
+      // immediately.
+      const bool matte_cached_this_frame =
+          matte->cached_matte_valid &&
+          matte->cached_matte_sequence == capture_sequence;
+
+      // Otherwise, rate-limit matting inference when it is only used for
+      // tracking. Matting can be significantly more expensive than box
+      // detectors.
+      constexpr std::uint64_t kMatteFallbackIntervalFrames = 10;
+      const bool should_query_matte =
+          matte_cached_this_frame || (last_matte_query_sequence == 0) ||
+          (capture_sequence >=
+           (last_matte_query_sequence + kMatteFallbackIntervalFrames));
+
+      if (!should_query_matte) {
+        if (have_last_matte_box) {
+          out_box->source = TrackingSource::kMatte;
+          out_box->box_px = last_matte_box_px;
+          out_box->confidence = 1.0f;
+        }
+        return true;
+      }
+
+      // Ensure the shared matting session exists, but avoid allocating VB-only
+      // buffers when matting is only used for tracking.
+      std::string matte_init_err;
+      if (!matte->EnsureInitialized(width, height, fx, &matte_init_err,
+                                    /*require_vb_buffers=*/false)) {
+        if (error && !matte_init_err.empty()) {
+          *error = "Open CUDA Auto Frame: " + matte_init_err;
+        }
+        return true;
+      }
+
+      const std::vector<float> *alpha_cpu = nullptr;
+      int alpha_w = 0;
+      int alpha_h = 0;
+      std::string alpha_err;
+      studiocast::maxine::effects::RectF box_px;
+      if (matte->GetAlphaCpuForFrame(rgb, stride, capture_sequence, width,
+                                     height, fx, &alpha_cpu, &alpha_w, &alpha_h,
+                                     &alpha_err) &&
+          alpha_cpu) {
+        const bool found = ComputeMatteBoxPxFromAlpha(
+            *alpha_cpu, alpha_w, alpha_h, width, height, &box_px);
+
+        last_matte_query_sequence = capture_sequence;
+        if (found) {
+          have_last_matte_box = true;
+          last_matte_box_px = box_px;
+          out_box->source = TrackingSource::kMatte;
+          out_box->box_px = box_px;
+          out_box->confidence = 1.0f;
+        } else {
+          have_last_matte_box = false;
+          last_matte_box_px = {};
+        }
+      } else {
+        if (error && !alpha_err.empty()) {
+          *error = "Open CUDA Auto Frame: " + alpha_err;
+        }
+        return true;
+      }
+
+      return true;
+    }
+
+    bool ResolveCropPlan(
+        std::uint64_t capture_sequence, const std::uint8_t *rgb, int width,
+        int height, size_t stride,
+        const studiocast::video::effects::BroadcastCameraEffects &fx,
+        const TrackingBox *tracking_box, bool tracking_provider_ran,
         CropPlan *plan, std::string *error) {
       if (plan) {
         *plan = CropPlan{};
@@ -3047,12 +3362,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return true;
       }
 
-      const bool face_detector_ran = (face_detections != nullptr);
-      const bool have_faces = (face_detections && !face_detections->empty());
-
       std::string err;
       if (!EnsureInitialized(width, height, fx,
-                             /*require_matte_tracking=*/!face_detector_ran,
+                             /*require_matte_tracking=*/!tracking_provider_ran,
                              &err)) {
         // Best-effort: if we can't initialize tracking, just bypass auto frame.
         if (error && !err.empty()) {
@@ -3061,105 +3373,25 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return true;
       }
 
-      studiocast::maxine::effects::RectF box_px;
+      TrackingBox resolved_box;
       bool found = false;
-      TrackingKind kind = TrackingKind::kNone;
 
-      if (have_faces) {
-        // Pick the largest detected face (most stable for framing).
-        const studiocast::open_video::FaceDetection *best =
-            &face_detections->front();
-        float best_area = best->w * best->h;
-        for (const auto &f : *face_detections) {
-          const float a = f.w * f.h;
-          if (a > best_area) {
-            best = &f;
-            best_area = a;
-          }
-        }
-        // Expand the face box to approximate "upper body" framing.
-        const float fx0 = best->x;
-        const float fy0 = best->y;
-        const float fw = best->w;
-        const float fh = best->h;
-        const float cx = fx0 + fw * 0.5f;
-
-        const float expand_w = fw * 1.8f;
-        const float expand_h = fh * 2.6f;
-        const float new_x = cx - expand_w * 0.5f;
-        const float new_y = fy0 - fh * 0.4f; // headroom
-
-        box_px = studiocast::maxine::effects::RectF{new_x, new_y, expand_w,
-                                                    expand_h};
+      if (tracking_box && IsUsableTrackingBox(*tracking_box, width, height)) {
+        resolved_box = *tracking_box;
         found = true;
-        kind = TrackingKind::kFace;
-      } else if (matte) {
-        // If another stage already computed matting for this frame (e.g.
-        // Virtual Background or Virtual Key Light), reuse the cached result
-        // immediately.
-        const bool matte_cached_this_frame =
-            matte->cached_matte_valid &&
-            matte->cached_matte_sequence == capture_sequence;
-
-        // Otherwise, rate-limit matting inference when it is only used for
-        // tracking. Matting can be significantly more expensive than face
-        // detection.
-        constexpr std::uint64_t kMatteFallbackIntervalFrames = 10;
-        const bool should_query_matte =
-            matte_cached_this_frame || (last_matte_query_sequence == 0) ||
-            (capture_sequence >=
-             (last_matte_query_sequence + kMatteFallbackIntervalFrames));
-
-        if (!should_query_matte) {
-          if (have_last_matte_box) {
-            box_px = last_matte_box_px;
-            found = true;
-            kind = TrackingKind::kMatte;
-          }
-        } else {
-          // Ensure the shared matting session exists, but avoid allocating
-          // VB-only buffers when matting is only used for tracking.
-          std::string matte_init_err;
-          if (!matte->EnsureInitialized(width, height, fx, &matte_init_err,
-                                        /*require_vb_buffers=*/false)) {
-            if (error && !matte_init_err.empty()) {
-              *error = "Open CUDA Auto Frame: " + matte_init_err;
-            }
-            return true;
-          }
-
-          const std::vector<float> *alpha_cpu = nullptr;
-          int alpha_w = 0;
-          int alpha_h = 0;
-          std::string alpha_err;
-          if (matte->GetAlphaCpuForFrame(rgb, stride, capture_sequence, width,
-                                         height, fx, &alpha_cpu, &alpha_w,
-                                         &alpha_h, &alpha_err) &&
-              alpha_cpu) {
-            found = ComputeMatteBoxPxFromAlpha(*alpha_cpu, alpha_w, alpha_h,
-                                               width, height, &box_px);
-            kind = found ? TrackingKind::kMatte : TrackingKind::kNone;
-
-            last_matte_query_sequence = capture_sequence;
-            if (found) {
-              have_last_matte_box = true;
-              last_matte_box_px = box_px;
-            } else {
-              have_last_matte_box = false;
-              last_matte_box_px = {};
-            }
-          } else {
-            if (error && !alpha_err.empty()) {
-              *error = "Open CUDA Auto Frame: " + alpha_err;
-            }
-            return true;
-          }
+      } else if (!tracking_provider_ran) {
+        if (!ResolveMatteTrackingBox(capture_sequence, rgb, width, height,
+                                     stride, fx, &resolved_box, error)) {
+          return false;
         }
+        found = IsUsableTrackingBox(resolved_box, width, height);
       }
 
-      if (kind != last_tracking_kind) {
+      const TrackingSource source =
+          found ? resolved_box.source : TrackingSource::kNone;
+      if (source != last_tracking_source) {
         have_smoothed_crop = false;
-        last_tracking_kind = kind;
+        last_tracking_source = source;
       }
 
       // Use the same crop math as the Maxine auto-frame tracker for
@@ -3174,11 +3406,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       studiocast::maxine::effects::RectF target_crop = {};
       if (found) {
         target_crop = studiocast::maxine::effects::ArAutoFrameTracker::
-            ComputeTargetCropFromBoxPx(box_px, width, height, out_aspect,
-                                       knobs);
+            ComputeTargetCropFromBoxPx(resolved_box.box_px, width, height,
+                                       out_aspect, knobs);
       } else {
         const float strength01 =
-            std::clamp(knobs.strength / 100.0f, 0.0f, 1.0f);
+            std::clamp(static_cast<float>(knobs.strength) / 100.0f, 0.0f,
+                       1.0f);
         const float zoom = 1.0f + strength01 * 0.5f; // up to ~1.5x
         target_crop =
             studiocast::maxine::effects::ArAutoFrameTracker::CenterCrop(
@@ -3213,14 +3446,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       constexpr float kEpsPx = 0.5f;
       if (std::abs(crop_smoothed_px.x) <= kEpsPx &&
           std::abs(crop_smoothed_px.y) <= kEpsPx &&
-          std::abs(crop_smoothed_px.w - width) <= kEpsPx &&
-          std::abs(crop_smoothed_px.h - height) <= kEpsPx) {
+          std::abs(crop_smoothed_px.w - static_cast<float>(width)) <= kEpsPx &&
+          std::abs(crop_smoothed_px.h - static_cast<float>(height)) <=
+              kEpsPx) {
         return true;
       }
 
       plan->should_crop = true;
       plan->found_tracking_box = found;
-      plan->tracking_kind = kind;
+      plan->tracking_source = source;
       plan->crop_px = crop_smoothed_px;
       return true;
     }
@@ -3232,8 +3466,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                  const std::uint8_t *tracking_rgb, int width, int height,
                  size_t tracking_stride,
                  const studiocast::video::effects::BroadcastCameraEffects &fx,
-                 const std::vector<studiocast::open_video::FaceDetection>
-                     *face_detections,
+                 const TrackingBox *tracking_box, bool tracking_provider_ran,
                  DeferredGpuOut *deferred_out, std::string *error) {
       if (!fx.auto_frame.enabled) {
         return true;
@@ -3254,9 +3487,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       CropPlan plan;
       std::string plan_err;
-      if (!ResolveCropPlan(
-              capture_sequence, const_cast<std::uint8_t *>(tracking_rgb), width,
-              height, tracking_stride, fx, face_detections, &plan, &plan_err)) {
+      if (!ResolveCropPlan(capture_sequence, tracking_rgb, width, height,
+                           tracking_stride, fx, tracking_box,
+                           tracking_provider_ran, &plan, &plan_err)) {
         if (error) {
           *error = plan_err;
         }
@@ -3307,16 +3540,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
 
     bool ApplyRgbInPlace(
-        std::uint64_t capture_sequence, std::uint8_t *rgb, int width,
+        std::uint64_t capture_sequence, std::uint8_t *rgb_data, int width,
         int height, size_t stride,
         const studiocast::video::effects::BroadcastCameraEffects &fx,
-        const std::vector<studiocast::open_video::FaceDetection>
-            *face_detections,
-        std::string *error) {
+        const TrackingBox *tracking_box, bool tracking_provider_ran,
+        std::string *error, bool *out_cpu_crop_resize_applied = nullptr) {
+      if (out_cpu_crop_resize_applied)
+        *out_cpu_crop_resize_applied = false;
       if (!fx.auto_frame.enabled) {
         return true;
       }
-      if (!rgb) {
+      if (!rgb_data) {
         if (error) {
           *error = "Open CUDA Auto Frame: null RGB buffer.";
         }
@@ -3324,13 +3558,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       CropPlan plan;
-      if (!ResolveCropPlan(capture_sequence, rgb, width, height, stride, fx,
-                           face_detections, &plan, error)) {
+      if (!ResolveCropPlan(capture_sequence, rgb_data, width, height, stride,
+                           fx, tracking_box, tracking_provider_ran, &plan,
+                           error)) {
         return false;
       }
       if (!plan.should_crop) {
         return true;
       }
+      if (out_cpu_crop_resize_applied)
+        *out_cpu_crop_resize_applied = true;
 
       const size_t min_row_bytes = static_cast<size_t>(width) * 3;
       if (stride < min_row_bytes) {
@@ -3341,12 +3578,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       tmp_rgb.resize(static_cast<size_t>(height) * stride);
-      CropResizeRgb24Bilinear(rgb, width, height, stride, tmp_rgb.data(), width,
-                              height, stride, plan.crop_px.x, plan.crop_px.y,
-                              plan.crop_px.w, plan.crop_px.h);
+      CropResizeRgb24Bilinear(rgb_data, width, height, stride, tmp_rgb.data(),
+                              width, height, stride, plan.crop_px.x,
+                              plan.crop_px.y, plan.crop_px.w, plan.crop_px.h);
 
       for (int y = 0; y < height; ++y) {
-        std::memcpy(rgb + (static_cast<size_t>(y) * stride),
+        std::memcpy(rgb_data + (static_cast<size_t>(y) * stride),
                     tmp_rgb.data() + (static_cast<size_t>(y) * stride),
                     min_row_bytes);
       }
@@ -3703,7 +3940,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   open_cuda_auto_frame.matte = &open_cuda_vb;
   open_cuda_key_light.matte = &open_cuda_vb;
 
-  // Open Video analysis cache (per-frame) and face detection (YuNet).
+  // Open Video analysis cache (per-frame) and face detection.
   //
   // The cache avoids duplicated ML inference when multiple effects need the
   // same frame-level analysis.
@@ -5728,21 +5965,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
     };
 
-    auto append_fastdvdnet_tensor_note = [&] {
-      if (!open_video_fastdvdnet.active_session_uses_cuda_ep() ||
-          !open_video_fastdvdnet.active_session_uses_cpu_tensor_io()) {
+    auto append_open_video_denoise_tensor_note = [&] {
+      const auto status = open_video_fastdvdnet.tensor_io_status();
+      if (status.summary.empty())
         return;
-      }
       if (!note.empty())
         note += "\n";
-      if (open_video_fastdvdnet.active_session_uses_cuda_tensor_io()) {
-        note += "Open Video FastDVDnet: CUDA EP active with CUDA IoBinding for "
-                "ORT tensors; CPU packing, output readback, and RGB "
-                "postprocess remain an explicit CPU tensor tail.";
-      } else {
-        note += "Open Video FastDVDnet: CUDA EP active with CPU tensor I/O; "
-                "pre/postprocess remains an explicit CPU tail.";
-      }
+      note += status.summary;
     };
 
     want_maxine_bg_blur = false;
@@ -5844,7 +6073,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (!note.empty())
             note += "\n";
           note += "Open Video: Video Noise Removal (FastDVDnet).";
-          append_fastdvdnet_tensor_note();
+          append_open_video_denoise_tensor_note();
         } else {
           want_open_cuda_video_denoise = true;
           have_open_cuda_video_denoise = true;
@@ -5888,7 +6117,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                 note += "\n";
               note += "Open Video: Video Noise Removal (FastDVDnet) — Maxine "
                       "VFX unavailable.";
-              append_fastdvdnet_tensor_note();
+              append_open_video_denoise_tensor_note();
               if (!mx_err.empty()) {
                 note += "\n";
                 note += mx_err;
@@ -6159,7 +6388,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       };
 
       if (engine_open_cuda) {
-        // Open source: prefer Open Video (YuNet) face tracking when available,
+        // Open source: prefer Open Video face tracking when available,
         // otherwise fall back to the foreground matte path.
         want_open_cuda_auto_frame = true;
 
@@ -6181,7 +6410,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             note += "\n";
           }
           if (have_open_video_face_detection) {
-            note += "Open Video (YuNet): Auto Frame (CPU face tracking; GPU "
+            note += "Open Video: Auto Frame (CPU face tracking; GPU "
                     "crop/scale when reusing an active Open CUDA frame, CPU "
                     "crop/scale fallback).";
           } else {
@@ -6246,7 +6475,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             }
             note += "Maxine AR unavailable; ";
             if (have_open_video_face_detection) {
-              note += "Open Video (YuNet): Auto Frame (CPU face tracking; GPU "
+              note += "Open Video: Auto Frame (CPU face tracking; GPU "
                       "crop/scale when reusing an active Open CUDA frame, CPU "
                       "crop/scale fallback).";
             } else {
@@ -6341,7 +6570,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                 "separate Green Screen pass and are counted. RGB "
                 "staging/readback remains per stage because the current "
                 "Maxine VFX stages own separate output images and CPU "
-                "continuation points.";
+                "continuation points; tracked input handles that cannot "
+                "represent the current RGB continuation are counted.";
           }
         } else if (engine_maxine) {
           append_canonical_maxine_blocked(studiocast::maxine::MaxineNeed::vfx);
@@ -6544,12 +6774,18 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   std::uint64_t open_cuda_rgb_download_calls = 0;
   std::uint64_t open_cuda_final_download_calls = 0;
   std::uint64_t open_cuda_cpu_continuation_download_calls = 0;
+  std::uint64_t open_cuda_denoise_tensor_upload_calls = 0;
+  std::uint64_t open_cuda_denoise_tensor_download_calls = 0;
+  std::uint64_t open_cuda_denoise_cpu_tail_calls = 0;
   std::uint64_t open_cuda_standalone_scaler_upload_calls = 0;
   std::uint64_t open_cuda_standalone_scaler_download_calls = 0;
   std::uint64_t open_cuda_forced_sync_calls = 0;
   std::uint64_t open_cuda_cpu_tail_stage_calls = 0;
   std::uint64_t open_cuda_cpu_tail_key_light_calls = 0;
   std::uint64_t open_cuda_cpu_tail_auto_frame_calls = 0;
+  std::uint64_t open_cuda_cpu_tail_auto_frame_face_tracking_calls = 0;
+  std::uint64_t open_cuda_cpu_tail_auto_frame_matte_tracking_calls = 0;
+  std::uint64_t open_cuda_cpu_tail_auto_frame_cpu_crop_calls = 0;
 
   const bool debug_maxine_transfers =
       (std::getenv("STUDIOCAST_DEBUG_MAXINE_TRANSFERS") != nullptr);
@@ -6560,6 +6796,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   std::uint64_t maxine_duplicate_green_screen_calls = 0;
   std::uint64_t maxine_shared_green_screen_matte_reuse_calls = 0;
   std::uint64_t maxine_shared_green_screen_matte_incompatible_calls = 0;
+  std::uint64_t maxine_shared_green_screen_input_incompatible_calls = 0;
   std::uint64_t maxine_download_calls = 0;
   std::uint64_t maxine_final_download_calls = 0;
   std::uint64_t maxine_cpu_continuation_download_calls = 0;
@@ -6782,14 +7019,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     bool open_cuda_active_this_frame = false;
     bool maxine_active_this_frame = false;
     int maxine_green_screen_calls_this_frame = 0;
-    const studiocast::maxine::NvCVImage *maxine_shared_green_screen_matte =
-        nullptr;
-    std::uint64_t maxine_shared_green_screen_sequence = 0;
-    int maxine_shared_green_screen_width = 0;
-    int maxine_shared_green_screen_height = 0;
-    studiocast::maxine::effects::VfxGreenScreenEffect::Config
-        maxine_shared_green_screen_config{};
-    bool maxine_shared_green_screen_valid = false;
+    MaxineFrameLocalSharedHandles maxine_shared_handles;
 
     // Reset per-frame Open CUDA ping-pong state.
     open_cuda_curr = nullptr;
@@ -6814,6 +7044,45 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         ++open_cuda_cpu_tail_auto_frame_calls;
       }
     };
+
+    auto count_open_video_denoise_tensor_run =
+        [&](const studiocast::open_video::DenoiseTensorRunStats &stats) {
+          if (!stats.cuda_ep_active)
+            return;
+
+          mark_open_cuda_active_frame();
+          open_cuda_denoise_tensor_upload_calls +=
+              stats.cuda_tensor_upload_calls;
+          open_cuda_denoise_tensor_download_calls +=
+              stats.cuda_tensor_download_calls;
+          open_cuda_cpu_continuation_download_calls +=
+              stats.cuda_tensor_download_calls;
+          open_cuda_forced_sync_calls += stats.forced_sync_calls;
+
+          if (stats.cpu_tail_stage_calls > 0) {
+            open_cuda_denoise_cpu_tail_calls += stats.cpu_tail_stage_calls;
+            open_cuda_cpu_tail_stage_calls += stats.cpu_tail_stage_calls;
+          }
+        };
+
+    auto mark_open_cuda_auto_frame_cpu_tail =
+        [&](OpenCudaAutoFrameContext::TrackingSource tracking_source,
+            bool cpu_crop_resize) {
+          mark_open_cuda_cpu_tail(
+              studiocast::video::effects::contract::kEffectIdAutoFrame);
+          switch (tracking_source) {
+          case OpenCudaAutoFrameContext::TrackingSource::kFace:
+            ++open_cuda_cpu_tail_auto_frame_face_tracking_calls;
+            break;
+          case OpenCudaAutoFrameContext::TrackingSource::kMatte:
+            ++open_cuda_cpu_tail_auto_frame_matte_tracking_calls;
+            break;
+          default:
+            break;
+          }
+          if (cpu_crop_resize)
+            ++open_cuda_cpu_tail_auto_frame_cpu_crop_calls;
+        };
 
     auto mark_maxine_active_frame = [&]() {
       if (!maxine_active_this_frame) {
@@ -6972,33 +7241,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       const std::uint64_t capture_sequence = f.sequence;
       publish_optional_retry_ready_status(capture_sequence);
 
-      auto green_screen_configs_equal =
-          [](const studiocast::maxine::effects::VfxGreenScreenEffect::Config &a,
-             const studiocast::maxine::effects::VfxGreenScreenEffect::Config
-                 &b) {
-            return a.mode == b.mode && a.temporal == b.temporal &&
-                   a.state_count == b.state_count;
-          };
-
-      auto compatible_shared_maxine_matte =
-          [&](const studiocast::maxine::effects::VfxGreenScreenEffect::Config
-                  &consumer_cfg) {
-            const auto *matte = maxine_shared_green_screen_matte;
-            return maxine_shared_green_screen_valid &&
-                   maxine_shared_green_screen_sequence == capture_sequence &&
-                   maxine_shared_green_screen_width == capA.width &&
-                   maxine_shared_green_screen_height == capA.height && matte &&
-                   matte->pixels &&
-                   matte->width == static_cast<std::uint32_t>(capA.width) &&
-                   matte->height == static_cast<std::uint32_t>(capA.height) &&
-                   matte->pixelFormat == studiocast::maxine::NVCV_A &&
-                   matte->componentType == studiocast::maxine::NVCV_U8 &&
-                   matte->planar == studiocast::maxine::NVCV_CHUNKY &&
-                   matte->gpuMem == studiocast::maxine::NVCV_GPU &&
-                   green_screen_configs_equal(maxine_shared_green_screen_config,
-                                              consumer_cfg);
-          };
-
       // Apply vignette exactly once, either attached to the planned last GPU
       // stage, or as a standalone GPU stage when no other GPU stage is active.
       const bool maxine_vignette_allowed =
@@ -7099,10 +7341,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
           if (have_open_video_video_denoise) {
             std::string ov_err;
-            if (!open_video_fastdvdnet.ApplyRgbInPlace(
-                    capture_sequence, rgb.data(), capA.width, capA.height,
-                    rgbStride, fx.video_noise_removal.strength,
-                    fx.video_noise_removal.model_id, &ov_err)) {
+            const bool ov_ok = open_video_fastdvdnet.ApplyRgbInPlace(
+                capture_sequence, rgb.data(), capA.width, capA.height,
+                rgbStride, fx.video_noise_removal.strength,
+                fx.video_noise_removal.model_id, &ov_err);
+            count_open_video_denoise_tensor_run(
+                open_video_fastdvdnet.last_tensor_run_stats());
+            if (!ov_ok) {
               if (!ov_err.empty()) {
                 std::lock_guard<std::mutex> lock(mu_);
                 last_error_ =
@@ -7212,11 +7457,30 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                 relight_green_screen_config.state_count == 0) {
               relight_green_screen_config.state_count = 1;
             }
+            const auto relight_stream =
+                maxine_relight.relight ? maxine_relight.relight->cuda_stream()
+                                       : nullptr;
+            const auto matte_reuse_reason =
+                maxine_shared_handles.ValidateMatteForConsumer(
+                    capture_sequence, capA.width, capA.height,
+                    &maxine_relight.nvcv, relight_stream,
+                    relight_green_screen_config);
             const bool can_reuse_green_screen_matte =
-                compatible_shared_maxine_matte(relight_green_screen_config);
-            if (maxine_shared_green_screen_valid &&
-                !can_reuse_green_screen_matte) {
+                matte_reuse_reason ==
+                MaxineFrameLocalSharedHandles::RejectReason::none;
+            if (maxine_shared_handles.valid &&
+                matte_reuse_reason !=
+                    MaxineFrameLocalSharedHandles::RejectReason::none) {
               ++maxine_shared_green_screen_matte_incompatible_calls;
+            }
+            const auto input_reuse_reason =
+                maxine_shared_handles.ValidateInputForCurrentRgbConsumer(
+                    capture_sequence, capA.width, capA.height,
+                    &maxine_relight.nvcv, relight_stream);
+            if (maxine_shared_handles.valid &&
+                input_reuse_reason !=
+                    MaxineFrameLocalSharedHandles::RejectReason::none) {
+              ++maxine_shared_green_screen_input_incompatible_calls;
             }
             bool used_shared_green_screen_matte = false;
             std::string mx_err;
@@ -7225,7 +7489,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                     apply_vignette_on_relight, vignette_center_x_px,
                     vignette_center_y_px,
                     can_reuse_green_screen_matte
-                        ? maxine_shared_green_screen_matte
+                        ? maxine_shared_handles.matte_gpu
                         : nullptr,
                     &used_shared_green_screen_matte, &mx_err, defer_readback,
                     &deferred_gpu_out)) {
@@ -7405,13 +7669,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                       deferred_gpu_out.kind != DeferredGpuKind::none,
                   /*runs_green_screen=*/true);
               if (const auto *matte = maxine_bg_blur.GreenScreenMatteGpu()) {
-                maxine_shared_green_screen_matte = matte;
-                maxine_shared_green_screen_sequence = capture_sequence;
-                maxine_shared_green_screen_width = capA.width;
-                maxine_shared_green_screen_height = capA.height;
-                maxine_shared_green_screen_config =
-                    maxine_bg_blur.GreenScreenConfig();
-                maxine_shared_green_screen_valid = true;
+                maxine_shared_handles.PublishGreenScreen(
+                    "virtual_background", capture_sequence, capA.width,
+                    capA.height, &maxine_bg_blur.nvcv, &maxine_bg_blur.cuda,
+                    maxine_bg_blur.GreenScreenStream(),
+                    maxine_bg_blur.GreenScreenInputGpu(), matte,
+                    maxine_bg_blur.GreenScreenConfig(),
+                    /*input_is_current_rgb=*/false,
+                    /*matte_ready_cross_stream=*/true);
               }
               clear_optional_effect_on_success(breaker, capture_sequence);
             }
@@ -7754,27 +8019,46 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           }
 
           if (have_open_cuda_auto_frame) {
-            mark_open_cuda_cpu_tail(stage_id);
-            // Open Video YuNet face detection is preferred for Auto Frame
-            // (cheaper than foreground matting, and helps avoid running the
-            // matting model solely for tracking).
-            const std::vector<studiocast::open_video::FaceDetection>
-                *face_detections = nullptr;
-            if (open_video_yunet.available()) {
+            // Open Video face detection is preferred for Auto Frame (cheaper
+            // than foreground matting, and helps avoid running the matting
+            // model solely for tracking). Convert detector output into the
+            // model-agnostic TrackingBox contract before crop planning.
+            OpenCudaAutoFrameContext::TrackingBox tracking_box;
+            const OpenCudaAutoFrameContext::TrackingBox *tracking_box_ptr =
+                nullptr;
+            bool tracking_provider_ran = false;
+            auto tracking_tail_source =
+                OpenCudaAutoFrameContext::TrackingSource::kMatte;
+
+            const auto adopt_face_detections =
+                [&](const std::vector<studiocast::open_video::FaceDetection>
+                        &detections) {
+                  tracking_provider_ran = true;
+                  tracking_tail_source =
+                      OpenCudaAutoFrameContext::TrackingSource::kFace;
+                  if (OpenCudaAutoFrameContext::BuildBestFaceTrackingBox(
+                          detections, &tracking_box)) {
+                    tracking_box_ptr = &tracking_box;
+                  }
+                };
+
+            if (open_video_cache.face_detections) {
+              adopt_face_detections(*open_video_cache.face_detections);
+            } else if (open_video_yunet.available()) {
               std::string fd_err;
               if (open_video_yunet.EnsureDetectionsForFrame(
                       rgb.data(), capA.width, capA.height, rgbStride,
                       fx.auto_frame.model_id, capture_sequence,
                       &open_video_cache, &fd_err)) {
                 if (open_video_cache.face_detections) {
-                  face_detections = &(*open_video_cache.face_detections);
+                  adopt_face_detections(*open_video_cache.face_detections);
                 }
               } else {
                 // Best-effort: if face detection can't run (runtime failure),
                 // Auto Frame will fall back to matte tracking if available.
                 if (!fd_err.empty()) {
                   std::lock_guard<std::mutex> lock(mu_);
-                  last_error_ = "Open Video YuNet failed: " + fd_err;
+                  last_error_ = "Open Video face detection failed: " + fd_err;
                 }
               }
             }
@@ -7788,8 +8072,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
               if (open_cuda_auto_frame.ApplyCudaRgb(
                       capture_sequence, *deferred_gpu_out.cuda_img,
                       open_cuda_next, rgb.data(), capA.width, capA.height,
-                      rgbStride, fx, face_detections, &auto_frame_gpu_out,
-                      &oc_err)) {
+                      rgbStride, fx, tracking_box_ptr, tracking_provider_ran,
+                      &auto_frame_gpu_out, &oc_err)) {
                 deferred_gpu_out = auto_frame_gpu_out;
                 have_deferred_gpu_out =
                     deferred_gpu_out.kind != DeferredGpuKind::none;
@@ -7822,6 +8106,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                         derr;
                   }
                 }
+                mark_open_cuda_auto_frame_cpu_tail(tracking_tail_source,
+                                                   /*cpu_crop_resize=*/false);
                 return;
               }
 
@@ -7845,9 +8131,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
               }
             }
 
+            bool cpu_crop_resize_applied = false;
             if (!open_cuda_auto_frame.ApplyRgbInPlace(
                     capture_sequence, rgb.data(), capA.width, capA.height,
-                    rgbStride, fx, face_detections, &oc_err)) {
+                    rgbStride, fx, tracking_box_ptr, tracking_provider_ran,
+                    &oc_err, &cpu_crop_resize_applied)) {
               // Best-effort: Auto Frame failures shouldn't break the entire
               // pipeline.
               if (!oc_err.empty()) {
@@ -7855,6 +8143,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                 last_error_ = "Open CUDA auto frame failed: " + oc_err;
               }
             }
+            mark_open_cuda_auto_frame_cpu_tail(tracking_tail_source,
+                                               cpu_crop_resize_applied);
           }
           return;
         }
@@ -8738,15 +9028,33 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           stderr,
           "Open CUDA transfers (pipeline): active_frames=%llu "
           "upload_calls=%llu download_calls=%llu final_downloads=%llu "
-          "alpha_downloads=%llu cpu_tail_stages=%llu forced_syncs=%llu\n",
+          "alpha_downloads=%llu denoise_tensor_uploads=%llu "
+          "denoise_tensor_downloads=%llu denoise_cpu_tails=%llu "
+          "cpu_tail_stages=%llu "
+          "auto_frame_face_tracking=%llu auto_frame_matte_tracking=%llu "
+          "auto_frame_cpu_crop=%llu forced_syncs=%llu\n",
           static_cast<unsigned long long>(open_cuda_active_frames),
           static_cast<unsigned long long>(
               open_cuda_frame_upload_calls +
-              open_cuda_vb.matte_frame_upload_calls),
-          static_cast<unsigned long long>(open_cuda_rgb_download_calls),
+              open_cuda_vb.matte_frame_upload_calls +
+              open_cuda_denoise_tensor_upload_calls),
+          static_cast<unsigned long long>(
+              open_cuda_rgb_download_calls +
+              open_cuda_denoise_tensor_download_calls),
           static_cast<unsigned long long>(open_cuda_final_download_calls),
           static_cast<unsigned long long>(open_cuda_vb.alpha_download_calls),
+          static_cast<unsigned long long>(
+              open_cuda_denoise_tensor_upload_calls),
+          static_cast<unsigned long long>(
+              open_cuda_denoise_tensor_download_calls),
+          static_cast<unsigned long long>(open_cuda_denoise_cpu_tail_calls),
           static_cast<unsigned long long>(open_cuda_cpu_tail_stage_calls),
+          static_cast<unsigned long long>(
+              open_cuda_cpu_tail_auto_frame_face_tracking_calls),
+          static_cast<unsigned long long>(
+              open_cuda_cpu_tail_auto_frame_matte_tracking_calls),
+          static_cast<unsigned long long>(
+              open_cuda_cpu_tail_auto_frame_cpu_crop_calls),
           static_cast<unsigned long long>(open_cuda_forced_sync_calls +
                                           open_cuda_vb.forced_sync_calls));
     }
@@ -8757,7 +9065,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           "Maxine transfers (pipeline): active_frames=%llu upload_calls=%llu "
           "download_calls=%llu final_downloads=%llu green_screen=%llu "
           "duplicate_green_screen=%llu shared_green_screen_reuse=%llu "
-          "shared_green_screen_incompatible=%llu forced_syncs=%llu\n",
+          "shared_green_screen_incompatible=%llu "
+          "shared_green_screen_input_incompatible=%llu forced_syncs=%llu\n",
           static_cast<unsigned long long>(maxine_active_frames),
           static_cast<unsigned long long>(maxine_upload_calls),
           static_cast<unsigned long long>(maxine_download_calls),
@@ -8768,6 +9077,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
               maxine_shared_green_screen_matte_reuse_calls),
           static_cast<unsigned long long>(
               maxine_shared_green_screen_matte_incompatible_calls),
+          static_cast<unsigned long long>(
+              maxine_shared_green_screen_input_incompatible_calls),
           static_cast<unsigned long long>(maxine_forced_sync_calls));
     }
 
@@ -8812,8 +9123,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       open_cuda_transfers_.active_frames = open_cuda_active_frames;
       open_cuda_transfers_.upload_calls =
-          open_cuda_frame_upload_calls + open_cuda_vb.matte_frame_upload_calls;
-      open_cuda_transfers_.download_calls = open_cuda_rgb_download_calls;
+          open_cuda_frame_upload_calls + open_cuda_vb.matte_frame_upload_calls +
+          open_cuda_denoise_tensor_upload_calls;
+      open_cuda_transfers_.download_calls =
+          open_cuda_rgb_download_calls +
+          open_cuda_denoise_tensor_download_calls;
       open_cuda_transfers_.final_download_calls =
           open_cuda_final_download_calls;
       open_cuda_transfers_.cpu_continuation_download_calls =
@@ -8826,6 +9140,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           open_cuda_standalone_scaler_upload_calls;
       open_cuda_transfers_.standalone_scaler_download_calls =
           open_cuda_standalone_scaler_download_calls;
+      open_cuda_transfers_.denoise_tensor_upload_calls =
+          open_cuda_denoise_tensor_upload_calls;
+      open_cuda_transfers_.denoise_tensor_download_calls =
+          open_cuda_denoise_tensor_download_calls;
       open_cuda_transfers_.forced_sync_calls =
           open_cuda_forced_sync_calls + open_cuda_vb.forced_sync_calls;
       open_cuda_transfers_.cpu_tail_stage_calls =
@@ -8834,6 +9152,14 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           open_cuda_cpu_tail_key_light_calls;
       open_cuda_transfers_.cpu_tail_auto_frame_calls =
           open_cuda_cpu_tail_auto_frame_calls;
+      open_cuda_transfers_.cpu_tail_auto_frame_face_tracking_calls =
+          open_cuda_cpu_tail_auto_frame_face_tracking_calls;
+      open_cuda_transfers_.cpu_tail_auto_frame_matte_tracking_calls =
+          open_cuda_cpu_tail_auto_frame_matte_tracking_calls;
+      open_cuda_transfers_.cpu_tail_auto_frame_cpu_crop_calls =
+          open_cuda_cpu_tail_auto_frame_cpu_crop_calls;
+      open_cuda_transfers_.cpu_tail_denoise_calls =
+          open_cuda_denoise_cpu_tail_calls;
 
       maxine_transfers_.active_frames = maxine_active_frames;
       maxine_transfers_.rgb_to_bgr_calls = maxine_rgb_to_bgr_calls;
@@ -8845,6 +9171,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           maxine_shared_green_screen_matte_reuse_calls;
       maxine_transfers_.shared_green_screen_matte_incompatible_calls =
           maxine_shared_green_screen_matte_incompatible_calls;
+      maxine_transfers_.shared_green_screen_input_incompatible_calls =
+          maxine_shared_green_screen_input_incompatible_calls;
       maxine_transfers_.download_calls = maxine_download_calls;
       maxine_transfers_.final_download_calls = maxine_final_download_calls;
       maxine_transfers_.cpu_continuation_download_calls =

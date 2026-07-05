@@ -860,6 +860,26 @@ struct OrtSession::Impl {
   std::vector<const char *> scratch_output_names;
   std::vector<Ort::Value> scratch_inputs;
   std::vector<Ort::Value> scratch_outputs;
+
+  void ClearCpuRunScratch() noexcept {
+    scratch_input_names.clear();
+    scratch_output_names.clear();
+    scratch_inputs.clear();
+    scratch_outputs.clear();
+  }
+
+  void ClearCudaRunScratch() noexcept {
+    if (binding) {
+      try {
+        binding->ClearBoundInputs();
+        binding->ClearBoundOutputs();
+      } catch (...) {
+        // Best-effort cleanup only. The caller's run result/error remains the
+        // source of truth.
+      }
+    }
+    ClearCpuRunScratch();
+  }
 #endif
 
   void LatchFailure(const std::string &err) {
@@ -1092,6 +1112,15 @@ bool OrtSession::RunCpu(const RunInput *inputs, std::size_t input_count,
   }
 
   try {
+    impl_->ClearCpuRunScratch();
+    struct ScratchGuard {
+      Impl *impl = nullptr;
+      ~ScratchGuard() {
+        if (impl)
+          impl->ClearCpuRunScratch();
+      }
+    } scratch_guard{impl_.get()};
+
     static Ort::MemoryInfo mem_info =
         Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
 
@@ -1231,6 +1260,15 @@ bool OrtSession::RunCudaIoBinding(const CudaBindingInput *inputs,
   }
 
   try {
+    impl_->ClearCudaRunScratch();
+    struct ScratchGuard {
+      Impl *impl = nullptr;
+      ~ScratchGuard() {
+        if (impl)
+          impl->ClearCudaRunScratch();
+      }
+    } scratch_guard{impl_.get()};
+
     if (!impl_->binding) {
       impl_->binding = std::make_unique<Ort::IoBinding>(*impl_->session);
     }
@@ -1294,9 +1332,6 @@ bool OrtSession::RunCudaIoBinding(const CudaBindingInput *inputs,
           *impl_->cuda_mem_info, out.device_ptr, out.num_floats, out.shape,
           out.shape_rank));
     }
-
-    impl_->binding->ClearBoundInputs();
-    impl_->binding->ClearBoundOutputs();
 
     for (std::size_t i = 0; i < input_count; ++i) {
       impl_->binding->BindInput(inputs[i].name, impl_->scratch_inputs[i]);

@@ -18,6 +18,7 @@ bool TestLatestFrameWinsOverwritesPendingWithBlockedProcessor();
 bool TestLatestFrameWinsStopWakesAndJoins();
 bool TestLatestFrameWinsGenerationRejectsStaleResults();
 bool TestLatestFrameWinsStatsCountersAndLastError();
+bool TestFastDvdnetDenoiseTensorContractIsDeclared();
 } // namespace studiocast::tests
 
 namespace {
@@ -884,6 +885,8 @@ int main() {
        &studiocast::tests::TestLatestFrameWinsGenerationRejectsStaleResults},
       {"latest-frame worker stats counters and last error",
        &studiocast::tests::TestLatestFrameWinsStatsCountersAndLastError},
+      {"FastDVDnet denoise tensor contract is declared",
+       &studiocast::tests::TestFastDvdnetDenoiseTensorContractIsDeclared},
   };
 
   int failed = 0;

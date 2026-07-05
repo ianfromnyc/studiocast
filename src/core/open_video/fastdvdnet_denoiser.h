@@ -14,20 +14,73 @@
 
 namespace studiocast::open_video {
 
+struct DenoiseTensorSpec {
+  std::string role;
+  std::string name;
+  std::string element_type;
+  std::string layout;
+  std::vector<int64_t> shape;
+};
+
+struct DenoiseTemporalWindowSpec {
+  int window_frames = 0;
+  int history_frames = 0;
+  int repeated_future_frames = 0;
+  bool causal = true;
+};
+
+struct DenoiseNormalizationSpec {
+  std::string frame_input;
+  std::string strength_input;
+  float max_sigma = 0.0f;
+};
+
+struct DenoiseTensorAdapterContract {
+  std::string adapter_id;
+  std::string model_family;
+  std::vector<DenoiseTensorSpec> inputs;
+  DenoiseTensorSpec output;
+  DenoiseTemporalWindowSpec temporal;
+  DenoiseNormalizationSpec normalization;
+
+  bool supports_cpu_tensor_io = true;
+  bool supports_cuda_device_tensor_io = false;
+
+  bool requires_cpu_preprocess = true;
+  bool requires_cpu_postprocess = true;
+  bool requires_output_device_to_cpu_for_postprocess = false;
+};
+
+struct DenoiseTensorIoStatus {
+  bool cuda_ep_active = false;
+  bool cuda_device_tensor_io_supported = false;
+  bool cuda_device_tensor_io_active = false;
+  bool cuda_ep_cpu_tensor_io_active = false;
+  bool cpu_only_fallback_active = false;
+  bool cpu_tensor_tail_active = false;
+  bool output_readback_required_for_postprocess = false;
+  std::string summary;
+};
+
+struct DenoiseTensorRunStats {
+  bool cuda_ep_active = false;
+  bool used_cuda_device_tensor_io = false;
+  bool used_cuda_ep_cpu_tensor_io = false;
+  bool used_cpu_session = false;
+  bool cpu_only_fallback_active = false;
+  bool cpu_tensor_tail_active = false;
+
+  std::uint64_t cuda_tensor_upload_calls = 0;
+  std::uint64_t cuda_tensor_download_calls = 0;
+  std::uint64_t forced_sync_calls = 0;
+  std::uint64_t cpu_tail_stage_calls = 0;
+};
+
 // Streaming FastDVDnet video denoiser (ONNX Runtime).
 //
 // This is used as the preferred open-source implementation for the
 // "Video Noise Removal" effect when a compatible Open Video model pack is
 // installed.
-//
-// The expected model signature is:
-//   noisy:     [1, 15, H, W] float32 (5 RGB frames concatenated on channels)
-//   noise_map: [1, 1,  H, W] float32 (sigma/255)
-//   denoised:  [1, 3,  H, W] float32 (RGB in 0..1)
-//
-// For real-time use we implement a causal approximation of the 5-frame window:
-//   [t-2, t-1, t, t, t]
-// (future frames are repeated as the current frame).
 class FastDvdnetDenoiser {
 public:
   FastDvdnetDenoiser();
@@ -65,13 +118,14 @@ public:
     return ort_session_active_ != nullptr && session_info_.using_cuda &&
            !using_cpu_fallback_;
   }
-  bool active_session_uses_cuda_tensor_io() const {
-    return active_session_uses_cuda_ep() && cuda_tensor_io_ready_;
+  bool active_session_uses_cuda_tensor_io() const;
+  bool active_session_uses_cpu_tensor_io() const;
+  const DenoiseTensorAdapterContract &tensor_io_contract() const {
+    return tensor_contract_;
   }
-  bool active_session_uses_cpu_tensor_io() const {
-    // Preprocess, temporal packing, output readback, and RGB postprocess are
-    // still CPU-side even when CUDA IoBinding handles ORT inference buffers.
-    return ort_session_active_ != nullptr;
+  DenoiseTensorIoStatus tensor_io_status() const;
+  const DenoiseTensorRunStats &last_tensor_run_stats() const {
+    return last_tensor_run_stats_;
   }
   const std::string &active_model_id() const { return active_model_id_; }
   const std::filesystem::path &active_model_path() const {
@@ -102,6 +156,8 @@ private:
   bool DetectIoNames(std::string *error);
   bool EnsureCudaTensorIo(std::string *error);
   void ResetCudaTensorIo();
+  void RefreshTensorContract();
+  int HistoryFrameCount() const;
 
   void PreprocessRgbToChwPadded(const std::uint8_t *rgb, int width, int height,
                                 std::size_t stride,
@@ -134,6 +190,9 @@ private:
   std::string noise_map_name_;
   std::string denoised_name_;
 
+  DenoiseTensorAdapterContract tensor_contract_;
+  DenoiseTensorRunStats last_tensor_run_stats_;
+
   // Geometry for the current session run.
   int proc_w_ = 0;
   int proc_h_ = 0;
@@ -145,7 +204,6 @@ private:
   std::vector<int64_t> denoised_shape_;
 
   // Temporal history (preprocessed CHW frames, proc_w_*proc_h_).
-  static constexpr int kHistoryFrames = 3; // t-2, t-1, t
   std::vector<std::vector<float>> history_;
   int history_filled_ = 0;
   int history_write_idx_ = 0;

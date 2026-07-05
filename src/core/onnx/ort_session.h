@@ -262,6 +262,10 @@ public:
   // stream. In that case, callers integrating with an explicit stream must
   // synchronize before/after this call so producer/consumer kernels see
   // consistent data.
+  //
+  // The wrapper clears bound Ort::Value objects before returning, so caller
+  // owned device buffers only need to remain valid for the duration of this
+  // call and any required caller-side stream synchronization.
   bool RunCudaIoBinding(const CudaBindingInput *inputs, std::size_t input_count,
                         const CudaBindingOutput *outputs,
                         std::size_t output_count, std::string *error);

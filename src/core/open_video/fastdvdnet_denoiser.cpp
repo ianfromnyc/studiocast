@@ -4,12 +4,77 @@
 #include <cmath>
 #include <cstring>
 #include <sstream>
+#include <utility>
 
 #include "core/util/fs.h"
 #include "core/util/json.h"
 
 namespace studiocast::open_video {
 namespace {
+
+constexpr int kFastDvdnetSpatialAlignment = 4;
+constexpr int kFastDvdnetWindowFrames = 5;
+constexpr int kFastDvdnetHistoryFrames = 3; // t-2, t-1, t
+constexpr int kFastDvdnetRepeatedFutureFrames = 2;
+constexpr int kFastDvdnetRgbChannels = 3;
+constexpr int kFastDvdnetNoisyChannels =
+    kFastDvdnetWindowFrames * kFastDvdnetRgbChannels;
+constexpr int kFastDvdnetNoiseMapChannels = 1;
+constexpr float kFastDvdnetMaxSigma = 55.0f;
+
+std::vector<int64_t> NchwShape(int channels, int height, int width) {
+  if (height > 0 && width > 0) {
+    return {1, channels, height, width};
+  }
+  return {1, channels, -1, -1};
+}
+
+DenoiseTensorAdapterContract BuildFastDvdnetTensorContract(
+    int proc_w, int proc_h, const std::string &noisy_name,
+    const std::string &noise_map_name, const std::string &denoised_name) {
+  DenoiseTensorAdapterContract c;
+  c.adapter_id = "fastdvdnet";
+  c.model_family = "FastDVDnet";
+
+  DenoiseTensorSpec noisy;
+  noisy.role = "temporal_rgb_window";
+  noisy.name = noisy_name.empty() ? "noisy" : noisy_name;
+  noisy.element_type = "float32";
+  noisy.layout = "NCHW";
+  noisy.shape = NchwShape(kFastDvdnetNoisyChannels, proc_h, proc_w);
+
+  DenoiseTensorSpec noise;
+  noise.role = "noise_map";
+  noise.name = noise_map_name.empty() ? "noise_map" : noise_map_name;
+  noise.element_type = "float32";
+  noise.layout = "NCHW";
+  noise.shape = NchwShape(kFastDvdnetNoiseMapChannels, proc_h, proc_w);
+
+  c.inputs = {std::move(noisy), std::move(noise)};
+
+  c.output.role = "denoised_rgb";
+  c.output.name = denoised_name.empty() ? "denoised" : denoised_name;
+  c.output.element_type = "float32";
+  c.output.layout = "NCHW";
+  c.output.shape = NchwShape(kFastDvdnetRgbChannels, proc_h, proc_w);
+
+  c.temporal.window_frames = kFastDvdnetWindowFrames;
+  c.temporal.history_frames = kFastDvdnetHistoryFrames;
+  c.temporal.repeated_future_frames = kFastDvdnetRepeatedFutureFrames;
+  c.temporal.causal = true;
+
+  c.normalization.frame_input = "RGB uint8 -> RGB float32 0..1";
+  c.normalization.strength_input = "strength 0..100 -> sigma 0..55 -> /255";
+  c.normalization.max_sigma = kFastDvdnetMaxSigma;
+
+  c.supports_cpu_tensor_io = true;
+  c.supports_cuda_device_tensor_io = true;
+
+  c.requires_cpu_preprocess = true;
+  c.requires_cpu_postprocess = true;
+  c.requires_output_device_to_cpu_for_postprocess = true;
+  return c;
+}
 
 int ParseSigmaFromIdFallback(const std::string &id) {
   // Best-effort extraction for curated ids like: fastdvdnet_sigma25.
@@ -35,7 +100,7 @@ int ParseSigmaFromIdFallback(const std::string &id) {
 
 } // namespace
 
-FastDvdnetDenoiser::FastDvdnetDenoiser() = default;
+FastDvdnetDenoiser::FastDvdnetDenoiser() { RefreshTensorContract(); }
 FastDvdnetDenoiser::~FastDvdnetDenoiser() { ResetCudaTensorIo(); }
 
 int FastDvdnetDenoiser::AlignUp(int v, int align) {
@@ -53,6 +118,68 @@ float FastDvdnetDenoiser::Clamp01(float x) {
   if (x > 1.0f)
     return 1.0f;
   return x;
+}
+
+bool FastDvdnetDenoiser::active_session_uses_cuda_tensor_io() const {
+  return active_session_uses_cuda_ep() &&
+         tensor_contract_.supports_cuda_device_tensor_io &&
+         cuda_tensor_io_ready_;
+}
+
+bool FastDvdnetDenoiser::active_session_uses_cpu_tensor_io() const {
+  if (!ort_session_active_)
+    return false;
+  if (using_cpu_fallback_)
+    return true;
+  return !active_session_uses_cuda_tensor_io();
+}
+
+DenoiseTensorIoStatus FastDvdnetDenoiser::tensor_io_status() const {
+  DenoiseTensorIoStatus s;
+  s.cuda_ep_active = active_session_uses_cuda_ep();
+  s.cuda_device_tensor_io_supported =
+      tensor_contract_.supports_cuda_device_tensor_io;
+  s.cuda_device_tensor_io_active = active_session_uses_cuda_tensor_io();
+  s.cuda_ep_cpu_tensor_io_active = s.cuda_ep_active &&
+                                   !s.cuda_device_tensor_io_active &&
+                                   tensor_contract_.supports_cpu_tensor_io;
+  s.cpu_only_fallback_active =
+      ort_session_active_ != nullptr &&
+      (using_cpu_fallback_ || !session_info_.using_cuda);
+  s.cpu_tensor_tail_active =
+      s.cuda_ep_active && (tensor_contract_.requires_cpu_preprocess ||
+                           tensor_contract_.requires_cpu_postprocess ||
+                           s.cuda_ep_cpu_tensor_io_active);
+  s.output_readback_required_for_postprocess =
+      s.cuda_device_tensor_io_active &&
+      tensor_contract_.requires_output_device_to_cpu_for_postprocess;
+
+  if (s.cuda_device_tensor_io_active) {
+    s.summary =
+        "Open Video denoise: CUDA EP active with adapter-declared CUDA "
+        "device tensor I/O for ORT tensors; CPU preprocessing, denoised "
+        "tensor readback, and RGB postprocess remain an explicit CPU tensor "
+        "tail.";
+  } else if (s.cuda_ep_cpu_tensor_io_active) {
+    s.summary =
+        "Open Video denoise: CUDA EP active, but this adapter is using CPU "
+        "ORT tensors; preprocessing and RGB postprocess remain an explicit "
+        "CPU tensor tail.";
+  } else if (s.cpu_only_fallback_active) {
+    s.summary = "Open Video denoise: CPU ORT fallback active; no CUDA tensor "
+                "transfers are used.";
+  }
+
+  return s;
+}
+
+void FastDvdnetDenoiser::RefreshTensorContract() {
+  tensor_contract_ = BuildFastDvdnetTensorContract(
+      proc_w_, proc_h_, noisy_name_, noise_map_name_, denoised_name_);
+}
+
+int FastDvdnetDenoiser::HistoryFrameCount() const {
+  return std::max(1, tensor_contract_.temporal.history_frames);
 }
 
 std::string
@@ -284,8 +411,8 @@ bool FastDvdnetDenoiser::RefreshGeometry(int src_w, int src_h,
     return false;
   }
 
-  const int new_proc_w = AlignUp(src_w, 4);
-  const int new_proc_h = AlignUp(src_h, 4);
+  const int new_proc_w = AlignUp(src_w, kFastDvdnetSpatialAlignment);
+  const int new_proc_h = AlignUp(src_h, kFastDvdnetSpatialAlignment);
 
   if (new_proc_w == proc_w_ && new_proc_h == proc_h_ && src_w == src_w_ &&
       src_h == src_h_) {
@@ -300,19 +427,20 @@ bool FastDvdnetDenoiser::RefreshGeometry(int src_w, int src_h,
   const std::size_t plane =
       static_cast<std::size_t>(proc_w_) * static_cast<std::size_t>(proc_h_);
 
-  noisy_shape_ = {1, 15, proc_h_, proc_w_};
-  noise_map_shape_ = {1, 1, proc_h_, proc_w_};
-  denoised_shape_ = {1, 3, proc_h_, proc_w_};
+  noisy_shape_ = NchwShape(kFastDvdnetNoisyChannels, proc_h_, proc_w_);
+  noise_map_shape_ = NchwShape(kFastDvdnetNoiseMapChannels, proc_h_, proc_w_);
+  denoised_shape_ = NchwShape(kFastDvdnetRgbChannels, proc_h_, proc_w_);
+  RefreshTensorContract();
 
-  noisy_tensor_.assign(15 * plane, 0.0f);
+  noisy_tensor_.assign(kFastDvdnetNoisyChannels * plane, 0.0f);
   noise_map_tensor_.assign(plane, 0.0f);
-  denoised_tensor_.assign(3 * plane, 0.0f);
+  denoised_tensor_.assign(kFastDvdnetRgbChannels * plane, 0.0f);
   last_noise_map_value_ = -1.0f;
 
   history_.clear();
-  history_.resize(kHistoryFrames);
+  history_.resize(static_cast<std::size_t>(HistoryFrameCount()));
   for (auto &f : history_) {
-    f.assign(3 * plane, 0.0f);
+    f.assign(kFastDvdnetRgbChannels * plane, 0.0f);
   }
   history_filled_ = 0;
   history_write_idx_ = 0;
@@ -352,6 +480,15 @@ bool FastDvdnetDenoiser::RefreshGeometry(int src_w, int src_h,
   out_den.shape_rank = denoised_shape_.size();
   ort_outputs_.push_back(out_den);
 
+  if (ort_session_cuda_) {
+    ort_session_cuda_->ReserveRunScratch(ort_inputs_.size(),
+                                         ort_outputs_.size());
+  }
+  if (ort_session_cpu_) {
+    ort_session_cpu_->ReserveRunScratch(ort_inputs_.size(),
+                                        ort_outputs_.size());
+  }
+
   if (session_info_.using_cuda && !using_cpu_fallback_) {
     std::string cuda_err;
     if (!EnsureCudaTensorIo(&cuda_err)) {
@@ -380,6 +517,11 @@ bool FastDvdnetDenoiser::EnsureCudaTensorIo(std::string *error) {
       *error = "CUDA EP is not active.";
     return false;
   }
+  if (!tensor_contract_.supports_cuda_device_tensor_io) {
+    if (error)
+      *error = "denoise tensor adapter does not support CUDA device tensors.";
+    return false;
+  }
 
   std::string err;
   if (!cuda_.IsInitialized() && !cuda_.Initialize(&err)) {
@@ -401,20 +543,20 @@ bool FastDvdnetDenoiser::EnsureCudaTensorIo(std::string *error) {
     cuda_stream_owned_ = true;
   }
 
-  if (!cuda_noisy_tensor_.ReallocIfNeededNchwF32(&cuda_, 1, 15, proc_h_,
-                                                 proc_w_, &err)) {
+  if (!cuda_noisy_tensor_.ReallocIfNeededNchwF32(
+          &cuda_, 1, kFastDvdnetNoisyChannels, proc_h_, proc_w_, &err)) {
     if (error)
       *error = "failed to allocate noisy tensor: " + err;
     return false;
   }
-  if (!cuda_noise_map_tensor_.ReallocIfNeededNchwF32(&cuda_, 1, 1, proc_h_,
-                                                     proc_w_, &err)) {
+  if (!cuda_noise_map_tensor_.ReallocIfNeededNchwF32(
+          &cuda_, 1, kFastDvdnetNoiseMapChannels, proc_h_, proc_w_, &err)) {
     if (error)
       *error = "failed to allocate noise map tensor: " + err;
     return false;
   }
-  if (!cuda_denoised_tensor_.ReallocIfNeededNchwF32(&cuda_, 1, 3, proc_h_,
-                                                    proc_w_, &err)) {
+  if (!cuda_denoised_tensor_.ReallocIfNeededNchwF32(
+          &cuda_, 1, kFastDvdnetRgbChannels, proc_h_, proc_w_, &err)) {
     if (error)
       *error = "failed to allocate denoised tensor: " + err;
     return false;
@@ -491,15 +633,15 @@ bool FastDvdnetDenoiser::DetectIoNames(std::string *error) {
     return false;
   }
 
-  // Heuristic: find input with channel dim == 15 and one with channel dim == 1.
+  // Heuristic: find FastDVDnet adapter inputs by declared channel count.
   int noisy_idx = -1;
   int noise_idx = -1;
   for (std::size_t i = 0; i < info.input_shapes.size(); ++i) {
     const auto &s = info.input_shapes[i];
     if (s.size() == 4) {
-      if (s[1] == 15)
+      if (s[1] == kFastDvdnetNoisyChannels)
         noisy_idx = static_cast<int>(i);
-      if (s[1] == 1)
+      if (s[1] == kFastDvdnetNoiseMapChannels)
         noise_idx = static_cast<int>(i);
     }
   }
@@ -523,7 +665,7 @@ bool FastDvdnetDenoiser::DetectIoNames(std::string *error) {
   int out_idx = -1;
   for (std::size_t i = 0; i < info.output_shapes.size(); ++i) {
     const auto &s = info.output_shapes[i];
-    if (s.size() == 4 && s[1] == 3) {
+    if (s.size() == 4 && s[1] == kFastDvdnetRgbChannels) {
       out_idx = static_cast<int>(i);
       break;
     }
@@ -541,6 +683,7 @@ bool FastDvdnetDenoiser::DetectIoNames(std::string *error) {
       *error = "Open Video FastDVDnet: failed to resolve IO tensor names.";
     return false;
   }
+  RefreshTensorContract();
   return true;
 }
 
@@ -605,8 +748,8 @@ void FastDvdnetDenoiser::PreprocessRgbToChwPadded(
     return;
   const std::size_t plane =
       static_cast<std::size_t>(proc_w_) * static_cast<std::size_t>(proc_h_);
-  if (out_chw->size() != 3 * plane) {
-    out_chw->assign(3 * plane, 0.0f);
+  if (out_chw->size() != kFastDvdnetRgbChannels * plane) {
+    out_chw->assign(kFastDvdnetRgbChannels * plane, 0.0f);
   }
 
   float *out_r = out_chw->data() + 0 * plane;
@@ -636,9 +779,10 @@ void FastDvdnetDenoiser::BuildNoisyTensorFromHistory(
     return;
   const std::size_t plane =
       static_cast<std::size_t>(proc_w_) * static_cast<std::size_t>(proc_h_);
-  if (out_noisy->size() != 15 * plane) {
-    out_noisy->assign(15 * plane, 0.0f);
+  if (out_noisy->size() != kFastDvdnetNoisyChannels * plane) {
+    out_noisy->assign(kFastDvdnetNoisyChannels * plane, 0.0f);
   }
+  const int history_frames = HistoryFrameCount();
 
   // Determine indices for t-2, t-1, t.
   auto idx_t = [&](int back) -> int {
@@ -646,17 +790,17 @@ void FastDvdnetDenoiser::BuildNoisyTensorFromHistory(
     if (history_filled_ <= 0)
       return 0;
     const int newest =
-        (history_write_idx_ - 1 + kHistoryFrames) % kHistoryFrames;
+        (history_write_idx_ - 1 + history_frames) % history_frames;
     if (back == 0)
       return newest;
     if (history_filled_ < back + 1) {
       // Not enough history; replicate oldest available.
       const int oldest =
-          (history_write_idx_ - history_filled_ + kHistoryFrames * 8) %
-          kHistoryFrames;
+          (history_write_idx_ - history_filled_ + history_frames * 8) %
+          history_frames;
       return oldest;
     }
-    return (newest - back + kHistoryFrames) % kHistoryFrames;
+    return (newest - back + history_frames) % history_frames;
   };
 
   const int i_t2 = idx_t(2);
@@ -676,7 +820,7 @@ void FastDvdnetDenoiser::BuildNoisyTensorFromHistory(
 
   for (std::size_t fi = 0; fi < frames.size(); ++fi) {
     const auto *f = frames[fi];
-    if (!f || f->size() < 3 * plane)
+    if (!f || f->size() < kFastDvdnetRgbChannels * plane)
       continue;
 
     const float *in_r = f->data() + 0 * plane;
@@ -710,7 +854,7 @@ void FastDvdnetDenoiser::PostprocessToRgbInPlace(std::uint8_t *rgb, int width,
 
   const std::size_t plane =
       static_cast<std::size_t>(proc_w_) * static_cast<std::size_t>(proc_h_);
-  if (denoised_tensor_.size() < 3 * plane)
+  if (denoised_tensor_.size() < kFastDvdnetRgbChannels * plane)
     return;
 
   const float *in_r = denoised_tensor_.data() + 0 * plane;
@@ -750,6 +894,7 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
                                          int strength,
                                          const std::string &requested_model_id,
                                          std::string *error) {
+  last_tensor_run_stats_ = DenoiseTensorRunStats{};
   if (error)
     error->clear();
 
@@ -780,6 +925,17 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
       *error = "Open Video FastDVDnet: ORT session missing.";
     return false;
   }
+  last_tensor_run_stats_.cuda_ep_active = active_session_uses_cuda_ep();
+  last_tensor_run_stats_.cpu_only_fallback_active =
+      ort_session_active_ != nullptr &&
+      (using_cpu_fallback_ || !session_info_.using_cuda);
+  last_tensor_run_stats_.used_cpu_session =
+      last_tensor_run_stats_.cpu_only_fallback_active;
+  last_tensor_run_stats_.cpu_tensor_tail_active =
+      tensor_io_status().cpu_tensor_tail_active;
+  if (last_tensor_run_stats_.cpu_tensor_tail_active) {
+    last_tensor_run_stats_.cpu_tail_stage_calls = 1;
+  }
 
   // If capture sequence jumps (drop/restart), reset temporal history to avoid
   // blending stale frames.
@@ -796,23 +952,25 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
     // Shouldn't happen (RefreshGeometry allocates), but be defensive.
     const std::size_t plane =
         static_cast<std::size_t>(proc_w_) * static_cast<std::size_t>(proc_h_);
-    history_.resize(kHistoryFrames);
+    history_.resize(static_cast<std::size_t>(HistoryFrameCount()));
     for (auto &f : history_)
-      f.assign(3 * plane, 0.0f);
+      f.assign(kFastDvdnetRgbChannels * plane, 0.0f);
   }
 
   PreprocessRgbToChwPadded(
       rgb, width, height, stride,
       &history_[static_cast<std::size_t>(history_write_idx_)]);
-  history_write_idx_ = (history_write_idx_ + 1) % kHistoryFrames;
-  history_filled_ = std::min(history_filled_ + 1, kHistoryFrames);
+  const int history_frames = HistoryFrameCount();
+  history_write_idx_ = (history_write_idx_ + 1) % history_frames;
+  history_filled_ = std::min(history_filled_ + 1, history_frames);
 
   // Assemble ORT inputs.
   BuildNoisyTensorFromHistory(&noisy_tensor_);
 
   // Strength -> sigma in [0..55], then normalize to [0..1] via /255.
   const float t = Clamp01(static_cast<float>(s) / 100.0f);
-  const float sigma = std::clamp(55.0f * t, 0.0f, 55.0f);
+  const float sigma =
+      std::clamp(kFastDvdnetMaxSigma * t, 0.0f, kFastDvdnetMaxSigma);
   const float sigma_over_255 = sigma * (1.0f / 255.0f);
   EnsureNoiseMap(sigma_over_255);
 
@@ -837,6 +995,7 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
   std::string ort_err;
   bool ort_ok = false;
   if (active_session_uses_cuda_tensor_io()) {
+    last_tensor_run_stats_.used_cuda_device_tensor_io = true;
     if (cuda_ort_inputs_.size() != 2 || cuda_ort_outputs_.size() != 1) {
       std::string cuda_err;
       if (!EnsureCudaTensorIo(&cuda_err)) {
@@ -846,13 +1005,21 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
 
     if (ort_err.empty()) {
       std::string cuda_err;
-      const bool upload_ok =
-          cuda_noisy_tensor_.UploadFromCpuF32(&cuda_, noisy_tensor_.data(),
-                                              noisy_tensor_.size(),
-                                              cuda_stream_, &cuda_err) &&
-          cuda_noise_map_tensor_.UploadFromCpuF32(
-              &cuda_, noise_map_tensor_.data(), noise_map_tensor_.size(),
-              cuda_stream_, &cuda_err);
+      bool upload_ok = true;
+      ++last_tensor_run_stats_.cuda_tensor_upload_calls;
+      if (!cuda_noisy_tensor_.UploadFromCpuF32(&cuda_, noisy_tensor_.data(),
+                                               noisy_tensor_.size(),
+                                               cuda_stream_, &cuda_err)) {
+        upload_ok = false;
+      }
+      if (upload_ok) {
+        ++last_tensor_run_stats_.cuda_tensor_upload_calls;
+        if (!cuda_noise_map_tensor_.UploadFromCpuF32(
+                &cuda_, noise_map_tensor_.data(), noise_map_tensor_.size(),
+                cuda_stream_, &cuda_err)) {
+          upload_ok = false;
+        }
+      }
       if (!upload_ok) {
         ort_err = "FastDVDnet CUDA tensor upload failed: " + cuda_err;
       }
@@ -860,6 +1027,7 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
 
     if (ort_err.empty() && session_info_.cuda_needs_stream_sync) {
       std::string sync_err;
+      ++last_tensor_run_stats_.forced_sync_calls;
       if (!cuda_.StreamSynchronize(cuda_stream_, &sync_err)) {
         ort_err = "FastDVDnet CUDA tensor upload sync failed: " + sync_err;
       }
@@ -879,20 +1047,33 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
       ort_ok = ort_session_active_->RunCudaIoBinding(
           cuda_ort_inputs_.data(), cuda_ort_inputs_.size(),
           cuda_ort_outputs_.data(), cuda_ort_outputs_.size(), &ort_err);
+      if (ort_ok && session_info_.cuda_needs_stream_sync) {
+        ++last_tensor_run_stats_.forced_sync_calls;
+      }
     }
 
     if (ort_ok) {
       std::string cuda_err;
+      ++last_tensor_run_stats_.cuda_tensor_download_calls;
       if (!cuda_denoised_tensor_.DownloadToCpuF32(&cuda_, &denoised_tensor_,
                                                   cuda_stream_, &cuda_err)) {
         ort_ok = false;
         ort_err = "FastDVDnet CUDA tensor download failed: " + cuda_err;
-      } else if (!cuda_.StreamSynchronize(cuda_stream_, &cuda_err)) {
-        ort_ok = false;
-        ort_err = "FastDVDnet CUDA tensor download sync failed: " + cuda_err;
+      } else {
+        ++last_tensor_run_stats_.forced_sync_calls;
+        if (!cuda_.StreamSynchronize(cuda_stream_, &cuda_err)) {
+          ort_ok = false;
+          ort_err = "FastDVDnet CUDA tensor download sync failed: " + cuda_err;
+        }
       }
     }
   } else {
+    if (active_session_uses_cuda_ep()) {
+      last_tensor_run_stats_.used_cuda_ep_cpu_tensor_io = true;
+    } else {
+      last_tensor_run_stats_.used_cpu_session = true;
+      last_tensor_run_stats_.cpu_only_fallback_active = true;
+    }
     ort_ok = ort_session_active_->RunCpu(ort_inputs_.data(), ort_inputs_.size(),
                                          ort_outputs_.data(),
                                          ort_outputs_.size(), &ort_err);
@@ -909,6 +1090,8 @@ bool FastDvdnetDenoiser::ApplyRgbInPlace(std::uint64_t capture_sequence,
       ort_session_active_ = ort_session_cpu_.get();
       using_cpu_fallback_ = true;
       ResetCudaTensorIo();
+      last_tensor_run_stats_.used_cpu_session = true;
+      last_tensor_run_stats_.cpu_only_fallback_active = true;
       sticky_warning_ = "Open Video FastDVDnet: switched to CPU fallback after "
                         "a CUDA runtime failure.";
       runtime_failures_ = 0;

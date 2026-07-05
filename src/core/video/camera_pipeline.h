@@ -127,10 +127,16 @@ struct CameraPipelineStatus {
     std::uint64_t matte_frame_upload_calls = 0;
     std::uint64_t standalone_scaler_upload_calls = 0;
     std::uint64_t standalone_scaler_download_calls = 0;
+    std::uint64_t denoise_tensor_upload_calls = 0;
+    std::uint64_t denoise_tensor_download_calls = 0;
     std::uint64_t forced_sync_calls = 0;
     std::uint64_t cpu_tail_stage_calls = 0;
     std::uint64_t cpu_tail_key_light_calls = 0;
     std::uint64_t cpu_tail_auto_frame_calls = 0;
+    std::uint64_t cpu_tail_auto_frame_face_tracking_calls = 0;
+    std::uint64_t cpu_tail_auto_frame_matte_tracking_calls = 0;
+    std::uint64_t cpu_tail_auto_frame_cpu_crop_calls = 0;
+    std::uint64_t cpu_tail_denoise_calls = 0;
   } open_cuda_transfers{};
 
   // Optional Maxine transfer counters (emitted in status JSON only when
@@ -143,6 +149,7 @@ struct CameraPipelineStatus {
     std::uint64_t duplicate_green_screen_calls = 0;
     std::uint64_t shared_green_screen_matte_reuse_calls = 0;
     std::uint64_t shared_green_screen_matte_incompatible_calls = 0;
+    std::uint64_t shared_green_screen_input_incompatible_calls = 0;
     std::uint64_t download_calls = 0;
     std::uint64_t final_download_calls = 0;
     std::uint64_t cpu_continuation_download_calls = 0;

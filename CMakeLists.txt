@@ -853,6 +853,7 @@ if (BUILD_TESTING)
     add_executable(studiocast-video-tests
             tests/video_service_tests.cpp
             tests/latest_frame_wins_worker_tests.cpp
+            tests/open_video_denoise_contract_tests.cpp
     )
 
     target_link_libraries(studiocast-video-tests PRIVATE studiocast_core)

@@ -1293,6 +1293,11 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
     oss << "\"standalone_scaler_download_calls\":"
         << st.pipeline.open_cuda_transfers.standalone_scaler_download_calls
         << ",";
+    oss << "\"denoise_tensor_upload_calls\":"
+        << st.pipeline.open_cuda_transfers.denoise_tensor_upload_calls << ",";
+    oss << "\"denoise_tensor_download_calls\":"
+        << st.pipeline.open_cuda_transfers.denoise_tensor_download_calls
+        << ",";
     oss << "\"forced_sync_calls\":"
         << st.pipeline.open_cuda_transfers.forced_sync_calls << ",";
     oss << "\"cpu_tail_stage_calls\":"
@@ -1300,7 +1305,20 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
     oss << "\"cpu_tail_key_light_calls\":"
         << st.pipeline.open_cuda_transfers.cpu_tail_key_light_calls << ",";
     oss << "\"cpu_tail_auto_frame_calls\":"
-        << st.pipeline.open_cuda_transfers.cpu_tail_auto_frame_calls;
+        << st.pipeline.open_cuda_transfers.cpu_tail_auto_frame_calls << ",";
+    oss << "\"cpu_tail_auto_frame_face_tracking_calls\":"
+        << st.pipeline.open_cuda_transfers
+               .cpu_tail_auto_frame_face_tracking_calls
+        << ",";
+    oss << "\"cpu_tail_auto_frame_matte_tracking_calls\":"
+        << st.pipeline.open_cuda_transfers
+               .cpu_tail_auto_frame_matte_tracking_calls
+        << ",";
+    oss << "\"cpu_tail_auto_frame_cpu_crop_calls\":"
+        << st.pipeline.open_cuda_transfers.cpu_tail_auto_frame_cpu_crop_calls
+        << ",";
+    oss << "\"cpu_tail_denoise_calls\":"
+        << st.pipeline.open_cuda_transfers.cpu_tail_denoise_calls;
     oss << "}";
   }
 
@@ -1322,6 +1340,10 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
     oss << "\"shared_green_screen_matte_incompatible_calls\":"
         << st.pipeline.maxine_transfers
                .shared_green_screen_matte_incompatible_calls
+        << ",";
+    oss << "\"shared_green_screen_input_incompatible_calls\":"
+        << st.pipeline.maxine_transfers
+               .shared_green_screen_input_incompatible_calls
         << ",";
     oss << "\"download_calls\":" << st.pipeline.maxine_transfers.download_calls
         << ",";
