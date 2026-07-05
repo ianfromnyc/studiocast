@@ -166,8 +166,8 @@ std::string OpenAudioRuntimeStatusToJson(
       << "\",";
   oss << "\"selected_model_path\":\"" << JsonEscape(st.selected_model_path)
       << "\",";
-  oss << "\"last_runtime_warning\":\""
-      << JsonEscape(st.last_runtime_warning) << "\"";
+  oss << "\"last_runtime_warning\":\"" << JsonEscape(st.last_runtime_warning)
+      << "\"";
   oss << "}";
   return oss.str();
 }
@@ -530,7 +530,61 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
     oss << "\"upload_calls\":" << st.pipeline.open_cuda_transfers.upload_calls
         << ",";
     oss << "\"download_calls\":"
-        << st.pipeline.open_cuda_transfers.download_calls;
+        << st.pipeline.open_cuda_transfers.download_calls << ",";
+    oss << "\"final_download_calls\":"
+        << st.pipeline.open_cuda_transfers.final_download_calls << ",";
+    oss << "\"cpu_continuation_download_calls\":"
+        << st.pipeline.open_cuda_transfers.cpu_continuation_download_calls
+        << ",";
+    oss << "\"alpha_download_calls\":"
+        << st.pipeline.open_cuda_transfers.alpha_download_calls << ",";
+    oss << "\"matte_frame_upload_calls\":"
+        << st.pipeline.open_cuda_transfers.matte_frame_upload_calls << ",";
+    oss << "\"standalone_scaler_upload_calls\":"
+        << st.pipeline.open_cuda_transfers.standalone_scaler_upload_calls
+        << ",";
+    oss << "\"standalone_scaler_download_calls\":"
+        << st.pipeline.open_cuda_transfers.standalone_scaler_download_calls
+        << ",";
+    oss << "\"forced_sync_calls\":"
+        << st.pipeline.open_cuda_transfers.forced_sync_calls << ",";
+    oss << "\"cpu_tail_stage_calls\":"
+        << st.pipeline.open_cuda_transfers.cpu_tail_stage_calls << ",";
+    oss << "\"cpu_tail_key_light_calls\":"
+        << st.pipeline.open_cuda_transfers.cpu_tail_key_light_calls << ",";
+    oss << "\"cpu_tail_auto_frame_calls\":"
+        << st.pipeline.open_cuda_transfers.cpu_tail_auto_frame_calls;
+    oss << "}";
+  }
+
+  if (std::getenv("STUDIOCAST_DEBUG_MAXINE_TRANSFERS")) {
+    oss << ",\"maxine_transfers\":{";
+    oss << "\"active_frames\":" << st.pipeline.maxine_transfers.active_frames
+        << ",";
+    oss << "\"rgb_to_bgr_calls\":"
+        << st.pipeline.maxine_transfers.rgb_to_bgr_calls << ",";
+    oss << "\"upload_calls\":" << st.pipeline.maxine_transfers.upload_calls
+        << ",";
+    oss << "\"green_screen_calls\":"
+        << st.pipeline.maxine_transfers.green_screen_calls << ",";
+    oss << "\"duplicate_green_screen_calls\":"
+        << st.pipeline.maxine_transfers.duplicate_green_screen_calls << ",";
+    oss << "\"download_calls\":" << st.pipeline.maxine_transfers.download_calls
+        << ",";
+    oss << "\"final_download_calls\":"
+        << st.pipeline.maxine_transfers.final_download_calls << ",";
+    oss << "\"cpu_continuation_download_calls\":"
+        << st.pipeline.maxine_transfers.cpu_continuation_download_calls << ",";
+    oss << "\"bgr_to_rgb_calls\":"
+        << st.pipeline.maxine_transfers.bgr_to_rgb_calls << ",";
+    oss << "\"deferred_readbacks\":"
+        << st.pipeline.maxine_transfers.deferred_readbacks << ",";
+    oss << "\"forced_sync_calls\":"
+        << st.pipeline.maxine_transfers.forced_sync_calls << ",";
+    oss << "\"standalone_scaler_upload_calls\":"
+        << st.pipeline.maxine_transfers.standalone_scaler_upload_calls << ",";
+    oss << "\"standalone_scaler_download_calls\":"
+        << st.pipeline.maxine_transfers.standalone_scaler_download_calls;
     oss << "}";
   }
 
@@ -1421,16 +1475,14 @@ int main(int argc, char **argv) {
 
               // Cache loopback diagnostics because they may scan /proc and run
               // v4l2-ctl with a timeout.
-              static studiocast::util::TtlCache<std::string>
-                  loopbackDiagCache;
+              static studiocast::util::TtlCache<std::string> loopbackDiagCache;
               constexpr auto kLoopbackDiagTtl = std::chrono::seconds(5);
 
-              const std::string loopbackJson =
-                  loopbackDiagCache.GetOrCompute(
-                      std::chrono::steady_clock::now(), kLoopbackDiagTtl, []() {
-                        return studiocast::video::ProbeLoopbackDiagnostics()
-                            .ToJson();
-                      });
+              const std::string loopbackJson = loopbackDiagCache.GetOrCompute(
+                  std::chrono::steady_clock::now(), kLoopbackDiagTtl, []() {
+                    return studiocast::video::ProbeLoopbackDiagnostics()
+                        .ToJson();
+                  });
 
               return std::string("OK ") +
                      StatusToJson(st, current, ast, acurrent, socketPath,

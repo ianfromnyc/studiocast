@@ -59,6 +59,13 @@ public:
   bool initialized() const { return initialized_; }
   bool disabled() const { return disabled_; }
   bool using_cpu_fallback() const { return using_cpu_fallback_; }
+  bool active_session_uses_cuda_ep() const {
+    return ort_session_active_ != nullptr && session_info_.using_cuda &&
+           !using_cpu_fallback_;
+  }
+  bool active_session_uses_cpu_tensor_io() const {
+    return ort_session_active_ != nullptr;
+  }
   const std::string &active_model_id() const { return active_model_id_; }
   const std::filesystem::path &active_model_path() const {
     return active_model_path_;
@@ -103,6 +110,7 @@ private:
 
   // Model/session state.
   ModelPackRegistry registry_;
+  std::string active_requested_model_id_;
   std::string active_model_id_;
   std::filesystem::path active_model_path_;
   int model_default_sigma_ = 25;

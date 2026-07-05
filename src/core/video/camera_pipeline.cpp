@@ -256,9 +256,9 @@ bool IsVignetteFailureReason(const std::string &reason) {
 }
 
 template <std::size_t N>
-std::string BuildDegradedEffectsNote(
-    const std::array<OptionalEffectBreaker, N> &breakers,
-    std::uint64_t frame_index) {
+std::string
+BuildDegradedEffectsNote(const std::array<OptionalEffectBreaker, N> &breakers,
+                         std::uint64_t frame_index) {
   std::string note;
   for (const auto &breaker : breakers) {
     if (!breaker.active())
@@ -431,6 +431,7 @@ CameraPipelineStatus CameraPipeline::Status() const {
     s.perf_sample_frames = perf_sample_frames_;
     s.debug = debug_;
     s.open_cuda_transfers = open_cuda_transfers_;
+    s.maxine_transfers = maxine_transfers_;
   } else {
     // Avoid exposing stale negotiated formats when the pipeline is idle.
     //
@@ -448,6 +449,7 @@ CameraPipelineStatus CameraPipeline::Status() const {
     s.perf_sample_frames = 0;
     s.debug = CameraPipelineStatus::Debug{};
     s.open_cuda_transfers = CameraPipelineStatus::OpenCudaTransfers{};
+    s.maxine_transfers = CameraPipelineStatus::MaxineTransfers{};
   }
   s.frame_index = frame_index_;
   s.effects_backends = effects_backends_;
@@ -517,6 +519,7 @@ bool CameraPipeline::Start(const CameraPipelineConfig &cfg,
   perf_sample_frames_ = 0;
   debug_ = CameraPipelineStatus::Debug{};
   open_cuda_transfers_ = CameraPipelineStatus::OpenCudaTransfers{};
+  maxine_transfers_ = CameraPipelineStatus::MaxineTransfers{};
 
   effects_backends_.clear();
   effects_note_.clear();
@@ -1932,6 +1935,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     // the Open CUDA session when the user changes
     // fx.virtual_background.model_id.
     std::string active_model_id;
+    std::string active_requested_model_id;
 
     studiocast::maxine::CudaDriverApi cuda;
 
@@ -1991,6 +1995,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     std::vector<std::uint8_t> tmp_replace_rgb_src;
 
+    std::uint64_t matte_frame_upload_calls = 0;
+    std::uint64_t alpha_download_calls = 0;
+    std::uint64_t forced_sync_calls = 0;
+
     ~OpenCudaVirtualBackgroundContext() { Destroy(); }
 
     void Destroy() {
@@ -2022,6 +2030,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       session.reset();
       pack.reset();
       active_model_id.clear();
+      active_requested_model_id.clear();
 
       cached_matte_sequence = 0;
       cached_matte_valid = false;
@@ -2086,63 +2095,69 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
       }
 
-      // Resolve model pack.
-      // Open CUDA models are selected per-effect, but remain an Open CUDA-only
-      // concern. If fx.virtual_background.model_id is empty, preserve the
-      // existing deterministic default.
-      const auto reg = studiocast::open_video::ModelPackRegistry::ScanDefault();
-      std::string requested_model_id = fx.virtual_background.model_id;
-      if (requested_model_id.empty()) {
-        requested_model_id = reg.DefaultModelIdForTask("matting");
-      }
+      // Resolve model pack only when the requested model key changes. Empty
+      // model id means "use the current default"; new installs are picked up on
+      // explicit reconfiguration/refresh rather than by rescanning per frame.
+      const std::string requested_model_key = fx.virtual_background.model_id;
+      std::string requested_model_id = active_model_id;
+      const bool needs_model_resolve =
+          !initialized || !pack.has_value() || !session ||
+          requested_model_key != active_requested_model_id;
 
-      if (requested_model_id.empty()) {
-        last_error = "Open CUDA: no usable model packs found (install under "
-                     "~/.local/share/studiocast/models/open_video/<subject>/"
-                     "<pack_dir>/).";
-        if (error)
-          *error = last_error;
-        return false;
-      }
-
-      auto DescribeInstalledModelIds = [&reg]() -> std::string {
-        std::ostringstream oss;
-        std::vector<std::string> ids;
-        for (const auto &m : reg.ListModels()) {
-          if (m.task != "matting")
-            continue;
-          ids.push_back(m.id);
+      if (needs_model_resolve) {
+        const auto reg =
+            studiocast::open_video::ModelPackRegistry::ScanDefault();
+        requested_model_id = requested_model_key;
+        if (requested_model_id.empty()) {
+          requested_model_id = reg.DefaultModelIdForTask("matting");
         }
-        if (ids.empty()) {
-          oss << "<none>";
+
+        if (requested_model_id.empty()) {
+          last_error = "Open CUDA: no usable model packs found (install under "
+                       "~/.local/share/studiocast/models/open_video/<subject>/"
+                       "<pack_dir>/).";
+          if (error)
+            *error = last_error;
+          return false;
+        }
+
+        auto DescribeInstalledModelIds = [&reg]() -> std::string {
+          std::ostringstream oss;
+          std::vector<std::string> ids;
+          for (const auto &m : reg.ListModels()) {
+            if (m.task != "matting")
+              continue;
+            ids.push_back(m.id);
+          }
+          if (ids.empty()) {
+            oss << "<none>";
+            return oss.str();
+          }
+          bool first = true;
+          for (const auto &id : ids) {
+            if (!first)
+              oss << ", ";
+            first = false;
+            oss << id;
+          }
           return oss.str();
+        };
+
+        if (requested_model_id != active_model_id) {
+          // Model changed: reset model-dependent state so ORT session and
+          // model-sized buffers are rebuilt cleanly.
+          session.reset();
+          pack.reset();
+          (void)alpha_tensor.Free(&cuda, nullptr);
+          alpha_model_view = studiocast::cuda::CudaImage{};
+
+          cached_matte_sequence = 0;
+          cached_matte_valid = false;
+          cached_alpha_cpu_sequence = 0;
+          cached_alpha_cpu_valid = false;
+          alpha_cpu.clear();
         }
-        bool first = true;
-        for (const auto &id : ids) {
-          if (!first)
-            oss << ", ";
-          first = false;
-          oss << id;
-        }
-        return oss.str();
-      };
 
-      if (requested_model_id != active_model_id) {
-        // Model changed: reset model-dependent state so ORT session and
-        // model-sized buffers are rebuilt cleanly.
-        session.reset();
-        pack.reset();
-        (void)alpha_tensor.Free(&cuda, nullptr);
-        alpha_model_view = studiocast::cuda::CudaImage{};
-
-        cached_matte_sequence = 0;
-        cached_matte_valid = false;
-        cached_alpha_cpu_sequence = 0;
-        cached_alpha_cpu_valid = false;
-        alpha_cpu.clear();
-      }
-
-      if (!pack.has_value()) {
         const auto p = reg.Find("matting", requested_model_id);
         if (!p.has_value()) {
           last_error = "Open CUDA: selected model_id '" + requested_model_id +
@@ -2153,6 +2168,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
         pack = *p;
         active_model_id = requested_model_id;
+        active_requested_model_id = requested_model_key;
 
         if (pack->task != "matting") {
           last_error = "Open CUDA: selected model_id '" + requested_model_id +
@@ -2434,6 +2450,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           *error = "Open CUDA: frame upload failed: " + up_err;
         return false;
       }
+      ++matte_frame_upload_calls;
 
       std::string matte_err;
       if (!session->Run(vb_stream, frame_rgb, &alpha_tensor, &matte_err)) {
@@ -2497,12 +2514,18 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       std::string derr;
-      if (!alpha_tensor.DownloadToCpuF32(&cuda, &alpha_cpu, vb_stream, &derr) ||
-          !cuda.StreamSynchronize(vb_stream, &derr)) {
+      if (!alpha_tensor.DownloadToCpuF32(&cuda, &alpha_cpu, vb_stream, &derr)) {
         if (error)
           *error = "Open CUDA: failed to download alpha tensor: " + derr;
         return false;
       }
+      ++alpha_download_calls;
+      if (!cuda.StreamSynchronize(vb_stream, &derr)) {
+        if (error)
+          *error = "Open CUDA: failed to download alpha tensor: " + derr;
+        return false;
+      }
+      ++forced_sync_calls;
 
       cached_alpha_cpu_valid = true;
       cached_alpha_cpu_sequence = capture_sequence;
@@ -5392,15 +5415,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   };
 
-  auto block_optional_effect =
-      [&](OptionalEffectSlot slot, std::string_view effect_id,
-          std::string_view backend, std::string reason,
-          std::uint64_t frame_index) {
-        auto &breaker = optional_breaker(slot);
-        breaker.OnFailure(effect_id, backend, std::move(reason), frame_index,
-                          ++optional_effect_trip_order);
-        publish_optional_effect_status(frame_index);
-      };
+  auto block_optional_effect = [&](OptionalEffectSlot slot,
+                                   std::string_view effect_id,
+                                   std::string_view backend, std::string reason,
+                                   std::uint64_t frame_index) {
+    auto &breaker = optional_breaker(slot);
+    breaker.OnFailure(effect_id, backend, std::move(reason), frame_index,
+                      ++optional_effect_trip_order);
+    publish_optional_effect_status(frame_index);
+  };
 
   auto publish_optional_retry_ready_status = [&](std::uint64_t frame_index) {
     bool changed = false;
@@ -5459,6 +5482,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       for (const auto &d : plan.disabled) {
         note += "\n - " + d.id + ": " + d.reason;
       }
+    };
+
+    auto append_fastdvdnet_tensor_note = [&] {
+      if (!open_video_fastdvdnet.active_session_uses_cuda_ep() ||
+          !open_video_fastdvdnet.active_session_uses_cpu_tensor_io()) {
+        return;
+      }
+      if (!note.empty())
+        note += "\n";
+      note += "Open Video FastDVDnet: CUDA EP active with CPU tensor I/O; "
+              "pre/postprocess remains an explicit CPU tail.";
     };
 
     want_maxine_bg_blur = false;
@@ -5560,6 +5594,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (!note.empty())
             note += "\n";
           note += "Open Video: Video Noise Removal (FastDVDnet).";
+          append_fastdvdnet_tensor_note();
         } else {
           want_open_cuda_video_denoise = true;
           have_open_cuda_video_denoise = true;
@@ -5603,6 +5638,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                 note += "\n";
               note += "Open Video: Video Noise Removal (FastDVDnet) — Maxine "
                       "VFX unavailable.";
+              append_fastdvdnet_tensor_note();
               if (!mx_err.empty()) {
                 note += "\n";
                 note += mx_err;
@@ -6238,8 +6274,32 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       (std::getenv("STUDIOCAST_DEBUG_OPEN_CUDA_TRANSFERS") != nullptr) ||
       (std::getenv("STUDIOCAST_DEBUG_CUDA_UPLOADS") != nullptr);
   std::uint64_t open_cuda_active_frames = 0;
-  std::uint64_t pipeline_open_cuda_upload_calls = 0;
-  std::uint64_t pipeline_open_cuda_download_calls = 0;
+  std::uint64_t open_cuda_frame_upload_calls = 0;
+  std::uint64_t open_cuda_rgb_download_calls = 0;
+  std::uint64_t open_cuda_final_download_calls = 0;
+  std::uint64_t open_cuda_cpu_continuation_download_calls = 0;
+  std::uint64_t open_cuda_standalone_scaler_upload_calls = 0;
+  std::uint64_t open_cuda_standalone_scaler_download_calls = 0;
+  std::uint64_t open_cuda_forced_sync_calls = 0;
+  std::uint64_t open_cuda_cpu_tail_stage_calls = 0;
+  std::uint64_t open_cuda_cpu_tail_key_light_calls = 0;
+  std::uint64_t open_cuda_cpu_tail_auto_frame_calls = 0;
+
+  const bool debug_maxine_transfers =
+      (std::getenv("STUDIOCAST_DEBUG_MAXINE_TRANSFERS") != nullptr);
+  std::uint64_t maxine_active_frames = 0;
+  std::uint64_t maxine_rgb_to_bgr_calls = 0;
+  std::uint64_t maxine_upload_calls = 0;
+  std::uint64_t maxine_green_screen_calls = 0;
+  std::uint64_t maxine_duplicate_green_screen_calls = 0;
+  std::uint64_t maxine_download_calls = 0;
+  std::uint64_t maxine_final_download_calls = 0;
+  std::uint64_t maxine_cpu_continuation_download_calls = 0;
+  std::uint64_t maxine_bgr_to_rgb_calls = 0;
+  std::uint64_t maxine_deferred_readbacks = 0;
+  std::uint64_t maxine_forced_sync_calls = 0;
+  std::uint64_t maxine_standalone_scaler_upload_calls = 0;
+  std::uint64_t maxine_standalone_scaler_download_calls = 0;
 
   const bool debug_v4l2_neg =
       (std::getenv("STUDIOCAST_DEBUG_V4L2_NEGOTIATION") != nullptr);
@@ -6451,26 +6511,76 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     DeferredGpuOut deferred_gpu_out{};
     bool have_deferred_gpu_out = false;
     bool open_cuda_active_this_frame = false;
+    bool maxine_active_this_frame = false;
+    int maxine_green_screen_calls_this_frame = 0;
 
     // Reset per-frame Open CUDA ping-pong state.
     open_cuda_curr = nullptr;
     open_cuda_next = nullptr;
     open_cuda_uploaded_this_frame = false;
 
+    auto mark_open_cuda_active_frame = [&]() {
+      if (!open_cuda_active_this_frame) {
+        open_cuda_active_this_frame = true;
+        ++open_cuda_active_frames;
+      }
+    };
+
+    auto mark_open_cuda_cpu_tail = [&](std::string_view stage_id) {
+      mark_open_cuda_active_frame();
+      ++open_cuda_cpu_tail_stage_calls;
+      if (stage_id ==
+          studiocast::video::effects::contract::kEffectIdVirtualKeyLight) {
+        ++open_cuda_cpu_tail_key_light_calls;
+      } else if (stage_id ==
+                 studiocast::video::effects::contract::kEffectIdAutoFrame) {
+        ++open_cuda_cpu_tail_auto_frame_calls;
+      }
+    };
+
+    auto mark_maxine_active_frame = [&]() {
+      if (!maxine_active_this_frame) {
+        maxine_active_this_frame = true;
+        ++maxine_active_frames;
+      }
+    };
+
+    auto count_maxine_stage = [&](bool deferred_readback,
+                                  bool runs_green_screen) {
+      mark_maxine_active_frame();
+      ++maxine_rgb_to_bgr_calls;
+      ++maxine_upload_calls;
+      if (runs_green_screen) {
+        if (maxine_green_screen_calls_this_frame > 0) {
+          ++maxine_duplicate_green_screen_calls;
+        }
+        ++maxine_green_screen_calls;
+        ++maxine_green_screen_calls_this_frame;
+      }
+      if (deferred_readback) {
+        return;
+      }
+      ++maxine_download_calls;
+      ++maxine_cpu_continuation_download_calls;
+      ++maxine_forced_sync_calls;
+      ++maxine_bgr_to_rgb_calls;
+    };
+
     // Open CUDA transfer invariant (pipeline contract)
     //
-    // Define “Open CUDA active for this frame” as:
+    // Define "Open CUDA active for this frame" as:
     //   fx.engine == EffectsEnginePreference::open_cuda
     //   AND at least one Open CUDA stage is planned+enabled and will actually
-    //   run. (Today that effectively means: the Virtual Background stage is
-    //   present in
-    //    appliedPlan.ordered_effect_ids and have_open_cuda_vb == true.)
+    //   run (virtual background, key light, auto frame, or standalone scaler).
     //
     // Invariant we are moving toward:
     //   - If Open CUDA is active this frame: exactly one CPU->GPU upload at the
     //     start of the Open CUDA section, then GPU-only model/effect stages,
     //     then exactly one GPU->CPU download at the end (including any resize).
-    //   - If Open CUDA is NOT active this frame: zero GPU uploads/downloads.
+    //   - If a CPU tail remains (key light/auto-frame alpha readback and CPU
+    //     work), count it explicitly.
+    //   - If Open CUDA is NOT active this frame: zero Open CUDA
+    //     uploads/downloads.
     //
     // Current transfer points (pre-refactor):
     //   - OpenCudaVirtualBackgroundContext::ApplyRgbInPlace does
@@ -6635,6 +6745,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                       "Maxine video noise removal failed", mx_err),
                   capture_sequence);
             } else {
+              count_maxine_stage(/*deferred_readback=*/false,
+                                 /*runs_green_screen=*/false);
               clear_optional_effect_on_success(breaker, capture_sequence);
             }
             return;
@@ -6703,6 +6815,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                       capture_sequence);
               }
             } else {
+              count_maxine_stage(
+                  /*deferred_readback=*/
+                  defer_readback &&
+                      deferred_gpu_out.kind != DeferredGpuKind::none,
+                  /*runs_green_screen=*/false);
               clear_optional_effect_on_success(breaker, capture_sequence);
             }
             if (defer_readback &&
@@ -6757,6 +6874,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                       capture_sequence);
               }
             } else {
+              count_maxine_stage(
+                  /*deferred_readback=*/
+                  defer_readback &&
+                      deferred_gpu_out.kind != DeferredGpuKind::none,
+                  /*runs_green_screen=*/true);
               clear_optional_effect_on_success(breaker, capture_sequence);
             }
             if (defer_readback &&
@@ -6774,6 +6896,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
               return;
             }
 
+            mark_open_cuda_cpu_tail(stage_id);
             std::string oc_err;
             if (!open_cuda_key_light.ApplyRgbInPlace(
                     capture_sequence, rgb.data(), capA.width, capA.height,
@@ -6824,6 +6947,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                     capture_sequence);
               }
             } else {
+              count_maxine_stage(
+                  /*deferred_readback=*/
+                  defer_readback &&
+                      deferred_gpu_out.kind != DeferredGpuKind::none,
+                  /*runs_green_screen=*/true);
               clear_optional_effect_on_success(breaker, capture_sequence);
             }
             if (defer_readback &&
@@ -6845,6 +6973,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
               if (!have_open_cuda_key_light)
                 return;
 
+              mark_open_cuda_cpu_tail(studiocast::video::effects::contract::
+                                          kEffectIdVirtualKeyLight);
               std::string kl_err;
               if (!open_cuda_key_light.ApplyRgbInPlace(
                       capture_sequence, rgb.data(), capA.width, capA.height,
@@ -6875,16 +7005,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
             std::string oc_err;
 
-            // Pipeline-level Open CUDA transfer counters (env-var gated).
+            // Pipeline-level Open CUDA transfer counters.
             // This matches the transfer invariant we're moving toward: one
             // upload at the start of the Open CUDA section and one download at
             // the end (possibly deferred).
-            if (!open_cuda_active_this_frame) {
-              open_cuda_active_this_frame = true;
-              if (debug_open_cuda_transfers) {
-                ++open_cuda_active_frames;
-              }
-            }
+            mark_open_cuda_active_frame();
 
             // Upload once at the start of the Open CUDA section (per-frame),
             // then keep the frame in GPU memory across Open CUDA stages.
@@ -6912,9 +7037,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                   open_cuda_curr = &open_cuda_frame_a;
                   open_cuda_next = &open_cuda_frame_b;
                   open_cuda_uploaded_this_frame = true;
-                  if (debug_open_cuda_transfers) {
-                    ++pipeline_open_cuda_upload_calls;
-                  }
+                  ++open_cuda_frame_upload_calls;
                 }
               }
 
@@ -6993,9 +7116,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
               return;
             }
 
-            if (debug_open_cuda_transfers) {
-              ++pipeline_open_cuda_download_calls;
-            }
+            ++open_cuda_rgb_download_calls;
+            ++open_cuda_cpu_continuation_download_calls;
+            ++open_cuda_forced_sync_calls;
 
             apply_deferred_open_cuda_key_light();
             return;
@@ -7030,6 +7153,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                       capture_sequence);
               }
             } else {
+              count_maxine_stage(
+                  /*deferred_readback=*/
+                  defer_readback &&
+                      deferred_gpu_out.kind != DeferredGpuKind::none,
+                  /*runs_green_screen=*/false);
               clear_optional_effect_on_success(breaker, capture_sequence);
             }
             if (defer_readback &&
@@ -7039,6 +7167,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           }
 
           if (have_open_cuda_auto_frame) {
+            mark_open_cuda_cpu_tail(stage_id);
             // Open Video YuNet face detection is preferred for Auto Frame
             // (cheaper than foreground matting, and helps avoid running the
             // matting model solely for tracking).
@@ -7098,6 +7227,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                             "CUDA vignette failed", mx_err),
                                   capture_sequence);
           } else {
+            count_maxine_stage(
+                /*deferred_readback=*/
+                defer_readback &&
+                    deferred_gpu_out.kind != DeferredGpuKind::none,
+                /*runs_green_screen=*/false);
             clear_optional_effect_on_success(breaker, capture_sequence);
           }
           if (defer_readback && deferred_gpu_out.kind != DeferredGpuKind::none)
@@ -7117,6 +7251,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (!fx_failed && pending_open_cuda_key_light &&
           have_open_cuda_key_light) {
         pending_open_cuda_key_light = false;
+        mark_open_cuda_cpu_tail(
+            studiocast::video::effects::contract::kEffectIdVirtualKeyLight);
         std::string kl_err;
         if (!open_cuda_key_light.ApplyRgbInPlace(capture_sequence, rgb.data(),
                                                  capA.width, capA.height,
@@ -7220,8 +7356,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       if (ok) {
         rgbScaled.resize(tightBytes);
-        if (debug_open_cuda_transfers && open_cuda_active_this_frame) {
-          ++pipeline_open_cuda_download_calls;
+        if (open_cuda_active_this_frame) {
+          ++open_cuda_rgb_download_calls;
+          ++open_cuda_final_download_calls;
         }
         if (!download_img->DownloadToCpuRgb24(deferred_gpu_out.cuda,
                                               rgbScaled.data(), tightStride,
@@ -7234,6 +7371,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (!deferred_gpu_out.cuda->StreamSynchronize(deferred_gpu_out.stream,
                                                       &gerr)) {
           ok = false;
+        } else if (open_cuda_active_this_frame) {
+          ++open_cuda_forced_sync_calls;
         }
       }
 
@@ -7249,14 +7388,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         std::string derr;
         bool readback_ok = false;
         if (deferred_gpu_out.cuda_img && deferred_gpu_out.cuda) {
-          if (debug_open_cuda_transfers && open_cuda_active_this_frame) {
-            ++pipeline_open_cuda_download_calls;
-          }
           if (deferred_gpu_out.cuda_img->DownloadToCpuRgb24(
                   deferred_gpu_out.cuda, rgb.data(), rgbStride,
                   deferred_gpu_out.stream, &derr) &&
               deferred_gpu_out.cuda->StreamSynchronize(deferred_gpu_out.stream,
                                                        &derr)) {
+            if (open_cuda_active_this_frame) {
+              ++open_cuda_rgb_download_calls;
+              ++open_cuda_cpu_continuation_download_calls;
+              ++open_cuda_forced_sync_calls;
+            }
             readback_ok = true;
             have_deferred_gpu_out = false;
           }
@@ -7413,6 +7554,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           studiocast::video::Bgr24ToRgb24(bgr_scaled_out.data(),
                                           rgbScaled.data(), outW, outH,
                                           tightStride, tightStride);
+          mark_maxine_active_frame();
+          ++maxine_deferred_readbacks;
+          ++maxine_download_calls;
+          ++maxine_final_download_calls;
+          ++maxine_forced_sync_calls;
+          ++maxine_bgr_to_rgb_calls;
           frameW = outW;
           frameH = outH;
           rgbOut = rgbScaled.data();
@@ -7458,6 +7605,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                   studiocast::video::Bgr24ToRgb24(bgr_readback.data(),
                                                   rgb.data(), frameW, frameH,
                                                   srcTightStride, rgbStride);
+                  mark_maxine_active_frame();
+                  ++maxine_download_calls;
+                  ++maxine_cpu_continuation_download_calls;
+                  ++maxine_forced_sync_calls;
+                  ++maxine_bgr_to_rgb_calls;
                   readback_ok = true;
                   have_deferred_gpu_out = false;
                 } else {
@@ -7647,6 +7799,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           studiocast::video::Bgr24ToRgb24(maxine_scaler.bgr_out.data(),
                                           rgbScaled.data(), outW, outH,
                                           dstTightStride, dstTightStride);
+          mark_maxine_active_frame();
+          ++maxine_rgb_to_bgr_calls;
+          ++maxine_upload_calls;
+          ++maxine_standalone_scaler_upload_calls;
+          ++maxine_download_calls;
+          ++maxine_final_download_calls;
+          ++maxine_standalone_scaler_download_calls;
+          ++maxine_forced_sync_calls;
+          ++maxine_bgr_to_rgb_calls;
           frameW = outW;
           frameH = outH;
           rgbOut = rgbScaled.data();
@@ -7683,6 +7844,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             /*have_deferred_gpu_out=*/have_deferred_gpu_out,
             /*allow_cpu_resize=*/cfg.allow_cpu_resize,
             /*open_cuda_effects_ran=*/open_cuda_active_this_frame)) {
+      mark_open_cuda_active_frame();
       std::string gerr;
       bool ok = open_cuda_scaler.EnsureInitialized(&gerr);
       if (ok) {
@@ -7704,6 +7866,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                 &open_cuda_scaler.cuda, rgbOut, rgbOutStride,
                 open_cuda_scaler.stream, &gerr)) {
           ok = false;
+        } else {
+          ++open_cuda_frame_upload_calls;
+          ++open_cuda_standalone_scaler_upload_calls;
         }
       }
       if (ok) {
@@ -7720,12 +7885,18 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                 &open_cuda_scaler.cuda, rgbScaled.data(), tightStride,
                 open_cuda_scaler.stream, &gerr)) {
           ok = false;
+        } else {
+          ++open_cuda_rgb_download_calls;
+          ++open_cuda_final_download_calls;
+          ++open_cuda_standalone_scaler_download_calls;
         }
       }
       if (ok) {
         if (!open_cuda_scaler.cuda.StreamSynchronize(open_cuda_scaler.stream,
                                                      &gerr)) {
           ok = false;
+        } else {
+          ++open_cuda_forced_sync_calls;
         }
       }
       if (ok) {
@@ -7894,10 +8065,33 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       std::fprintf(
           stderr,
           "Open CUDA transfers (pipeline): active_frames=%llu "
-          "upload_calls=%llu download_calls=%llu\n",
+          "upload_calls=%llu download_calls=%llu final_downloads=%llu "
+          "alpha_downloads=%llu cpu_tail_stages=%llu forced_syncs=%llu\n",
           static_cast<unsigned long long>(open_cuda_active_frames),
-          static_cast<unsigned long long>(pipeline_open_cuda_upload_calls),
-          static_cast<unsigned long long>(pipeline_open_cuda_download_calls));
+          static_cast<unsigned long long>(
+              open_cuda_frame_upload_calls +
+              open_cuda_vb.matte_frame_upload_calls),
+          static_cast<unsigned long long>(open_cuda_rgb_download_calls),
+          static_cast<unsigned long long>(open_cuda_final_download_calls),
+          static_cast<unsigned long long>(open_cuda_vb.alpha_download_calls),
+          static_cast<unsigned long long>(open_cuda_cpu_tail_stage_calls),
+          static_cast<unsigned long long>(open_cuda_forced_sync_calls +
+                                          open_cuda_vb.forced_sync_calls));
+    }
+
+    if (debug_maxine_transfers && ((perf_frames % 120) == 0)) {
+      std::fprintf(
+          stderr,
+          "Maxine transfers (pipeline): active_frames=%llu upload_calls=%llu "
+          "download_calls=%llu final_downloads=%llu green_screen=%llu "
+          "duplicate_green_screen=%llu forced_syncs=%llu\n",
+          static_cast<unsigned long long>(maxine_active_frames),
+          static_cast<unsigned long long>(maxine_upload_calls),
+          static_cast<unsigned long long>(maxine_download_calls),
+          static_cast<unsigned long long>(maxine_final_download_calls),
+          static_cast<unsigned long long>(maxine_green_screen_calls),
+          static_cast<unsigned long long>(maxine_duplicate_green_screen_calls),
+          static_cast<unsigned long long>(maxine_forced_sync_calls));
     }
 
     double fps_actual = 0.0;
@@ -7940,8 +8134,47 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       debug_.pace_resyncs = pace_resyncs;
 
       open_cuda_transfers_.active_frames = open_cuda_active_frames;
-      open_cuda_transfers_.upload_calls = pipeline_open_cuda_upload_calls;
-      open_cuda_transfers_.download_calls = pipeline_open_cuda_download_calls;
+      open_cuda_transfers_.upload_calls =
+          open_cuda_frame_upload_calls + open_cuda_vb.matte_frame_upload_calls;
+      open_cuda_transfers_.download_calls = open_cuda_rgb_download_calls;
+      open_cuda_transfers_.final_download_calls =
+          open_cuda_final_download_calls;
+      open_cuda_transfers_.cpu_continuation_download_calls =
+          open_cuda_cpu_continuation_download_calls;
+      open_cuda_transfers_.alpha_download_calls =
+          open_cuda_vb.alpha_download_calls;
+      open_cuda_transfers_.matte_frame_upload_calls =
+          open_cuda_vb.matte_frame_upload_calls;
+      open_cuda_transfers_.standalone_scaler_upload_calls =
+          open_cuda_standalone_scaler_upload_calls;
+      open_cuda_transfers_.standalone_scaler_download_calls =
+          open_cuda_standalone_scaler_download_calls;
+      open_cuda_transfers_.forced_sync_calls =
+          open_cuda_forced_sync_calls + open_cuda_vb.forced_sync_calls;
+      open_cuda_transfers_.cpu_tail_stage_calls =
+          open_cuda_cpu_tail_stage_calls;
+      open_cuda_transfers_.cpu_tail_key_light_calls =
+          open_cuda_cpu_tail_key_light_calls;
+      open_cuda_transfers_.cpu_tail_auto_frame_calls =
+          open_cuda_cpu_tail_auto_frame_calls;
+
+      maxine_transfers_.active_frames = maxine_active_frames;
+      maxine_transfers_.rgb_to_bgr_calls = maxine_rgb_to_bgr_calls;
+      maxine_transfers_.upload_calls = maxine_upload_calls;
+      maxine_transfers_.green_screen_calls = maxine_green_screen_calls;
+      maxine_transfers_.duplicate_green_screen_calls =
+          maxine_duplicate_green_screen_calls;
+      maxine_transfers_.download_calls = maxine_download_calls;
+      maxine_transfers_.final_download_calls = maxine_final_download_calls;
+      maxine_transfers_.cpu_continuation_download_calls =
+          maxine_cpu_continuation_download_calls;
+      maxine_transfers_.bgr_to_rgb_calls = maxine_bgr_to_rgb_calls;
+      maxine_transfers_.deferred_readbacks = maxine_deferred_readbacks;
+      maxine_transfers_.forced_sync_calls = maxine_forced_sync_calls;
+      maxine_transfers_.standalone_scaler_upload_calls =
+          maxine_standalone_scaler_upload_calls;
+      maxine_transfers_.standalone_scaler_download_calls =
+          maxine_standalone_scaler_download_calls;
     }
   }
 

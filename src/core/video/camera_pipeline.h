@@ -121,7 +121,35 @@ struct CameraPipelineStatus {
     std::uint64_t active_frames = 0;
     std::uint64_t upload_calls = 0;
     std::uint64_t download_calls = 0;
+    std::uint64_t final_download_calls = 0;
+    std::uint64_t cpu_continuation_download_calls = 0;
+    std::uint64_t alpha_download_calls = 0;
+    std::uint64_t matte_frame_upload_calls = 0;
+    std::uint64_t standalone_scaler_upload_calls = 0;
+    std::uint64_t standalone_scaler_download_calls = 0;
+    std::uint64_t forced_sync_calls = 0;
+    std::uint64_t cpu_tail_stage_calls = 0;
+    std::uint64_t cpu_tail_key_light_calls = 0;
+    std::uint64_t cpu_tail_auto_frame_calls = 0;
   } open_cuda_transfers{};
+
+  // Optional Maxine transfer counters (emitted in status JSON only when
+  // STUDIOCAST_DEBUG_MAXINE_TRANSFERS=1 is set for the daemon).
+  struct MaxineTransfers {
+    std::uint64_t active_frames = 0;
+    std::uint64_t rgb_to_bgr_calls = 0;
+    std::uint64_t upload_calls = 0;
+    std::uint64_t green_screen_calls = 0;
+    std::uint64_t duplicate_green_screen_calls = 0;
+    std::uint64_t download_calls = 0;
+    std::uint64_t final_download_calls = 0;
+    std::uint64_t cpu_continuation_download_calls = 0;
+    std::uint64_t bgr_to_rgb_calls = 0;
+    std::uint64_t deferred_readbacks = 0;
+    std::uint64_t forced_sync_calls = 0;
+    std::uint64_t standalone_scaler_upload_calls = 0;
+    std::uint64_t standalone_scaler_download_calls = 0;
+  } maxine_transfers{};
 
   // Debug/status for effects.
   std::string
@@ -264,6 +292,7 @@ private:
   CameraPipelineStatus::Debug debug_{};
 
   CameraPipelineStatus::OpenCudaTransfers open_cuda_transfers_{};
+  CameraPipelineStatus::MaxineTransfers maxine_transfers_{};
 
   // Effects: updated live by SetEffects.
   mutable std::mutex effects_mu_;

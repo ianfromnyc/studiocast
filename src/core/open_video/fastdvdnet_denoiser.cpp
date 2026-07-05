@@ -424,7 +424,12 @@ bool FastDvdnetDenoiser::EnsureInitialized(
     return false;
   }
 
-  // Scan installed packs.
+  if (initialized_ && ort_session_active_ &&
+      requested_model_id == active_requested_model_id_) {
+    return RefreshGeometry(src_w, src_h, error);
+  }
+
+  // Scan installed packs only when the requested model configuration changes.
   registry_ = ModelPackRegistry::ScanDefault();
   LoadedModel model;
   std::string resolve_err;
@@ -450,6 +455,7 @@ bool FastDvdnetDenoiser::EnsureInitialized(
   }
 
   initialized_ = true;
+  active_requested_model_id_ = requested_model_id;
   return true;
 }
 
