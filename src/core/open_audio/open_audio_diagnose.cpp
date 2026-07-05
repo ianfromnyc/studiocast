@@ -50,6 +50,7 @@ OpenAudioDiagnostics DiagnoseOpenAudioDefault() {
     od.onnxruntime_cpu_provider_present = ort.cpu_provider_present;
     od.onnxruntime_cuda_ep_v2_build = ort.cuda_ep_v2_build;
     od.onnxruntime_library_path = ort.library_path;
+    od.onnxruntime_warnings = ort.warnings;
 #if STUDIOCAST_HAVE_ONNXRUNTIME
     if (ort.cuda_provider_present) {
       od.acceleration_likely = "cuda";

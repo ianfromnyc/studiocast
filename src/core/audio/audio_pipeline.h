@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -111,6 +112,7 @@ public:
 private:
   void ThreadMain(AudioPipelineConfig cfg);
   void SetLastError(std::string msg);
+  void CompleteStartup(bool ok, std::string error);
   std::unique_ptr<AudioPipelineIo> CreateIo() const;
   AudioPipelineIo *GetActiveIo() const;
 
@@ -140,6 +142,13 @@ private:
   std::atomic<std::uint64_t> resync_events_{0};
 
   std::atomic<bool> stop_{false};
+
+  std::mutex startup_mu_;
+  std::condition_variable startup_cv_;
+  bool startup_complete_ = false;
+  bool startup_ok_ = false;
+  std::string startup_error_;
+
   std::thread thread_;
 };
 

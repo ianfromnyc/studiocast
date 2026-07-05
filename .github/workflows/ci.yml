@@ -243,7 +243,7 @@ jobs:
             qt6-base-dev qt6-base-dev-tools qt6-tools-dev qt6-tools-dev-tools \
             libxkbcommon-dev libpulse-dev libsqlite3-dev \
             libjpeg-turbo8-dev libpng-dev libgl1-mesa-dev \
-            desktop-file-utils
+            desktop-file-utils python3
 
       - name: Build package smoke artifacts
         env:

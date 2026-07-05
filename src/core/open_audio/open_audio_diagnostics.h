@@ -18,6 +18,7 @@ struct OpenAudioDiagnostics {
   bool onnxruntime_cpu_provider_present = false;
   bool onnxruntime_cuda_ep_v2_build = false;
   std::string onnxruntime_library_path;
+  std::vector<std::string> onnxruntime_warnings;
 
   // Best-effort expected execution mode for Open Audio model sessions.
   std::string acceleration_likely;

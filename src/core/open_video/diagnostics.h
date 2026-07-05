@@ -17,6 +17,7 @@ struct OpenCudaDiagnostics {
   bool onnxruntime_cpu_provider_present = false;
   bool onnxruntime_cuda_ep_v2_build = false;
   std::string onnxruntime_library_path;
+  std::vector<std::string> onnxruntime_warnings;
 
   // Best-effort CUDA driver/context probe.
   bool cuda_driver_api_available = false;

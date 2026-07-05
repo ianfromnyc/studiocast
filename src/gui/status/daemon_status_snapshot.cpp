@@ -35,6 +35,29 @@ QJsonObject EngineObject(const QJsonObject &root, const QString &key) {
   return ObjectValue(root, key);
 }
 
+OpenAudioRuntimeSnapshot ParseOpenAudioRuntime(const QJsonObject &obj) {
+  const QJsonObject runtime =
+      ObjectValue(obj, QStringLiteral("open_audio_runtime"));
+  OpenAudioRuntimeSnapshot out;
+  out.present = !runtime.isEmpty();
+  if (!out.present)
+    return out;
+
+  out.active = runtime.value(QStringLiteral("active")).toBool(false);
+  out.usingCpuFallback =
+      runtime.value(QStringLiteral("using_cpu_fallback")).toBool(false);
+  out.disabled = runtime.value(QStringLiteral("disabled")).toBool(false);
+  out.activeProvider =
+      runtime.value(QStringLiteral("active_provider")).toString().trimmed();
+  out.selectedModelId =
+      runtime.value(QStringLiteral("selected_model_id")).toString().trimmed();
+  out.selectedModelPath =
+      runtime.value(QStringLiteral("selected_model_path")).toString().trimmed();
+  out.lastRuntimeWarning =
+      runtime.value(QStringLiteral("last_runtime_warning")).toString().trimmed();
+  return out;
+}
+
 QStringList StringListValue(const QJsonObject &obj, const QString &key) {
   QStringList out;
   const QJsonArray array = obj.value(key).toArray();
@@ -876,6 +899,8 @@ DaemonStatusSnapshot DaemonStatusSnapshot::FromJson(const QString &json) {
       ObjectValue(audio, QStringLiteral("pipeline"))
           .value(QStringLiteral("backend_active"))
           .toString();
+  out.microphoneOpenAudioRuntime =
+      ParseOpenAudioRuntime(ObjectValue(audio, QStringLiteral("pipeline")));
   const QJsonObject speakers = ObjectValue(audio, QStringLiteral("speakers"));
   out.speakersRouteMode = speakers.value(QStringLiteral("route_mode")).toString();
   out.speakersActiveBackend =
@@ -883,6 +908,7 @@ DaemonStatusSnapshot DaemonStatusSnapshot::FromJson(const QString &json) {
                      ObjectValue(speakers, QStringLiteral("pipeline"))
                          .value(QStringLiteral("backend_active"))
                          .toString()});
+  out.speakersOpenAudioRuntime = ParseOpenAudioRuntime(speakers);
 
   out.maxine = ParseEngine(EngineObject(root, QStringLiteral("maxine")),
                            QStringLiteral("maxine"), QStringLiteral("Maxine"));

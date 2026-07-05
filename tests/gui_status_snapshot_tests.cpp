@@ -270,6 +270,97 @@ bool TestEngineModelDetailsAndConfiguredSelections() {
                 "explicit model paths should be preserved in details");
 }
 
+bool TestOpenAudioRuntimeStatusFields() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "audio":{
+          "enabled":true,
+          "mic_present":true,
+          "source_error":"",
+          "audio_effects":{"engine":"open_source"},
+          "pipeline":{
+            "running":true,
+            "starting":false,
+            "state":"running",
+            "backend_active":"open_source",
+            "last_error":"",
+            "open_audio_runtime":{
+              "active":true,
+              "active_provider":"cpu",
+              "using_cpu_fallback":true,
+              "disabled":false,
+              "selected_model_id":"fast-enhancer",
+              "selected_model_path":"/models/open_audio/fast/model.onnx",
+              "last_runtime_warning":"Open Audio: switched to CPU fallback after a CUDA runtime failure."
+            }
+          },
+          "speakers":{
+            "enabled":true,
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"pipeline",
+            "backend_active":"open_source",
+            "last_error":"",
+            "pipeline_last_error":"",
+            "open_audio_runtime":{
+              "active":false,
+              "active_provider":"disabled",
+              "using_cpu_fallback":true,
+              "disabled":true,
+              "selected_model_id":"speaker-enhancer",
+              "selected_model_path":"/models/open_audio/speaker/model.onnx",
+              "last_runtime_warning":"Open Audio: disabled after repeated runtime failures."
+            }
+          }
+        }
+      })");
+
+  const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
+  return Expect(s.parsed, "open audio runtime payload should parse") &&
+         Expect(s.microphoneOpenAudioRuntime.present,
+                "microphone runtime status should be present") &&
+         Expect(s.microphoneOpenAudioRuntime.active,
+                "microphone runtime active flag should parse") &&
+         Expect(s.microphoneOpenAudioRuntime.activeProvider ==
+                    QStringLiteral("cpu"),
+                "microphone runtime provider should parse") &&
+         Expect(s.microphoneOpenAudioRuntime.usingCpuFallback,
+                "microphone CPU fallback should parse") &&
+         Expect(!s.microphoneOpenAudioRuntime.disabled,
+                "microphone disabled flag should parse") &&
+         Expect(s.microphoneOpenAudioRuntime.selectedModelId ==
+                    QStringLiteral("fast-enhancer"),
+                "microphone runtime model id should parse") &&
+         Expect(s.microphoneOpenAudioRuntime.selectedModelPath ==
+                    QStringLiteral("/models/open_audio/fast/model.onnx"),
+                "microphone runtime model path should parse") &&
+         Expect(s.microphoneOpenAudioRuntime.lastRuntimeWarning.contains(
+                    QStringLiteral("CPU fallback")),
+                "microphone runtime warning should parse") &&
+         Expect(s.speakersOpenAudioRuntime.present,
+                "speaker runtime status should be present") &&
+         Expect(!s.speakersOpenAudioRuntime.active,
+                "speaker runtime active flag should parse") &&
+         Expect(s.speakersOpenAudioRuntime.disabled,
+                "speaker runtime disabled flag should parse") &&
+         Expect(s.speakersOpenAudioRuntime.activeProvider ==
+                    QStringLiteral("disabled"),
+                "speaker runtime provider should parse") &&
+         Expect(s.speakersOpenAudioRuntime.usingCpuFallback,
+                "speaker CPU fallback should parse") &&
+         Expect(s.speakersOpenAudioRuntime.selectedModelId ==
+                    QStringLiteral("speaker-enhancer"),
+                "speaker runtime model id should parse") &&
+         Expect(s.speakersOpenAudioRuntime.selectedModelPath ==
+                    QStringLiteral("/models/open_audio/speaker/model.onnx"),
+                "speaker runtime model path should parse") &&
+         Expect(s.speakersOpenAudioRuntime.lastRuntimeWarning.contains(
+                    QStringLiteral("repeated runtime failures")),
+                "speaker runtime warning should parse");
+}
+
 bool TestMissingVirtualDevices() {
   const QString json = QStringLiteral(
       R"({
@@ -494,6 +585,7 @@ int main() {
   ok = TestUnreachableStatus() && ok;
   ok = TestStatusJsonCompatibilityShapes() && ok;
   ok = TestEngineModelDetailsAndConfiguredSelections() && ok;
+  ok = TestOpenAudioRuntimeStatusFields() && ok;
   ok = TestMissingVirtualDevices() && ok;
   ok = TestMissingPhysicalDevices() && ok;
   ok = TestIdleNoConsumerStates() && ok;

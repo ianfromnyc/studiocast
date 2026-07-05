@@ -45,6 +45,17 @@ struct ConfiguredModelEntry {
   bool modelIdExplicitlyMissing = false;
 };
 
+struct OpenAudioRuntimeSnapshot {
+  bool present = false;
+  bool active = false;
+  bool usingCpuFallback = false;
+  bool disabled = false;
+  QString activeProvider;
+  QString selectedModelId;
+  QString selectedModelPath;
+  QString lastRuntimeWarning;
+};
+
 struct EngineStatus {
   QString id;
   QString label;
@@ -90,6 +101,8 @@ struct DaemonStatusSnapshot {
   QString microphoneActiveBackend;
   QString speakersActiveBackend;
   QString speakersRouteMode;
+  OpenAudioRuntimeSnapshot microphoneOpenAudioRuntime;
+  OpenAudioRuntimeSnapshot speakersOpenAudioRuntime;
 
   EngineStatus maxine;
   EngineStatus openCuda;

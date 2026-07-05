@@ -85,6 +85,9 @@ std::string OpenAudioDiagnostics::ToJson() const {
       << BoolJson(onnxruntime_cuda_ep_v2_build) << ",";
   oss << "\"onnxruntime_library_path\":\""
       << JsonEscape(onnxruntime_library_path) << "\",";
+  oss << "\"onnxruntime_warnings\":";
+  AppendJsonStringArray(&oss, onnxruntime_warnings);
+  oss << ",";
   oss << "\"acceleration_likely\":\"" << JsonEscape(acceleration_likely)
       << "\",";
 

@@ -1,6 +1,7 @@
 #include "camera_pipeline.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -10,9 +11,11 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <set>
 #include <sstream>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -235,7 +238,167 @@ std::vector<VideoDevice> ListCandidateCameras() {
   return cams;
 }
 
+constexpr const char *kOptionalEffectCoolingDownState = "cooling_down";
+constexpr const char *kOptionalEffectRetryReadyState = "retry_ready";
+
+std::string OptionalEffectFailureReason(const char *prefix,
+                                        const std::string &detail) {
+  if (!prefix || !*prefix)
+    return detail.empty() ? std::string("Effect failed.") : detail;
+  if (detail.empty())
+    return std::string(prefix);
+  return std::string(prefix) + ": " + detail;
+}
+
+bool IsVignetteFailureReason(const std::string &reason) {
+  return reason == "Vignette failed" ||
+         reason.rfind("Vignette failed:", 0) == 0;
+}
+
+template <std::size_t N>
+std::string BuildDegradedEffectsNote(
+    const std::array<OptionalEffectBreaker, N> &breakers,
+    std::uint64_t frame_index) {
+  std::string note;
+  for (const auto &breaker : breakers) {
+    if (!breaker.active())
+      continue;
+    const auto status = breaker.ToStatus(frame_index);
+    if (note.empty()) {
+      note = "Runtime degraded effects:";
+    }
+    note += "\n - ";
+    note += status.effect_id;
+    note += " [";
+    note += status.backend;
+    note += "]: ";
+    note += status.reason;
+    note += " (state=";
+    note += status.state;
+    note += ", failures=";
+    note += std::to_string(status.failure_count);
+    note += ", cooldown_frames=";
+    note += std::to_string(status.cooldown_frames);
+    note += ")";
+  }
+  return note;
+}
+
+template <std::size_t N>
+CameraPipelineStatus::DegradedEffect
+MostRecentDegradedEffect(const std::array<OptionalEffectBreaker, N> &breakers,
+                         std::uint64_t frame_index) {
+  const OptionalEffectBreaker *latest = nullptr;
+  for (const auto &breaker : breakers) {
+    if (!breaker.active())
+      continue;
+    if (!latest || breaker.trip_order() > latest->trip_order())
+      latest = &breaker;
+  }
+  return latest ? latest->ToStatus(frame_index)
+                : CameraPipelineStatus::DegradedEffect{};
+}
+
+std::string CombineEffectsNotes(const std::string &base,
+                                const std::string &runtime) {
+  if (base.empty())
+    return runtime;
+  if (runtime.empty())
+    return base;
+  return base + "\n" + runtime;
+}
+
 } // namespace
+
+int OptionalEffectBreaker::CooldownFramesForFailureCount(int failure_count) {
+  if (failure_count <= 0)
+    return 0;
+
+  int cooldown = kInitialCooldownFrames;
+  for (int i = 1; i < failure_count && cooldown < kMaxCooldownFrames; ++i) {
+    if (cooldown > (kMaxCooldownFrames / 2)) {
+      cooldown = kMaxCooldownFrames;
+    } else {
+      cooldown *= 2;
+    }
+  }
+  return std::min(cooldown, kMaxCooldownFrames);
+}
+
+bool OptionalEffectBreaker::AllowsAttempt(std::uint64_t frame_index) const {
+  return !active_ || frame_index >= retry_frame_index_;
+}
+
+void OptionalEffectBreaker::Reset() {
+  active_ = false;
+  effect_id_.clear();
+  backend_.clear();
+  reason_.clear();
+  failure_count_ = 0;
+  cooldown_frames_ = 0;
+  retry_frame_index_ = 0;
+  trip_order_ = 0;
+  retry_ready_published_ = false;
+}
+
+void OptionalEffectBreaker::OnFailure(std::string_view effect,
+                                      std::string_view effect_backend,
+                                      std::string failure_reason,
+                                      std::uint64_t frame_index, int order) {
+  active_ = true;
+  effect_id_ = std::string(effect);
+  backend_ = std::string(effect_backend);
+  reason_ = failure_reason.empty() ? std::string("Effect failed.")
+                                   : std::move(failure_reason);
+  ++failure_count_;
+  cooldown_frames_ = CooldownFramesForFailureCount(failure_count_);
+  const auto cooldown = static_cast<std::uint64_t>(cooldown_frames_);
+  retry_frame_index_ =
+      frame_index > (std::numeric_limits<std::uint64_t>::max() - cooldown)
+          ? std::numeric_limits<std::uint64_t>::max()
+          : frame_index + cooldown;
+  trip_order_ = order;
+  retry_ready_published_ = false;
+}
+
+bool OptionalEffectBreaker::OnSuccess() {
+  if (!active_)
+    return false;
+  Reset();
+  return true;
+}
+
+bool OptionalEffectBreaker::MarkRetryReadyIfDue(std::uint64_t frame_index) {
+  if (!active_ || retry_ready_published_ || !AllowsAttempt(frame_index))
+    return false;
+  retry_ready_published_ = true;
+  return true;
+}
+
+CameraPipelineStatus::DegradedEffect
+OptionalEffectBreaker::ToStatus(std::uint64_t frame_index) const {
+  CameraPipelineStatus::DegradedEffect s;
+  if (!active_)
+    return s;
+
+  s.active = true;
+  s.effect_id = effect_id_;
+  s.backend = backend_;
+  s.reason = reason_;
+  s.failure_count = failure_count_;
+  if (AllowsAttempt(frame_index)) {
+    s.state = kOptionalEffectRetryReadyState;
+    s.cooldown_frames = 0;
+  } else {
+    s.state = kOptionalEffectCoolingDownState;
+    const auto remaining = retry_frame_index_ - frame_index;
+    s.cooldown_frames =
+        remaining > static_cast<std::uint64_t>(std::numeric_limits<int>::max())
+            ? std::numeric_limits<int>::max()
+            : static_cast<int>(remaining);
+  }
+  return s;
+}
 
 CameraPipeline::~CameraPipeline() { Stop(); }
 
@@ -289,6 +452,7 @@ CameraPipelineStatus CameraPipeline::Status() const {
   s.frame_index = frame_index_;
   s.effects_backends = effects_backends_;
   s.effects_note = effects_note_;
+  s.degraded_effect = degraded_effect_;
   s.last_error = last_error_;
   return s;
 }
@@ -356,6 +520,7 @@ bool CameraPipeline::Start(const CameraPipelineConfig &cfg,
 
   effects_backends_.clear();
   effects_note_.clear();
+  degraded_effect_ = CameraPipelineStatus::DegradedEffect{};
 
   starting_ = true;
   running_ = false;
@@ -1642,7 +1807,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                     vig_intensity, vignette_center_x_px, vignette_center_y_px,
                     blur->cuda_stream(), &ve)) {
               if (error)
-                *error = ve;
+                *error = OptionalEffectFailureReason("Vignette failed", ve);
               return false;
             }
           }
@@ -1711,7 +1876,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                        vignette_center_x_px,
                                        vignette_center_y_px, stream, &ve)) {
               if (error)
-                *error = ve;
+                *error = OptionalEffectFailureReason("Vignette failed", ve);
               return false;
             }
           }
@@ -3949,7 +4114,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                      vignette_center_x_px, vignette_center_y_px,
                                      stream, &ve)) {
             if (error)
-              *error = ve;
+              *error = OptionalEffectFailureReason("Vignette failed", ve);
             return false;
           }
         }
@@ -4536,7 +4701,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                      vignette_center_x_px, vignette_center_y_px,
                                      stream, &ve)) {
             if (error)
-              *error = ve;
+              *error = OptionalEffectFailureReason("Vignette failed", ve);
             return false;
           }
         }
@@ -4883,7 +5048,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           if (!vignette.ApplyInPlace(&gpu_bgr_out, vig_intensity, cx, cy,
                                      stream, &ve)) {
             if (error)
-              *error = ve;
+              *error = OptionalEffectFailureReason("Vignette failed", ve);
             return false;
           }
         }
@@ -5105,7 +5270,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                  vignette_center_y_px,
                                  /*stream=*/nullptr, &ve)) {
         if (error)
-          *error = ve;
+          *error = OptionalEffectFailureReason("Vignette failed", ve);
         return false;
       }
 
@@ -5184,6 +5349,73 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
   bool want_maxine_vignette_only = false;
   bool have_maxine_vignette_only = false;
+
+  enum class OptionalEffectSlot : std::size_t {
+    denoise = 0,
+    eye_contact,
+    relight,
+    virtual_background,
+    auto_frame,
+    vignette,
+    count,
+  };
+
+  std::array<OptionalEffectBreaker,
+             static_cast<std::size_t>(OptionalEffectSlot::count)>
+      optional_effect_breakers{};
+  int optional_effect_trip_order = 0;
+  std::string appliedEffectsBaseNote;
+
+  auto optional_breaker =
+      [&](OptionalEffectSlot slot) -> OptionalEffectBreaker & {
+    return optional_effect_breakers[static_cast<std::size_t>(slot)];
+  };
+
+  auto publish_optional_effect_status = [&](std::uint64_t frame_index) {
+    const std::string runtime_note =
+        BuildDegradedEffectsNote(optional_effect_breakers, frame_index);
+    const std::string combined_note =
+        CombineEffectsNotes(appliedEffectsBaseNote, runtime_note);
+    const auto degraded =
+        MostRecentDegradedEffect(optional_effect_breakers, frame_index);
+
+    std::lock_guard<std::mutex> lock(mu_);
+    const bool last_error_was_previous_effects_note =
+        !effects_note_.empty() && last_error_ == effects_note_;
+
+    effects_note_ = combined_note;
+    degraded_effect_ = degraded;
+    if (!combined_note.empty()) {
+      last_error_ = combined_note;
+    } else if (last_error_was_previous_effects_note) {
+      last_error_.clear();
+    }
+  };
+
+  auto block_optional_effect =
+      [&](OptionalEffectSlot slot, std::string_view effect_id,
+          std::string_view backend, std::string reason,
+          std::uint64_t frame_index) {
+        auto &breaker = optional_breaker(slot);
+        breaker.OnFailure(effect_id, backend, std::move(reason), frame_index,
+                          ++optional_effect_trip_order);
+        publish_optional_effect_status(frame_index);
+      };
+
+  auto publish_optional_retry_ready_status = [&](std::uint64_t frame_index) {
+    bool changed = false;
+    for (auto &breaker : optional_effect_breakers) {
+      changed = breaker.MarkRetryReadyIfDue(frame_index) || changed;
+    }
+    if (changed)
+      publish_optional_effect_status(frame_index);
+  };
+
+  auto clear_optional_effect_on_success = [&](OptionalEffectBreaker &breaker,
+                                              std::uint64_t frame_index) {
+    if (breaker.OnSuccess())
+      publish_optional_effect_status(frame_index);
+  };
 
   auto rebuildChain = [&](const studiocast::video::effects::
                               BroadcastCameraEffects &fx) {
@@ -5880,6 +6112,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     {
       append_rule_notes();
 
+      for (auto &breaker : optional_effect_breakers)
+        breaker.Reset();
+      appliedEffectsBaseNote = note;
+
       std::lock_guard<std::mutex> lock(mu_);
       const bool last_error_was_previous_effects_note =
           !effects_note_.empty() && last_error_ == effects_note_;
@@ -5895,6 +6131,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       effects_backends_ = backends;
       effects_note_ = note;
+      degraded_effect_ = CameraPipelineStatus::DegradedEffect{};
       if (!note.empty()) {
         last_error_ = note;
       } else if (last_error_was_previous_effects_note) {
@@ -6331,18 +6568,24 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
                                kEffectIdVirtualBackgroundReplace;
       };
 
+      const std::uint64_t capture_sequence = f.sequence;
+      publish_optional_retry_ready_status(capture_sequence);
+
       // Apply vignette exactly once, either attached to the planned last GPU
       // stage, or as a standalone GPU stage when no other GPU stage is active.
+      const bool maxine_vignette_allowed =
+          optional_breaker(OptionalEffectSlot::vignette)
+              .AllowsAttempt(capture_sequence);
       const bool apply_vignette_on_eye_contact =
-          vignette_requested &&
+          vignette_requested && maxine_vignette_allowed &&
           (vig_attach ==
            studiocast::video::effects::contract::kEffectIdEyeContact);
       const bool apply_vignette_on_relight =
-          vignette_requested &&
+          vignette_requested && maxine_vignette_allowed &&
           (vig_attach ==
            studiocast::video::effects::contract::kEffectIdVirtualKeyLight);
       const bool apply_vignette_on_bg =
-          vignette_requested &&
+          vignette_requested && maxine_vignette_allowed &&
           (vig_attach == studiocast::video::effects::contract::
                              kEffectIdVirtualBackgroundBlur ||
            vig_attach == studiocast::video::effects::contract::
@@ -6350,11 +6593,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
            vig_attach == studiocast::video::effects::contract::
                              kEffectIdVirtualBackgroundReplace);
       const bool apply_vignette_on_auto_frame =
-          vignette_requested &&
+          vignette_requested && maxine_vignette_allowed &&
           (vig_attach ==
            studiocast::video::effects::contract::kEffectIdAutoFrame);
-
-      const std::uint64_t capture_sequence = f.sequence;
 
       // Reset per-frame analysis cache (Open Video). This allows effects to
       // share ML outputs without re-running inference multiple times per frame.
@@ -6381,15 +6622,20 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (stage_id ==
             studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval) {
           if (have_maxine_denoise) {
+            auto &breaker = optional_breaker(OptionalEffectSlot::denoise);
+            if (!breaker.AllowsAttempt(capture_sequence))
+              return;
             std::string mx_err;
             if (!maxine_denoise.ApplyRgbInPlace(rgb.data(), capA.width,
                                                 capA.height, rgbStride, fx,
                                                 &mx_err)) {
-              {
-                std::lock_guard<std::mutex> lock(mu_);
-                last_error_ = "Maxine video noise removal failed: " + mx_err;
-              }
-              fx_failed = true;
+              block_optional_effect(
+                  OptionalEffectSlot::denoise, stage_id, "maxine",
+                  OptionalEffectFailureReason(
+                      "Maxine video noise removal failed", mx_err),
+                  capture_sequence);
+            } else {
+              clear_optional_effect_on_success(breaker, capture_sequence);
             }
             return;
           }
@@ -6434,17 +6680,30 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (stage_id ==
             studiocast::video::effects::contract::kEffectIdEyeContact) {
           if (have_maxine_eye_contact) {
+            auto &breaker = optional_breaker(OptionalEffectSlot::eye_contact);
+            if (!breaker.AllowsAttempt(capture_sequence))
+              return;
             std::string mx_err;
             if (!maxine_eye_contact.ApplyRgbInPlace(
                     rgb.data(), capA.width, capA.height, rgbStride, fx,
                     apply_vignette_on_eye_contact, vignette_center_x_px,
                     vignette_center_y_px, &mx_err, defer_readback,
                     &deferred_gpu_out)) {
-              {
-                std::lock_guard<std::mutex> lock(mu_);
-                last_error_ = "Maxine eye contact failed: " + mx_err;
+              if (IsVignetteFailureReason(mx_err)) {
+                clear_optional_effect_on_success(breaker, capture_sequence);
+                block_optional_effect(
+                    OptionalEffectSlot::vignette,
+                    studiocast::video::effects::contract::kEffectIdVignette,
+                    "cuda", mx_err, capture_sequence);
+              } else {
+                block_optional_effect(OptionalEffectSlot::eye_contact, stage_id,
+                                      "maxine_ar",
+                                      OptionalEffectFailureReason(
+                                          "Maxine eye contact failed", mx_err),
+                                      capture_sequence);
               }
-              fx_failed = true;
+            } else {
+              clear_optional_effect_on_success(breaker, capture_sequence);
             }
             if (defer_readback &&
                 deferred_gpu_out.kind != DeferredGpuKind::none)
@@ -6475,17 +6734,30 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (stage_id ==
             studiocast::video::effects::contract::kEffectIdVirtualKeyLight) {
           if (have_maxine_relight) {
+            auto &breaker = optional_breaker(OptionalEffectSlot::relight);
+            if (!breaker.AllowsAttempt(capture_sequence))
+              return;
             std::string mx_err;
             if (!maxine_relight.ApplyRgbInPlace(
                     rgb.data(), capA.width, capA.height, rgbStride, fx,
                     apply_vignette_on_relight, vignette_center_x_px,
                     vignette_center_y_px, &mx_err, defer_readback,
                     &deferred_gpu_out)) {
-              {
-                std::lock_guard<std::mutex> lock(mu_);
-                last_error_ = "Maxine relighting failed: " + mx_err;
+              if (IsVignetteFailureReason(mx_err)) {
+                clear_optional_effect_on_success(breaker, capture_sequence);
+                block_optional_effect(
+                    OptionalEffectSlot::vignette,
+                    studiocast::video::effects::contract::kEffectIdVignette,
+                    "cuda", mx_err, capture_sequence);
+              } else {
+                block_optional_effect(OptionalEffectSlot::relight, stage_id,
+                                      "maxine",
+                                      OptionalEffectFailureReason(
+                                          "Maxine relighting failed", mx_err),
+                                      capture_sequence);
               }
-              fx_failed = true;
+            } else {
+              clear_optional_effect_on_success(breaker, capture_sequence);
             }
             if (defer_readback &&
                 deferred_gpu_out.kind != DeferredGpuKind::none)
@@ -6528,17 +6800,31 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             stage_id == studiocast::video::effects::contract::
                             kEffectIdVirtualBackgroundReplace) {
           if (have_maxine_bg_blur) {
+            auto &breaker =
+                optional_breaker(OptionalEffectSlot::virtual_background);
+            if (!breaker.AllowsAttempt(capture_sequence))
+              return;
             std::string mx_err;
             if (!maxine_bg_blur.ApplyRgbInPlace(
                     rgb.data(), capA.width, capA.height, rgbStride, fx,
                     apply_vignette_on_bg, vignette_center_x_px,
                     vignette_center_y_px, &mx_err, defer_readback,
                     &deferred_gpu_out)) {
-              {
-                std::lock_guard<std::mutex> lock(mu_);
-                last_error_ = "Maxine virtual background failed: " + mx_err;
+              if (IsVignetteFailureReason(mx_err)) {
+                clear_optional_effect_on_success(breaker, capture_sequence);
+                block_optional_effect(
+                    OptionalEffectSlot::vignette,
+                    studiocast::video::effects::contract::kEffectIdVignette,
+                    "cuda", mx_err, capture_sequence);
+              } else {
+                block_optional_effect(
+                    OptionalEffectSlot::virtual_background, stage_id, "maxine",
+                    OptionalEffectFailureReason(
+                        "Maxine virtual background failed", mx_err),
+                    capture_sequence);
               }
-              fx_failed = true;
+            } else {
+              clear_optional_effect_on_success(breaker, capture_sequence);
             }
             if (defer_readback &&
                 deferred_gpu_out.kind != DeferredGpuKind::none)
@@ -6721,17 +7007,30 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         if (stage_id ==
             studiocast::video::effects::contract::kEffectIdAutoFrame) {
           if (have_maxine_auto_frame) {
+            auto &breaker = optional_breaker(OptionalEffectSlot::auto_frame);
+            if (!breaker.AllowsAttempt(capture_sequence))
+              return;
             std::string mx_err;
             if (!maxine_auto_frame.ApplyRgbInPlace(
                     rgb.data(), capA.width, capA.height, rgbStride, fx,
                     apply_vignette_on_auto_frame, vignette_center_x_px,
                     vignette_center_y_px, &mx_err, defer_readback,
                     &deferred_gpu_out)) {
-              {
-                std::lock_guard<std::mutex> lock(mu_);
-                last_error_ = "Maxine auto frame failed: " + mx_err;
+              if (IsVignetteFailureReason(mx_err)) {
+                clear_optional_effect_on_success(breaker, capture_sequence);
+                block_optional_effect(
+                    OptionalEffectSlot::vignette,
+                    studiocast::video::effects::contract::kEffectIdVignette,
+                    "cuda", mx_err, capture_sequence);
+              } else {
+                block_optional_effect(OptionalEffectSlot::auto_frame, stage_id,
+                                      "maxine_ar_cuda",
+                                      OptionalEffectFailureReason(
+                                          "Maxine auto frame failed", mx_err),
+                                      capture_sequence);
               }
-              fx_failed = true;
+            } else {
+              clear_optional_effect_on_success(breaker, capture_sequence);
             }
             if (defer_readback &&
                 deferred_gpu_out.kind != DeferredGpuKind::none)
@@ -6783,16 +7082,23 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
             studiocast::video::effects::contract::kEffectIdVignette) {
           if (!have_maxine_vignette_only)
             return;
+          auto &breaker = optional_breaker(OptionalEffectSlot::vignette);
+          if (!breaker.AllowsAttempt(capture_sequence))
+            return;
           std::string mx_err;
           if (!vignette_only.ApplyRgbInPlace(
                   rgb.data(), capA.width, capA.height, rgbStride, fx,
                   vignette_center_x_px, vignette_center_y_px, &mx_err,
                   defer_readback, &deferred_gpu_out)) {
-            {
-              std::lock_guard<std::mutex> lock(mu_);
-              last_error_ = "CUDA vignette failed: " + mx_err;
-            }
-            fx_failed = true;
+            block_optional_effect(OptionalEffectSlot::vignette, stage_id,
+                                  "cuda",
+                                  IsVignetteFailureReason(mx_err)
+                                      ? mx_err
+                                      : OptionalEffectFailureReason(
+                                            "CUDA vignette failed", mx_err),
+                                  capture_sequence);
+          } else {
+            clear_optional_effect_on_success(breaker, capture_sequence);
           }
           if (defer_readback && deferred_gpu_out.kind != DeferredGpuKind::none)
             have_deferred_gpu_out = true;

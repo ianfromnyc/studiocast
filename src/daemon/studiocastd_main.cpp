@@ -19,6 +19,7 @@
 #include "../core/open_video/diagnose.h"
 #include "core/audio/audio_device_safety.h"
 #include "core/audio/effects/broadcast_audio_effects_json.h"
+#include "core/audio/virtual_audio_service.h"
 #include "core/config/daemon_config.h"
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
@@ -152,6 +153,24 @@ std::string JsonEscape(const std::string &s) {
 }
 
 std::string BoolJson(bool v) { return v ? "true" : "false"; }
+
+std::string OpenAudioRuntimeStatusToJson(
+    const studiocast::audio::OpenAudioRuntimeStatus &st) {
+  std::ostringstream oss;
+  oss << "{";
+  oss << "\"active\":" << BoolJson(st.active) << ",";
+  oss << "\"active_provider\":\"" << JsonEscape(st.active_provider) << "\",";
+  oss << "\"using_cpu_fallback\":" << BoolJson(st.using_cpu_fallback) << ",";
+  oss << "\"disabled\":" << BoolJson(st.disabled) << ",";
+  oss << "\"selected_model_id\":\"" << JsonEscape(st.selected_model_id)
+      << "\",";
+  oss << "\"selected_model_path\":\"" << JsonEscape(st.selected_model_path)
+      << "\",";
+  oss << "\"last_runtime_warning\":\""
+      << JsonEscape(st.last_runtime_warning) << "\"";
+  oss << "}";
+  return oss.str();
+}
 
 struct ParsedCommand {
   std::string cmd;
@@ -472,6 +491,17 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"effects_backends\":\"" << JsonEscape(st.pipeline.effects_backends)
       << "\",";
   oss << "\"effects_note\":\"" << JsonEscape(st.pipeline.effects_note) << "\",";
+  if (st.pipeline.degraded_effect.active) {
+    const auto &fx = st.pipeline.degraded_effect;
+    oss << "\"degraded_effect\":{";
+    oss << "\"id\":\"" << JsonEscape(fx.effect_id) << "\",";
+    oss << "\"backend\":\"" << JsonEscape(fx.backend) << "\",";
+    oss << "\"reason\":\"" << JsonEscape(fx.reason) << "\",";
+    oss << "\"state\":\"" << JsonEscape(fx.state) << "\",";
+    oss << "\"failure_count\":" << fx.failure_count << ",";
+    oss << "\"cooldown_frames\":" << fx.cooldown_frames;
+    oss << "},";
+  }
 
   // Lightweight rolling perf counters for quick CPU vs GPU scaling comparisons.
   oss << "\"fps_actual\":" << std::setprecision(6) << st.pipeline.fps_actual
@@ -693,6 +723,8 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"last_error\":\"" << JsonEscape(ast.speakers_last_error) << "\",";
   oss << "\"pipeline_last_error\":\""
       << JsonEscape(ast.speakers_pipeline_last_error) << "\",";
+  oss << "\"open_audio_runtime\":"
+      << OpenAudioRuntimeStatusToJson(ast.speakers_open_audio_runtime) << ",";
   oss << "\"pipeline_perf\":{";
   oss << "\"frames_processed\":" << ast.speakers_pipeline_frames_processed
       << ",";
@@ -751,6 +783,8 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"sink\":\"" << JsonEscape(ast.pipeline_sink) << "\",";
   oss << "\"backend_active\":\"" << JsonEscape(ast.effects_backend_active)
       << "\",";
+  oss << "\"open_audio_runtime\":"
+      << OpenAudioRuntimeStatusToJson(ast.open_audio_runtime) << ",";
   oss << "\"effects_note\":\"" << JsonEscape(ast.effects_note) << "\",";
   oss << "\"effect_selector\":\"" << JsonEscape(ast.effect_selector) << "\",";
   oss << "\"feature_id\":\"" << JsonEscape(ast.feature_id) << "\",";

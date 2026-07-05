@@ -64,6 +64,16 @@ struct AudioConsumerSnapshot {
   std::string error;
 };
 
+struct OpenAudioRuntimeStatus {
+  bool active = false;
+  bool using_cpu_fallback = false;
+  bool disabled = false;
+  std::string active_provider;
+  std::string selected_model_id;
+  std::string selected_model_path;
+  std::string last_runtime_warning;
+};
+
 struct VirtualAudioServiceStatus {
   bool service_running = false;
 
@@ -94,6 +104,7 @@ struct VirtualAudioServiceStatus {
   std::string speakers_effects_note;
   float speakers_intensity = 0.0f;
   std::string speakers_pipeline_last_error;
+  OpenAudioRuntimeStatus speakers_open_audio_runtime;
 
   // Speaker pipeline performance (best-effort realtime stats).
   std::uint64_t speakers_pipeline_frames_processed = 0;
@@ -133,6 +144,7 @@ struct VirtualAudioServiceStatus {
   // Active effects backend (selected by the runtime resolver).
   // Common values: "passthrough", "maxine", "open_source".
   std::string effects_backend_active;
+  OpenAudioRuntimeStatus open_audio_runtime;
 
   // Human-friendly backend selection / fallback note.
   // Intended for GUI banners and daemon status.

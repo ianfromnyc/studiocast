@@ -1150,6 +1150,25 @@ OpenAudioAudioProcessor::OpenAudioAudioProcessor(ResolvedOpenAudioModel model)
 
 OpenAudioAudioProcessor::~OpenAudioAudioProcessor() = default;
 
+std::string OpenAudioAudioProcessor::ActiveProviderForStatus() const {
+  if (model_disabled_)
+    return "disabled";
+  if (!ort_session_active_)
+    return {};
+
+  const auto &si = ort_session_active_->info();
+  if (!si.active_provider.empty())
+    return si.active_provider;
+  return using_cpu_fallback_ ? "cpu" : (si.using_cuda ? "cuda" : "cpu");
+}
+
+std::string OpenAudioAudioProcessor::LastStartupWarningForStatus() const {
+  if (!ort_session_active_)
+    return {};
+  const auto &warnings = ort_session_active_->info().warnings;
+  return warnings.empty() ? std::string{} : warnings.back();
+}
+
 void OpenAudioAudioProcessor::UpdateFromMicrophoneConfig(
     const studiocast::audio::effects::BroadcastMicrophoneEffects &mic) {
   int s = mic.strength;
@@ -1421,6 +1440,9 @@ bool OpenAudioAudioProcessor::InitializeBindings(std::string *error) {
   // refreshed in Process()).
   ort_inputs_.clear();
   ort_outputs_.clear();
+  ort_inputs_.reserve(1 + (has_strength_input_ ? 1 : 0) +
+                      state_input_names_.size());
+  ort_outputs_.reserve(1 + state_output_names_.size());
 
   OpenAudioOrtSession::OrtRunInput in0;
   in0.name = audio_input_name_.c_str();
@@ -1467,6 +1489,14 @@ bool OpenAudioAudioProcessor::InitializeBindings(std::string *error) {
     st_out.shape_rank = state_shapes_[i].size();
     ort_outputs_.push_back(st_out);
   }
+
+  const auto reserve_run_scratch = [&](OpenAudioOrtSession *session) {
+    if (session) {
+      session->ReserveRunScratch(ort_inputs_.size(), ort_outputs_.size());
+    }
+  };
+  reserve_run_scratch(ort_session_cuda_.get());
+  reserve_run_scratch(ort_session_cpu_.get());
 
   return true;
 }

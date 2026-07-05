@@ -147,6 +147,12 @@ public:
 
   const ResolvedOpenAudioModel &model() const { return model_; }
 
+  // Supervisor/status helpers. These are intended to be read immediately after
+  // processor creation, before the processor is handed to AudioPipeline.
+  std::string ActiveProviderForStatus() const;
+  bool UsingCpuFallbackForStatus() const { return using_cpu_fallback_; }
+  std::string LastStartupWarningForStatus() const;
+
   bool Process(const float *in, float *out, std::uint32_t frames,
                std::uint32_t channels, std::string *error) override;
 

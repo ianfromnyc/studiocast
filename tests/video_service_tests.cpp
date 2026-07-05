@@ -1,3 +1,4 @@
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -5,8 +6,11 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
 
+#include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/virtual_camera_service.h"
 
 namespace studiocast::tests {
@@ -19,6 +23,7 @@ bool TestLatestFrameWinsStatsCountersAndLastError();
 namespace {
 
 using studiocast::video::CameraPipelineConfig;
+using studiocast::video::OptionalEffectBreaker;
 using studiocast::video::CameraPipelineRunner;
 using studiocast::video::CameraPipelineStatus;
 using studiocast::video::VideoConsumerSnapshot;
@@ -112,6 +117,13 @@ public:
   }
 
   void SetMirrorEnabled(bool) override {}
+
+  void SetDegradedEffect(CameraPipelineStatus::DegradedEffect degraded,
+                         std::string effects_note) {
+    std::lock_guard<std::mutex> lock(mu_);
+    status_.degraded_effect = std::move(degraded);
+    status_.effects_note = std::move(effects_note);
+  }
 
   std::atomic<int> start_calls{0};
   std::atomic<int> stop_calls{0};
@@ -558,6 +570,172 @@ bool TestVideoConfigRestartTransitionNameIsStable() {
   return true;
 }
 
+bool TestOptionalVideoEffectsFailOpenCooldownAndRetry() {
+  namespace contract = studiocast::video::effects::contract;
+
+  struct Scenario {
+    const char *name;
+    std::string_view effect_id;
+    const char *backend;
+    const char *reason;
+  };
+
+  const std::array<Scenario, 4> scenarios{{
+      {"denoise", contract::kEffectIdVideoNoiseRemoval, "maxine",
+       "Maxine video noise removal failed: synthetic denoise failure"},
+      {"relight", contract::kEffectIdVirtualKeyLight, "maxine",
+       "Maxine relighting failed: synthetic relight failure"},
+      {"virtual background", contract::kEffectIdVirtualBackgroundBlur,
+       "maxine", "Maxine virtual background failed: synthetic VB failure"},
+      {"auto frame", contract::kEffectIdAutoFrame, "maxine_ar_cuda",
+       "Maxine auto frame failed: synthetic auto-frame failure"},
+  }};
+
+  for (const auto &scenario : scenarios) {
+    OptionalEffectBreaker breaker;
+    int order = 0;
+    int attempts = 0;
+    int skipped_cooldown_frames = 0;
+    int output_frames = 0;
+    bool saw_first_cooldown = false;
+    bool saw_retry_ready = false;
+    bool saw_second_cooldown = false;
+    bool saw_success_reset = false;
+
+    for (std::uint64_t frame = 10; frame <= 100; ++frame) {
+      ++output_frames;
+
+      if (breaker.MarkRetryReadyIfDue(frame)) {
+        const auto retry = breaker.ToStatus(frame);
+        if (!retry.active || retry.state != "retry_ready" ||
+            retry.cooldown_frames != 0) {
+          std::cerr << scenario.name
+                    << " retry-ready status was malformed: active="
+                    << retry.active << " state='" << retry.state
+                    << "' cooldown=" << retry.cooldown_frames << "\n";
+          return false;
+        }
+        saw_retry_ready = true;
+      }
+
+      if (!breaker.AllowsAttempt(frame)) {
+        ++skipped_cooldown_frames;
+        continue;
+      }
+
+      ++attempts;
+      if (attempts <= 2) {
+        breaker.OnFailure(scenario.effect_id, scenario.backend,
+                          scenario.reason, frame, ++order);
+        const auto degraded = breaker.ToStatus(frame);
+        if (!degraded.active || degraded.effect_id != scenario.effect_id ||
+            degraded.backend != scenario.backend ||
+            degraded.reason != scenario.reason ||
+            degraded.state != "cooling_down") {
+          std::cerr << scenario.name
+                    << " degraded status was malformed after failure: active="
+                    << degraded.active << " id='" << degraded.effect_id
+                    << "' backend='" << degraded.backend << "' reason='"
+                    << degraded.reason << "' state='" << degraded.state
+                    << "'\n";
+          return false;
+        }
+
+        if (attempts == 1) {
+          saw_first_cooldown =
+              degraded.failure_count == 1 &&
+              degraded.cooldown_frames ==
+                  OptionalEffectBreaker::kInitialCooldownFrames;
+        } else {
+          saw_second_cooldown =
+              degraded.failure_count == 2 &&
+              degraded.cooldown_frames ==
+                  (OptionalEffectBreaker::kInitialCooldownFrames * 2);
+        }
+      } else {
+        saw_success_reset = breaker.OnSuccess();
+      }
+    }
+
+    if (!saw_first_cooldown || !saw_retry_ready || !saw_second_cooldown ||
+        !saw_success_reset || breaker.active() || attempts != 3 ||
+        output_frames != 91 || skipped_cooldown_frames < 80) {
+      std::cerr << scenario.name
+                << " breaker did not fail open/retry as expected:"
+                << " first_cooldown=" << saw_first_cooldown
+                << " retry_ready=" << saw_retry_ready
+                << " second_cooldown=" << saw_second_cooldown
+                << " success_reset=" << saw_success_reset
+                << " active=" << breaker.active() << " attempts=" << attempts
+                << " output_frames=" << output_frames
+                << " skipped=" << skipped_cooldown_frames << "\n";
+      return false;
+    }
+  }
+
+  return true;
+}
+
+bool TestVideoPipelineStatusExposesDegradedEffect() {
+  ServiceHarness h;
+  h.consumer_present.store(true, std::memory_order_relaxed);
+  VirtualCameraService service(h.Hooks());
+  auto cfg = TestConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil([&] { return service.Status().pipeline.running; }, 250ms)) {
+    std::cerr << "video pipeline did not start before degraded status test\n";
+    service.Stop();
+    return false;
+  }
+
+  CameraPipelineStatus::DegradedEffect degraded;
+  degraded.active = true;
+  degraded.effect_id = "virtual_background.blur";
+  degraded.backend = "maxine";
+  degraded.reason = "synthetic Maxine virtual background failure";
+  degraded.state = "cooling_down";
+  degraded.failure_count = 1;
+  degraded.cooldown_frames = OptionalEffectBreaker::kInitialCooldownFrames;
+  h.pipeline->SetDegradedEffect(
+      degraded,
+      "Runtime degraded effects:\n - virtual_background.blur [maxine]: "
+      "synthetic Maxine virtual background failure "
+      "(state=cooling_down, failures=1, cooldown_frames=30)");
+
+  const bool exposed = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        const auto &fx = status.pipeline.degraded_effect;
+        return fx.active && fx.effect_id == "virtual_background.blur" &&
+               fx.backend == "maxine" &&
+               fx.reason == "synthetic Maxine virtual background failure" &&
+               fx.state == "cooling_down" && fx.failure_count == 1 &&
+               fx.cooldown_frames ==
+                   OptionalEffectBreaker::kInitialCooldownFrames &&
+               status.pipeline.effects_note.find("Runtime degraded effects") !=
+                   std::string::npos;
+      },
+      250ms);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!exposed) {
+    const auto &fx = status.pipeline.degraded_effect;
+    std::cerr << "degraded effect status was not exposed; active=" << fx.active
+              << " id='" << fx.effect_id << "' backend='" << fx.backend
+              << "' reason='" << fx.reason << "' state='" << fx.state
+              << "' note='" << status.pipeline.effects_note << "'\n";
+    return false;
+  }
+  return true;
+}
+
 bool TestVideoOutputDisappearanceStopsPipelineAndMarksUnavailable() {
   ServiceHarness h;
   h.consumer_present.store(true, std::memory_order_relaxed);
@@ -600,8 +778,8 @@ bool TestVideoOutputDisappearanceStopsPipelineAndMarksUnavailable() {
               << "' present=" << status.virtual_device_present
               << " available=" << status.virtual_device_available << " error='"
               << status.virtual_device_error
-              << "' pipeline_stops=" << status.pipeline_stops
-              << " transition='" << status.last_transition
+              << "' pipeline_stops=" << status.pipeline_stops << " transition='"
+              << status.last_transition
               << "' stops=" << h.pipeline->stop_calls.load()
               << " close_outputs=" << h.pipeline->close_output_calls.load()
               << "\n";
@@ -645,8 +823,10 @@ bool TestVideoOutputRecoveryClearsUnavailableError() {
       [&] {
         const auto status = service.Status();
         return status.pipeline_state == "idle_no_consumer" &&
-               status.virtual_device_present && status.virtual_device_available &&
-               status.virtual_device_error.empty() && status.last_error.empty() &&
+               status.virtual_device_present &&
+               status.virtual_device_available &&
+               status.virtual_device_error.empty() &&
+               status.last_error.empty() &&
                h.pipeline->ensure_output_calls.load() > 0;
       },
       500ms);
@@ -687,6 +867,10 @@ int main() {
        &TestVideoStartFailureClearsAfterRecovery},
       {"video config restart transition name is stable",
        &TestVideoConfigRestartTransitionNameIsStable},
+      {"optional video effects fail open with cooldown retry",
+       &TestOptionalVideoEffectsFailOpenCooldownAndRetry},
+      {"video pipeline exposes degraded effect status",
+       &TestVideoPipelineStatusExposesDegradedEffect},
       {"video output disappearance marks unavailable",
        &TestVideoOutputDisappearanceStopsPipelineAndMarksUnavailable},
       {"video output recovery clears unavailable error",

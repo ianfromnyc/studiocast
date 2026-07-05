@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -128,7 +129,57 @@ struct CameraPipelineStatus {
   std::string
       effects_note; // e.g. "Maxine requested but unavailable; effects disabled"
 
+  struct DegradedEffect {
+    bool active = false;
+    std::string effect_id;
+    std::string backend;
+    std::string reason;
+    std::string state;
+    int failure_count = 0;
+    int cooldown_frames = 0;
+  };
+
+  // Cached on effect state transitions/config changes only. When active, the
+  // effect has been bypassed and the frame loop is continuing pass-through.
+  DegradedEffect degraded_effect{};
+
   std::string last_error;
+};
+
+class OptionalEffectBreaker {
+public:
+  static constexpr int kInitialCooldownFrames = 30;
+  static constexpr int kMaxCooldownFrames = 300;
+
+  bool active() const { return active_; }
+  bool AllowsAttempt(std::uint64_t frame_index) const;
+  void Reset();
+  void OnFailure(std::string_view effect, std::string_view effect_backend,
+                 std::string failure_reason, std::uint64_t frame_index,
+                 int order);
+  bool OnSuccess();
+  bool MarkRetryReadyIfDue(std::uint64_t frame_index);
+  CameraPipelineStatus::DegradedEffect
+  ToStatus(std::uint64_t frame_index) const;
+
+  const std::string &effect_id() const { return effect_id_; }
+  const std::string &backend() const { return backend_; }
+  const std::string &reason() const { return reason_; }
+  int failure_count() const { return failure_count_; }
+  int trip_order() const { return trip_order_; }
+
+private:
+  static int CooldownFramesForFailureCount(int failure_count);
+
+  bool active_ = false;
+  std::string effect_id_;
+  std::string backend_;
+  std::string reason_;
+  int failure_count_ = 0;
+  int cooldown_frames_ = 0;
+  std::uint64_t retry_frame_index_ = 0;
+  int trip_order_ = 0;
+  bool retry_ready_published_ = false;
 };
 
 class CameraPipelineRunner {
@@ -222,6 +273,7 @@ private:
   // changes).
   std::string effects_backends_;
   std::string effects_note_;
+  CameraPipelineStatus::DegradedEffect degraded_effect_{};
 
   std::string last_error_;
 
