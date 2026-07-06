@@ -206,7 +206,7 @@ QString DestinationAction(HomePage::Destination destination) {
   case HomePage::Destination::Speakers:
     return QStringLiteral("Open Speakers");
   case HomePage::Destination::Engines:
-    return QStringLiteral("Open Engines & Models");
+    return QStringLiteral("Open Engines && Models");
   case HomePage::Destination::Support:
     return QStringLiteral("Open Support");
   }
