@@ -24,7 +24,7 @@ Options:
 What it does:
   - (default) Symlinks built binaries into ~/.local/bin
   - Copies packaging/systemd/user/studiocastd.service into ~/.config/systemd/user/
-  - Runs: systemctl --user daemon-reload && systemctl --user enable --now studiocastd.service
+  - Runs: systemctl --user daemon-reload, enables the unit, and restarts it
 
 Notes:
   - The unit ExecStart is %h/.local/bin/studiocastd.
@@ -220,9 +220,10 @@ enable_unit() {
     return 0
   fi
 
-  log "Enabling and starting studiocastd.service"
+  log "Enabling and restarting studiocastd.service"
   run systemctl --user daemon-reload
-  run systemctl --user enable --now studiocastd.service
+  run systemctl --user enable studiocastd.service
+  run systemctl --user restart studiocastd.service
 }
 
 main() {

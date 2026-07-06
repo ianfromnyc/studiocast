@@ -77,6 +77,12 @@ fi
 
 log() { echo "[setup] $*"; }
 
+if [[ "${STUDIOCAST_GUI_SUDO_STDIN:-0}" == "1" ]]; then
+  sudo() {
+    command sudo -S -p "${STUDIOCAST_GUI_SUDO_PROMPT:-[sudo] password for %u: }" "$@"
+  }
+fi
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "[setup] Missing required command: $1"; exit 1; }
 }

@@ -63,6 +63,9 @@ private:
   void StartSetupRepairProcess(SetupRepairPhase phase,
                                const QStringList &arguments,
                                const QString &statusText);
+  void AppendSetupRepairOutput(const QByteArray &bytes);
+  void AppendSetupRepairErrorOutput(const QByteArray &bytes);
+  void PromptForSetupRepairPassword();
   void FinishSetupRepairPlan(int exitCode, QProcess::ExitStatus exitStatus);
   void FinishSetupRepairExecution(int exitCode,
                                   QProcess::ExitStatus exitStatus);
@@ -89,6 +92,9 @@ private:
   QString setupRepairBackend_;
   QString setupRepairOutput_;
   QString setupRepairPlanText_;
+  QString setupRepairPromptBuffer_;
+  bool setupRepairPasswordDialogOpen_ = false;
+  bool setupRepairPasswordCancelled_ = false;
 };
 
 } // namespace studiocast::gui

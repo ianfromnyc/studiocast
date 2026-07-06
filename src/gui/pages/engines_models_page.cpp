@@ -1,6 +1,8 @@
 #include "engines_models_page.h"
 
 #include <QCoreApplication>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -11,9 +13,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QPushButton>
 #include <QStandardPaths>
 #include <QStyle>
@@ -718,6 +722,109 @@ QString TailForDialog(const QString &text, qsizetype maxChars = 5000) {
   return trimmed;
 }
 
+QLabel *DialogTitleLabel(const QString &text, QWidget *parent) {
+  auto *label = new QLabel(text, parent);
+  label->setProperty("scRole", "homeCardTitle");
+  label->setWordWrap(true);
+  return label;
+}
+
+QLabel *DialogBanner(const QString &text, const QString &status,
+                     QWidget *parent) {
+  auto *label = new QLabel(text, parent);
+  label->setProperty("scBanner", status);
+  label->setWordWrap(true);
+  return label;
+}
+
+void SetPrimaryDialogButton(QPushButton *button) {
+  if (!button)
+    return;
+  button->setProperty("scVariant", "primary");
+}
+
+bool ConfirmSetupRepairDialog(QWidget *parent, const QString &planText) {
+  QDialog dialog(parent);
+  dialog.setObjectName(QStringLiteral("setupRepairConfirmDialog"));
+  dialog.setWindowTitle(QStringLiteral("StudioCast Setup Repair"));
+  dialog.setModal(true);
+  dialog.resize(720, 560);
+
+  auto *root = new QVBoxLayout(&dialog);
+  root->setContentsMargins(18, 18, 18, 18);
+  root->setSpacing(12);
+
+  root->addWidget(
+      DialogTitleLabel(QStringLiteral("Run setup repair now?"), &dialog));
+  root->addWidget(MutedLabel(
+      QStringLiteral("StudioCast will refresh prerequisites, configure and "
+                     "rebuild Open Video/Open CUDA and Open Audio support, "
+                     "reinstall the user service, and skip model downloads."),
+      &dialog));
+  root->addWidget(DialogBanner(
+      QStringLiteral("Some repair steps may need sudo. If your password is "
+                     "required, StudioCast will pause the repair and show a "
+                     "password prompt in this GUI."),
+      QStringLiteral("warning"), &dialog));
+
+  auto *details = DetailsBox(&dialog, 280);
+  details->setObjectName(QStringLiteral("setupRepairPlanDetails"));
+  details->setPlainText(TailForDialog(planText, 12000));
+  root->addWidget(details, 1);
+
+  auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
+  auto *runButton = buttons->addButton(QStringLiteral("Run Repair"),
+                                       QDialogButtonBox::AcceptRole);
+  SetPrimaryDialogButton(runButton);
+  runButton->setDefault(true);
+  QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog,
+                   &QDialog::accept);
+  QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog,
+                   &QDialog::reject);
+  root->addWidget(buttons);
+
+  return dialog.exec() == QDialog::Accepted;
+}
+
+void ShowSetupRepairDialog(QWidget *parent, const QString &heading,
+                           const QString &message, const QString &detailsText,
+                           const QString &status) {
+  QDialog dialog(parent);
+  dialog.setObjectName(QStringLiteral("setupRepairResultDialog"));
+  dialog.setWindowTitle(QStringLiteral("StudioCast Setup Repair"));
+  dialog.setModal(true);
+  dialog.resize(680, detailsText.trimmed().isEmpty() ? 260 : 520);
+
+  auto *root = new QVBoxLayout(&dialog);
+  root->setContentsMargins(18, 18, 18, 18);
+  root->setSpacing(12);
+  root->addWidget(DialogTitleLabel(heading, &dialog));
+  root->addWidget(DialogBanner(message, status, &dialog));
+
+  if (!detailsText.trimmed().isEmpty()) {
+    auto *details = DetailsBox(&dialog, 260);
+    details->setObjectName(QStringLiteral("setupRepairResultDetails"));
+    details->setPlainText(detailsText);
+    root->addWidget(details, 1);
+  }
+
+  auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+  auto *closeButton = buttons->button(QDialogButtonBox::Close);
+  SetPrimaryDialogButton(closeButton);
+  QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog,
+                   &QDialog::reject);
+  root->addWidget(buttons);
+  dialog.exec();
+}
+
+bool LooksLikeSudoPasswordPrompt(const QString &text) {
+  const QString lower = text.toLower();
+  return lower.contains(QStringLiteral("[sudo] password")) ||
+         lower.contains(QStringLiteral("sudo password")) ||
+         (lower.contains(QStringLiteral("password for ")) &&
+          lower.contains(QChar(':')));
+}
+
 } // namespace
 
 EnginesModelsPage::EnginesModelsPage(QWidget *parent) : QWidget(parent) {
@@ -1222,6 +1329,9 @@ void EnginesModelsPage::StartSetupRepair(EngineCard *card) {
 
   activeRepairCard_ = card;
   setupRepairPlanText_.clear();
+  setupRepairPromptBuffer_.clear();
+  setupRepairPasswordDialogOpen_ = false;
+  setupRepairPasswordCancelled_ = false;
   QStringList planArgs;
   planArgs << QStringLiteral("plan") << card->repairArgs;
   StartSetupRepairProcess(SetupRepairPhase::Plan, planArgs,
@@ -1235,27 +1345,32 @@ void EnginesModelsPage::StartSetupRepairProcess(SetupRepairPhase phase,
     return;
 
   setupRepairOutput_.clear();
+  setupRepairPromptBuffer_.clear();
   setupRepairProcess_ = new QProcess(this);
   setupRepairProcess_->setProcessChannelMode(QProcess::SeparateChannels);
   setupRepairProcess_->setWorkingDirectory(
       QFileInfo(setupRepairBackend_).absolutePath());
+  QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+  environment.insert(QStringLiteral("STUDIOCAST_GUI_SUDO_STDIN"),
+                     QStringLiteral("1"));
+  environment.insert(QStringLiteral("STUDIOCAST_GUI_SUDO_PROMPT"),
+                     QStringLiteral("[sudo] password for %u: "));
+  setupRepairProcess_->setProcessEnvironment(environment);
 
   if (activeRepairCard_ && activeRepairCard_->repairSetupStatus) {
     activeRepairCard_->repairSetupStatus->setText(statusText);
     activeRepairCard_->repairSetupStatus->setVisible(true);
   }
 
-  connect(setupRepairProcess_, &QProcess::readyReadStandardOutput, this,
-          [this] {
-            if (setupRepairProcess_) {
-              setupRepairOutput_ += QString::fromLocal8Bit(
-                  setupRepairProcess_->readAllStandardOutput());
-            }
-          });
+  connect(
+      setupRepairProcess_, &QProcess::readyReadStandardOutput, this, [this] {
+        if (setupRepairProcess_) {
+          AppendSetupRepairOutput(setupRepairProcess_->readAllStandardOutput());
+        }
+      });
   connect(setupRepairProcess_, &QProcess::readyReadStandardError, this, [this] {
     if (setupRepairProcess_) {
-      setupRepairOutput_ +=
-          QString::fromLocal8Bit(setupRepairProcess_->readAllStandardError());
+      AppendSetupRepairErrorOutput(setupRepairProcess_->readAllStandardError());
     }
   });
   connect(
@@ -1295,14 +1410,101 @@ void EnginesModelsPage::StartSetupRepairProcess(SetupRepairPhase phase,
   setupRepairProcess_->start(setupRepairBackend_, arguments);
 }
 
+void EnginesModelsPage::AppendSetupRepairOutput(const QByteArray &bytes) {
+  setupRepairOutput_ += QString::fromLocal8Bit(bytes);
+}
+
+void EnginesModelsPage::AppendSetupRepairErrorOutput(const QByteArray &bytes) {
+  const QString text = QString::fromLocal8Bit(bytes);
+  setupRepairOutput_ += text;
+  setupRepairPromptBuffer_ += text;
+  if (setupRepairPromptBuffer_.size() > 1000)
+    setupRepairPromptBuffer_ = setupRepairPromptBuffer_.right(1000);
+
+  if (!setupRepairPasswordDialogOpen_ &&
+      LooksLikeSudoPasswordPrompt(setupRepairPromptBuffer_)) {
+    setupRepairPromptBuffer_.clear();
+    PromptForSetupRepairPassword();
+  }
+}
+
+void EnginesModelsPage::PromptForSetupRepairPassword() {
+  if (!setupRepairProcess_ || setupRepairPasswordDialogOpen_)
+    return;
+
+  setupRepairPasswordDialogOpen_ = true;
+  if (activeRepairCard_ && activeRepairCard_->repairSetupStatus) {
+    activeRepairCard_->repairSetupStatus->setText(
+        QStringLiteral("Waiting for sudo password..."));
+    activeRepairCard_->repairSetupStatus->setVisible(true);
+  }
+
+  QDialog dialog(this);
+  dialog.setObjectName(QStringLiteral("setupRepairPasswordDialog"));
+  dialog.setWindowTitle(QStringLiteral("StudioCast Setup Repair"));
+  dialog.setModal(true);
+  dialog.resize(460, 220);
+
+  auto *root = new QVBoxLayout(&dialog);
+  root->setContentsMargins(18, 18, 18, 18);
+  root->setSpacing(12);
+  root->addWidget(
+      DialogTitleLabel(QStringLiteral("Sudo password required"), &dialog));
+  root->addWidget(MutedLabel(
+      QStringLiteral("StudioCast needs your account password to continue the "
+                     "repair steps that install packages or update system "
+                     "configuration."),
+      &dialog));
+
+  auto *passwordEdit = new QLineEdit(&dialog);
+  passwordEdit->setObjectName(QStringLiteral("setupRepairPasswordEdit"));
+  passwordEdit->setEchoMode(QLineEdit::Password);
+  passwordEdit->setPlaceholderText(QStringLiteral("Password"));
+  root->addWidget(passwordEdit);
+
+  auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
+  auto *continueButton = buttons->addButton(QStringLiteral("Continue"),
+                                            QDialogButtonBox::AcceptRole);
+  SetPrimaryDialogButton(continueButton);
+  continueButton->setDefault(true);
+  QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog,
+                   &QDialog::accept);
+  QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog,
+                   &QDialog::reject);
+  root->addWidget(buttons);
+
+  passwordEdit->setFocus(Qt::OtherFocusReason);
+  const int result = dialog.exec();
+  setupRepairPasswordDialogOpen_ = false;
+
+  if (!setupRepairProcess_)
+    return;
+
+  if (result == QDialog::Accepted) {
+    setupRepairProcess_->write(passwordEdit->text().toLocal8Bit());
+    setupRepairProcess_->write("\n");
+    if (activeRepairCard_ && activeRepairCard_->repairSetupStatus) {
+      activeRepairCard_->repairSetupStatus->setText(
+          QStringLiteral("Repairing setup..."));
+      activeRepairCard_->repairSetupStatus->setVisible(true);
+    }
+    return;
+  }
+
+  setupRepairPasswordCancelled_ = true;
+  setupRepairOutput_ += QStringLiteral(
+      "\n[StudioCast] Setup repair cancelled while waiting for sudo "
+      "password.\n");
+  setupRepairProcess_->terminate();
+}
+
 void EnginesModelsPage::FinishSetupRepairPlan(int exitCode,
                                               QProcess::ExitStatus exitStatus) {
   QProcess *process = setupRepairProcess_;
   if (!process)
     return;
 
-  setupRepairOutput_ +=
-      QString::fromLocal8Bit(process->readAllStandardOutput());
+  AppendSetupRepairOutput(process->readAllStandardOutput());
   setupRepairOutput_ += QString::fromLocal8Bit(process->readAllStandardError());
   const bool ok = exitStatus == QProcess::NormalExit && exitCode == 0;
   process->deleteLater();
@@ -1317,11 +1519,11 @@ void EnginesModelsPage::FinishSetupRepairPlan(int exitCode,
     QString details = TailForDialog(setupRepairOutput_);
     if (details.isEmpty())
       details = QStringLiteral("No output was captured.");
-    QMessageBox::warning(
-        this, QStringLiteral("StudioCast Setup Repair"),
-        QStringLiteral("Setup repair plan failed with exit code %1.\n\n%2")
-            .arg(exitCode)
-            .arg(details));
+    ShowSetupRepairDialog(
+        this, QStringLiteral("Setup repair plan failed"),
+        QStringLiteral("The installer backend exited with code %1.")
+            .arg(exitCode),
+        details, QStringLiteral("error"));
     activeRepairCard_ = nullptr;
     RefreshDownloadButtons();
     return;
@@ -1335,19 +1537,7 @@ void EnginesModelsPage::FinishSetupRepairPlan(int exitCode,
   }
   RefreshDownloadButtons();
 
-  QMessageBox confirm(this);
-  confirm.setIcon(QMessageBox::Question);
-  confirm.setWindowTitle(QStringLiteral("StudioCast Setup Repair"));
-  confirm.setText(QStringLiteral("Run setup repair now?"));
-  confirm.setInformativeText(
-      QStringLiteral("StudioCast will refresh prerequisites, configure and "
-                     "rebuild Open Video/Open CUDA and Open Audio support, "
-                     "reinstall the user service, and skip model downloads."));
-  confirm.setDetailedText(TailForDialog(setupRepairPlanText_, 12000));
-  confirm.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
-  confirm.setDefaultButton(QMessageBox::Yes);
-
-  if (confirm.exec() != QMessageBox::Yes) {
+  if (!ConfirmSetupRepairDialog(this, setupRepairPlanText_)) {
     if (activeRepairCard_ && activeRepairCard_->repairSetupStatus) {
       activeRepairCard_->repairSetupStatus->setText(
           QStringLiteral("Setup repair cancelled."));
@@ -1373,39 +1563,49 @@ void EnginesModelsPage::FinishSetupRepairExecution(
   if (!process)
     return;
 
-  setupRepairOutput_ +=
-      QString::fromLocal8Bit(process->readAllStandardOutput());
+  AppendSetupRepairOutput(process->readAllStandardOutput());
   setupRepairOutput_ += QString::fromLocal8Bit(process->readAllStandardError());
   const bool ok = exitStatus == QProcess::NormalExit && exitCode == 0;
+  const bool cancelled = setupRepairPasswordCancelled_;
 
   if (activeRepairCard_ && activeRepairCard_->repairSetupStatus) {
     activeRepairCard_->repairSetupStatus->setText(
-        ok ? QStringLiteral(
-                 "Setup repair completed. Status will refresh shortly.")
-           : QStringLiteral("Setup repair failed. See details."));
+        cancelled ? QStringLiteral("Setup repair cancelled.")
+        : ok      ? QStringLiteral(
+                        "Setup repair completed. Status will refresh shortly.")
+             : QStringLiteral("Setup repair failed. See details."));
     activeRepairCard_->repairSetupStatus->setVisible(true);
   }
 
-  const QString title = QStringLiteral("StudioCast Setup Repair");
-  if (ok) {
-    QMessageBox::information(
-        this, title,
+  if (cancelled) {
+    ShowSetupRepairDialog(
+        this, QStringLiteral("Setup repair cancelled"),
+        QStringLiteral("The repair was cancelled before sudo authentication "
+                       "completed."),
+        QString(), QStringLiteral("warning"));
+  } else if (ok) {
+    ShowSetupRepairDialog(
+        this, QStringLiteral("Setup repair completed"),
         QStringLiteral("Setup repair completed. StudioCast will refresh engine "
-                       "diagnostics shortly."));
+                       "diagnostics shortly."),
+        QString(), QStringLiteral("info"));
   } else {
     QString details = TailForDialog(setupRepairOutput_);
     if (details.isEmpty())
       details = QStringLiteral("No output was captured.");
-    QMessageBox::warning(
-        this, title,
-        QStringLiteral("Setup repair failed with exit code %1.\n\n%2")
-            .arg(exitCode)
-            .arg(details));
+    ShowSetupRepairDialog(
+        this, QStringLiteral("Setup repair failed"),
+        QStringLiteral("The installer backend exited with code %1.")
+            .arg(exitCode),
+        details, QStringLiteral("error"));
   }
 
   process->deleteLater();
   setupRepairProcess_ = nullptr;
   activeRepairCard_ = nullptr;
+  setupRepairPromptBuffer_.clear();
+  setupRepairPasswordDialogOpen_ = false;
+  setupRepairPasswordCancelled_ = false;
   emit SetupRepairFinished();
   RefreshDownloadButtons();
 }

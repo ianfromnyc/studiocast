@@ -44,6 +44,12 @@ DEVICES=1
 LABEL="StudioCast Camera"
 EXCLUSIVE_CAPS=1
 
+if [[ "${STUDIOCAST_GUI_SUDO_STDIN:-0}" == "1" ]]; then
+  sudo() {
+    command sudo -S -p "${STUDIOCAST_GUI_SUDO_PROMPT:-[sudo] password for %u: }" "$@"
+  }
+fi
+
 module_available() {
   modinfo v4l2loopback >/dev/null 2>&1
 }
