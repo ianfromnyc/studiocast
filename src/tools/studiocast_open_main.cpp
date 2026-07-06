@@ -260,8 +260,8 @@ static int CmdVideoPaths() {
   std::cout << "  - Segmentation/matting packs (task=matting) are consumed by "
                "the Open CUDA backend.\n";
   std::cout << "  - Other tasks (face_detection, eye_contact, video_denoise, "
-               "etc.) are tracked here\n";
-  std::cout << "    for future open-source video effects.\n";
+               "etc.) are consumed by\n";
+  std::cout << "    Open Video camera effects and shared analysis stages.\n";
   return 0;
 }
 
@@ -280,8 +280,6 @@ static int CmdVideoListModels(int argc, char **argv) {
     std::cout << "Valid model packs:\n";
     std::string current_task;
     for (const auto &m : models) {
-      if (m.task != "matting")
-        continue;
       if (!task_filter.empty() && m.task != task_filter)
         continue;
       if (m.task != current_task) {

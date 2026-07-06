@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <set>
 
 #include "core/maxine/cuda_driver_api.h"
 #include "core/onnx/ort_session.h"
@@ -37,6 +38,15 @@ bool HasProvider(const std::vector<std::string> &providers,
          providers.end();
 }
 
+bool LooksLikeDuplicateInstalledModelProblem(const std::string &id,
+                                             const std::string &reason,
+                                             const std::set<std::string> &ids) {
+  if (ids.find(id) == ids.end())
+    return false;
+  const std::string lower = ToLowerAscii(reason);
+  return lower.find("duplicate model id") != std::string::npos;
+}
+
 } // namespace
 
 OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
@@ -69,10 +79,23 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
   }
 
   const auto reg = studiocast::open_video::ModelPackRegistry::ScanDefault();
-  od.default_model_id = reg.DefaultModelIdForTask("matting");
+  [[maybe_unused]] bool has_matting_model = false;
+  std::set<std::string> installed_model_ids;
+  od.default_model_id = [&reg]() -> std::string {
+    if (reg.Find("matting", "modnet-webnn-256-fp32"))
+      return "modnet-webnn-256-fp32";
+    if (reg.Find("matting", "birefnet_lite"))
+      return "birefnet_lite";
+    for (const auto &m : reg.ListModels()) {
+      if (m.task == "matting")
+        return m.id;
+    }
+    return {};
+  }();
   for (const auto &m : reg.ListModels()) {
-    if (m.task != "matting")
-      continue;
+    if (m.task == "matting")
+      has_matting_model = true;
+    installed_model_ids.insert(m.id);
     od.installed_models.push_back(m.id);
     OpenCudaDiagnostics::ModelInfo mi;
     mi.id = m.id;
@@ -84,7 +107,13 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
     }
     od.models.push_back(std::move(mi));
   }
-  od.missing_models = reg.Problems();
+  for (const auto &[id, reason] : reg.Problems()) {
+    if (LooksLikeDuplicateInstalledModelProblem(id, reason,
+                                                installed_model_ids)) {
+      continue;
+    }
+    od.missing_models[id] = reason;
+  }
 
   const auto modelsRoot = studiocast::util::StudioCastModelsDir();
   const auto openVideoRoot =
@@ -123,7 +152,8 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
         reason_code;
   };
 
-  const auto block_open_cuda_matting_effects = [&](const char *reason_code) {
+  [[maybe_unused]] const auto block_open_cuda_matting_effects =
+      [&](const char *reason_code) {
     od.blocked_effects[std::string(
         studiocast::video::effects::contract::kEffectIdVirtualBackgroundBlur)] =
         reason_code;
@@ -216,12 +246,12 @@ OpenCudaDiagnostics DiagnoseOpenCudaDefault() {
       od.install_hints.push_back(
           "ONNX Runtime CUDAExecutionProvider is not available; "
           "matting-based Open CUDA effects require the ORT CUDA provider.");
-    } else if (od.installed_models.empty()) {
+    } else if (!has_matting_model) {
       // Segmentation/matting-based effects require at least one usable model
       // pack.
       block_open_cuda_matting_effects("missing_model_packs");
       od.install_hints.push_back(
-          "No usable Open CUDA model packs were found (required for "
+          "No usable Open Video matting model packs were found (required for "
           "segmentation-based effects). Video Noise Removal can still run "
           "without packs.");
     } else {
