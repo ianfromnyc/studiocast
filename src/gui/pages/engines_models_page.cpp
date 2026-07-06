@@ -144,7 +144,7 @@ QString ReasonCodeFromBlockedLine(const QString &line) {
   return trimmed;
 }
 
-QStringList OpenCudaBlockerCodes(const EngineStatus &engine) {
+QStringList EngineBlockerCodes(const EngineStatus &engine) {
   QStringList codes;
   const auto add = [&](const QString &raw) {
     const QString code = ReasonCodeFromBlockedLine(raw);
@@ -157,49 +157,59 @@ QStringList OpenCudaBlockerCodes(const EngineStatus &engine) {
   return codes;
 }
 
-bool OpenCudaHasBlockerCode(const EngineStatus &engine, const QString &code) {
-  return OpenCudaBlockerCodes(engine).contains(code);
+bool EngineHasBlockerCode(const EngineStatus &engine, const QString &code) {
+  return EngineBlockerCodes(engine).contains(code);
 }
 
-bool OpenCudaHasSetupBlocker(const EngineStatus &engine) {
-  if (engine.id != QStringLiteral("open_cuda"))
+bool EngineHasSetupBlocker(const EngineStatus &engine) {
+  if (engine.id != QStringLiteral("open_cuda") &&
+      engine.id != QStringLiteral("open_audio")) {
     return false;
+  }
 
-  const QStringList codes = OpenCudaBlockerCodes(engine);
+  const QStringList codes = EngineBlockerCodes(engine);
   for (const QString &code : codes) {
     if (code == QStringLiteral("disabled_in_build") ||
-        code == QStringLiteral("onnxruntime_not_found") ||
-        code == QStringLiteral("onnxruntime_cuda_provider_unavailable") ||
-        code == QStringLiteral("cuda_unavailable")) {
+        code == QStringLiteral("onnxruntime_not_found")) {
+      return true;
+    }
+    if (engine.id == QStringLiteral("open_cuda") &&
+        (code == QStringLiteral("onnxruntime_cuda_provider_unavailable") ||
+         code == QStringLiteral("cuda_unavailable"))) {
       return true;
     }
   }
   return false;
 }
 
-QString OpenCudaSetupReasonText(const QString &code) {
+QString EngineSetupReasonText(const EngineStatus &engine, const QString &code) {
   if (code == QStringLiteral("disabled_in_build")) {
-    return QStringLiteral(
-        "Open Video / Open CUDA is disabled in the running StudioCast build.");
+    return QStringLiteral("%1 is disabled in the running StudioCast build.")
+        .arg(engine.label);
   }
   if (code == QStringLiteral("onnxruntime_not_found")) {
     return QStringLiteral(
         "This StudioCast build was compiled without ONNX Runtime.");
   }
-  if (code == QStringLiteral("onnxruntime_cuda_provider_unavailable")) {
+  if (engine.id == QStringLiteral("open_cuda") &&
+      code == QStringLiteral("onnxruntime_cuda_provider_unavailable")) {
     return QStringLiteral(
         "ONNX Runtime is available, but CUDAExecutionProvider is not.");
   }
-  if (code == QStringLiteral("cuda_unavailable")) {
+  if (engine.id == QStringLiteral("open_cuda") &&
+      code == QStringLiteral("cuda_unavailable")) {
     return QStringLiteral("The daemon could not initialize CUDA.");
   }
-  if (code == QStringLiteral("missing_model_packs"))
-    return QStringLiteral("Required Open Video model packs are missing.");
   return {};
 }
 
-QString OpenCudaSetupFixText(const QString &code) {
+QString EngineSetupFixText(const EngineStatus &engine, const QString &code) {
   if (code == QStringLiteral("disabled_in_build")) {
+    if (engine.id == QStringLiteral("open_audio")) {
+      return QStringLiteral(
+          "Fix: rebuild StudioCast with -DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON, "
+          "then restart the GUI and daemon.");
+    }
     return QStringLiteral(
         "Fix: rebuild StudioCast with -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON, then "
         "restart the GUI and daemon.");
@@ -209,12 +219,14 @@ QString OpenCudaSetupFixText(const QString &code) {
         "Fix: install or point CMake at ONNX Runtime, rebuild StudioCast, then "
         "restart the GUI and daemon.");
   }
-  if (code == QStringLiteral("onnxruntime_cuda_provider_unavailable")) {
+  if (engine.id == QStringLiteral("open_cuda") &&
+      code == QStringLiteral("onnxruntime_cuda_provider_unavailable")) {
     return QStringLiteral(
         "Fix: install or build ONNX Runtime with CUDAExecutionProvider support, "
         "rebuild StudioCast, then restart the GUI and daemon.");
   }
-  if (code == QStringLiteral("cuda_unavailable")) {
+  if (engine.id == QStringLiteral("open_cuda") &&
+      code == QStringLiteral("cuda_unavailable")) {
     return QStringLiteral(
         "Fix: check the NVIDIA driver/CUDA runtime and restart StudioCast after "
         "CUDA initializes successfully.");
@@ -222,25 +234,28 @@ QString OpenCudaSetupFixText(const QString &code) {
   return {};
 }
 
-QStringList OpenCudaSetupGuidanceLines(const EngineStatus &engine) {
+QStringList EngineSetupGuidanceLines(const EngineStatus &engine) {
   QStringList lines;
-  if (engine.id != QStringLiteral("open_cuda"))
+  if (!EngineHasSetupBlocker(engine))
     return lines;
 
-  for (const QString &code : OpenCudaBlockerCodes(engine)) {
-    const QString reason = OpenCudaSetupReasonText(code);
-    const QString fix = OpenCudaSetupFixText(code);
+  for (const QString &code : EngineBlockerCodes(engine)) {
+    const QString reason = EngineSetupReasonText(engine, code);
+    const QString fix = EngineSetupFixText(engine, code);
     if (!reason.isEmpty() && !lines.contains(reason))
       lines.push_back(reason);
     if (!fix.isEmpty() && !lines.contains(fix))
       lines.push_back(fix);
   }
 
-  if (OpenCudaHasBlockerCode(engine, QStringLiteral("disabled_in_build"))) {
-    const QString command = QStringLiteral(
-        "Source build command: cmake -S . -B build "
-        "-DSTUDIOCAST_ENABLE_OPEN_CUDA=ON && cmake --build build --target "
-        "studiocast studiocastd");
+  if (EngineHasBlockerCode(engine, QStringLiteral("disabled_in_build"))) {
+    const QString flag = engine.id == QStringLiteral("open_audio")
+                             ? QStringLiteral("STUDIOCAST_ENABLE_OPEN_AUDIO")
+                             : QStringLiteral("STUDIOCAST_ENABLE_OPEN_CUDA");
+    const QString command =
+        QStringLiteral("Source build command: cmake -S . -B build -D%1=ON && "
+                       "cmake --build build --target studiocast studiocastd")
+            .arg(flag);
     if (!lines.contains(command))
       lines.push_back(command);
   }
@@ -248,8 +263,8 @@ QStringList OpenCudaSetupGuidanceLines(const EngineStatus &engine) {
   return lines;
 }
 
-QString OpenCudaSetupSummary(const EngineStatus &engine) {
-  const QStringList lines = OpenCudaSetupGuidanceLines(engine);
+QString EngineSetupSummary(const EngineStatus &engine) {
+  const QStringList lines = EngineSetupGuidanceLines(engine);
   if (lines.isEmpty())
     return {};
 
@@ -259,8 +274,8 @@ QString OpenCudaSetupSummary(const EngineStatus &engine) {
   return summary;
 }
 
-QString OpenCudaSetupDisclaimerText(const EngineStatus &engine) {
-  const QStringList lines = OpenCudaSetupGuidanceLines(engine);
+QString EngineSetupDisclaimerText(const EngineStatus &engine) {
+  const QStringList lines = EngineSetupGuidanceLines(engine);
   if (lines.isEmpty())
     return {};
   return lines.join(QStringLiteral("\n"));
@@ -271,7 +286,7 @@ QString EngineStateLabel(const EngineStatus &engine,
   if (!engine.present)
     return QStringLiteral("Unknown");
   if (!(engine.ok || engine.supported)) {
-    if (OpenCudaHasSetupBlocker(engine)) {
+    if (EngineHasSetupBlocker(engine)) {
       return selectedByPreference ? QStringLiteral("Selected setup required")
                                   : QStringLiteral("Setup required");
     }
@@ -283,7 +298,7 @@ QString EngineStateLabel(const EngineStatus &engine,
   }
   if (engine.configuredMissingModelCount > 0)
     return QStringLiteral("Model selection review");
-  if (OpenCudaHasSetupBlocker(engine))
+  if (EngineHasSetupBlocker(engine))
     return QStringLiteral("Partial setup required");
   if (!engine.blockedEffects.isEmpty())
     return QStringLiteral("Partially blocked");
@@ -297,7 +312,7 @@ QString EngineSummary(const EngineStatus &engine,
         .arg(engine.label);
 
   if (!(engine.ok || engine.supported)) {
-    if (OpenCudaHasSetupBlocker(engine))
+    if (EngineHasSetupBlocker(engine))
       return selectedByPreference
                  ? QStringLiteral("This backend is currently selected.")
                  : QStringLiteral("%1 requires setup before it can run.")
@@ -311,7 +326,7 @@ QString EngineSummary(const EngineStatus &engine,
     return summary;
   }
 
-  const QString setup = OpenCudaSetupSummary(engine);
+  const QString setup = EngineSetupSummary(engine);
   if (!setup.isEmpty()) {
     return QStringLiteral("%1 is available, but some effects require setup.")
         .arg(engine.label);
@@ -445,7 +460,7 @@ QString EngineDetailsText(const EngineStatus &engine) {
     for (const QString &detail : engine.blockedDetails)
       lines << QStringLiteral("- %1").arg(detail);
   }
-  const QStringList setupGuidance = OpenCudaSetupGuidanceLines(engine);
+  const QStringList setupGuidance = EngineSetupGuidanceLines(engine);
   if (!setupGuidance.isEmpty()) {
     lines << QStringLiteral("");
     lines << QStringLiteral("Setup guidance:");
@@ -556,7 +571,7 @@ bool ModelInstallRecommended(const EngineStatus &engine) {
   }
   if (!engine.present)
     return false;
-  if (OpenCudaHasSetupBlocker(engine))
+  if (EngineHasSetupBlocker(engine))
     return false;
   if (engine.missingModelCount > 0 || engine.configuredMissingModelCount > 0 ||
       HasMissingModelBlock(engine)) {
@@ -582,10 +597,10 @@ QString ModelInstallStatusText(const EngineStatus &engine,
   }
   if (!engine.present)
     return QStringLiteral("Model diagnostics unavailable.");
-  if (OpenCudaHasSetupBlocker(engine)) {
-    return QStringLiteral(
-        "Resolve the Open Video setup issue above before downloading model "
-        "packs.");
+  if (EngineHasSetupBlocker(engine)) {
+    return QStringLiteral("Resolve the %1 setup issue above before "
+                          "downloading model packs.")
+        .arg(engine.label);
   }
   if (!installRecommended) {
     if (!(engine.ok || engine.supported) && engine.installedModelCount == 0) {
@@ -827,7 +842,7 @@ void EnginesModelsPage::UpdateEngineCard(EngineCard *card,
 
   card->summary->setText(EngineSummary(engine, selectedByPreference));
   if (card->setupDisclaimer) {
-    const QString disclaimer = OpenCudaSetupDisclaimerText(engine);
+    const QString disclaimer = EngineSetupDisclaimerText(engine);
     card->setupDisclaimer->setText(disclaimer);
     card->setupDisclaimer->setVisible(!disclaimer.isEmpty());
   }

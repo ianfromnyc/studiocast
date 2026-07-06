@@ -719,6 +719,108 @@ bool TestEnginesModelsPageShowsOpenCudaSetupFix() {
                 "details should include source-build fix command");
 }
 
+bool TestEnginesModelsPageShowsOpenAudioSetupFix() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "engines":{
+          "open_audio":{
+            "ok":false,
+            "installed_models":["fastenhancer_s_vd_v1"],
+            "models":[
+              {"id":"fastenhancer_s_vd_v1","display_name":"FastEnhancer-S","effects":["noise_removal"],"sample_rate":16000,"channels":1}
+            ],
+            "missing_models":{},
+            "blocked_effects":{
+              "noise_removal":"disabled_in_build",
+              "room_echo_removal":"disabled_in_build"
+            },
+            "install_hints":[
+              "Open Audio backend is disabled in this build.",
+              "Rebuild with -DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON."
+            ]
+          }
+        },
+        "video":{
+          "enabled":false,
+          "virtual_device_present":true,
+          "virtual_device_available":true,
+          "consumer_count":0,
+          "video_effects":{"engine":"auto"},
+          "pipeline":{"running":false,"starting":false}
+        },
+        "audio":{
+          "mic_present":true,
+          "source_error":"",
+          "audio_effects":{"engine":"open_source"},
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  studiocast::gui::EnginesModelsPage page;
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(json));
+
+  auto *state =
+      page.findChild<QLabel *>(QStringLiteral("open_audio_engine_state"));
+  auto *summary =
+      page.findChild<QLabel *>(QStringLiteral("open_audio_engine_summary"));
+  auto *disclaimer =
+      page.findChild<QLabel *>(QStringLiteral("open_audio_setup_disclaimer"));
+  auto *downloadStatus =
+      page.findChild<QLabel *>(QStringLiteral("open_audio_download_status"));
+  auto *downloadButton =
+      page.findChild<QPushButton *>(QStringLiteral("open_audio_download_button"));
+
+  return Expect(state != nullptr, "open audio state label should be findable") &&
+         Expect(summary != nullptr,
+                "open audio summary label should be findable") &&
+         Expect(disclaimer != nullptr,
+                "open audio setup disclaimer should be findable") &&
+         Expect(downloadStatus != nullptr,
+                "open audio download status should be findable") &&
+         Expect(downloadButton != nullptr,
+                "open audio download button should be findable") &&
+         Expect(state->text() == QStringLiteral("Selected setup required"),
+                "disabled Open Audio build should show setup-required state") &&
+         Expect(summary->text() ==
+                    QStringLiteral("This backend is currently selected."),
+                "selected Open Audio text should stay separate from setup "
+                "disclaimer") &&
+         Expect(!disclaimer->isHidden() && !disclaimer->text().isEmpty(),
+                "Open Audio setup disclaimer should be shown") &&
+         Expect(disclaimer->property("scBanner").toString() ==
+                    QStringLiteral("warning"),
+                "Open Audio setup disclaimer should use warning banner style") &&
+         Expect(disclaimer->text().contains(
+                    QStringLiteral("Open Audio is disabled in the running "
+                                   "StudioCast build")),
+                "Open Audio disclaimer should explain disabled build") &&
+         Expect(disclaimer->text().contains(
+                    QStringLiteral("-DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON")),
+                "Open Audio disclaimer should include rebuild flag") &&
+         Expect(!disclaimer->text().contains(
+                    QStringLiteral("This backend is currently selected")),
+                "Open Audio disclaimer should not include selected-backend text") &&
+         Expect(downloadStatus->text().contains(
+                    QStringLiteral("Open Audio setup issue above")),
+                "Open Audio model status should reference setup disclaimer") &&
+         Expect(!downloadStatus->text().contains(
+                    QStringLiteral("Ready to install")),
+                "disabled Open Audio build should not claim models are ready "
+                "to install") &&
+         Expect(!downloadButton->isEnabled(),
+                "Open Audio model download button should be disabled for setup "
+                "blockers");
+}
+
 bool TestCameraPageShowsOpenCudaSetupFix() {
   const QString json = QStringLiteral(
       R"({
@@ -1279,6 +1381,7 @@ int main(int argc, char **argv) {
   ok = TestAudioEndpointActionReadinessFields() && ok;
   ok = TestEngineModelDetailsAndConfiguredSelections() && ok;
   ok = TestEnginesModelsPageShowsOpenCudaSetupFix() && ok;
+  ok = TestEnginesModelsPageShowsOpenAudioSetupFix() && ok;
   ok = TestCameraPageShowsOpenCudaSetupFix() && ok;
   ok = TestOpenAudioRuntimeStatusFields() && ok;
   ok = TestMissingVirtualDevices() && ok;
