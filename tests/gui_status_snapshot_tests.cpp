@@ -11,11 +11,15 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QEventLoop>
+#include <QLabel>
+#include <QPlainTextEdit>
+#include <QPushButton>
 #include <QTimer>
 #include <unistd.h>
 
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
+#include "gui/pages/engines_models_page.h"
 #include "gui/pages/video_page.h"
 #include "gui/status/pending_daemon_write_guard.h"
 #include "gui/status/daemon_status_snapshot.h"
@@ -609,6 +613,183 @@ bool TestEngineModelDetailsAndConfiguredSelections() {
                 "explicit model paths should be preserved in details");
 }
 
+bool TestEnginesModelsPageShowsOpenCudaSetupFix() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "engines":{
+          "open_cuda":{
+            "ok":false,
+            "installed_models":["modnet-webnn-256-fp32"],
+            "models":[
+              {"id":"modnet-webnn-256-fp32","display_name":"MODNet","task":"matting"}
+            ],
+            "missing_models":{},
+            "blocked_effects":{
+              "virtual_background.blur":"disabled_in_build",
+              "auto_frame":"disabled_in_build"
+            },
+            "install_hints":[
+              "Open CUDA backend is disabled in this build.",
+              "Rebuild with -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON."
+            ]
+          }
+        },
+        "video":{
+          "enabled":false,
+          "virtual_device_present":true,
+          "virtual_device_available":true,
+          "consumer_count":0,
+          "video_effects":{"engine":"open_cuda"},
+          "pipeline":{"running":false,"starting":false}
+        },
+        "audio":{
+          "mic_present":true,
+          "source_error":"",
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  studiocast::gui::EnginesModelsPage page;
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(json));
+
+  auto *state =
+      page.findChild<QLabel *>(QStringLiteral("open_cuda_engine_state"));
+  auto *summary =
+      page.findChild<QLabel *>(QStringLiteral("open_cuda_engine_summary"));
+  auto *disclaimer =
+      page.findChild<QLabel *>(QStringLiteral("open_cuda_setup_disclaimer"));
+  auto *downloadStatus =
+      page.findChild<QLabel *>(QStringLiteral("open_cuda_download_status"));
+  auto *downloadButton =
+      page.findChild<QPushButton *>(QStringLiteral("open_cuda_download_button"));
+  auto *details =
+      page.findChild<QPlainTextEdit *>(QStringLiteral("open_cuda_engine_details"));
+
+  return Expect(state != nullptr, "open cuda state label should be findable") &&
+         Expect(summary != nullptr,
+                "open cuda summary label should be findable") &&
+         Expect(disclaimer != nullptr,
+                "open cuda setup disclaimer should be findable") &&
+         Expect(downloadStatus != nullptr,
+                "open cuda download status should be findable") &&
+         Expect(downloadButton != nullptr,
+                "open cuda download button should be findable") &&
+         Expect(details != nullptr,
+                "open cuda details should be findable") &&
+         Expect(state->text() == QStringLiteral("Selected setup required"),
+                "disabled Open CUDA build should show setup-required state") &&
+         Expect(summary->text() ==
+                    QStringLiteral("This backend is currently selected."),
+                "selected-backend text should stay separate from setup "
+                "disclaimer") &&
+         Expect(!disclaimer->isHidden() && !disclaimer->text().isEmpty(),
+                "setup disclaimer should be shown for setup blockers") &&
+         Expect(disclaimer->property("scBanner").toString() ==
+                    QStringLiteral("warning"),
+                "setup disclaimer should use the warning banner style") &&
+         Expect(disclaimer->text().contains(
+                    QStringLiteral("disabled in the running StudioCast build")),
+                "disclaimer should explain disabled build") &&
+         Expect(disclaimer->text().contains(
+                    QStringLiteral("-DSTUDIOCAST_ENABLE_OPEN_CUDA=ON")),
+                "disclaimer should include rebuild flag") &&
+         Expect(!disclaimer->text().contains(
+                    QStringLiteral("This backend is currently selected")),
+                "setup disclaimer should not include selected-backend text") &&
+         Expect(downloadStatus->text().contains(
+                    QStringLiteral("setup issue above")),
+                "model install status should reference the separate setup "
+                "disclaimer") &&
+         Expect(!downloadStatus->text().contains(
+                    QStringLiteral("Ready to install")),
+                "disabled build should not claim models are ready to install") &&
+         Expect(!downloadButton->isEnabled(),
+                "model download button should be disabled for setup blockers") &&
+         Expect(details->toPlainText().contains(
+                    QStringLiteral("cmake -S . -B build")),
+                "details should include source-build fix command");
+}
+
+bool TestCameraPageShowsOpenCudaSetupFix() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "engines":{
+          "open_cuda":{
+            "ok":false,
+            "installed_models":["modnet-webnn-256-fp32"],
+            "models":[
+              {"id":"modnet-webnn-256-fp32","display_name":"MODNet","task":"matting"}
+            ],
+            "missing_models":{},
+            "blocked_effects":{
+              "virtual_background.blur":"disabled_in_build",
+              "auto_frame":"disabled_in_build"
+            },
+            "install_hints":[
+              "Open CUDA backend is disabled in this build.",
+              "Rebuild with -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON."
+            ]
+          }
+        },
+        "video":{
+          "enabled":false,
+          "virtual_device_present":true,
+          "virtual_device_available":true,
+          "consumer_count":0,
+          "video_effects":{
+            "engine":"open_cuda",
+            "virtual_background":{"mode":"blur","model_id":"modnet-webnn-256-fp32"}
+          },
+          "pipeline":{"running":false,"starting":false}
+        },
+        "audio":{
+          "mic_present":true,
+          "source_error":"",
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  studiocast::gui::VideoPage page;
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(json));
+
+  auto *banner =
+      page.findChild<QLabel *>(QStringLiteral("cameraEngineWarningBanner"));
+  return Expect(banner != nullptr,
+                "camera engine warning banner should be findable") &&
+         Expect(!banner->text().contains(
+                    QStringLiteral("No usable model packs were found")),
+                "camera page should not blame installed models for setup "
+                "blockers") &&
+         Expect(banner->text().contains(
+                    QStringLiteral("disabled in the running StudioCast build")),
+                "camera page should explain disabled Open CUDA build") &&
+         Expect(banner->text().contains(
+                    QStringLiteral("-DSTUDIOCAST_ENABLE_OPEN_CUDA=ON")),
+                "camera page should include rebuild flag") &&
+         Expect(banner->text().contains(
+                    QStringLiteral("Model packs were found")),
+                "camera page should say models are present but unusable until "
+                "setup is fixed");
+}
+
 bool TestOpenAudioRuntimeStatusFields() {
   const QString json = QStringLiteral(
       R"({
@@ -1097,6 +1278,8 @@ int main(int argc, char **argv) {
   ok = TestVideoEffectReadinessMissingModelWhileIdle() && ok;
   ok = TestAudioEndpointActionReadinessFields() && ok;
   ok = TestEngineModelDetailsAndConfiguredSelections() && ok;
+  ok = TestEnginesModelsPageShowsOpenCudaSetupFix() && ok;
+  ok = TestCameraPageShowsOpenCudaSetupFix() && ok;
   ok = TestOpenAudioRuntimeStatusFields() && ok;
   ok = TestMissingVirtualDevices() && ok;
   ok = TestMissingPhysicalDevices() && ok;

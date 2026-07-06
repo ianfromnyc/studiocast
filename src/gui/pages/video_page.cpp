@@ -276,6 +276,9 @@ struct DaemonVideoStatus {
   // Open CUDA runtime diagnostics (from daemon status)
   bool open_cuda_present = false;
   bool open_cuda_ok = false;
+  QString open_cuda_summary;
+  QString open_cuda_blocked_reason;
+  QStringList open_cuda_blocked_details;
   QString open_cuda_default_model_id;
 
   struct OpenCudaModelInfo {
@@ -499,6 +502,9 @@ bool ParseDaemonStatusJson(const std::string &json, DaemonVideoStatus *out,
   // Open CUDA diagnostics payload.
   out->open_cuda_present = false;
   out->open_cuda_ok = false;
+  out->open_cuda_summary.clear();
+  out->open_cuda_blocked_reason.clear();
+  out->open_cuda_blocked_details.clear();
   out->open_cuda_default_model_id.clear();
   out->open_cuda_models.clear();
   out->open_cuda_installed_models.clear();
@@ -515,6 +521,16 @@ bool ParseDaemonStatusJson(const std::string &json, DaemonVideoStatus *out,
   if (!openCuda.isEmpty()) {
     out->open_cuda_present = true;
     out->open_cuda_ok = openCuda.value("ok").toBool(false);
+    out->open_cuda_summary = openCuda.value("summary").toString();
+    out->open_cuda_blocked_reason =
+        openCuda.value("blocked_reason").toString();
+    const auto blockedDetails =
+        openCuda.value("blocked_details").toArray();
+    for (const auto &v : blockedDetails) {
+      const QString s = v.toString();
+      if (!s.isEmpty())
+        out->open_cuda_blocked_details.push_back(s);
+    }
 
     out->open_cuda_default_model_id =
         openCuda.value("default_model_id").toString();
@@ -621,6 +637,145 @@ QString FormatMaxineReasonCode(const QString &code) {
   const std::string s = code.toStdString();
   return QString::fromStdString(studiocast::maxine::reasons::ToEnglish(s));
 }
+
+QString ReasonCodeFromBlockedLine(const QString &line) {
+  const QString trimmed = line.trimmed();
+  const qsizetype colon = trimmed.lastIndexOf(QStringLiteral(": "));
+  if (colon >= 0)
+    return trimmed.mid(colon + 2).trimmed();
+  return trimmed;
+}
+
+QStringList OpenCudaBlockerCodes(const DaemonVideoStatus &st) {
+  QStringList codes;
+  const auto add = [&](const QString &raw) {
+    const QString code = ReasonCodeFromBlockedLine(raw);
+    if (!code.isEmpty() && !codes.contains(code))
+      codes.push_back(code);
+  };
+
+  add(st.open_cuda_blocked_reason);
+  for (auto it = st.open_cuda_blocked_effects.constBegin();
+       it != st.open_cuda_blocked_effects.constEnd(); ++it) {
+    add(it.value());
+  }
+  return codes;
+}
+
+bool OpenCudaHasBlockerCode(const DaemonVideoStatus &st, const QString &code) {
+  return OpenCudaBlockerCodes(st).contains(code);
+}
+
+bool OpenCudaHasSetupBlocker(const DaemonVideoStatus &st) {
+  const QStringList codes = OpenCudaBlockerCodes(st);
+  for (const QString &code : codes) {
+    if (code == QStringLiteral("disabled_in_build") ||
+        code == QStringLiteral("onnxruntime_not_found") ||
+        code == QStringLiteral("onnxruntime_cuda_provider_unavailable") ||
+        code == QStringLiteral("cuda_unavailable")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+QString OpenCudaSetupReasonText(const QString &code) {
+  if (code == QStringLiteral("disabled_in_build")) {
+    return QStringLiteral(
+        "Open Video / Open CUDA is disabled in the running StudioCast build.");
+  }
+  if (code == QStringLiteral("onnxruntime_not_found")) {
+    return QStringLiteral(
+        "This StudioCast build was compiled without ONNX Runtime.");
+  }
+  if (code == QStringLiteral("onnxruntime_cuda_provider_unavailable")) {
+    return QStringLiteral(
+        "ONNX Runtime is available, but CUDAExecutionProvider is not.");
+  }
+  if (code == QStringLiteral("cuda_unavailable")) {
+    return QStringLiteral("The daemon could not initialize CUDA.");
+  }
+  if (code == QStringLiteral("missing_model_packs"))
+    return QStringLiteral("Required Open Video model packs are missing.");
+  return {};
+}
+
+QString OpenCudaSetupFixText(const QString &code) {
+  if (code == QStringLiteral("disabled_in_build")) {
+    return QStringLiteral(
+        "Fix: rebuild StudioCast with -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON, then "
+        "restart the GUI and daemon.");
+  }
+  if (code == QStringLiteral("onnxruntime_not_found")) {
+    return QStringLiteral(
+        "Fix: install or point CMake at ONNX Runtime, rebuild StudioCast, then "
+        "restart the GUI and daemon.");
+  }
+  if (code == QStringLiteral("onnxruntime_cuda_provider_unavailable")) {
+    return QStringLiteral(
+        "Fix: install or build ONNX Runtime with CUDAExecutionProvider support, "
+        "rebuild StudioCast, then restart the GUI and daemon.");
+  }
+  if (code == QStringLiteral("cuda_unavailable")) {
+    return QStringLiteral(
+        "Fix: check the NVIDIA driver/CUDA runtime and restart StudioCast after "
+        "CUDA initializes successfully.");
+  }
+  return {};
+}
+
+QString OpenCudaSetupText(const DaemonVideoStatus &st,
+                          bool includeInstallHints) {
+  QStringList lines;
+  lines << QStringLiteral("Open Video / Open CUDA unavailable.");
+
+  if (!st.open_cuda_summary.trimmed().isEmpty())
+    lines << st.open_cuda_summary.trimmed();
+
+  for (const QString &code : OpenCudaBlockerCodes(st)) {
+    const QString reason = OpenCudaSetupReasonText(code);
+    const QString fix = OpenCudaSetupFixText(code);
+    if (!reason.isEmpty() && !lines.contains(reason))
+      lines << reason;
+    if (!fix.isEmpty() && !lines.contains(fix))
+      lines << fix;
+  }
+
+  if (OpenCudaHasBlockerCode(st, QStringLiteral("disabled_in_build"))) {
+    lines << QStringLiteral(
+        "Source build command: cmake -S . -B build "
+        "-DSTUDIOCAST_ENABLE_OPEN_CUDA=ON && cmake --build build --target "
+        "studiocast studiocastd");
+  }
+
+  if (OpenCudaHasSetupBlocker(st) && !st.open_cuda_installed_models.isEmpty()) {
+    lines << QStringLiteral(
+        "Model packs were found, but the backend cannot use them until this "
+        "setup issue is fixed.");
+  }
+
+  if (!st.open_cuda_blocked_details.isEmpty()) {
+    lines << QStringLiteral("");
+    lines << st.open_cuda_blocked_details;
+  }
+
+  if (!st.open_cuda_missing_models.isEmpty()) {
+    lines << QStringLiteral("");
+    lines << QStringLiteral("Missing/invalid model packs:");
+    for (auto it = st.open_cuda_missing_models.begin();
+         it != st.open_cuda_missing_models.end(); ++it) {
+      lines << QStringLiteral("- %1: %2").arg(it.key(), it.value());
+    }
+  }
+
+  if (includeInstallHints && !st.open_cuda_install_hints.isEmpty()) {
+    lines << QStringLiteral("");
+    lines << st.open_cuda_install_hints;
+  }
+
+  return lines.join(QStringLiteral("\n")).trimmed();
+}
+
 QString FirstLine(const QString &s) {
   const QString t = s.trimmed();
   const qsizetype nl = t.indexOf('\n');
@@ -879,6 +1034,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   runLayout->addWidget(engineInfoBanner_);
 
   maxineBanner_ = new QLabel(runBox);
+  maxineBanner_->setObjectName(QStringLiteral("cameraEngineWarningBanner"));
   maxineBanner_->setWordWrap(true);
   maxineBanner_->setProperty("scBanner", "warning");
   maxineBanner_->setVisible(false);
@@ -2638,7 +2794,10 @@ void VideoPage::UpdateUiEnabled() {
       };
 
       const auto fmtOpenCudaBlocked = [&]() -> QString {
-        QString s = "Open Source unavailable.";
+        if (st.open_cuda_present && OpenCudaHasSetupBlocker(st))
+          return OpenCudaSetupText(st, /*includeInstallHints=*/true);
+
+        QString s = "Open Video / Open CUDA unavailable.";
         if (!st.open_cuda_present) {
           s += "\nStatus is not available.";
         } else if (!st.open_cuda_ok) {
@@ -2652,7 +2811,11 @@ void VideoPage::UpdateUiEnabled() {
                    .arg(st.open_cuda_missing_models.size());
         }
 
-        s += "\nRun: studiocast-open install-hints";
+        if (!st.open_cuda_install_hints.isEmpty()) {
+          s += "\n\n";
+          s += st.open_cuda_install_hints.join(QStringLiteral("\n"));
+        }
+        s += "\nRun: ./build/studiocast-open video-install-hints";
         return s.trimmed();
       };
 
@@ -2722,13 +2885,19 @@ void VideoPage::UpdateUiEnabled() {
       QString note;
       if (enginePref ==
               studiocast::video::effects::EffectsEnginePreference::open_cuda &&
-          !st.open_cuda_missing_models.isEmpty()) {
-        note = QStringLiteral(
-            "NOTE: Some Open Source model packs are missing/invalid.\n");
-        for (auto it = st.open_cuda_missing_models.begin();
-             it != st.open_cuda_missing_models.end(); ++it) {
-          note += QStringLiteral("• ") + it.key() + QStringLiteral(": ") +
-                  it.value() + QChar('\n');
+          (!st.open_cuda_missing_models.isEmpty() ||
+           OpenCudaHasSetupBlocker(st))) {
+        if (OpenCudaHasSetupBlocker(st)) {
+          note = QStringLiteral("NOTE: %1\n")
+                     .arg(OpenCudaSetupText(st, /*includeInstallHints=*/false));
+        } else {
+          note = QStringLiteral(
+              "NOTE: Some Open Video model packs are missing/invalid.\n");
+          for (auto it = st.open_cuda_missing_models.begin();
+               it != st.open_cuda_missing_models.end(); ++it) {
+            note += QStringLiteral("- ") + it.key() + QStringLiteral(": ") +
+                    it.value() + QChar('\n');
+          }
         }
         note = note.trimmed();
         note += QStringLiteral("\n\n");
@@ -2815,20 +2984,23 @@ void VideoPage::UpdateUiEnabled() {
     if (enginePref ==
         studiocast::video::effects::EffectsEnginePreference::open_cuda) {
       if (!st.open_cuda_present) {
-        return "Open Source status is not available.";
+        return "Open Video / Open CUDA status is not available.";
       }
       if (!st.open_cuda_ok) {
+        if (OpenCudaHasSetupBlocker(st))
+          return OpenCudaSetupText(st, /*includeInstallHints=*/true);
+
         QStringList lines;
-        lines << "Open Source unavailable.";
+        lines << "Open Video / Open CUDA unavailable.";
         if (st.open_cuda_installed_models.isEmpty()) {
-          lines << "No usable Open Source model packs were found.";
+          lines << "No usable Open Video model packs were found.";
         }
         if (!st.open_cuda_missing_models.isEmpty()) {
           lines << "";
           lines << "Missing/invalid model packs:";
           for (auto it = st.open_cuda_missing_models.begin();
                it != st.open_cuda_missing_models.end(); ++it) {
-            lines << ("• " + it.key() + ": " + it.value());
+            lines << QStringLiteral("- %1: %2").arg(it.key(), it.value());
           }
         }
         if (!st.open_cuda_install_hints.isEmpty()) {
@@ -2836,11 +3008,15 @@ void VideoPage::UpdateUiEnabled() {
           lines << st.open_cuda_install_hints;
         }
         lines << "";
-        lines << "Run: studiocast-open install-hints";
+        lines << "Run: ./build/studiocast-open video-install-hints";
         return lines.join("\n");
       }
       if (st.open_cuda_blocked_effects.contains(id)) {
-        return st.open_cuda_blocked_effects.value(id);
+        const QString reason = st.open_cuda_blocked_effects.value(id);
+        const QString code = ReasonCodeFromBlockedLine(reason);
+        if (!OpenCudaSetupReasonText(code).isEmpty())
+          return OpenCudaSetupText(st, /*includeInstallHints=*/true);
+        return reason;
       }
       return "Effect is unavailable.";
     }
@@ -3119,6 +3295,23 @@ void VideoPage::UpdateUiEnabled() {
 
     vbModelLabel_->setVisible(showModelRow);
     vbModelCombo_->setVisible(showModelRow);
+    if (showModelRow) {
+      const bool backendReady = st.open_cuda_present && st.open_cuda_ok;
+      const QString tip =
+          backendReady
+              ? QString()
+              : (st.open_cuda_present
+                     ? OpenCudaSetupText(st, /*includeInstallHints=*/true)
+                     : QStringLiteral(
+                           "Open Video / Open CUDA status is not available."));
+      vbModelCombo_->setEnabled(daemonReachable_ && backendReady);
+      vbModelLabel_->setEnabled(daemonReachable_ && backendReady);
+      vbModelCombo_->setToolTip(tip);
+      vbModelLabel_->setToolTip(tip);
+    } else {
+      vbModelCombo_->setToolTip(QString());
+      vbModelLabel_->setToolTip(QString());
+    }
   }
 
   // Open Video model selection for other effects. Model availability is
@@ -3292,9 +3485,18 @@ void VideoPage::UpdateUiEnabled() {
       }
 
       const bool has_models = !packs.empty();
-      combo->setEnabled(daemonReachable_ && has_models);
-      label->setEnabled(daemonReachable_);
-      if (!has_models) {
+      const bool backend_ready = st.open_cuda_present && st.open_cuda_ok;
+      combo->setEnabled(daemonReachable_ && has_models && backend_ready);
+      label->setEnabled(daemonReachable_ && backend_ready);
+      if (!backend_ready) {
+        const QString tip =
+            st.open_cuda_present
+                ? OpenCudaSetupText(st, /*includeInstallHints=*/true)
+                : QStringLiteral(
+                      "Open Video / Open CUDA status is not available.");
+        combo->setToolTip(tip);
+        label->setToolTip(tip);
+      } else if (!has_models) {
         const QString tip =
             QString("No daemon-reported models for task '%1'.\nOpen Engines & "
                     "Models for status and install hints.")

@@ -136,11 +136,145 @@ QString EngineProperty(const EngineStatus &engine) {
   return QStringLiteral("good");
 }
 
+QString ReasonCodeFromBlockedLine(const QString &line) {
+  const QString trimmed = line.trimmed();
+  const qsizetype colon = trimmed.lastIndexOf(QStringLiteral(": "));
+  if (colon >= 0)
+    return trimmed.mid(colon + 2).trimmed();
+  return trimmed;
+}
+
+QStringList OpenCudaBlockerCodes(const EngineStatus &engine) {
+  QStringList codes;
+  const auto add = [&](const QString &raw) {
+    const QString code = ReasonCodeFromBlockedLine(raw);
+    if (!code.isEmpty() && !codes.contains(code))
+      codes.push_back(code);
+  };
+  add(engine.blockedReason);
+  for (const QString &effect : engine.blockedEffects)
+    add(effect);
+  return codes;
+}
+
+bool OpenCudaHasBlockerCode(const EngineStatus &engine, const QString &code) {
+  return OpenCudaBlockerCodes(engine).contains(code);
+}
+
+bool OpenCudaHasSetupBlocker(const EngineStatus &engine) {
+  if (engine.id != QStringLiteral("open_cuda"))
+    return false;
+
+  const QStringList codes = OpenCudaBlockerCodes(engine);
+  for (const QString &code : codes) {
+    if (code == QStringLiteral("disabled_in_build") ||
+        code == QStringLiteral("onnxruntime_not_found") ||
+        code == QStringLiteral("onnxruntime_cuda_provider_unavailable") ||
+        code == QStringLiteral("cuda_unavailable")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+QString OpenCudaSetupReasonText(const QString &code) {
+  if (code == QStringLiteral("disabled_in_build")) {
+    return QStringLiteral(
+        "Open Video / Open CUDA is disabled in the running StudioCast build.");
+  }
+  if (code == QStringLiteral("onnxruntime_not_found")) {
+    return QStringLiteral(
+        "This StudioCast build was compiled without ONNX Runtime.");
+  }
+  if (code == QStringLiteral("onnxruntime_cuda_provider_unavailable")) {
+    return QStringLiteral(
+        "ONNX Runtime is available, but CUDAExecutionProvider is not.");
+  }
+  if (code == QStringLiteral("cuda_unavailable")) {
+    return QStringLiteral("The daemon could not initialize CUDA.");
+  }
+  if (code == QStringLiteral("missing_model_packs"))
+    return QStringLiteral("Required Open Video model packs are missing.");
+  return {};
+}
+
+QString OpenCudaSetupFixText(const QString &code) {
+  if (code == QStringLiteral("disabled_in_build")) {
+    return QStringLiteral(
+        "Fix: rebuild StudioCast with -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON, then "
+        "restart the GUI and daemon.");
+  }
+  if (code == QStringLiteral("onnxruntime_not_found")) {
+    return QStringLiteral(
+        "Fix: install or point CMake at ONNX Runtime, rebuild StudioCast, then "
+        "restart the GUI and daemon.");
+  }
+  if (code == QStringLiteral("onnxruntime_cuda_provider_unavailable")) {
+    return QStringLiteral(
+        "Fix: install or build ONNX Runtime with CUDAExecutionProvider support, "
+        "rebuild StudioCast, then restart the GUI and daemon.");
+  }
+  if (code == QStringLiteral("cuda_unavailable")) {
+    return QStringLiteral(
+        "Fix: check the NVIDIA driver/CUDA runtime and restart StudioCast after "
+        "CUDA initializes successfully.");
+  }
+  return {};
+}
+
+QStringList OpenCudaSetupGuidanceLines(const EngineStatus &engine) {
+  QStringList lines;
+  if (engine.id != QStringLiteral("open_cuda"))
+    return lines;
+
+  for (const QString &code : OpenCudaBlockerCodes(engine)) {
+    const QString reason = OpenCudaSetupReasonText(code);
+    const QString fix = OpenCudaSetupFixText(code);
+    if (!reason.isEmpty() && !lines.contains(reason))
+      lines.push_back(reason);
+    if (!fix.isEmpty() && !lines.contains(fix))
+      lines.push_back(fix);
+  }
+
+  if (OpenCudaHasBlockerCode(engine, QStringLiteral("disabled_in_build"))) {
+    const QString command = QStringLiteral(
+        "Source build command: cmake -S . -B build "
+        "-DSTUDIOCAST_ENABLE_OPEN_CUDA=ON && cmake --build build --target "
+        "studiocast studiocastd");
+    if (!lines.contains(command))
+      lines.push_back(command);
+  }
+
+  return lines;
+}
+
+QString OpenCudaSetupSummary(const EngineStatus &engine) {
+  const QStringList lines = OpenCudaSetupGuidanceLines(engine);
+  if (lines.isEmpty())
+    return {};
+
+  QString summary = lines.first();
+  if (lines.size() > 1)
+    summary += QChar(' ') + lines.at(1);
+  return summary;
+}
+
+QString OpenCudaSetupDisclaimerText(const EngineStatus &engine) {
+  const QStringList lines = OpenCudaSetupGuidanceLines(engine);
+  if (lines.isEmpty())
+    return {};
+  return lines.join(QStringLiteral("\n"));
+}
+
 QString EngineStateLabel(const EngineStatus &engine,
                          bool selectedByPreference) {
   if (!engine.present)
     return QStringLiteral("Unknown");
   if (!(engine.ok || engine.supported)) {
+    if (OpenCudaHasSetupBlocker(engine)) {
+      return selectedByPreference ? QStringLiteral("Selected setup required")
+                                  : QStringLiteral("Setup required");
+    }
     return selectedByPreference ? QStringLiteral("Selected unavailable")
                                 : QStringLiteral("Unavailable");
   }
@@ -149,6 +283,8 @@ QString EngineStateLabel(const EngineStatus &engine,
   }
   if (engine.configuredMissingModelCount > 0)
     return QStringLiteral("Model selection review");
+  if (OpenCudaHasSetupBlocker(engine))
+    return QStringLiteral("Partial setup required");
   if (!engine.blockedEffects.isEmpty())
     return QStringLiteral("Partially blocked");
   return QStringLiteral("Available");
@@ -161,12 +297,24 @@ QString EngineSummary(const EngineStatus &engine,
         .arg(engine.label);
 
   if (!(engine.ok || engine.supported)) {
+    if (OpenCudaHasSetupBlocker(engine))
+      return selectedByPreference
+                 ? QStringLiteral("This backend is currently selected.")
+                 : QStringLiteral("%1 requires setup before it can run.")
+                       .arg(engine.label);
+
     QString summary = engine.summary.trimmed();
     if (summary.isEmpty())
       summary = QStringLiteral("%1 is unavailable.").arg(engine.label);
     if (selectedByPreference)
       summary += QStringLiteral(" This backend is currently selected.");
     return summary;
+  }
+
+  const QString setup = OpenCudaSetupSummary(engine);
+  if (!setup.isEmpty()) {
+    return QStringLiteral("%1 is available, but some effects require setup.")
+        .arg(engine.label);
   }
 
   if (engine.missingModelCount > 0) {
@@ -297,6 +445,13 @@ QString EngineDetailsText(const EngineStatus &engine) {
     for (const QString &detail : engine.blockedDetails)
       lines << QStringLiteral("- %1").arg(detail);
   }
+  const QStringList setupGuidance = OpenCudaSetupGuidanceLines(engine);
+  if (!setupGuidance.isEmpty()) {
+    lines << QStringLiteral("");
+    lines << QStringLiteral("Setup guidance:");
+    for (const QString &line : setupGuidance)
+      lines << QStringLiteral("- %1").arg(line);
+  }
   if (!engine.availableEffects.isEmpty()) {
     lines << QStringLiteral("");
     lines << QStringLiteral("Available effects:");
@@ -401,6 +556,8 @@ bool ModelInstallRecommended(const EngineStatus &engine) {
   }
   if (!engine.present)
     return false;
+  if (OpenCudaHasSetupBlocker(engine))
+    return false;
   if (engine.missingModelCount > 0 || engine.configuredMissingModelCount > 0 ||
       HasMissingModelBlock(engine)) {
     return true;
@@ -425,6 +582,11 @@ QString ModelInstallStatusText(const EngineStatus &engine,
   }
   if (!engine.present)
     return QStringLiteral("Model diagnostics unavailable.");
+  if (OpenCudaHasSetupBlocker(engine)) {
+    return QStringLiteral(
+        "Resolve the Open Video setup issue above before downloading model "
+        "packs.");
+  }
   if (!installRecommended) {
     if (!(engine.ok || engine.supported) && engine.installedModelCount == 0) {
       return QStringLiteral(
@@ -569,6 +731,7 @@ EnginesModelsPage::CreateEngineCard(const QString &title,
   EngineCard card;
   card.engineId = engineId;
   card.frame = new QFrame(parent);
+  card.frame->setObjectName(engineId + QStringLiteral("_engine_card"));
   card.frame->setProperty("scRole", "engineCard");
   card.frame->setProperty("scStatus", "warning");
   auto *layout = new QVBoxLayout(card.frame);
@@ -579,8 +742,10 @@ EnginesModelsPage::CreateEngineCard(const QString &title,
   header->setContentsMargins(0, 0, 0, 0);
   header->setSpacing(10);
   card.title = ValueLabel(title, card.frame);
+  card.title->setObjectName(engineId + QStringLiteral("_engine_title"));
   card.title->setProperty("scRole", "homeCardTitle");
   card.state = new QLabel(QStringLiteral("Unknown"), card.frame);
+  card.state->setObjectName(engineId + QStringLiteral("_engine_state"));
   card.state->setProperty("scRole", "statusPill");
   card.state->setProperty("scStatus", "warning");
   card.state->setAlignment(Qt::AlignCenter);
@@ -590,9 +755,18 @@ EnginesModelsPage::CreateEngineCard(const QString &title,
 
   card.summary = MutedLabel(QStringLiteral("Diagnostics have not been read."),
                             card.frame);
+  card.summary->setObjectName(engineId + QStringLiteral("_engine_summary"));
+  card.setupDisclaimer = new QLabel(card.frame);
+  card.setupDisclaimer->setObjectName(engineId +
+                                      QStringLiteral("_setup_disclaimer"));
+  card.setupDisclaimer->setWordWrap(true);
+  card.setupDisclaimer->setProperty("scBanner", "warning");
+  card.setupDisclaimer->setVisible(false);
   card.models = MutedLabel(QStringLiteral("No model diagnostics reported."),
                            card.frame);
+  card.models->setObjectName(engineId + QStringLiteral("_engine_models"));
   layout->addWidget(card.summary);
+  layout->addWidget(card.setupDisclaimer);
   layout->addWidget(card.models);
 
   auto *actions = new QHBoxLayout();
@@ -600,11 +774,15 @@ EnginesModelsPage::CreateEngineCard(const QString &title,
   actions->setSpacing(10);
   card.downloadButton =
       new QPushButton(QStringLiteral("Download default models"), card.frame);
+  card.downloadButton->setObjectName(engineId +
+                                     QStringLiteral("_download_button"));
   card.downloadButton->setProperty("scVariant", "primary");
   card.downloadButton->setVisible(engineId == QStringLiteral("open_cuda") ||
                                   engineId == QStringLiteral("open_audio"));
   card.downloadButton->setEnabled(false);
   card.downloadStatus = MutedLabel(QString(), card.frame);
+  card.downloadStatus->setObjectName(engineId +
+                                     QStringLiteral("_download_status"));
   card.downloadStatus->setVisible(card.downloadButton->isVisible());
   actions->addWidget(card.downloadButton, 0);
   actions->addWidget(card.downloadStatus, 1);
@@ -619,7 +797,10 @@ EnginesModelsPage::CreateEngineCard(const QString &title,
   detailsGrid->addWidget(MutedLabel(QStringLiteral("Install Hints"), card.frame),
                          0, 1);
   card.details = DetailsBox(card.frame, 118);
+  card.details->setObjectName(engineId + QStringLiteral("_engine_details"));
   card.installHints = DetailsBox(card.frame, 118);
+  card.installHints->setObjectName(engineId +
+                                   QStringLiteral("_install_hints"));
   detailsGrid->addWidget(card.details, 1, 0);
   detailsGrid->addWidget(card.installHints, 1, 1);
   layout->addLayout(detailsGrid);
@@ -627,6 +808,7 @@ EnginesModelsPage::CreateEngineCard(const QString &title,
   layout->addWidget(MutedLabel(QStringLiteral("Raw Engine Diagnostics"),
                                card.frame));
   card.rawDetails = DetailsBox(card.frame, 130);
+  card.rawDetails->setObjectName(engineId + QStringLiteral("_raw_details"));
   layout->addWidget(card.rawDetails);
 
   return card;
@@ -644,6 +826,11 @@ void EnginesModelsPage::UpdateEngineCard(EngineCard *card,
   SetDynamicProperty(card->frame, "scStatus", prop);
 
   card->summary->setText(EngineSummary(engine, selectedByPreference));
+  if (card->setupDisclaimer) {
+    const QString disclaimer = OpenCudaSetupDisclaimerText(engine);
+    card->setupDisclaimer->setText(disclaimer);
+    card->setupDisclaimer->setVisible(!disclaimer.isEmpty());
+  }
   card->models->setText(ModelSummary(engine));
   if (card->downloadButton && card->downloadStatus) {
     const bool relevant = engine.id == QStringLiteral("open_cuda") ||

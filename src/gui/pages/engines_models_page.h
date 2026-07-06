@@ -31,6 +31,7 @@ private:
     QLabel *title = nullptr;
     QLabel *state = nullptr;
     QLabel *summary = nullptr;
+    QLabel *setupDisclaimer = nullptr;
     QLabel *models = nullptr;
     QPushButton *downloadButton = nullptr;
     QLabel *downloadStatus = nullptr;
