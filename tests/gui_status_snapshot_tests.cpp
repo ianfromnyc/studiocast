@@ -8,13 +8,15 @@
 #include <string>
 #include <thread>
 
-#include <QCoreApplication>
+#include <QApplication>
+#include <QComboBox>
 #include <QEventLoop>
 #include <QTimer>
 #include <unistd.h>
 
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
+#include "gui/pages/video_page.h"
 #include "gui/status/pending_daemon_write_guard.h"
 #include "gui/status/daemon_status_snapshot.h"
 #include "gui/status/status_poller.h"
@@ -1028,10 +1030,65 @@ bool TestPendingDaemonWriteGuardSkipsRoutineStatusUntilWriteSettles() {
                 "rejected write should allow forced daemon resync");
 }
 
+bool TestVideoPageKeepsUserSelectedInputWhenRoutineStatusStillAuto() {
+  studiocast::gui::VideoPage page;
+  auto *inputCombo =
+      page.findChild<QComboBox *>(QStringLiteral("videoInputCombo"));
+  if (!Expect(inputCombo != nullptr, "video input combo should be findable"))
+    return false;
+
+  const QString selectedDevice = QStringLiteral("/dev/video-test-selection");
+  if (inputCombo->findData(selectedDevice) < 0)
+    inputCombo->addItem(QStringLiteral("Test Camera"), selectedDevice);
+
+  const int selectedIndex = inputCombo->findData(selectedDevice);
+  inputCombo->setCurrentIndex(selectedIndex);
+  if (!Expect(inputCombo->currentData().toString() == selectedDevice,
+              "test setup should select explicit input camera"))
+    return false;
+
+  const QString daemonStillAuto = QStringLiteral(
+      R"({
+        "service_running":true,
+        "video":{
+          "enabled":false,
+          "virtual_device_present":true,
+          "virtual_device_available":true,
+          "consumer_count":0,
+          "input_device":"",
+          "output_device":"",
+          "width":1280,
+          "height":720,
+          "fps":30,
+          "pipeline":{"running":false,"starting":false}
+        },
+        "audio":{
+          "enabled":false,
+          "mic_present":true,
+          "source_error":"",
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  page.UpdateStatus(
+      studiocast::gui::DaemonStatusSnapshot::FromJson(daemonStillAuto));
+  return Expect(inputCombo->currentData().toString() == selectedDevice,
+                "routine status must not reset a user-selected input to auto");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
-  QCoreApplication app(argc, argv);
+  (void)::setenv("QT_QPA_PLATFORM", "offscreen", 0);
+  QApplication app(argc, argv);
 
   bool ok = true;
   ok = TestUnreachableStatus() && ok;
@@ -1049,5 +1106,6 @@ int main(int argc, char **argv) {
   ok = TestRawDiagnosticsFallbacks() && ok;
   ok = TestStatusPollerRefreshesDiagnosticsOutOfBand() && ok;
   ok = TestPendingDaemonWriteGuardSkipsRoutineStatusUntilWriteSettles() && ok;
+  ok = TestVideoPageKeepsUserSelectedInputWhenRoutineStatusStillAuto() && ok;
   return ok ? 0 : 1;
 }

@@ -26,6 +26,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSizePolicy>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStandardItemModel>
@@ -904,12 +905,14 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
 
   setupGrid->addWidget(new QLabel("Input camera:", setupBox), 0, 0);
   inputCombo_ = new QComboBox(setupBox);
+  inputCombo_->setObjectName(QStringLiteral("videoInputCombo"));
   setupGrid->addWidget(inputCombo_, 0, 1);
   refreshBtn_ = new QPushButton("Refresh", setupBox);
   setupGrid->addWidget(refreshBtn_, 0, 2);
 
   setupGrid->addWidget(new QLabel("Virtual camera:", setupBox), 1, 0);
   outputCombo_ = new QComboBox(setupBox);
+  outputCombo_->setObjectName(QStringLiteral("videoOutputCombo"));
   setupGrid->addWidget(outputCombo_, 1, 1, 1, 2);
 
   auto *formatRow = new QHBoxLayout();
@@ -1235,6 +1238,16 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   connect(refreshBtn_, &QPushButton::clicked, this, &VideoPage::Refresh);
   connect(copyCmdBtn_, &QPushButton::clicked, this,
           &VideoPage::CopySuggestedCommand);
+  connect(inputCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, [this](int) { MarkSetupControlsEdited(); });
+  connect(outputCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, [this](int) { MarkSetupControlsEdited(); });
+  connect(widthSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this,
+          [this](int) { MarkSetupControlsEdited(); });
+  connect(heightSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this,
+          [this](int) { MarkSetupControlsEdited(); });
+  connect(fpsSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this,
+          [this](int) { MarkSetupControlsEdited(); });
   connect(startBtn_, &QPushButton::clicked, this, &VideoPage::OnStart);
   connect(stopBtn_, &QPushButton::clicked, this, &VideoPage::OnStop);
   connect(previewCheck_, &QCheckBox::toggled, this,
@@ -1377,6 +1390,9 @@ void VideoPage::Refresh() {
   const QString prevIn = inputCombo_->currentData().toString();
   const QString prevOut = outputCombo_->currentData().toString();
 
+  const QSignalBlocker blockInput(inputCombo_);
+  const QSignalBlocker blockOutput(outputCombo_);
+
   inputCombo_->clear();
   outputCombo_->clear();
 
@@ -1482,6 +1498,7 @@ bool VideoPage::SyncFromCachedDaemonStatus() {
   const int w = st.width;
   const int h = st.height;
   const int fps = st.fps;
+  const bool applySetupControls = st.enabled || !setupControlsDirty_;
   effects_ = st.effects_valid
                  ? st.effects
                  : studiocast::video::effects::BroadcastCameraEffects{};
@@ -1541,23 +1558,39 @@ bool VideoPage::SyncFromCachedDaemonStatus() {
   const int vignetteIntensity = effects_.vignette.intensity;
   const bool vignetteCenterOnFace = effects_.vignette.center_on_tracked_face;
 
-  // Apply to UI (best-effort; ignore if device not found in combo).
-  const QString inKey = input.isEmpty() ? "auto" : input;
-  const int inIdx = inputCombo_->findData(inKey);
-  if (inIdx >= 0)
-    inputCombo_->setCurrentIndex(inIdx);
+  // Apply setup controls only while they have no unsaved local edits. Effects
+  // still resync routinely because effect edits are written immediately.
+  if (applySetupControls) {
+    const QString inKey = input.isEmpty() ? "auto" : input;
+    const int inIdx = inputCombo_->findData(inKey);
+    if (inIdx >= 0) {
+      const QSignalBlocker blockInput(inputCombo_);
+      inputCombo_->setCurrentIndex(inIdx);
+    }
 
-  const QString outKey = output.isEmpty() ? "auto" : output;
-  const int outIdx = outputCombo_->findData(outKey);
-  if (outIdx >= 0)
-    outputCombo_->setCurrentIndex(outIdx);
+    const QString outKey = output.isEmpty() ? "auto" : output;
+    const int outIdx = outputCombo_->findData(outKey);
+    if (outIdx >= 0) {
+      const QSignalBlocker blockOutput(outputCombo_);
+      outputCombo_->setCurrentIndex(outIdx);
+    }
 
-  if (w > 0)
-    widthSpin_->setValue(w);
-  if (h > 0)
-    heightSpin_->setValue(h);
-  if (fps > 0)
-    fpsSpin_->setValue(fps);
+    if (w > 0) {
+      const QSignalBlocker blockWidth(widthSpin_);
+      widthSpin_->setValue(w);
+    }
+    if (h > 0) {
+      const QSignalBlocker blockHeight(heightSpin_);
+      heightSpin_->setValue(h);
+    }
+    if (fps > 0) {
+      const QSignalBlocker blockFps(fpsSpin_);
+      fpsSpin_->setValue(fps);
+    }
+
+    if (st.enabled)
+      setupControlsDirty_ = false;
+  }
 
   if (backgroundCombo_) {
     backgroundCombo_->blockSignals(true);
@@ -1728,6 +1761,8 @@ void VideoPage::ScheduleDaemonVideoEffectsWrite() {
   effectsWriteGuard_.MarkPending();
   effectsWriteDebounceTimer_->start();
 }
+
+void VideoPage::MarkSetupControlsEdited() { setupControlsDirty_ = true; }
 
 studiocast::video::effects::BroadcastCameraEffects
 VideoPage::BuildCandidateEffectsFromUi() const {
@@ -1906,6 +1941,7 @@ bool VideoPage::SendDaemonVideoConfig() {
     return false;
   }
 
+  setupControlsDirty_ = false;
   emit StatusRefreshRequested();
   return true;
 }

@@ -1,6 +1,9 @@
 #include <algorithm>
+#include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <string>
@@ -14,6 +17,7 @@
 #include "core/open_audio/open_audio_diagnostics.h"
 #include "core/open_audio/open_audio_onnx_session.h"
 #include "core/open_audio/model_pack_registry.h"
+#include "core/open_video/diagnose.h"
 #include "core/open_video/diagnostics.h"
 #include "core/open_video/model_pack_registry.h"
 
@@ -117,6 +121,122 @@ const Result *FindResult(const std::vector<Result> &results,
   return nullptr;
 }
 
+class ScopedDataHome {
+public:
+  explicit ScopedDataHome(const std::string &name) {
+    had_old_ = std::getenv("XDG_DATA_HOME") != nullptr;
+    if (had_old_)
+      old_ = std::getenv("XDG_DATA_HOME");
+
+    std::error_code ec;
+    const auto tmp = std::filesystem::temp_directory_path(ec);
+    if (ec) {
+      error_ = "failed to resolve temp directory: " + ec.message();
+      return;
+    }
+
+    dir_ = tmp /
+           (name + "-" + std::to_string(static_cast<long long>(::getpid())));
+    std::filesystem::remove_all(dir_, ec);
+    std::filesystem::create_directories(dir_, ec);
+    if (ec) {
+      error_ = "failed to create temp data dir: " + ec.message();
+      return;
+    }
+
+    if (::setenv("XDG_DATA_HOME", dir_.string().c_str(), 1) != 0) {
+      error_ = std::string("setenv(XDG_DATA_HOME) failed: ") +
+               std::strerror(errno);
+    }
+  }
+
+  ~ScopedDataHome() {
+    if (had_old_) {
+      (void)::setenv("XDG_DATA_HOME", old_.c_str(), 1);
+    } else {
+      (void)::unsetenv("XDG_DATA_HOME");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir_, ec);
+  }
+
+  bool ok() const { return error_.empty(); }
+  const std::string &error() const { return error_; }
+  const std::filesystem::path &path() const { return dir_; }
+
+private:
+  std::filesystem::path dir_;
+  bool had_old_ = false;
+  std::string old_;
+  std::string error_;
+};
+
+bool WriteTextFile(const std::filesystem::path &path,
+                   const std::string &text) {
+  std::error_code ec;
+  std::filesystem::create_directories(path.parent_path(), ec);
+  if (ec) {
+    std::cerr << "failed to create parent directory for " << path << ": "
+              << ec.message() << "\n";
+    return false;
+  }
+
+  std::ofstream out(path, std::ios::out | std::ios::trunc);
+  if (!out) {
+    std::cerr << "failed to open " << path << " for write\n";
+    return false;
+  }
+  out << text;
+  return static_cast<bool>(out);
+}
+
+bool WriteOpenVideoMattingPack(const std::filesystem::path &root,
+                               const std::string &dir_name,
+                               const std::string &id) {
+  const auto dir = root / "matting" / dir_name;
+  const std::string manifest =
+      std::string("{\n") + "  \"id\":\"" + id + "\",\n" +
+      "  \"display_name\":\"" + id + "\",\n" +
+      "  \"task\":\"matting\",\n" +
+      "  \"onnx_filename\":\"model.onnx\",\n" +
+      "  \"input\":{\"name\":\"input\",\"layout\":\"nchw\","
+      "\"dtype\":\"float32\",\"width\":256,\"height\":256,"
+      "\"channels\":3},\n" +
+      "  \"output\":{\"name\":\"alpha\",\"kind\":\"alpha\","
+      "\"dtype\":\"float32\"},\n" +
+      "  \"preprocess\":{\"mean\":[0.5,0.5,0.5],"
+      "\"std\":[0.5,0.5,0.5],\"color\":\"rgb\","
+      "\"range\":\"0..1\"}\n" +
+      "}\n";
+  return WriteTextFile(dir / "model.onnx", "synthetic matting model\n") &&
+         WriteTextFile(dir / "LICENSE.txt", "synthetic test license\n") &&
+         WriteTextFile(dir / "model.json", manifest);
+}
+
+bool WriteOpenVideoV2Pack(const std::filesystem::path &root,
+                          const std::string &task, const std::string &id,
+                          const std::string &file_name = "model.onnx") {
+  const auto dir = root / task / id;
+  const std::string manifest =
+      std::string("{\n") + "  \"schema_version\":2,\n" +
+      "  \"id\":\"" + id + "\",\n" + "  \"display_name\":\"" + id +
+      "\",\n" + "  \"task\":\"" + task + "\",\n" +
+      "  \"files\":[{\"name\":\"" + file_name +
+      "\",\"kind\":\"onnx\",\"role\":\"main\",\"sha256\":\"\"}]\n" + "}\n";
+  return WriteTextFile(dir / file_name, "synthetic model file\n") &&
+         WriteTextFile(dir / "LICENSE.txt", "synthetic test license\n") &&
+         WriteTextFile(dir / "model.json", manifest);
+}
+
+bool DiagnosticsContainsModel(
+    const studiocast::open_cuda::OpenCudaDiagnostics &d,
+    const std::string &id, const std::string &task) {
+  return std::any_of(d.models.begin(), d.models.end(), [&](const auto &m) {
+    return m.id == id && m.task == task;
+  });
+}
+
 bool TestOpenVideoIntegrity() {
   namespace ov = studiocast::open_video;
   const auto root = std::filesystem::path("tests") / "data" / "models" /
@@ -186,6 +306,63 @@ bool TestOpenVideoIntegrity() {
     return false;
   return ExpectEq("video_placeholder_pack status", placeholder->status,
                   "placeholder");
+}
+
+bool TestOpenCudaDiagnosticsReportAllOpenVideoTasks() {
+  ScopedDataHome dataHome("studiocast-open-video-diagnostics-test");
+  if (!Expect(dataHome.ok(), dataHome.error()))
+    return false;
+
+  const auto root =
+      dataHome.path() / "studiocast" / "models" / "open_video";
+  if (!WriteOpenVideoMattingPack(root, "modnet-webnn-256-fp32",
+                                 "modnet-webnn-256-fp32") ||
+      !WriteOpenVideoMattingPack(root, "duplicate-modnet",
+                                 "modnet-webnn-256-fp32") ||
+      !WriteOpenVideoV2Pack(root, "face_detection",
+                            "yunet_opencv_zoo_2023mar_fp32") ||
+      !WriteOpenVideoV2Pack(root, "face_landmarks", "dlib_68_ibug_300w",
+                            "shape_predictor_68_face_landmarks.dat") ||
+      !WriteOpenVideoV2Pack(root, "eye_contact",
+                            "gaze_correction_cam_flx_v0_1_1") ||
+      !WriteOpenVideoV2Pack(root, "video_denoise",
+                            "fastdvdnet_sigma15")) {
+    return false;
+  }
+
+  const auto diag = studiocast::open_cuda::DiagnoseOpenCudaDefault();
+
+  const auto installedContains = [&](const std::string &id) {
+    return std::find(diag.installed_models.begin(),
+                     diag.installed_models.end(),
+                     id) != diag.installed_models.end();
+  };
+
+  return ExpectEq("Open CUDA default model remains the matting default",
+                  diag.default_model_id, "modnet-webnn-256-fp32") &&
+         Expect(DiagnosticsContainsModel(diag, "modnet-webnn-256-fp32",
+                                         "matting"),
+                "Open CUDA diagnostics should include matting packs") &&
+         Expect(DiagnosticsContainsModel(diag,
+                                         "yunet_opencv_zoo_2023mar_fp32",
+                                         "face_detection"),
+                "Open CUDA diagnostics should include face_detection packs") &&
+         Expect(DiagnosticsContainsModel(diag, "dlib_68_ibug_300w",
+                                         "face_landmarks"),
+                "Open CUDA diagnostics should include face_landmarks packs") &&
+         Expect(DiagnosticsContainsModel(diag,
+                                         "gaze_correction_cam_flx_v0_1_1",
+                                         "eye_contact"),
+                "Open CUDA diagnostics should include eye_contact packs") &&
+         Expect(DiagnosticsContainsModel(diag, "fastdvdnet_sigma15",
+                                         "video_denoise"),
+                "Open CUDA diagnostics should include video_denoise packs") &&
+         Expect(installedContains("yunet_opencv_zoo_2023mar_fp32"),
+                "installed_models should include non-matting model IDs") &&
+         Expect(diag.missing_models.find("modnet-webnn-256-fp32") ==
+                    diag.missing_models.end(),
+                "duplicate installed model IDs should not be reported as "
+                "missing model packs");
 }
 
 bool TestOpenAudioIntegrity() {
@@ -580,6 +757,9 @@ bool TestOnnxWarningsPropagateToDiagnosticsJson() {
 int main() {
   bool ok = true;
   ok = RunNamedTest("open_video_integrity", TestOpenVideoIntegrity) && ok;
+  ok = RunNamedTest("open_cuda_diagnostics_open_video_tasks",
+                    TestOpenCudaDiagnosticsReportAllOpenVideoTasks, true) &&
+       ok;
   ok = RunNamedTest("open_audio_integrity", TestOpenAudioIntegrity) && ok;
   ok = RunNamedTest("onnx_cpu_only", TestOnnxCpuOnlySessionDiagnostics,
                     true) &&

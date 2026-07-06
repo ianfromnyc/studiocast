@@ -755,6 +755,10 @@ if (BUILD_TESTING)
 
     add_executable(studiocast-gui-status-tests
             tests/gui_status_snapshot_tests.cpp
+            src/gui/text_edit_utils.h
+            src/gui/text_edit_utils.cpp
+            src/gui/pages/video_page.h
+            src/gui/pages/video_page.cpp
             src/gui/status/daemon_status_snapshot.h
             src/gui/status/daemon_status_snapshot.cpp
             src/gui/status/pending_daemon_write_guard.h

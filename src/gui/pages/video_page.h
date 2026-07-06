@@ -89,6 +89,7 @@ private:
   bool SyncFromCachedDaemonStatus();
   void ScheduleDaemonVideoEffectsWrite();
   void ResyncControlsFromCachedStatus(bool force = false);
+  void MarkSetupControlsEdited();
   studiocast::video::effects::BroadcastCameraEffects
   BuildCandidateEffectsFromUi() const;
 
@@ -202,6 +203,7 @@ private:
   bool daemonReachable_ = false;
   std::string daemonLastStatusJson_;
   QString daemonStatusDetail_;
+  bool setupControlsDirty_ = false;
 
   // Canonical local effects model (Broadcast schema). This is the single
   // source of truth for what the GUI intends to apply.
