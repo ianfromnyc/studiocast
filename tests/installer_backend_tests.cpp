@@ -114,6 +114,9 @@ bool TestRepairPlanIncludesDefaultOpenBackendConfigureFlags() {
          ExpectContains("installer backend plan", result.stdout_str,
                         "-DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON") &&
          ExpectContains("installer backend plan", result.stdout_str,
+                        "Enable CPU resize fallback in the daemon config by "
+                        "default") &&
+         ExpectContains("installer backend plan", result.stdout_str,
                         "Force Linux CMake configuration to keep Open Video/"
                         "Open CUDA and Open Audio enabled");
 }
@@ -157,7 +160,9 @@ bool TestRepairDryRunIncludesOpenBackendConfigureFlags() {
          ExpectContains("installer backend repair dry-run", result.stdout_str,
                         "-DSTUDIOCAST_ENABLE_OPEN_CUDA=ON") &&
          ExpectContains("installer backend repair dry-run", result.stdout_str,
-                        "-DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON");
+                        "-DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON") &&
+         ExpectContains("installer backend repair dry-run", result.stdout_str,
+                        "video.scaling.allow_cpu_resize");
 }
 
 bool TestStatusReportsOptionalComponents() {

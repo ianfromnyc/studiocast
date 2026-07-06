@@ -40,7 +40,7 @@ struct ReadinessFields {
 };
 
 ReadinessFields ReadinessEntryFor(const std::string &statusJson,
-                                   const std::string &effectId) {
+                                  const std::string &effectId) {
   ReadinessFields out;
   studiocast::util::json::Value rootValue;
   std::string error;
@@ -107,6 +107,52 @@ std::string StatusForEffects(
                       /*openAudioJson=*/"", /*loopbackJson=*/"");
 }
 
+std::string StatusForVideoConfig(
+    const studiocast::video::VirtualCameraServiceConfig &videoConfig) {
+  studiocast::video::VirtualCameraServiceStatus videoStatus;
+  videoStatus.service_running = true;
+  videoStatus.virtual_device_present = true;
+  videoStatus.virtual_device_available = true;
+
+  studiocast::audio::VirtualAudioServiceStatus audioStatus;
+  audioStatus.service_running = true;
+  audioStatus.mic_present = true;
+  audioStatus.speakers_present = true;
+
+  studiocast::audio::VirtualAudioServiceConfig audioConfig;
+
+  return StatusToJson(videoStatus, videoConfig, audioStatus, audioConfig,
+                      std::filesystem::path("/tmp/studiocastd-test.sock"),
+                      /*maxineJson=*/"", /*openCudaJson=*/"",
+                      /*openAudioJson=*/"", /*loopbackJson=*/"");
+}
+
+bool TestVideoStatusReportsAllowCpuResize() {
+  studiocast::video::VirtualCameraServiceConfig videoConfig;
+  videoConfig.pipeline.allow_cpu_resize = false;
+
+  studiocast::util::json::Value rootValue;
+  std::string error;
+  if (!studiocast::util::json::Parse(StatusForVideoConfig(videoConfig),
+                                     &rootValue, &error)) {
+    std::cerr << "status JSON should parse: " << error << "\n";
+    return false;
+  }
+
+  const JsonObject *root = rootValue.AsObject();
+  if (!root) {
+    std::cerr << "status root should be an object\n";
+    return false;
+  }
+
+  const JsonObject *video = ObjectAt(*root, "video", "video should exist");
+  if (!video)
+    return false;
+
+  return Expect(!JsonBoolField(*video, "allow_cpu_resize", true),
+                "video status should report allow_cpu_resize=false");
+}
+
 bool TestExplicitOpenCudaEffectUnknownWithoutDiagnostics() {
   studiocast::video::effects::BroadcastCameraEffects effects;
   effects.engine =
@@ -149,6 +195,7 @@ bool TestBuiltinEffectReadyWithoutDiagnostics() {
 
 int main() {
   bool ok = true;
+  ok = TestVideoStatusReportsAllowCpuResize() && ok;
   ok = TestExplicitOpenCudaEffectUnknownWithoutDiagnostics() && ok;
   ok = TestBuiltinEffectReadyWithoutDiagnostics() && ok;
   return ok ? 0 : 1;

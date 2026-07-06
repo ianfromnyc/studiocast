@@ -742,6 +742,7 @@ plan_workflow() {
     if [[ "${OPEN_BACKENDS}" -eq 1 ]]; then
       PLAN_CHANGES+=("Force Linux CMake configuration to keep Open Video/Open CUDA and Open Audio enabled.")
     fi
+    PLAN_CHANGES+=("Enable CPU resize fallback in the daemon config by default.")
     PLAN_CHANGES+=("Write install manifest: ${MANIFEST_PATH}.")
   fi
 
@@ -980,6 +981,45 @@ install_models_if_requested() {
   run_cmd "${EFFECTIVE_SOURCE_DIR}/scripts/install.sh" "${video_args[@]}"
 }
 
+configure_daemon_defaults() {
+  local conf="${APP_CONFIG_DIR}/daemon.conf"
+  log "Ensuring daemon CPU resize fallback is enabled by default"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    print_cmd mkdir -p -- "${APP_CONFIG_DIR}"
+    printf '+ ensure-daemon-config %q %q\n' "${conf}" "video.scaling.allow_cpu_resize=true"
+    return 0
+  fi
+
+  mkdir -p -- "${APP_CONFIG_DIR}"
+  if [[ ! -f "${conf}" ]]; then
+    {
+      printf '# StudioCast daemon (studiocastd) configuration\n'
+      printf '# This file is managed by the StudioCast GUI / studiocastctl.\n\n'
+      printf 'video.scaling.allow_cpu_resize = true\n'
+    } > "${conf}"
+    return 0
+  fi
+
+  local tmp="${conf}.tmp"
+  awk '
+    BEGIN { done = 0 }
+    /^[[:space:]]*video[.]scaling[.]allow_cpu_resize[[:space:]]*=/ {
+      print "video.scaling.allow_cpu_resize = true"
+      done = 1
+      next
+    }
+    { print }
+    END {
+      if (!done) {
+        print ""
+        print "video.scaling.allow_cpu_resize = true"
+      }
+    }
+  ' "${conf}" > "${tmp}"
+  mv -- "${tmp}" "${conf}"
+}
+
 write_manifest() {
   local state="$1"
   local version="$2"
@@ -1073,6 +1113,7 @@ run_install_like_workflow() {
   run_setup_deps
   configure_build
   build_studiocast
+  configure_daemon_defaults
   install_binaries_and_service
   install_models_if_requested
 

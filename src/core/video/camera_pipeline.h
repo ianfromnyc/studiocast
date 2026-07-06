@@ -53,13 +53,13 @@ struct CameraPipelineConfig {
   ScalingBackendPreference scaling_backend =
       ScalingBackendPreference::auto_select;
 
-  // When false (default), the pipeline will NOT perform CPU resizing when
-  // output dimensions differ from the source frame.
+  // When false, the pipeline will NOT perform CPU resizing when output
+  // dimensions differ from the source frame.
   //
   // If an output resize is required and GPU resize is unavailable, the
   // pipeline reports an explicit error and stops instead of silently
   // spending tens of milliseconds per frame.
-  bool allow_cpu_resize = false;
+  bool allow_cpu_resize = true;
 
   studiocast::video::effects::BroadcastCameraEffects effects{};
 };

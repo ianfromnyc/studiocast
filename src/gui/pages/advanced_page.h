@@ -33,6 +33,7 @@ public:
 
 private slots:
   void OnAlwaysOnToggled(bool checked);
+  void OnAllowCpuResizeToggled(bool checked);
   void OnCreateVirtualMic();
   void OnDestroyVirtualMic();
   void OnEnableVirtualSpeakers();
@@ -59,9 +60,8 @@ private:
   void ApplySnapshotJson(const QJsonObject &root);
   void RefreshPulseState();
   void ApplyPulseRefreshResult(const PulseRefreshResult &result);
-  void RefreshLegacySources(const std::vector<
-                            studiocast::audio::pulse::PactlSourceInfo>
-                                &sources);
+  void RefreshLegacySources(
+      const std::vector<studiocast::audio::pulse::PactlSourceInfo> &sources);
   void UpdateLegacyPorts();
   void UpdateButtonStates();
 
@@ -73,8 +73,7 @@ private:
   bool SaveVideoModelOverrides(QString *error);
 
   bool ConfirmDestructive(const QString &title, const QString &text,
-                          const QString &detail,
-                          const QString &confirmText);
+                          const QString &detail, const QString &confirmText);
   void SetResult(const QString &text, const QString &status);
   void ShowFailure(const QString &title, const QString &details);
 
@@ -87,6 +86,7 @@ private:
 
   QLabel *cameraStateLabel_ = nullptr;
   QCheckBox *alwaysOnCheck_ = nullptr;
+  QCheckBox *allowCpuResizeCheck_ = nullptr;
 
   QLabel *audioLifecycleLabel_ = nullptr;
   QLabel *pulseStateLabel_ = nullptr;
@@ -125,6 +125,7 @@ private:
   bool updatingUi_ = false;
   bool daemonReachable_ = false;
   bool currentAlwaysOn_ = false;
+  bool currentAllowCpuResize_ = true;
   bool pactlOk_ = false;
   bool hasVirtualMicSink_ = false;
   bool hasVirtualMicSource_ = false;

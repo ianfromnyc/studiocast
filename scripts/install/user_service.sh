@@ -83,6 +83,12 @@ confirm() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+print_cmd() {
+  printf '+ '
+  printf '%q ' "$@"
+  printf '\n'
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 UNIT_SRC="${REPO_ROOT}/packaging/systemd/user/studiocastd.service"
@@ -121,6 +127,7 @@ normalize_build_dir() {
 
 XDG_CONFIG_HOME_DIR="${XDG_CONFIG_HOME:-$HOME_DIR/.config}"
 SYSTEMD_USER_DIR="${XDG_CONFIG_HOME_DIR}/systemd/user"
+APP_CONFIG_DIR="${XDG_CONFIG_HOME_DIR}/studiocast"
 
 LOCAL_BIN_DIR="${HOME_DIR}/.local/bin"
 UNIT_DST="${SYSTEMD_USER_DIR}/studiocastd.service"
@@ -168,6 +175,45 @@ install_unit() {
   run install -m 0644 -- "$UNIT_SRC" "$UNIT_DST"
 }
 
+configure_daemon_defaults() {
+  local conf="${APP_CONFIG_DIR}/daemon.conf"
+  log "Ensuring daemon CPU resize fallback is enabled by default"
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    print_cmd mkdir -p -- "$APP_CONFIG_DIR"
+    printf '+ ensure-daemon-config %q %q\n' "$conf" "video.scaling.allow_cpu_resize=true"
+    return 0
+  fi
+
+  mkdir -p -- "$APP_CONFIG_DIR"
+  if [[ ! -f "$conf" ]]; then
+    {
+      printf '# StudioCast daemon (studiocastd) configuration\n'
+      printf '# This file is managed by the StudioCast GUI / studiocastctl.\n\n'
+      printf 'video.scaling.allow_cpu_resize = true\n'
+    } > "$conf"
+    return 0
+  fi
+
+  local tmp="${conf}.tmp"
+  awk '
+    BEGIN { done = 0 }
+    /^[[:space:]]*video[.]scaling[.]allow_cpu_resize[[:space:]]*=/ {
+      print "video.scaling.allow_cpu_resize = true"
+      done = 1
+      next
+    }
+    { print }
+    END {
+      if (!done) {
+        print ""
+        print "video.scaling.allow_cpu_resize = true"
+      }
+    }
+  ' "$conf" > "$tmp"
+  mv -- "$tmp" "$conf"
+}
+
 enable_unit() {
   if ! have_cmd systemctl; then
     log "systemctl not found; installed unit but cannot enable/start it automatically."
@@ -197,6 +243,8 @@ main() {
   if [[ "$LINK_BINS" -eq 1 ]]; then
     link_bins
   fi
+
+  configure_daemon_defaults
 
   if [[ "$LINK_BINS_ONLY" -eq 1 ]]; then
     log "Skipping systemd user service install/start (--link-bins-only)."

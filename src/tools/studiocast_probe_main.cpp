@@ -2667,9 +2667,13 @@ int RunSelfTest() {
                  dc.video_effects.virtual_key_light.enabled);
       expectIntEq("daemon_config migrate key_light intensity",
                   dc.video_effects.virtual_key_light.intensity, 42);
+      expectTrue("daemon_config default allow CPU resize",
+                 dc.video_allow_cpu_resize);
 
       const auto vc = studiocast::config::ToVideoServiceConfig(dc);
       expectTrue("ToVideoServiceConfig mirror", vc.pipeline.effects.mirror);
+      expectTrue("ToVideoServiceConfig allow CPU resize",
+                 vc.pipeline.allow_cpu_resize);
       expectTrue("ToVideoServiceConfig scaling backend gpu",
                  vc.pipeline.scaling_backend ==
                      studiocast::video::ScalingBackendPreference::gpu);
@@ -2755,6 +2759,9 @@ int RunSelfTest() {
           expectTrue("saved config has video.scaling.backend",
                      content.find("video.scaling.backend") !=
                          std::string::npos);
+          expectTrue("saved config has video.scaling.allow_cpu_resize true",
+                     content.find("video.scaling.allow_cpu_resize = true") !=
+                         std::string::npos);
           expectTrue("saved config removes video.mirror",
                      content.find("video.mirror") == std::string::npos);
           expectTrue("saved config removes video.background",
@@ -2766,6 +2773,7 @@ int RunSelfTest() {
 
         const auto dc2 = studiocast::config::LoadDaemonConfig();
         const auto vc2 = studiocast::config::ToVideoServiceConfig(dc2);
+        expectTrue("roundtrip allow CPU resize", vc2.pipeline.allow_cpu_resize);
         expectTrue("roundtrip vb blur",
                    vc2.pipeline.effects.virtual_background.mode ==
                        studiocast::video::effects::VirtualBackgroundMode::blur);
@@ -2794,6 +2802,21 @@ int RunSelfTest() {
                    ac2.effects.microphone.room_echo_removal_enabled);
         expectIntEq("roundtrip audio strength", ac2.effects.microphone.strength,
                     55);
+      }
+
+      // Explicit CPU-resize opt-out should still be respected.
+      {
+        std::ofstream out(confPath);
+        out << "video.scaling.allow_cpu_resize = false\n";
+      }
+      {
+        const auto dc_no_cpu = studiocast::config::LoadDaemonConfig();
+        expectTrue("explicit CPU resize opt-out parses false",
+                   !dc_no_cpu.video_allow_cpu_resize);
+        const auto vc_no_cpu =
+            studiocast::config::ToVideoServiceConfig(dc_no_cpu);
+        expectTrue("explicit CPU resize opt-out reaches service config",
+                   !vc_no_cpu.pipeline.allow_cpu_resize);
       }
 
       // Audio effects JSON parsing should tolerate unknown keys

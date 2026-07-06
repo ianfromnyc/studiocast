@@ -320,32 +320,27 @@ DiagnosticsJsonSnapshot RefreshDiagnosticsJsonCache() {
   return snapshot;
 }
 
-std::string DiagnosticsJsonSnapshotToJson(
-    const DiagnosticsJsonSnapshot &snapshot) {
+std::string
+DiagnosticsJsonSnapshotToJson(const DiagnosticsJsonSnapshot &snapshot) {
   std::ostringstream oss;
   oss << "{";
   oss << "\"engines\":{";
   oss << "\"maxine\":"
-      << (snapshot.maxine.empty() ? std::string("{}") : snapshot.maxine)
-      << ",";
+      << (snapshot.maxine.empty() ? std::string("{}") : snapshot.maxine) << ",";
   oss << "\"open_cuda\":"
-      << (snapshot.open_cuda.empty() ? std::string("{}")
-                                     : snapshot.open_cuda)
+      << (snapshot.open_cuda.empty() ? std::string("{}") : snapshot.open_cuda)
       << ",";
   oss << "\"open_audio\":"
       << (snapshot.open_audio.empty() ? std::string("{}")
                                       : snapshot.open_audio);
   oss << "},";
   oss << "\"maxine\":"
-      << (snapshot.maxine.empty() ? std::string("{}") : snapshot.maxine)
-      << ",";
+      << (snapshot.maxine.empty() ? std::string("{}") : snapshot.maxine) << ",";
   oss << "\"open_cuda\":"
-      << (snapshot.open_cuda.empty() ? std::string("{}")
-                                     : snapshot.open_cuda)
+      << (snapshot.open_cuda.empty() ? std::string("{}") : snapshot.open_cuda)
       << ",";
   oss << "\"open_audio\":"
-      << (snapshot.open_audio.empty() ? std::string("{}")
-                                      : snapshot.open_audio)
+      << (snapshot.open_audio.empty() ? std::string("{}") : snapshot.open_audio)
       << ",";
   oss << "\"virtual_device_diagnostics\":"
       << (snapshot.loopback.empty() ? std::string("{}") : snapshot.loopback);
@@ -416,8 +411,8 @@ std::string JsonStringArrayJoined(const studiocast::util::json::Value &value) {
   return out;
 }
 
-std::map<std::string, std::string>
-JsonStringishMap(const JsonObject &obj, const std::string &key) {
+std::map<std::string, std::string> JsonStringishMap(const JsonObject &obj,
+                                                    const std::string &key) {
   std::map<std::string, std::string> out;
   const JsonObject *map = JsonObjectField(obj, key);
   if (!map)
@@ -444,8 +439,8 @@ struct EngineDiagnosticsSummary {
   std::map<std::string, std::string> missing_effects;
 };
 
-EngineDiagnosticsSummary ParseEngineDiagnosticsSummary(
-    const std::string &json) {
+EngineDiagnosticsSummary
+ParseEngineDiagnosticsSummary(const std::string &json) {
   EngineDiagnosticsSummary out;
   if (json.empty())
     return out;
@@ -529,9 +524,9 @@ bool IsOpenCudaModelReadinessEffect(const std::string &id) {
   using namespace studiocast::video::effects::contract;
   return id == kEffectIdVirtualBackgroundBlur ||
          id == kEffectIdVirtualBackgroundRemove ||
-         id == kEffectIdVirtualBackgroundReplace ||
-         id == kEffectIdAutoFrame || id == kEffectIdVirtualKeyLight ||
-         id == kEffectIdEyeContact || id == kEffectIdVideoNoiseRemoval;
+         id == kEffectIdVirtualBackgroundReplace || id == kEffectIdAutoFrame ||
+         id == kEffectIdVirtualKeyLight || id == kEffectIdEyeContact ||
+         id == kEffectIdVideoNoiseRemoval;
 }
 
 std::string RequestedVideoModelId(
@@ -619,9 +614,9 @@ EndpointReadiness BuildMicrophoneEndpointReadiness(
   }
 
   if (!ast.last_error.empty()) {
-    out.action =
-        LooksLikeMissingModelError(ast.last_error) ? "choose_open_audio_model"
-                                                  : "retry_microphone";
+    out.action = LooksLikeMissingModelError(ast.last_error)
+                     ? "choose_open_audio_model"
+                     : "retry_microphone";
     out.state = LooksLikeMissingModelError(ast.last_error)
                     ? "missing_model"
                     : "recoverable_error";
@@ -655,8 +650,7 @@ EndpointReadiness BuildMicrophoneEndpointReadiness(
 
   out.action = acfg.enabled ? "wait" : "enable_processing";
   out.state = "ready";
-  out.summary =
-      "StudioCast Microphone is present; processing is off.";
+  out.summary = "StudioCast Microphone is present; processing is off.";
   return out;
 }
 
@@ -683,13 +677,13 @@ EndpointReadiness BuildSpeakersEndpointReadiness(
     return out;
   }
 
-  const std::string lastError =
-      !ast.speakers_last_error.empty() ? ast.speakers_last_error
-                                       : ast.speakers_pipeline_last_error;
+  const std::string lastError = !ast.speakers_last_error.empty()
+                                    ? ast.speakers_last_error
+                                    : ast.speakers_pipeline_last_error;
   if (!lastError.empty()) {
-    out.action =
-        LooksLikeMissingModelError(lastError) ? "choose_open_audio_model"
-                                             : "retry_routing";
+    out.action = LooksLikeMissingModelError(lastError)
+                     ? "choose_open_audio_model"
+                     : "retry_routing";
     out.state = LooksLikeMissingModelError(lastError) ? "missing_model"
                                                       : "recoverable_error";
     out.summary = LooksLikeMissingModelError(lastError)
@@ -705,10 +699,9 @@ EndpointReadiness BuildSpeakersEndpointReadiness(
       pipelineState == "running") {
     out.action = "stop_routing";
     out.state = "processing";
-    out.summary =
-        routeMode == "pipeline" || ast.speakers_pipeline_running
-            ? "Processed speaker routing is active."
-            : "Speaker pass-through routing is active.";
+    out.summary = routeMode == "pipeline" || ast.speakers_pipeline_running
+                      ? "Processed speaker routing is active."
+                      : "Speaker pass-through routing is active.";
     return out;
   }
 
@@ -787,14 +780,12 @@ std::string ChooseVideoEffectBackend(
   if (fx.engine == EffectsEnginePreference::open_cuda)
     return "open_cuda";
 
-  if (maxineDiag.present &&
-      maxineDiag.available_effects.find(id) !=
-          maxineDiag.available_effects.end()) {
+  if (maxineDiag.present && maxineDiag.available_effects.find(id) !=
+                                maxineDiag.available_effects.end()) {
     return "maxine";
   }
-  if (openCudaDiag.present &&
-      openCudaDiag.available_effects.find(id) !=
-          openCudaDiag.available_effects.end()) {
+  if (openCudaDiag.present && openCudaDiag.available_effects.find(id) !=
+                                  openCudaDiag.available_effects.end()) {
     return "open_cuda";
   }
   if (maxineDiag.present && (maxineDiag.ok || maxineDiag.supported))
@@ -814,13 +805,13 @@ VideoEffectReadinessEntry BuildVideoEffectReadinessEntry(
     const EngineDiagnosticsSummary &openCudaDiag) {
   VideoEffectReadinessEntry out;
   out.id = id;
-  out.backend =
-      ChooseVideoEffectBackend(id, fx, activeBackends, maxineDiag, openCudaDiag);
+  out.backend = ChooseVideoEffectBackend(id, fx, activeBackends, maxineDiag,
+                                         openCudaDiag);
   out.requested_model_id = RequestedVideoModelId(fx, id);
   if (out.backend == "open_cuda")
-    out.resolved_model_id =
-        out.requested_model_id.empty() ? openCudaDiag.default_model_id
-                                       : out.requested_model_id;
+    out.resolved_model_id = out.requested_model_id.empty()
+                                ? openCudaDiag.default_model_id
+                                : out.requested_model_id;
 
   const std::string label = VideoEffectLabel(id);
 
@@ -902,8 +893,8 @@ VideoEffectReadinessEntry BuildVideoEffectReadinessEntry(
               diag->installed_models.end()) {
         out.state = "missing_model";
         out.summary = label + " model is missing.";
-        out.detail = "Configured model " + out.requested_model_id +
-                     " is not installed.";
+        out.detail =
+            "Configured model " + out.requested_model_id + " is not installed.";
         out.reason = "missing_model";
         return out;
       }
@@ -925,11 +916,9 @@ VideoEffectReadinessEntry BuildVideoEffectReadinessEntry(
 
   out.state = "backend_unavailable";
   out.summary = label + " backend is unavailable.";
-  out.detail =
-      !diag->summary.empty() ? diag->summary : diag->blocked_reason;
-  out.reason =
-      !diag->blocked_reason.empty() ? diag->blocked_reason
-                                    : "backend_unavailable";
+  out.detail = !diag->summary.empty() ? diag->summary : diag->blocked_reason;
+  out.reason = !diag->blocked_reason.empty() ? diag->blocked_reason
+                                             : "backend_unavailable";
   return out;
 }
 
@@ -938,8 +927,7 @@ std::string VideoEffectReadinessToJson(
     const studiocast::video::VirtualCameraServiceConfig &cfg,
     const std::string &maxineJson, const std::string &openCudaJson) {
   const auto &fx = cfg.pipeline.effects;
-  const auto plan =
-      studiocast::video::effects::BuildBroadcastEffectsPlan(fx);
+  const auto plan = studiocast::video::effects::BuildBroadcastEffectsPlan(fx);
 
   std::set<std::string> ids;
   for (const auto &id : plan.ordered_effect_ids)
@@ -954,17 +942,17 @@ std::string VideoEffectReadinessToJson(
   }
 
   if (fx.mirror)
-    ids.insert(std::string(
-        studiocast::video::effects::contract::kEffectIdMirror));
+    ids.insert(
+        std::string(studiocast::video::effects::contract::kEffectIdMirror));
   if (const std::string vb = ConfiguredVirtualBackgroundEffectId(fx);
       !vb.empty())
     ids.insert(vb);
   if (fx.auto_frame.enabled)
-    ids.insert(std::string(
-        studiocast::video::effects::contract::kEffectIdAutoFrame));
+    ids.insert(
+        std::string(studiocast::video::effects::contract::kEffectIdAutoFrame));
   if (fx.eye_contact.enabled)
-    ids.insert(std::string(
-        studiocast::video::effects::contract::kEffectIdEyeContact));
+    ids.insert(
+        std::string(studiocast::video::effects::contract::kEffectIdEyeContact));
   if (fx.video_noise_removal.enabled)
     ids.insert(std::string(
         studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval));
@@ -978,7 +966,8 @@ std::string VideoEffectReadinessToJson(
       !st.pipeline.degraded_effect.effect_id.empty())
     ids.insert(st.pipeline.degraded_effect.effect_id);
 
-  const auto activeBackends = ParseEffectBackendMap(st.pipeline.effects_backends);
+  const auto activeBackends =
+      ParseEffectBackendMap(st.pipeline.effects_backends);
   const EngineDiagnosticsSummary maxineDiag =
       ParseEngineDiagnosticsSummary(maxineJson);
   const EngineDiagnosticsSummary openCudaDiag =
@@ -999,10 +988,10 @@ std::string VideoEffectReadinessToJson(
     oss << "\"summary\":\"" << JsonEscape(entry.summary) << "\",";
     oss << "\"detail\":\"" << JsonEscape(entry.detail) << "\",";
     oss << "\"backend\":\"" << JsonEscape(entry.backend) << "\",";
-    oss << "\"requested_model_id\":\""
-        << JsonEscape(entry.requested_model_id) << "\",";
-    oss << "\"resolved_model_id\":\""
-        << JsonEscape(entry.resolved_model_id) << "\",";
+    oss << "\"requested_model_id\":\"" << JsonEscape(entry.requested_model_id)
+        << "\",";
+    oss << "\"resolved_model_id\":\"" << JsonEscape(entry.resolved_model_id)
+        << "\",";
     oss << "\"reason\":\"" << JsonEscape(entry.reason) << "\"";
     oss << "}";
   }
@@ -1125,6 +1114,8 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"video\":{";
   oss << "\"enabled\":" << BoolJson(cfg.enabled) << ",";
   oss << "\"always_on\":" << BoolJson(cfg.always_on) << ",";
+  oss << "\"allow_cpu_resize\":" << BoolJson(cfg.pipeline.allow_cpu_resize)
+      << ",";
   oss << "\"virtual_device_present\":" << BoolJson(st.virtual_device_present)
       << ",";
   oss << "\"virtual_device_available\":"
@@ -1296,8 +1287,7 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
     oss << "\"denoise_tensor_upload_calls\":"
         << st.pipeline.open_cuda_transfers.denoise_tensor_upload_calls << ",";
     oss << "\"denoise_tensor_download_calls\":"
-        << st.pipeline.open_cuda_transfers.denoise_tensor_download_calls
-        << ",";
+        << st.pipeline.open_cuda_transfers.denoise_tensor_download_calls << ",";
     oss << "\"forced_sync_calls\":"
         << st.pipeline.open_cuda_transfers.forced_sync_calls << ",";
     oss << "\"cpu_tail_stage_calls\":"
@@ -1668,6 +1658,8 @@ ConfigToJson(const studiocast::video::VirtualCameraServiceConfig &cfg) {
   oss << "\"width\":" << cfg.pipeline.width << ",";
   oss << "\"height\":" << cfg.pipeline.height << ",";
   oss << "\"fps\":" << cfg.pipeline.fps << ",";
+  oss << "\"allow_cpu_resize\":" << BoolJson(cfg.pipeline.allow_cpu_resize)
+      << ",";
   oss << "\"mirror\":" << BoolJson(cfg.pipeline.effects.mirror) << ",";
   // Legacy flat fields (kept for compatibility): derived from the canonical
   // Broadcast schema.
@@ -2209,8 +2201,7 @@ int main(int argc, char **argv) {
               return std::string("OK ") +
                      StatusToJson(st, current, ast, acurrent, socketPath,
                                   diagnostics.maxine, diagnostics.open_cuda,
-                                  diagnostics.open_audio,
-                                  diagnostics.loopback);
+                                  diagnostics.open_audio, diagnostics.loopback);
             }
 
             if (pc.cmd == "GET_DIAGNOSTICS" ||
@@ -2369,6 +2360,14 @@ int main(int argc, char **argv) {
                          ErrorJson("always_on expects 0|1|true|false");
                 }
                 newCfg.always_on = v;
+              }
+              if (auto it = pc.kv.find("allow_cpu_resize"); it != pc.kv.end()) {
+                bool v = false;
+                if (!ParseBoolArg(it->second, &v)) {
+                  return std::string("ERR ") +
+                         ErrorJson("allow_cpu_resize expects 0|1|true|false");
+                }
+                newCfg.pipeline.allow_cpu_resize = v;
               }
 
               std::string perr;

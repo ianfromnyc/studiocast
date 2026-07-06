@@ -34,10 +34,9 @@ struct DaemonConfig {
   // "auto" = use GPU scaling when available; otherwise CPU.
   std::string video_scaling_backend = "auto";
 
-  // Hard guard to prevent silent expensive CPU resize/scale paths.
-  // When false (default), output size mismatches must be resolved via GPU
-  // resize.
-  bool video_allow_cpu_resize = false;
+  // Allow CPU resize/scale fallback when output size mismatches cannot be
+  // resolved on GPU. Users can opt out from Advanced settings.
+  bool video_allow_cpu_resize = true;
 
   // Audio
   bool audio_enabled = false;
