@@ -44,6 +44,7 @@ public:
   bool loadLoopback() const;
   bool persistLoopback() const;
   bool installService() const;
+  bool openBackendsSetup() const;
   bool installModels() const;
   bool freshBuild() const;
   bool allowUnsupported() const;
@@ -69,6 +70,7 @@ public:
   void setLoadLoopback(bool enabled);
   void setPersistLoopback(bool enabled);
   void setInstallService(bool enabled);
+  void setOpenBackendsSetup(bool enabled);
   void setInstallModels(bool enabled);
   void setFreshBuild(bool enabled);
   void setAllowUnsupported(bool enabled);
@@ -90,6 +92,7 @@ private:
   bool loadLoopback_ = true;
   bool persistLoopback_ = true;
   bool installService_ = true;
+  bool openBackendsSetup_ = true;
   bool installModels_ = false;
   bool freshBuild_ = false;
   bool allowUnsupported_ = false;
@@ -174,8 +177,10 @@ private:
   QCheckBox *configureV4l2_ = nullptr;
   QCheckBox *loadLoopback_ = nullptr;
   QCheckBox *persistLoopback_ = nullptr;
+  QCheckBox *openBackendsSetup_ = nullptr;
   QCheckBox *installModels_ = nullptr;
   QCheckBox *removeUserData_ = nullptr;
+  QLabel *optionalComponentsNotice_ = nullptr;
 };
 
 class ReviewPage : public QWizardPage {

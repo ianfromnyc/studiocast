@@ -42,6 +42,17 @@ QWizard QFrame[scRole="separator"] {
   min-height: 1px;
   max-height: 1px;
 }
+QWizard QProgressBar[scRole="installerPreferenceProgress"] {
+  background: transparent;
+  border: none;
+  min-height: 2px;
+  max-height: 2px;
+  margin-bottom: 8px;
+}
+QWizard QProgressBar[scRole="installerPreferenceProgress"]::chunk {
+  background-color: #2DD4FF;
+  border: none;
+}
 QRadioButton {
   spacing: 8px;
 }

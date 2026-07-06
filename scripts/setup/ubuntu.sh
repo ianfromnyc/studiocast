@@ -381,7 +381,9 @@ fi
 
 if [[ "$DO_BUILD" -eq 1 ]]; then
   log "Configuring + building into: $BUILD_DIR (type: $BUILD_TYPE)"
-  cmake -S . -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+  cmake -S . -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+    -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON \
+    -DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON
   cmake --build "$BUILD_DIR"
   log "Built. Useful commands:"
   echo "  $BUILD_DIR/studiocast --version"

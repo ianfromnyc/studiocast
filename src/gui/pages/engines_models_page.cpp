@@ -37,10 +37,8 @@ constexpr const char *kOpenAudioDefaultModelIds[] = {
 };
 
 constexpr const char *kOpenVideoDefaultModelIds[] = {
-    "modnet-webnn-256-fp32",
-    "yunet_opencv_zoo_2023mar_fp32",
-    "dlib_68_ibug_300w",
-    "gaze_correction_cam_flx_v0_1_1",
+    "modnet-webnn-256-fp32", "yunet_opencv_zoo_2023mar_fp32",
+    "dlib_68_ibug_300w",     "gaze_correction_cam_flx_v0_1_1",
     "fastdvdnet_sigma15",
 };
 
@@ -98,9 +96,9 @@ QString FriendlyBackendLabel(const QString &id) {
   return id;
 }
 
-QString ActiveBackendSummary(const QString &raw,
-                             const QString &emptyLabel =
-                                 QStringLiteral("Pass-through / idle")) {
+QString ActiveBackendSummary(
+    const QString &raw,
+    const QString &emptyLabel = QStringLiteral("Pass-through / idle")) {
   const QString trimmed = raw.trimmed();
   if (trimmed.isEmpty())
     return emptyLabel;
@@ -128,8 +126,7 @@ QString EngineProperty(const EngineStatus &engine) {
     return QStringLiteral("warning");
   if (!(engine.ok || engine.supported))
     return QStringLiteral("error");
-  if (engine.missingModelCount > 0 ||
-      engine.configuredMissingModelCount > 0 ||
+  if (engine.missingModelCount > 0 || engine.configuredMissingModelCount > 0 ||
       !engine.blockedEffects.isEmpty()) {
     return QStringLiteral("warning");
   }
@@ -222,14 +219,15 @@ QString EngineSetupFixText(const EngineStatus &engine, const QString &code) {
   if (engine.id == QStringLiteral("open_cuda") &&
       code == QStringLiteral("onnxruntime_cuda_provider_unavailable")) {
     return QStringLiteral(
-        "Fix: install or build ONNX Runtime with CUDAExecutionProvider support, "
+        "Fix: install or build ONNX Runtime with CUDAExecutionProvider "
+        "support, "
         "rebuild StudioCast, then restart the GUI and daemon.");
   }
   if (engine.id == QStringLiteral("open_cuda") &&
       code == QStringLiteral("cuda_unavailable")) {
-    return QStringLiteral(
-        "Fix: check the NVIDIA driver/CUDA runtime and restart StudioCast after "
-        "CUDA initializes successfully.");
+    return QStringLiteral("Fix: check the NVIDIA driver/CUDA runtime and "
+                          "restart StudioCast after "
+                          "CUDA initializes successfully.");
   }
   return {};
 }
@@ -305,8 +303,7 @@ QString EngineStateLabel(const EngineStatus &engine,
   return QStringLiteral("Available");
 }
 
-QString EngineSummary(const EngineStatus &engine,
-                      bool selectedByPreference) {
+QString EngineSummary(const EngineStatus &engine, bool selectedByPreference) {
   if (!engine.present)
     return QStringLiteral("The daemon did not report %1 diagnostics.")
         .arg(engine.label);
@@ -338,8 +335,7 @@ QString EngineSummary(const EngineStatus &engine,
                             "are missing or invalid.")
           .arg(engine.label)
           .arg(engine.missingModelCount)
-          .arg(engine.missingModelCount == 1 ? QString()
-                                             : QStringLiteral("s"));
+          .arg(engine.missingModelCount == 1 ? QString() : QStringLiteral("s"));
     }
     return QStringLiteral("%1 model packs are missing or invalid.")
         .arg(engine.label);
@@ -411,8 +407,9 @@ QString ModelSummary(const EngineStatus &engine) {
 }
 
 QString ModelEntryLine(const EngineModelEntry &entry) {
-  QString line = entry.displayName.trimmed().isEmpty() ? entry.id.trimmed()
-                                                       : entry.displayName.trimmed();
+  QString line = entry.displayName.trimmed().isEmpty()
+                     ? entry.id.trimmed()
+                     : entry.displayName.trimmed();
   QStringList suffix;
   if (!entry.category.trimmed().isEmpty())
     suffix << entry.category.trimmed();
@@ -443,7 +440,8 @@ QString ConfiguredModelLine(const EngineStatus &engine,
   }
   if (!entry.modelPath.isEmpty())
     parts << QStringLiteral("model_path=%1").arg(entry.modelPath);
-  return QStringLiteral("%1: %2").arg(entry.owner, parts.join(QStringLiteral("; ")));
+  return QStringLiteral("%1: %2").arg(entry.owner,
+                                      parts.join(QStringLiteral("; ")));
 }
 
 QString EngineDetailsText(const EngineStatus &engine) {
@@ -650,6 +648,18 @@ void AddInstallScriptCandidate(QStringList *candidates,
     candidates->push_back(script);
 }
 
+void AddInstallerBackendCandidate(QStringList *candidates,
+                                  const QString &sourceDir) {
+  if (!candidates || sourceDir.trimmed().isEmpty())
+    return;
+  const QString backend =
+      QDir(sourceDir.trimmed())
+          .filePath(QStringLiteral("installer/backend/"
+                                   "studiocast-installer-backend"));
+  if (!candidates->contains(backend))
+    candidates->push_back(backend);
+}
+
 QString InstallHintsText(const EngineStatus &engine) {
   if (engine.installHints.isEmpty())
     return QStringLiteral("No install hints reported by daemon diagnostics.");
@@ -660,8 +670,10 @@ QString InstallHintsText(const EngineStatus &engine) {
 }
 
 bool PreferenceSelectsMaxine(const DaemonStatusSnapshot &snapshot) {
-  const QString video = snapshot.videoEffectsEnginePreference.trimmed().toLower();
-  const QString audio = snapshot.audioEffectsEnginePreference.trimmed().toLower();
+  const QString video =
+      snapshot.videoEffectsEnginePreference.trimmed().toLower();
+  const QString audio =
+      snapshot.audioEffectsEnginePreference.trimmed().toLower();
   return video == QStringLiteral("maxine") || audio == QStringLiteral("maxine");
 }
 
@@ -671,9 +683,39 @@ bool PreferenceSelectsOpenVideo(const DaemonStatusSnapshot &snapshot) {
 }
 
 bool PreferenceSelectsOpenAudio(const DaemonStatusSnapshot &snapshot) {
-  const QString audio = snapshot.audioEffectsEnginePreference.trimmed().toLower();
+  const QString audio =
+      snapshot.audioEffectsEnginePreference.trimmed().toLower();
   return audio == QStringLiteral("open_source") ||
          audio == QStringLiteral("open_audio");
+}
+
+QString RepairSetupButtonText(const QString &engineId) {
+  if (engineId == QStringLiteral("open_audio"))
+    return QStringLiteral("Repair Open Audio setup");
+  return QStringLiteral("Repair Open Video setup");
+}
+
+QStringList SetupRepairArgsForEngine(const EngineStatus &engine) {
+  if (!EngineHasSetupBlocker(engine))
+    return {};
+
+  if (engine.id != QStringLiteral("open_cuda") &&
+      engine.id != QStringLiteral("open_audio")) {
+    return {};
+  }
+
+  return {
+      QStringLiteral("repair"),      QStringLiteral("--open-backends"),
+      QStringLiteral("--with-deps"), QStringLiteral("--no-models"),
+      QStringLiteral("--service"),   QStringLiteral("--yes"),
+  };
+}
+
+QString TailForDialog(const QString &text, qsizetype maxChars = 5000) {
+  QString trimmed = text.trimmed();
+  if (trimmed.size() > maxChars)
+    trimmed = QStringLiteral("...\n") + trimmed.right(maxChars);
+  return trimmed;
 }
 
 } // namespace
@@ -691,30 +733,30 @@ EnginesModelsPage::EnginesModelsPage(QWidget *parent) : QWidget(parent) {
   backendGrid->setHorizontalSpacing(18);
   backendGrid->setVerticalSpacing(8);
 
-  backendGrid->addWidget(MutedLabel(QStringLiteral("Camera effects"), backendBox),
-                         0, 0);
+  backendGrid->addWidget(
+      MutedLabel(QStringLiteral("Camera effects"), backendBox), 0, 0);
   backendGrid->addWidget(MutedLabel(QStringLiteral("Preference"), backendBox),
                          0, 1);
-  backendGrid->addWidget(MutedLabel(QStringLiteral("Active backend"), backendBox),
-                         0, 2);
+  backendGrid->addWidget(
+      MutedLabel(QStringLiteral("Active backend"), backendBox), 0, 2);
   videoPreferenceLabel_ = ValueLabel(QStringLiteral("Unknown"), backendBox);
   videoActiveLabel_ = ValueLabel(QStringLiteral("Unknown"), backendBox);
   backendGrid->addWidget(videoPreferenceLabel_, 1, 1);
   backendGrid->addWidget(videoActiveLabel_, 1, 2);
 
-  backendGrid->addWidget(MutedLabel(QStringLiteral("Audio cleanup"), backendBox),
-                         2, 0);
+  backendGrid->addWidget(
+      MutedLabel(QStringLiteral("Audio cleanup"), backendBox), 2, 0);
   backendGrid->addWidget(MutedLabel(QStringLiteral("Preference"), backendBox),
                          2, 1);
-  backendGrid->addWidget(MutedLabel(QStringLiteral("Active backends"), backendBox),
-                         2, 2);
+  backendGrid->addWidget(
+      MutedLabel(QStringLiteral("Active backends"), backendBox), 2, 2);
   audioPreferenceLabel_ = ValueLabel(QStringLiteral("Unknown"), backendBox);
   auto *activeAudio = new QWidget(backendBox);
   auto *activeAudioLayout = new QVBoxLayout(activeAudio);
   activeAudioLayout->setContentsMargins(0, 0, 0, 0);
   activeAudioLayout->setSpacing(2);
-  microphoneActiveLabel_ = ValueLabel(QStringLiteral("Microphone: Unknown"),
-                                      activeAudio);
+  microphoneActiveLabel_ =
+      ValueLabel(QStringLiteral("Microphone: Unknown"), activeAudio);
   speakersActiveLabel_ =
       ValueLabel(QStringLiteral("Speakers: Unknown"), activeAudio);
   activeAudioLayout->addWidget(microphoneActiveLabel_);
@@ -723,9 +765,8 @@ EnginesModelsPage::EnginesModelsPage(QWidget *parent) : QWidget(parent) {
   backendGrid->addWidget(activeAudio, 3, 2);
   root->addWidget(backendBox);
 
-  maxineCard_ =
-      CreateEngineCard(QStringLiteral("Maxine"), QStringLiteral("maxine"),
-                       this);
+  maxineCard_ = CreateEngineCard(QStringLiteral("Maxine"),
+                                 QStringLiteral("maxine"), this);
   openVideoCard_ = CreateEngineCard(QStringLiteral("Open Video / Open CUDA"),
                                     QStringLiteral("open_cuda"), this);
   openAudioCard_ = CreateEngineCard(QStringLiteral("Open Audio"),
@@ -734,6 +775,10 @@ EnginesModelsPage::EnginesModelsPage(QWidget *parent) : QWidget(parent) {
           [this] { StartModelInstall(&openVideoCard_); });
   connect(openAudioCard_.downloadButton, &QPushButton::clicked, this,
           [this] { StartModelInstall(&openAudioCard_); });
+  connect(openVideoCard_.repairSetupButton, &QPushButton::clicked, this,
+          [this] { StartSetupRepair(&openVideoCard_); });
+  connect(openAudioCard_.repairSetupButton, &QPushButton::clicked, this,
+          [this] { StartSetupRepair(&openAudioCard_); });
   root->addWidget(maxineCard_.frame);
   root->addWidget(openVideoCard_.frame);
   root->addWidget(openAudioCard_.frame);
@@ -768,20 +813,43 @@ EnginesModelsPage::CreateEngineCard(const QString &title,
   header->addWidget(card.state, 0);
   layout->addLayout(header);
 
-  card.summary = MutedLabel(QStringLiteral("Diagnostics have not been read."),
-                            card.frame);
+  card.summary =
+      MutedLabel(QStringLiteral("Diagnostics have not been read."), card.frame);
   card.summary->setObjectName(engineId + QStringLiteral("_engine_summary"));
-  card.setupDisclaimer = new QLabel(card.frame);
+  card.setupDisclaimerBanner = new QFrame(card.frame);
+  card.setupDisclaimerBanner->setObjectName(
+      engineId + QStringLiteral("_setup_disclaimer_banner"));
+  card.setupDisclaimerBanner->setProperty("scBanner", "warning");
+  card.setupDisclaimerBanner->setVisible(false);
+  auto *setupLayout = new QVBoxLayout(card.setupDisclaimerBanner);
+  setupLayout->setContentsMargins(12, 10, 12, 10);
+  setupLayout->setSpacing(8);
+  card.setupDisclaimer = new QLabel(card.setupDisclaimerBanner);
   card.setupDisclaimer->setObjectName(engineId +
                                       QStringLiteral("_setup_disclaimer"));
   card.setupDisclaimer->setWordWrap(true);
-  card.setupDisclaimer->setProperty("scBanner", "warning");
   card.setupDisclaimer->setVisible(false);
-  card.models = MutedLabel(QStringLiteral("No model diagnostics reported."),
-                           card.frame);
+  card.repairSetupButton = new QPushButton(RepairSetupButtonText(engineId),
+                                           card.setupDisclaimerBanner);
+  card.repairSetupButton->setObjectName(engineId +
+                                        QStringLiteral("_repair_setup_button"));
+  card.repairSetupButton->setVisible(false);
+  card.repairSetupStatus = MutedLabel(QString(), card.setupDisclaimerBanner);
+  card.repairSetupStatus->setObjectName(engineId +
+                                        QStringLiteral("_repair_setup_status"));
+  card.repairSetupStatus->setVisible(false);
+  auto *repairRow = new QHBoxLayout();
+  repairRow->setContentsMargins(0, 0, 0, 0);
+  repairRow->setSpacing(10);
+  repairRow->addWidget(card.repairSetupButton, 0);
+  repairRow->addWidget(card.repairSetupStatus, 1);
+  setupLayout->addWidget(card.setupDisclaimer);
+  setupLayout->addLayout(repairRow);
+  card.models =
+      MutedLabel(QStringLiteral("No model diagnostics reported."), card.frame);
   card.models->setObjectName(engineId + QStringLiteral("_engine_models"));
   layout->addWidget(card.summary);
-  layout->addWidget(card.setupDisclaimer);
+  layout->addWidget(card.setupDisclaimerBanner);
   layout->addWidget(card.models);
 
   auto *actions = new QHBoxLayout();
@@ -809,19 +877,18 @@ EnginesModelsPage::CreateEngineCard(const QString &title,
   detailsGrid->setVerticalSpacing(8);
   detailsGrid->addWidget(MutedLabel(QStringLiteral("Details"), card.frame), 0,
                          0);
-  detailsGrid->addWidget(MutedLabel(QStringLiteral("Install Hints"), card.frame),
-                         0, 1);
+  detailsGrid->addWidget(
+      MutedLabel(QStringLiteral("Install Hints"), card.frame), 0, 1);
   card.details = DetailsBox(card.frame, 118);
   card.details->setObjectName(engineId + QStringLiteral("_engine_details"));
   card.installHints = DetailsBox(card.frame, 118);
-  card.installHints->setObjectName(engineId +
-                                   QStringLiteral("_install_hints"));
+  card.installHints->setObjectName(engineId + QStringLiteral("_install_hints"));
   detailsGrid->addWidget(card.details, 1, 0);
   detailsGrid->addWidget(card.installHints, 1, 1);
   layout->addLayout(detailsGrid);
 
-  layout->addWidget(MutedLabel(QStringLiteral("Raw Engine Diagnostics"),
-                               card.frame));
+  layout->addWidget(
+      MutedLabel(QStringLiteral("Raw Engine Diagnostics"), card.frame));
   card.rawDetails = DetailsBox(card.frame, 130);
   card.rawDetails->setObjectName(engineId + QStringLiteral("_raw_details"));
   layout->addWidget(card.rawDetails);
@@ -841,10 +908,35 @@ void EnginesModelsPage::UpdateEngineCard(EngineCard *card,
   SetDynamicProperty(card->frame, "scStatus", prop);
 
   card->summary->setText(EngineSummary(engine, selectedByPreference));
-  if (card->setupDisclaimer) {
+  if (card->setupDisclaimerBanner && card->setupDisclaimer) {
     const QString disclaimer = EngineSetupDisclaimerText(engine);
     card->setupDisclaimer->setText(disclaimer);
-    card->setupDisclaimer->setVisible(!disclaimer.isEmpty());
+    const bool showDisclaimer = !disclaimer.isEmpty();
+    card->setupDisclaimer->setVisible(showDisclaimer);
+    card->setupDisclaimerBanner->setVisible(showDisclaimer);
+    if (!showDisclaimer && card->repairSetupStatus) {
+      card->repairSetupStatus->clear();
+      card->repairSetupStatus->setVisible(false);
+    }
+  }
+  if (card->repairSetupButton && card->repairSetupStatus) {
+    const bool repairRelevant = EngineHasSetupBlocker(engine);
+    card->repairArgs = SetupRepairArgsForEngine(engine);
+    card->repairRecommended = repairRelevant && !card->repairArgs.isEmpty();
+    card->repairSetupButton->setText(RepairSetupButtonText(engine.id));
+    card->repairSetupButton->setToolTip(
+        card->repairArgs.isEmpty()
+            ? QStringLiteral("No setup repair command is available.")
+            : QStringLiteral("studiocast-installer-backend %1")
+                  .arg(card->repairArgs.join(QStringLiteral(" "))));
+    card->repairSetupButton->setVisible(repairRelevant);
+    card->repairSetupStatus->setVisible(
+        repairRelevant && !card->repairSetupStatus->text().isEmpty());
+    if (!repairRelevant) {
+      card->repairArgs.clear();
+      card->repairRecommended = false;
+      card->repairSetupStatus->clear();
+    }
   }
   card->models->setText(ModelSummary(engine));
   if (card->downloadButton && card->downloadStatus) {
@@ -880,20 +972,36 @@ void EnginesModelsPage::UpdateEngineCard(EngineCard *card,
 }
 
 void EnginesModelsPage::RefreshDownloadButtons() {
-  const bool running = modelInstallProcess_ != nullptr;
+  const bool modelInstallRunning = modelInstallProcess_ != nullptr;
+  const bool setupRepairRunning = setupRepairProcess_ != nullptr;
+  const bool anyInstallerRunning = modelInstallRunning || setupRepairRunning;
   auto update = [&](EngineCard *card) {
-    if (!card || !card->downloadButton || !card->downloadButton->isVisible())
+    if (!card || !card->downloadButton || card->downloadButton->isHidden())
       return;
 
-    const bool enabled =
-        !running && card->installRecommended && !card->installArgs.isEmpty();
+    const bool enabled = !anyInstallerRunning && card->installRecommended &&
+                         !card->installArgs.isEmpty();
     card->downloadButton->setEnabled(enabled);
-    if (running && card == activeInstallCard_ && card->downloadStatus) {
+    if (modelInstallRunning && card == activeInstallCard_ &&
+        card->downloadStatus) {
       card->downloadStatus->setText(
           QStringLiteral("Downloading model packs..."));
-    } else if (running && card->downloadStatus) {
+    } else if (anyInstallerRunning && card->downloadStatus) {
       card->downloadStatus->setText(
-          QStringLiteral("Another model download is running."));
+          setupRepairRunning
+              ? QStringLiteral("Setup repair is running.")
+              : QStringLiteral("Another model download is running."));
+    }
+
+    if (card->repairSetupButton) {
+      const bool repairEnabled = !anyInstallerRunning &&
+                                 card->repairRecommended &&
+                                 !card->repairArgs.isEmpty();
+      card->repairSetupButton->setEnabled(repairEnabled);
+    }
+    if (setupRepairRunning && card == activeRepairCard_ &&
+        card->repairSetupStatus) {
+      card->repairSetupStatus->setVisible(true);
     }
   };
 
@@ -931,8 +1039,44 @@ QString EnginesModelsPage::ResolveInstallScript(QString *error) const {
   return {};
 }
 
+QString EnginesModelsPage::ResolveInstallerBackend(QString *error) const {
+  QStringList candidates;
+  const QString envPath =
+      QString::fromLocal8Bit(qgetenv("STUDIOCAST_INSTALLER_BACKEND")).trimmed();
+  if (!envPath.isEmpty())
+    candidates.push_back(envPath);
+
+  AddInstallerBackendCandidate(&candidates,
+                               QString::fromUtf8(STUDIOCAST_SOURCE_DIR));
+
+  const QDir appDir(QCoreApplication::applicationDirPath());
+  const QString installed =
+      appDir.filePath(QStringLiteral("../share/studiocast/installer/"
+                                     "studiocast-installer-backend"));
+  if (!candidates.contains(installed))
+    candidates.push_back(installed);
+
+  AddInstallerBackendCandidate(&candidates, ManifestSourceDir());
+  AddInstallerBackendCandidate(&candidates, QDir::currentPath());
+
+  QStringList checked;
+  for (const QString &candidate : candidates) {
+    const QFileInfo info(candidate);
+    checked.push_back(info.absoluteFilePath());
+    if (info.isFile() && info.isExecutable())
+      return info.absoluteFilePath();
+  }
+
+  if (error) {
+    *error = QStringLiteral(
+                 "Could not find studiocast-installer-backend. Checked:\n%1")
+                 .arg(checked.join(QStringLiteral("\n")));
+  }
+  return {};
+}
+
 void EnginesModelsPage::StartModelInstall(EngineCard *card) {
-  if (!card || modelInstallProcess_)
+  if (!card || modelInstallProcess_ || setupRepairProcess_)
     return;
 
   QString error;
@@ -944,9 +1088,9 @@ void EnginesModelsPage::StartModelInstall(EngineCard *card) {
 
   const QString bash = QStandardPaths::findExecutable(QStringLiteral("bash"));
   if (bash.isEmpty()) {
-    QMessageBox::warning(this, QStringLiteral("StudioCast Models"),
-                         QStringLiteral("Could not find bash to run %1.")
-                             .arg(script));
+    QMessageBox::warning(
+        this, QStringLiteral("StudioCast Models"),
+        QStringLiteral("Could not find bash to run %1.").arg(script));
     return;
   }
 
@@ -978,29 +1122,28 @@ void EnginesModelsPage::StartModelInstall(EngineCard *card) {
                   modelInstallProcess_->readAllStandardError());
             }
           });
-  connect(modelInstallProcess_, &QProcess::errorOccurred, this,
-          [this](QProcess::ProcessError processError) {
-            if (processError != QProcess::FailedToStart ||
-                !modelInstallProcess_) {
-              return;
-            }
+  connect(
+      modelInstallProcess_, &QProcess::errorOccurred, this,
+      [this](QProcess::ProcessError processError) {
+        if (processError != QProcess::FailedToStart || !modelInstallProcess_) {
+          return;
+        }
 
-            const QString message = modelInstallProcess_->errorString();
-            if (activeInstallCard_ && activeInstallCard_->downloadStatus) {
-              activeInstallCard_->downloadStatus->setText(
-                  QStringLiteral("Model installer failed to start."));
-            }
-            QProcess *process = modelInstallProcess_;
-            modelInstallProcess_ = nullptr;
-            activeInstallCard_ = nullptr;
-            if (process)
-              process->deleteLater();
-            RefreshDownloadButtons();
-            QMessageBox::warning(
-                this, QStringLiteral("StudioCast Models"),
-                QStringLiteral("Failed to start model installer: %1")
-                    .arg(message));
-          });
+        const QString message = modelInstallProcess_->errorString();
+        if (activeInstallCard_ && activeInstallCard_->downloadStatus) {
+          activeInstallCard_->downloadStatus->setText(
+              QStringLiteral("Model installer failed to start."));
+        }
+        QProcess *process = modelInstallProcess_;
+        modelInstallProcess_ = nullptr;
+        activeInstallCard_ = nullptr;
+        if (process)
+          process->deleteLater();
+        RefreshDownloadButtons();
+        QMessageBox::warning(
+            this, QStringLiteral("StudioCast Models"),
+            QStringLiteral("Failed to start model installer: %1").arg(message));
+      });
   connect(modelInstallProcess_,
           QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
           [this](int exitCode, QProcess::ExitStatus exitStatus) {
@@ -1014,8 +1157,7 @@ void EnginesModelsPage::StartModelInstall(EngineCard *card) {
                   QString::fromLocal8Bit(process->readAllStandardError());
             }
 
-            const bool ok =
-                exitStatus == QProcess::NormalExit && exitCode == 0;
+            const bool ok = exitStatus == QProcess::NormalExit && exitCode == 0;
             if (activeInstallCard_ && activeInstallCard_->downloadStatus) {
               activeInstallCard_->downloadStatus->setText(
                   ok ? QStringLiteral("Model download completed. Status will "
@@ -1056,6 +1198,216 @@ void EnginesModelsPage::StartModelInstall(EngineCard *card) {
   card->downloadStatus->setText(QStringLiteral("Starting model download..."));
   RefreshDownloadButtons();
   modelInstallProcess_->start(bash, processArgs);
+}
+
+void EnginesModelsPage::StartSetupRepair(EngineCard *card) {
+  if (!card || setupRepairProcess_ || modelInstallProcess_)
+    return;
+
+  if (card->repairArgs.isEmpty()) {
+    QMessageBox::information(
+        this, QStringLiteral("StudioCast Setup Repair"),
+        QStringLiteral(
+            "No setup repair command is available for this engine."));
+    return;
+  }
+
+  QString error;
+  setupRepairBackend_ = ResolveInstallerBackend(&error);
+  if (setupRepairBackend_.isEmpty()) {
+    QMessageBox::warning(this, QStringLiteral("StudioCast Setup Repair"),
+                         error);
+    return;
+  }
+
+  activeRepairCard_ = card;
+  setupRepairPlanText_.clear();
+  QStringList planArgs;
+  planArgs << QStringLiteral("plan") << card->repairArgs;
+  StartSetupRepairProcess(SetupRepairPhase::Plan, planArgs,
+                          QStringLiteral("Planning setup repair..."));
+}
+
+void EnginesModelsPage::StartSetupRepairProcess(SetupRepairPhase phase,
+                                                const QStringList &arguments,
+                                                const QString &statusText) {
+  if (setupRepairProcess_ || setupRepairBackend_.isEmpty())
+    return;
+
+  setupRepairOutput_.clear();
+  setupRepairProcess_ = new QProcess(this);
+  setupRepairProcess_->setProcessChannelMode(QProcess::SeparateChannels);
+  setupRepairProcess_->setWorkingDirectory(
+      QFileInfo(setupRepairBackend_).absolutePath());
+
+  if (activeRepairCard_ && activeRepairCard_->repairSetupStatus) {
+    activeRepairCard_->repairSetupStatus->setText(statusText);
+    activeRepairCard_->repairSetupStatus->setVisible(true);
+  }
+
+  connect(setupRepairProcess_, &QProcess::readyReadStandardOutput, this,
+          [this] {
+            if (setupRepairProcess_) {
+              setupRepairOutput_ += QString::fromLocal8Bit(
+                  setupRepairProcess_->readAllStandardOutput());
+            }
+          });
+  connect(setupRepairProcess_, &QProcess::readyReadStandardError, this, [this] {
+    if (setupRepairProcess_) {
+      setupRepairOutput_ +=
+          QString::fromLocal8Bit(setupRepairProcess_->readAllStandardError());
+    }
+  });
+  connect(
+      setupRepairProcess_, &QProcess::errorOccurred, this,
+      [this](QProcess::ProcessError processError) {
+        if (processError != QProcess::FailedToStart || !setupRepairProcess_) {
+          return;
+        }
+
+        const QString message = setupRepairProcess_->errorString();
+        if (activeRepairCard_ && activeRepairCard_->repairSetupStatus) {
+          activeRepairCard_->repairSetupStatus->setText(
+              QStringLiteral("Setup repair failed to start."));
+          activeRepairCard_->repairSetupStatus->setVisible(true);
+        }
+        QProcess *process = setupRepairProcess_;
+        setupRepairProcess_ = nullptr;
+        activeRepairCard_ = nullptr;
+        if (process)
+          process->deleteLater();
+        RefreshDownloadButtons();
+        QMessageBox::warning(
+            this, QStringLiteral("StudioCast Setup Repair"),
+            QStringLiteral("Failed to start setup repair: %1").arg(message));
+      });
+  connect(setupRepairProcess_,
+          QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+          [this, phase](int exitCode, QProcess::ExitStatus exitStatus) {
+            if (phase == SetupRepairPhase::Plan) {
+              FinishSetupRepairPlan(exitCode, exitStatus);
+            } else {
+              FinishSetupRepairExecution(exitCode, exitStatus);
+            }
+          });
+
+  RefreshDownloadButtons();
+  setupRepairProcess_->start(setupRepairBackend_, arguments);
+}
+
+void EnginesModelsPage::FinishSetupRepairPlan(int exitCode,
+                                              QProcess::ExitStatus exitStatus) {
+  QProcess *process = setupRepairProcess_;
+  if (!process)
+    return;
+
+  setupRepairOutput_ +=
+      QString::fromLocal8Bit(process->readAllStandardOutput());
+  setupRepairOutput_ += QString::fromLocal8Bit(process->readAllStandardError());
+  const bool ok = exitStatus == QProcess::NormalExit && exitCode == 0;
+  process->deleteLater();
+  setupRepairProcess_ = nullptr;
+
+  if (!ok) {
+    if (activeRepairCard_ && activeRepairCard_->repairSetupStatus) {
+      activeRepairCard_->repairSetupStatus->setText(
+          QStringLiteral("Setup repair plan failed. See details."));
+      activeRepairCard_->repairSetupStatus->setVisible(true);
+    }
+    QString details = TailForDialog(setupRepairOutput_);
+    if (details.isEmpty())
+      details = QStringLiteral("No output was captured.");
+    QMessageBox::warning(
+        this, QStringLiteral("StudioCast Setup Repair"),
+        QStringLiteral("Setup repair plan failed with exit code %1.\n\n%2")
+            .arg(exitCode)
+            .arg(details));
+    activeRepairCard_ = nullptr;
+    RefreshDownloadButtons();
+    return;
+  }
+
+  setupRepairPlanText_ = setupRepairOutput_.trimmed();
+  if (activeRepairCard_ && activeRepairCard_->repairSetupStatus) {
+    activeRepairCard_->repairSetupStatus->setText(
+        QStringLiteral("Setup repair plan is ready."));
+    activeRepairCard_->repairSetupStatus->setVisible(true);
+  }
+  RefreshDownloadButtons();
+
+  QMessageBox confirm(this);
+  confirm.setIcon(QMessageBox::Question);
+  confirm.setWindowTitle(QStringLiteral("StudioCast Setup Repair"));
+  confirm.setText(QStringLiteral("Run setup repair now?"));
+  confirm.setInformativeText(
+      QStringLiteral("StudioCast will refresh prerequisites, configure and "
+                     "rebuild Open Video/Open CUDA and Open Audio support, "
+                     "reinstall the user service, and skip model downloads."));
+  confirm.setDetailedText(TailForDialog(setupRepairPlanText_, 12000));
+  confirm.setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+  confirm.setDefaultButton(QMessageBox::Yes);
+
+  if (confirm.exec() != QMessageBox::Yes) {
+    if (activeRepairCard_ && activeRepairCard_->repairSetupStatus) {
+      activeRepairCard_->repairSetupStatus->setText(
+          QStringLiteral("Setup repair cancelled."));
+      activeRepairCard_->repairSetupStatus->setVisible(true);
+    }
+    activeRepairCard_ = nullptr;
+    RefreshDownloadButtons();
+    return;
+  }
+
+  if (!activeRepairCard_) {
+    RefreshDownloadButtons();
+    return;
+  }
+  StartSetupRepairProcess(SetupRepairPhase::Execute,
+                          activeRepairCard_->repairArgs,
+                          QStringLiteral("Repairing setup..."));
+}
+
+void EnginesModelsPage::FinishSetupRepairExecution(
+    int exitCode, QProcess::ExitStatus exitStatus) {
+  QProcess *process = setupRepairProcess_;
+  if (!process)
+    return;
+
+  setupRepairOutput_ +=
+      QString::fromLocal8Bit(process->readAllStandardOutput());
+  setupRepairOutput_ += QString::fromLocal8Bit(process->readAllStandardError());
+  const bool ok = exitStatus == QProcess::NormalExit && exitCode == 0;
+
+  if (activeRepairCard_ && activeRepairCard_->repairSetupStatus) {
+    activeRepairCard_->repairSetupStatus->setText(
+        ok ? QStringLiteral(
+                 "Setup repair completed. Status will refresh shortly.")
+           : QStringLiteral("Setup repair failed. See details."));
+    activeRepairCard_->repairSetupStatus->setVisible(true);
+  }
+
+  const QString title = QStringLiteral("StudioCast Setup Repair");
+  if (ok) {
+    QMessageBox::information(
+        this, title,
+        QStringLiteral("Setup repair completed. StudioCast will refresh engine "
+                       "diagnostics shortly."));
+  } else {
+    QString details = TailForDialog(setupRepairOutput_);
+    if (details.isEmpty())
+      details = QStringLiteral("No output was captured.");
+    QMessageBox::warning(
+        this, title,
+        QStringLiteral("Setup repair failed with exit code %1.\n\n%2")
+            .arg(exitCode)
+            .arg(details));
+  }
+
+  process->deleteLater();
+  setupRepairProcess_ = nullptr;
+  activeRepairCard_ = nullptr;
+  emit SetupRepairFinished();
+  RefreshDownloadButtons();
 }
 
 void EnginesModelsPage::UpdateStatus(const DaemonStatusSnapshot &snapshot) {

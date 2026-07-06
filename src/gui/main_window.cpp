@@ -136,7 +136,8 @@ void MainWindow::BuildUi() {
   auto *serviceLayout = new QVBoxLayout(serviceBox);
   serviceLayout->setContentsMargins(10, 6, 10, 6);
   serviceLayout->setSpacing(2);
-  serviceStateLabel_ = new QLabel(QStringLiteral("Checking service"), serviceBox);
+  serviceStateLabel_ =
+      new QLabel(QStringLiteral("Checking service"), serviceBox);
   serviceStateLabel_->setProperty("scRole", "value");
   serviceDetailLabel_ = MutedLabel(QString(), serviceBox);
   serviceLayout->addWidget(serviceStateLabel_);
@@ -201,6 +202,11 @@ void MainWindow::ConnectSignals() {
           [navigateTo] { navigateTo(QStringLiteral("Support")); });
 
   connect(enginesModelsPage_, &EnginesModelsPage::ModelsInstallFinished, this,
+          [this] {
+            if (statusPoller_)
+              statusPoller_->RefreshDiagnosticsNow();
+          });
+  connect(enginesModelsPage_, &EnginesModelsPage::SetupRepairFinished, this,
           [this] {
             if (statusPoller_)
               statusPoller_->RefreshDiagnosticsNow();

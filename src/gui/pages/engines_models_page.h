@@ -1,12 +1,12 @@
 #pragma once
 
+#include <QProcess>
 #include <QStringList>
 #include <QWidget>
 
 class QFrame;
 class QLabel;
 class QPlainTextEdit;
-class QProcess;
 class QPushButton;
 
 namespace studiocast::gui {
@@ -24,14 +24,23 @@ public:
 
 signals:
   void ModelsInstallFinished();
+  void SetupRepairFinished();
 
 private:
+  enum class SetupRepairPhase {
+    Plan,
+    Execute,
+  };
+
   struct EngineCard {
     QFrame *frame = nullptr;
     QLabel *title = nullptr;
     QLabel *state = nullptr;
     QLabel *summary = nullptr;
+    QFrame *setupDisclaimerBanner = nullptr;
     QLabel *setupDisclaimer = nullptr;
+    QPushButton *repairSetupButton = nullptr;
+    QLabel *repairSetupStatus = nullptr;
     QLabel *models = nullptr;
     QPushButton *downloadButton = nullptr;
     QLabel *downloadStatus = nullptr;
@@ -41,6 +50,8 @@ private:
     QString engineId;
     QStringList installArgs;
     bool installRecommended = false;
+    QStringList repairArgs;
+    bool repairRecommended = false;
   };
 
   EngineCard CreateEngineCard(const QString &title, const QString &engineId,
@@ -48,8 +59,16 @@ private:
   void UpdateEngineCard(EngineCard *card, const EngineStatus &engine,
                         bool selectedByPreference);
   void StartModelInstall(EngineCard *card);
+  void StartSetupRepair(EngineCard *card);
+  void StartSetupRepairProcess(SetupRepairPhase phase,
+                               const QStringList &arguments,
+                               const QString &statusText);
+  void FinishSetupRepairPlan(int exitCode, QProcess::ExitStatus exitStatus);
+  void FinishSetupRepairExecution(int exitCode,
+                                  QProcess::ExitStatus exitStatus);
   void RefreshDownloadButtons();
   QString ResolveInstallScript(QString *error) const;
+  QString ResolveInstallerBackend(QString *error) const;
 
   QLabel *videoPreferenceLabel_ = nullptr;
   QLabel *videoActiveLabel_ = nullptr;
@@ -64,6 +83,12 @@ private:
   QProcess *modelInstallProcess_ = nullptr;
   EngineCard *activeInstallCard_ = nullptr;
   QString modelInstallOutput_;
+
+  QProcess *setupRepairProcess_ = nullptr;
+  EngineCard *activeRepairCard_ = nullptr;
+  QString setupRepairBackend_;
+  QString setupRepairOutput_;
+  QString setupRepairPlanText_;
 };
 
 } // namespace studiocast::gui

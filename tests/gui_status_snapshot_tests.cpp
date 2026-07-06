@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QEventLoop>
+#include <QFrame>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -21,8 +22,8 @@
 #include "core/ipc/daemon_socket.h"
 #include "gui/pages/engines_models_page.h"
 #include "gui/pages/video_page.h"
-#include "gui/status/pending_daemon_write_guard.h"
 #include "gui/status/daemon_status_snapshot.h"
+#include "gui/status/pending_daemon_write_guard.h"
 #include "gui/status/status_poller.h"
 
 namespace {
@@ -52,8 +53,8 @@ public:
       return;
     }
 
-    dir_ = tmp /
-           (name + "-" + std::to_string(static_cast<long long>(::getpid())));
+    dir_ =
+        tmp / (name + "-" + std::to_string(static_cast<long long>(::getpid())));
     fs::remove_all(dir_, ec);
     fs::create_directories(dir_, ec);
     if (ec) {
@@ -159,8 +160,7 @@ bool TestStatusJsonCompatibilityShapes() {
   return Expect(s.reachable, "snapshot should be reachable") &&
          Expect(s.parsed, "snapshot should parse") &&
          Expect(s.rawJson == json, "raw json should be preserved") &&
-         Expect(s.version == QStringLiteral("0.2.0"),
-                "version should parse") &&
+         Expect(s.version == QStringLiteral("0.2.0"), "version should parse") &&
          Expect(s.serviceRunning, "service_running should parse") &&
          Expect(s.camera.state == studiocast::gui::ReadinessState::Ready,
                 "camera should be ready") &&
@@ -275,8 +275,7 @@ bool TestNestedPipelineEffectsPlanAndRawEffectsPreservation() {
          Expect(s.rawVideoEffectsJson.contains(
                     QStringLiteral("hidden_future_field")),
                 "raw video_effects json should preserve hidden fields") &&
-         Expect(s.rawAudioEffectsJson.contains(
-                    QStringLiteral("preserve_this")),
+         Expect(s.rawAudioEffectsJson.contains(QStringLiteral("preserve_this")),
                 "raw audio_effects json should preserve hidden fields");
 }
 
@@ -335,8 +334,7 @@ bool TestVideoEffectReadinessMissingModelWhileIdle() {
   const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
   const auto vb =
       s.videoEffectReadiness.value(QStringLiteral("virtual_background.blur"));
-  const auto mirror =
-      s.videoEffectReadiness.value(QStringLiteral("mirror"));
+  const auto mirror = s.videoEffectReadiness.value(QStringLiteral("mirror"));
   return Expect(s.parsed, "effect readiness payload should parse") &&
          Expect(s.camera.state == studiocast::gui::ReadinessState::MissingModel,
                 "missing effect model should drive camera missing-model state "
@@ -421,9 +419,10 @@ bool TestAudioEndpointActionReadinessFields() {
 
   const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
   return Expect(s.parsed, "audio endpoint status payload should parse") &&
-         Expect(s.microphone.state ==
-                    studiocast::gui::ReadinessState::MissingModel,
-                "explicit microphone readiness should drive microphone state") &&
+         Expect(
+             s.microphone.state ==
+                 studiocast::gui::ReadinessState::MissingModel,
+             "explicit microphone readiness should drive microphone state") &&
          Expect(s.microphoneEndpoint.action ==
                     QStringLiteral("choose_open_audio_model"),
                 "microphone action should parse from daemon status") &&
@@ -567,8 +566,9 @@ bool TestEngineModelDetailsAndConfiguredSelections() {
                 "running microphone should report processing") &&
          Expect(s.speakers.state == studiocast::gui::ReadinessState::Processing,
                 "active speaker routing should report processing") &&
-         Expect(s.videoEffectsActiveBackends.contains(QStringLiteral("open_cuda")),
-                "video active backends should parse") &&
+         Expect(
+             s.videoEffectsActiveBackends.contains(QStringLiteral("open_cuda")),
+             "video active backends should parse") &&
          Expect(s.microphoneActiveBackend == QStringLiteral("open_audio"),
                 "microphone active backend should parse") &&
          Expect(s.speakersActiveBackend == QStringLiteral("open_audio"),
@@ -583,9 +583,9 @@ bool TestEngineModelDetailsAndConfiguredSelections() {
          Expect(s.openCuda.rawJson.contains(
                     QStringLiteral("onnxruntime_cuda_provider_present")),
                 "raw open_cuda diagnostics should preserve runtime fields") &&
-         Expect(s.openCuda.rawJson.contains(
-                    QStringLiteral("cuda_driver_version")),
-                "raw open_cuda diagnostics should preserve cuda fields") &&
+         Expect(
+             s.openCuda.rawJson.contains(QStringLiteral("cuda_driver_version")),
+             "raw open_cuda diagnostics should preserve cuda fields") &&
          Expect(s.openCuda.installedModels.size() == 1 &&
                     s.openCuda.installedModels.front().displayName ==
                         QStringLiteral("Good Matting"),
@@ -667,24 +667,31 @@ bool TestEnginesModelsPageShowsOpenCudaSetupFix() {
       page.findChild<QLabel *>(QStringLiteral("open_cuda_engine_summary"));
   auto *disclaimer =
       page.findChild<QLabel *>(QStringLiteral("open_cuda_setup_disclaimer"));
+  auto *disclaimerBanner = page.findChild<QFrame *>(
+      QStringLiteral("open_cuda_setup_disclaimer_banner"));
   auto *downloadStatus =
       page.findChild<QLabel *>(QStringLiteral("open_cuda_download_status"));
-  auto *downloadButton =
-      page.findChild<QPushButton *>(QStringLiteral("open_cuda_download_button"));
-  auto *details =
-      page.findChild<QPlainTextEdit *>(QStringLiteral("open_cuda_engine_details"));
+  auto *downloadButton = page.findChild<QPushButton *>(
+      QStringLiteral("open_cuda_download_button"));
+  auto *repairButton = page.findChild<QPushButton *>(
+      QStringLiteral("open_cuda_repair_setup_button"));
+  auto *details = page.findChild<QPlainTextEdit *>(
+      QStringLiteral("open_cuda_engine_details"));
 
   return Expect(state != nullptr, "open cuda state label should be findable") &&
          Expect(summary != nullptr,
                 "open cuda summary label should be findable") &&
          Expect(disclaimer != nullptr,
                 "open cuda setup disclaimer should be findable") &&
+         Expect(disclaimerBanner != nullptr,
+                "open cuda setup disclaimer banner should be findable") &&
          Expect(downloadStatus != nullptr,
                 "open cuda download status should be findable") &&
          Expect(downloadButton != nullptr,
                 "open cuda download button should be findable") &&
-         Expect(details != nullptr,
-                "open cuda details should be findable") &&
+         Expect(repairButton != nullptr,
+                "open cuda repair setup button should be findable") &&
+         Expect(details != nullptr, "open cuda details should be findable") &&
          Expect(state->text() == QStringLiteral("Selected setup required"),
                 "disabled Open CUDA build should show setup-required state") &&
          Expect(summary->text() ==
@@ -693,9 +700,21 @@ bool TestEnginesModelsPageShowsOpenCudaSetupFix() {
                 "disclaimer") &&
          Expect(!disclaimer->isHidden() && !disclaimer->text().isEmpty(),
                 "setup disclaimer should be shown for setup blockers") &&
-         Expect(disclaimer->property("scBanner").toString() ==
+         Expect(!disclaimerBanner->isHidden(),
+                "setup disclaimer banner should be shown") &&
+         Expect(disclaimerBanner->property("scBanner").toString() ==
                     QStringLiteral("warning"),
                 "setup disclaimer should use the warning banner style") &&
+         Expect(!repairButton->isHidden(),
+                "setup repair button should be shown for setup blockers") &&
+         Expect(repairButton->isEnabled(),
+                "setup repair button should be enabled when no repair is "
+                "running") &&
+         Expect(
+             repairButton->text() == QStringLiteral("Repair Open Video setup"),
+             "Open CUDA setup repair button should use the Open Video label") &&
+         Expect(repairButton != downloadButton,
+                "setup repair action should be separate from model download") &&
          Expect(disclaimer->text().contains(
                     QStringLiteral("disabled in the running StudioCast build")),
                 "disclaimer should explain disabled build") &&
@@ -709,11 +728,13 @@ bool TestEnginesModelsPageShowsOpenCudaSetupFix() {
                     QStringLiteral("setup issue above")),
                 "model install status should reference the separate setup "
                 "disclaimer") &&
-         Expect(!downloadStatus->text().contains(
-                    QStringLiteral("Ready to install")),
-                "disabled build should not claim models are ready to install") &&
-         Expect(!downloadButton->isEnabled(),
-                "model download button should be disabled for setup blockers") &&
+         Expect(
+             !downloadStatus->text().contains(
+                 QStringLiteral("Ready to install")),
+             "disabled build should not claim models are ready to install") &&
+         Expect(
+             !downloadButton->isEnabled(),
+             "model download button should be disabled for setup blockers") &&
          Expect(details->toPlainText().contains(
                     QStringLiteral("cmake -S . -B build")),
                 "details should include source-build fix command");
@@ -774,20 +795,29 @@ bool TestEnginesModelsPageShowsOpenAudioSetupFix() {
       page.findChild<QLabel *>(QStringLiteral("open_audio_engine_summary"));
   auto *disclaimer =
       page.findChild<QLabel *>(QStringLiteral("open_audio_setup_disclaimer"));
+  auto *disclaimerBanner = page.findChild<QFrame *>(
+      QStringLiteral("open_audio_setup_disclaimer_banner"));
   auto *downloadStatus =
       page.findChild<QLabel *>(QStringLiteral("open_audio_download_status"));
-  auto *downloadButton =
-      page.findChild<QPushButton *>(QStringLiteral("open_audio_download_button"));
+  auto *downloadButton = page.findChild<QPushButton *>(
+      QStringLiteral("open_audio_download_button"));
+  auto *repairButton = page.findChild<QPushButton *>(
+      QStringLiteral("open_audio_repair_setup_button"));
 
-  return Expect(state != nullptr, "open audio state label should be findable") &&
+  return Expect(state != nullptr,
+                "open audio state label should be findable") &&
          Expect(summary != nullptr,
                 "open audio summary label should be findable") &&
          Expect(disclaimer != nullptr,
                 "open audio setup disclaimer should be findable") &&
+         Expect(disclaimerBanner != nullptr,
+                "open audio setup disclaimer banner should be findable") &&
          Expect(downloadStatus != nullptr,
                 "open audio download status should be findable") &&
          Expect(downloadButton != nullptr,
                 "open audio download button should be findable") &&
+         Expect(repairButton != nullptr,
+                "open audio repair setup button should be findable") &&
          Expect(state->text() == QStringLiteral("Selected setup required"),
                 "disabled Open Audio build should show setup-required state") &&
          Expect(summary->text() ==
@@ -796,9 +826,25 @@ bool TestEnginesModelsPageShowsOpenAudioSetupFix() {
                 "disclaimer") &&
          Expect(!disclaimer->isHidden() && !disclaimer->text().isEmpty(),
                 "Open Audio setup disclaimer should be shown") &&
-         Expect(disclaimer->property("scBanner").toString() ==
-                    QStringLiteral("warning"),
-                "Open Audio setup disclaimer should use warning banner style") &&
+         Expect(!disclaimerBanner->isHidden(),
+                "Open Audio setup disclaimer banner should be shown") &&
+         Expect(
+             disclaimerBanner->property("scBanner").toString() ==
+                 QStringLiteral("warning"),
+             "Open Audio setup disclaimer should use warning banner style") &&
+         Expect(!repairButton->isHidden(),
+                "Open Audio setup repair button should be shown for setup "
+                "blockers") &&
+         Expect(repairButton->isEnabled(),
+                "Open Audio setup repair button should be enabled when no "
+                "repair is running") &&
+         Expect(repairButton->text() ==
+                    QStringLiteral("Repair Open Audio setup"),
+                "Open Audio setup repair button should use the Open Audio "
+                "label") &&
+         Expect(repairButton != downloadButton,
+                "Open Audio setup repair action should be separate from model "
+                "download") &&
          Expect(disclaimer->text().contains(
                     QStringLiteral("Open Audio is disabled in the running "
                                    "StudioCast build")),
@@ -808,7 +854,8 @@ bool TestEnginesModelsPageShowsOpenAudioSetupFix() {
                 "Open Audio disclaimer should include rebuild flag") &&
          Expect(!disclaimer->text().contains(
                     QStringLiteral("This backend is currently selected")),
-                "Open Audio disclaimer should not include selected-backend text") &&
+                "Open Audio disclaimer should not include selected-backend "
+                "text") &&
          Expect(downloadStatus->text().contains(
                     QStringLiteral("Open Audio setup issue above")),
                 "Open Audio model status should reference setup disclaimer") &&
@@ -819,6 +866,118 @@ bool TestEnginesModelsPageShowsOpenAudioSetupFix() {
          Expect(!downloadButton->isEnabled(),
                 "Open Audio model download button should be disabled for setup "
                 "blockers");
+}
+
+bool TestEnginesModelsPageKeepsModelInstallsSeparateFromSetupRepair() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "engines":{
+          "open_cuda":{
+            "ok":false,
+            "installed_models":[],
+            "models":[],
+            "missing_models":{"modnet-webnn-256-fp32":"model.onnx is missing"},
+            "blocked_effects":{
+              "virtual_background.blur":"missing_model_packs"
+            },
+            "install_hints":["No usable Open Video matting model packs were found."]
+          },
+          "open_audio":{
+            "ok":false,
+            "installed_models":[],
+            "models":[],
+            "missing_models":{"fastenhancer_s_vd_v1":"model.onnx is missing"},
+            "blocked_effects":{
+              "noise_removal":"missing_model_packs"
+            },
+            "install_hints":["No usable Open Audio model packs were found."]
+          }
+        },
+        "video":{
+          "enabled":false,
+          "virtual_device_present":true,
+          "virtual_device_available":true,
+          "consumer_count":0,
+          "video_effects":{"engine":"open_cuda"},
+          "pipeline":{"running":false,"starting":false}
+        },
+        "audio":{
+          "mic_present":true,
+          "source_error":"",
+          "audio_effects":{"engine":"open_source"},
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  studiocast::gui::EnginesModelsPage page;
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(json));
+
+  auto *openVideoRepair = page.findChild<QPushButton *>(
+      QStringLiteral("open_cuda_repair_setup_button"));
+  auto *openAudioRepair = page.findChild<QPushButton *>(
+      QStringLiteral("open_audio_repair_setup_button"));
+  auto *openVideoDisclaimer = page.findChild<QFrame *>(
+      QStringLiteral("open_cuda_setup_disclaimer_banner"));
+  auto *openAudioDisclaimer = page.findChild<QFrame *>(
+      QStringLiteral("open_audio_setup_disclaimer_banner"));
+  auto *openVideoDownload = page.findChild<QPushButton *>(
+      QStringLiteral("open_cuda_download_button"));
+  auto *openAudioDownload = page.findChild<QPushButton *>(
+      QStringLiteral("open_audio_download_button"));
+  auto *openVideoDownloadStatus =
+      page.findChild<QLabel *>(QStringLiteral("open_cuda_download_status"));
+  auto *openAudioDownloadStatus =
+      page.findChild<QLabel *>(QStringLiteral("open_audio_download_status"));
+
+  return Expect(openVideoRepair != nullptr,
+                "open video repair setup button should be findable") &&
+         Expect(openAudioRepair != nullptr,
+                "open audio repair setup button should be findable") &&
+         Expect(openVideoDisclaimer != nullptr,
+                "open video setup disclaimer banner should be findable") &&
+         Expect(openAudioDisclaimer != nullptr,
+                "open audio setup disclaimer banner should be findable") &&
+         Expect(openVideoDownload != nullptr,
+                "open video model download button should be findable") &&
+         Expect(openAudioDownload != nullptr,
+                "open audio model download button should be findable") &&
+         Expect(openVideoDownloadStatus != nullptr,
+                "open video model download status should be findable") &&
+         Expect(openAudioDownloadStatus != nullptr,
+                "open audio model download status should be findable") &&
+         Expect(
+             openVideoRepair->isHidden(),
+             "missing Open Video models alone should not show setup repair") &&
+         Expect(
+             openAudioRepair->isHidden(),
+             "missing Open Audio models alone should not show setup repair") &&
+         Expect(openVideoDisclaimer->isHidden(),
+                "missing Open Video models alone should not show setup "
+                "disclaimer") &&
+         Expect(openAudioDisclaimer->isHidden(),
+                "missing Open Audio models alone should not show setup "
+                "disclaimer") &&
+         Expect(
+             openVideoDownload->isEnabled(),
+             "missing Open Video models should keep model download enabled") &&
+         Expect(
+             openAudioDownload->isEnabled(),
+             "missing Open Audio models should keep model download enabled") &&
+         Expect(openVideoDownloadStatus->text().contains(
+                    QStringLiteral("Ready to install")),
+                "missing Open Video models should use model install path") &&
+         Expect(openAudioDownloadStatus->text().contains(
+                    QStringLiteral("Ready to install")),
+                "missing Open Audio models should use model install path");
 }
 
 bool TestCameraPageShowsOpenCudaSetupFix() {
@@ -886,10 +1045,10 @@ bool TestCameraPageShowsOpenCudaSetupFix() {
          Expect(banner->text().contains(
                     QStringLiteral("-DSTUDIOCAST_ENABLE_OPEN_CUDA=ON")),
                 "camera page should include rebuild flag") &&
-         Expect(banner->text().contains(
-                    QStringLiteral("Model packs were found")),
-                "camera page should say models are present but unusable until "
-                "setup is fixed");
+         Expect(
+             banner->text().contains(QStringLiteral("Model packs were found")),
+             "camera page should say models are present but unusable until "
+             "setup is fixed");
 }
 
 bool TestOpenAudioRuntimeStatusFields() {
@@ -1059,7 +1218,8 @@ bool TestMissingPhysicalDevices() {
 
   const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
   return Expect(s.parsed, "missing physical device payload should parse") &&
-         Expect(s.camera.state == studiocast::gui::ReadinessState::NoPhysicalDevice,
+         Expect(s.camera.state ==
+                    studiocast::gui::ReadinessState::NoPhysicalDevice,
                 "camera should report physical input problem when supported") &&
          Expect(s.microphone.state ==
                     studiocast::gui::ReadinessState::NoPhysicalDevice,
@@ -1180,7 +1340,8 @@ bool TestConsumerDetectionErrorsAreNotIdle() {
 bool TestInvalidJsonPreservesRawPayload() {
   const QString json = QStringLiteral("{not-json");
   const auto s = studiocast::gui::DaemonStatusSnapshot::FromJson(json);
-  return Expect(s.reachable, "parse errors still came from a reachable daemon") &&
+  return Expect(s.reachable,
+                "parse errors still came from a reachable daemon") &&
          Expect(!s.parsed, "invalid json should not parse") &&
          Expect(s.rawJson == json, "invalid raw json should be preserved") &&
          Expect(!s.parseError.isEmpty(), "parse error should be reported") &&
@@ -1257,10 +1418,9 @@ bool TestStatusPollerRefreshesDiagnosticsOutOfBand() {
   bool refreshOk = false;
 
   QEventLoop loop;
-  QObject::connect(&poller, &studiocast::gui::StatusPoller::StatusChanged,
-                   &loop, [&](const studiocast::gui::DaemonStatusSnapshot &) {
-                     ++changedCount;
-                   });
+  QObject::connect(
+      &poller, &studiocast::gui::StatusPoller::StatusChanged, &loop,
+      [&](const studiocast::gui::DaemonStatusSnapshot &) { ++changedCount; });
   QObject::connect(&poller,
                    &studiocast::gui::StatusPoller::DiagnosticsRefreshFinished,
                    &loop, [&](bool ok, const QString &) {
@@ -1281,8 +1441,9 @@ bool TestStatusPollerRefreshesDiagnosticsOutOfBand() {
          Expect(refreshOk, "diagnostics refresh should report success") &&
          Expect(diagnosticsCalls.load() == 1,
                 "duplicate diagnostics refreshes should coalesce") &&
-         Expect(statusCalls.load() == 1,
-                "diagnostics refresh should trigger one follow-up status poll") &&
+         Expect(
+             statusCalls.load() == 1,
+             "diagnostics refresh should trigger one follow-up status poll") &&
          Expect(changedCount == 1,
                 "follow-up status poll should emit one snapshot");
 }
@@ -1382,6 +1543,7 @@ int main(int argc, char **argv) {
   ok = TestEngineModelDetailsAndConfiguredSelections() && ok;
   ok = TestEnginesModelsPageShowsOpenCudaSetupFix() && ok;
   ok = TestEnginesModelsPageShowsOpenAudioSetupFix() && ok;
+  ok = TestEnginesModelsPageKeepsModelInstallsSeparateFromSetupRepair() && ok;
   ok = TestCameraPageShowsOpenCudaSetupFix() && ok;
   ok = TestOpenAudioRuntimeStatusFields() && ok;
   ok = TestMissingVirtualDevices() && ok;
