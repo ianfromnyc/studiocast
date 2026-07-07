@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QJsonObject>
+#include <QProcess>
 #include <QString>
 #include <QWidget>
 
@@ -42,6 +43,7 @@ private slots:
   void OnSaveAudioModelOverrides();
   void OnSaveVideoModelOverrides();
   void OnRefreshPulseState();
+  void OnRestartVirtualCamera();
   void OnLegacySourceChanged(int index);
   void OnStartLegacyLoopback();
   void OnStopLegacyLoopback();
@@ -64,6 +66,11 @@ private:
       const std::vector<studiocast::audio::pulse::PactlSourceInfo> &sources);
   void UpdateLegacyPorts();
   void UpdateButtonStates();
+  void AppendVirtualCameraRecoveryOutput(const QByteArray &bytes);
+  void AppendVirtualCameraRecoveryErrorOutput(const QByteArray &bytes);
+  void PromptForVirtualCameraRecoveryPassword();
+  void FinishVirtualCameraRecovery(int exitCode,
+                                   QProcess::ExitStatus exitStatus);
 
   bool SendDaemonRequest(const std::string &request, QString *error);
   bool FetchDaemonJson(const std::string &request, QJsonObject *out,
@@ -87,6 +94,10 @@ private:
   QLabel *cameraStateLabel_ = nullptr;
   QCheckBox *alwaysOnCheck_ = nullptr;
   QCheckBox *allowCpuResizeCheck_ = nullptr;
+
+  QGroupBox *virtualCameraRecoveryBox_ = nullptr;
+  QPushButton *restartVirtualCameraButton_ = nullptr;
+  QLabel *virtualCameraRecoveryStatusLabel_ = nullptr;
 
   QLabel *audioLifecycleLabel_ = nullptr;
   QLabel *pulseStateLabel_ = nullptr;
@@ -137,6 +148,11 @@ private:
   bool configuredSpeakersEnabled_ = false;
   bool speakersRoutingActive_ = false;
   QThread *pulseRefreshThread_ = nullptr;
+  QProcess *virtualCameraRecoveryProcess_ = nullptr;
+  QString virtualCameraRecoveryOutput_;
+  QString virtualCameraRecoveryPromptBuffer_;
+  bool virtualCameraRecoveryPasswordDialogOpen_ = false;
+  bool virtualCameraRecoveryPasswordCancelled_ = false;
 
   std::vector<studiocast::audio::pulse::PactlSourceInfo> cachedSources_;
 };
