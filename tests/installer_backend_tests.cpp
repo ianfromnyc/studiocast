@@ -1,5 +1,6 @@
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -44,6 +45,37 @@ std::string ShellQuote(const std::string &value) {
   }
   out += "'";
   return out;
+}
+
+bool WriteExecutable(const fs::path &path, const std::string &text,
+                     std::string *error = nullptr) {
+  std::error_code ec;
+  fs::create_directories(path.parent_path(), ec);
+  if (ec) {
+    if (error)
+      *error = "create_directories failed: " + ec.message();
+    return false;
+  }
+
+  std::ofstream file(path);
+  if (!file) {
+    if (error)
+      *error = "open failed: " + path.string();
+    return false;
+  }
+  file << text;
+  file.close();
+
+  fs::permissions(path,
+                  fs::perms::owner_read | fs::perms::owner_write |
+                      fs::perms::owner_exec,
+                  fs::perm_options::replace, ec);
+  if (ec) {
+    if (error)
+      *error = "permissions failed: " + ec.message();
+    return false;
+  }
+  return true;
 }
 
 class ScopedTempDir {
@@ -187,6 +219,50 @@ bool TestStatusReportsOptionalComponents() {
                         "docs/maxine_install.md");
 }
 
+bool TestUserServiceDryRunRestartsServiceAfterInstall() {
+  ScopedTempDir temp("studiocast-user-service-dry-run");
+  if (!Expect(temp.ok(), temp.error().c_str()))
+    return false;
+
+  std::string error;
+  const fs::path fakeSystemctl = temp.path() / "bin" / "systemctl";
+  const fs::path buildDir = temp.path() / "build";
+  const fs::path daemon = buildDir / "studiocastd";
+  if (!Expect(WriteExecutable(fakeSystemctl, "#!/usr/bin/env bash\nexit 0\n",
+                              &error),
+              error.c_str()) ||
+      !Expect(WriteExecutable(daemon, "#!/usr/bin/env bash\nexit 0\n", &error),
+              error.c_str())) {
+    return false;
+  }
+
+  const fs::path repo = fs::path(STUDIOCAST_SOURCE_DIR);
+  const fs::path script = repo / "scripts" / "install" / "user_service.sh";
+  const char *pathEnv = std::getenv("PATH");
+  const std::string command =
+      "HOME=" + ShellQuote((temp.path() / "home").string()) + " " +
+      "XDG_CONFIG_HOME=" + ShellQuote((temp.path() / "config").string()) +
+      " PATH=" +
+      ShellQuote((temp.path() / "bin").string() + ":" +
+                 (pathEnv ? pathEnv : "")) +
+      " " + ShellQuote(script.string()) + " --dry-run --yes --build-dir " +
+      ShellQuote(buildDir.string());
+
+  studiocast::util::ExecCaptureOptions options;
+  options.timeout_ms = 10000;
+  const auto result = studiocast::util::ExecCapture(command, options);
+
+  return Expect(result.exit_code == 0,
+                "user service dry-run should exit successfully") &&
+         ExpectContains("user service dry-run", result.stdout_str,
+                        "systemctl --user enable studiocastd.service") &&
+         ExpectContains("user service dry-run", result.stdout_str,
+                        "systemctl --user restart studiocastd.service") &&
+         Expect(result.stdout_str.find("enable --now") == std::string::npos,
+                "user service install should not rely on enable --now for "
+                "already-running daemons");
+}
+
 } // namespace
 
 int main() {
@@ -195,5 +271,6 @@ int main() {
   ok = TestRepairPlanCanDisableOpenBackendConfigureFlags() && ok;
   ok = TestRepairDryRunIncludesOpenBackendConfigureFlags() && ok;
   ok = TestStatusReportsOptionalComponents() && ok;
+  ok = TestUserServiceDryRunRestartsServiceAfterInstall() && ok;
   return ok ? 0 : 1;
 }

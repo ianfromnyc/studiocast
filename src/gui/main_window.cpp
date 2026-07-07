@@ -11,6 +11,7 @@
 #include <QScrollArea>
 #include <QStackedWidget>
 #include <QStyle>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <algorithm>
@@ -208,8 +209,13 @@ void MainWindow::ConnectSignals() {
           });
   connect(enginesModelsPage_, &EnginesModelsPage::SetupRepairFinished, this,
           [this] {
-            if (statusPoller_)
-              statusPoller_->RefreshDiagnosticsNow();
+            auto refresh = [this] {
+              if (statusPoller_)
+                statusPoller_->RefreshDiagnosticsNow();
+            };
+            refresh();
+            QTimer::singleShot(1500, this, refresh);
+            QTimer::singleShot(4000, this, refresh);
           });
   connect(videoPage_, &VideoPage::StatusRefreshRequested, this, [this] {
     if (statusPoller_)
