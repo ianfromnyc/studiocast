@@ -37,9 +37,10 @@ def build_model():
         [out],
     )
 
-    # Opset 13 is a conservative baseline supported by ONNX Runtime builds in the wild.
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
-    model.ir_version = max(model.ir_version, 7)
+    # Keep this fixture compatible with the oldest ONNX Runtime used by CI.
+    # ORT 1.17.x supports ONNX IR up to 9, and opset 11 is enough for this graph.
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 11)])
+    model.ir_version = 9
 
     onnx.checker.check_model(model)
     return model
