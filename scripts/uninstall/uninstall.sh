@@ -241,6 +241,7 @@ greedy_purge_apt_dependencies() {
     libpulse-dev libpulse0 pulseaudio-utils
     clang clang-format clang-tidy
     v4l-utils v4l2loopback-utils
+    libblas-dev liblapack-dev
     libdlib-dev libsqlite3-dev
     libjpeg-turbo8 libjpeg-turbo8-dev
     libpng-dev
