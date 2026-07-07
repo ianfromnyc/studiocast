@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "id": "video_missing_file",
+  "display_name": "Video Missing File",
+  "task": "face_detection",
+  "files": [
+    {
+      "name": "model.fixture",
+      "kind": "onnx",
+      "role": "main",
+      "sha256": "cbc724d038823203ec77f127b74e6d84341e15f2befee18af5d6f5739f00492b"
+    }
+  ]
+}

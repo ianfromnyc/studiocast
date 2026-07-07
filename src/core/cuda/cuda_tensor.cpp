@@ -117,6 +117,40 @@ bool CudaTensor::ReallocIfNeededNchwF32(studiocast::maxine::CudaDriverApi *cuda,
   return AllocateNchwF32(cuda, n_in, c_in, h_in, w_in, error_out);
 }
 
+bool CudaTensor::UploadFromCpuF32(studiocast::maxine::CudaDriverApi *cuda,
+                                  const float *src, std::size_t src_floats,
+                                  studiocast::maxine::CUstream stream,
+                                  std::string *error_out) const {
+  if (error_out)
+    error_out->clear();
+
+  if (!cuda || !cuda->IsInitialized()) {
+    if (error_out)
+      *error_out =
+          "CudaTensor::UploadFromCpuF32: CUDA driver API not initialized.";
+    return false;
+  }
+  if (!Valid()) {
+    if (error_out)
+      *error_out = "CudaTensor::UploadFromCpuF32: invalid tensor.";
+    return false;
+  }
+  if (!src) {
+    if (error_out)
+      *error_out = "CudaTensor::UploadFromCpuF32: src is null.";
+    return false;
+  }
+  if (src_floats < ElementCount()) {
+    if (error_out)
+      *error_out = "CudaTensor::UploadFromCpuF32: source buffer too small.";
+    return false;
+  }
+
+  return cuda->MemcpyHtoD2DAsync(ptr, pitch, src, /*src_pitch=*/bytes,
+                                 /*width_bytes=*/bytes, /*height=*/1, stream,
+                                 error_out);
+}
+
 bool CudaTensor::DownloadToCpuF32(studiocast::maxine::CudaDriverApi *cuda,
                                   std::vector<float> *out,
                                   studiocast::maxine::CUstream stream,

@@ -4,9 +4,12 @@
 #include <QStringList>
 #include <QWidget>
 
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "core/audio/pulse/pactl.h"
+#include "gui/status/pending_daemon_write_guard.h"
 
 class QComboBox;
 class QGroupBox;
@@ -18,8 +21,11 @@ class QSlider;
 class QSpinBox;
 class QToolButton;
 class QTimer;
+class QThread;
 
 namespace studiocast::gui {
+
+struct DaemonStatusSnapshot;
 
 enum class AudioPageMode {
   Microphone,
@@ -31,6 +37,10 @@ class AudioPage final : public QWidget {
 
 public:
   explicit AudioPage(AudioPageMode mode, QWidget *parent = nullptr);
+  void UpdateStatus(const DaemonStatusSnapshot &snapshot);
+
+signals:
+  void StatusRefreshRequested();
 
 private slots:
   void RefreshSources();
@@ -68,9 +78,31 @@ private slots:
   void OnToggleAdvanced(bool checked);
 
 private:
+  struct SourceRefreshResult {
+    bool pactlOk = false;
+    std::string pactlDetails;
+    std::vector<studiocast::audio::pulse::PactlSourceInfo> sources;
+    std::optional<std::string> defaultSource;
+    std::string listError;
+  };
+
+  struct SpeakerTargetRefreshResult {
+    bool pactlOk = false;
+    std::string pactlDetails;
+    std::vector<studiocast::audio::pulse::PactlSink> sinks;
+    std::optional<std::string> defaultSink;
+    std::string listError;
+  };
+
   void ShowError(const QString &title, const QString &details);
 
-  void RefreshDaemonAudioStatus();
+  void ApplySourceRefreshResult(const SourceRefreshResult &result);
+  void ApplySpeakerTargetRefreshResult(
+      const SpeakerTargetRefreshResult &result);
+  void RefreshStatusFromCachedDaemon(bool forceControlResync);
+  void ApplyCachedDaemonAudioStatus(bool forceControlResync = false);
+  void ScheduleDaemonAudioConfigWrite();
+  void UpdateReleaseControlsFromCachedStatus();
   void PushDaemonAudioConfig();
   void PushDaemonSourceSelection();
   void SetAiControlsEnabled(bool enabled, const QString &reason);
@@ -187,10 +219,16 @@ private:
   bool daemonAiSupported_ = false;
   QString daemonAiDisableReason_;
   QString daemonStatusText_;
+  QString daemonStatusDetail_;
+  QString daemonLastStatusJson_;
   QString daemonSource_;
 
   // Last speaker routing status reported by the daemon.
   bool daemonSpeakersRoutingActive_ = false;
+  bool daemonMicVirtualDevicePresent_ = false;
+  bool daemonSpeakersVirtualDevicePresent_ = false;
+  QString daemonMicrophoneAction_;
+  QString daemonSpeakersAction_;
   QString daemonSpeakersRouteMode_;
   QString daemonSpeakerTarget_;
 
@@ -203,7 +241,10 @@ private:
   bool openAudioOk_ = false;
   QStringList openAudioInstallHints_;
 
-  QTimer *pollTimer_ = nullptr;
+  QTimer *audioWriteDebounceTimer_ = nullptr;
+  PendingDaemonWriteGuard audioWriteGuard_;
+  QThread *sourceRefreshThread_ = nullptr;
+  QThread *speakerTargetRefreshThread_ = nullptr;
 };
 
 } // namespace studiocast::gui

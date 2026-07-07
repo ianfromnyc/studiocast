@@ -21,6 +21,9 @@ struct DaemonCallOptions {
   // Separate budgets keep stale sockets from blocking UI callers forever while
   // still allowing CLI/status callers to tolerate first-run diagnostics.
   int connect_timeout_ms = 1000;
+
+  // Total write + read budget after connect. This is a monotonic deadline, not
+  // a fresh timeout for each partial socket operation.
   int io_timeout_ms = 10000;
 };
 

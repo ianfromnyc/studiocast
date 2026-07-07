@@ -34,12 +34,35 @@ OpenAudioDiagnostics DiagnoseOpenAudioDefault() {
   od.install_hints.push_back(std::string("Model packs: ") + openAudioRoot +
                              "/<model_id>/");
   od.install_hints.push_back(
-      "Source builds: run ./scripts/install_open_audio_models.sh to install "
+      "Source builds: run ./scripts/install.sh open-audio-models to install "
       "curated FastEnhancer packs.");
-  od.install_hints.push_back("Docs: docs/open_audio_install.md");
+  od.install_hints.push_back("Docs: docs/open_source_audio_models_install.md");
   od.install_hints.push_back(
       "Each pack must contain: model.json, the ONNX file referenced by "
       "onnx_filename, and LICENSE.txt.");
+
+  {
+    const auto ort = OpenAudioOrtSession::QueryRuntimeInfo();
+    od.onnxruntime_version = ort.version;
+    od.onnxruntime_providers = ort.providers;
+    od.onnxruntime_cuda_provider_present = ort.cuda_provider_present;
+    od.onnxruntime_tensorrt_provider_present = ort.tensorrt_provider_present;
+    od.onnxruntime_cpu_provider_present = ort.cpu_provider_present;
+    od.onnxruntime_cuda_ep_v2_build = ort.cuda_ep_v2_build;
+    od.onnxruntime_library_path = ort.library_path;
+    od.onnxruntime_warnings = ort.warnings;
+#if STUDIOCAST_HAVE_ONNXRUNTIME
+    if (ort.cuda_provider_present) {
+      od.acceleration_likely = "cuda";
+    } else if (ort.cpu_provider_present) {
+      od.acceleration_likely = "cpu_fallback";
+    } else {
+      od.acceleration_likely = "unknown";
+    }
+#else
+    od.acceleration_likely = "unavailable";
+#endif
+  }
 
   const auto block_effects = [&](const char *reason_code) {
     od.blocked_effects[std::string(
@@ -60,12 +83,6 @@ OpenAudioDiagnostics DiagnoseOpenAudioDefault() {
   od.install_hints.push_back("Rebuild with -DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON "
                              "(requires ONNX Runtime).");
 #elif STUDIOCAST_HAVE_ONNXRUNTIME
-  {
-    const auto ort = OpenAudioOrtSession::QueryRuntimeInfo();
-    od.onnxruntime_version = ort.version;
-    od.onnxruntime_providers = ort.providers;
-  }
-
   if (od.installed_models.empty()) {
     od.ok = false;
     block_effects("missing_model_packs");

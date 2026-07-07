@@ -1,6 +1,7 @@
 #include "core/onnx/ort_session.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <optional>
 #include <sstream>
 #include <type_traits>
@@ -8,11 +9,77 @@
 #include <vector>
 
 #if STUDIOCAST_HAVE_ONNXRUNTIME
+#include <dlfcn.h>
+
 #include <onnxruntime_c_api.h>
 #include <onnxruntime_cxx_api.h>
 #endif
 
+#ifndef STUDIOCAST_ORT_HAS_CUDA_EP_V2
+#define STUDIOCAST_ORT_HAS_CUDA_EP_V2 0
+#endif
+
+#ifndef STUDIOCAST_ORT_HAS_TENSORRT_EP_V2
+#define STUDIOCAST_ORT_HAS_TENSORRT_EP_V2 0
+#endif
+
 namespace studiocast::onnx {
+namespace {
+
+bool HasProvider(const std::vector<std::string> &providers,
+                 const char *provider) {
+  return std::find(providers.begin(), providers.end(), std::string(provider)) !=
+         providers.end();
+}
+
+#if STUDIOCAST_HAVE_ONNXRUNTIME
+std::string QueryOrtLibraryPath() {
+  Dl_info info{};
+  if (dladdr(reinterpret_cast<const void *>(&OrtGetApiBase), &info) != 0 &&
+      info.dli_fname && *info.dli_fname) {
+    return info.dli_fname;
+  }
+  return {};
+}
+#endif
+
+} // namespace
+
+namespace {
+
+std::filesystem::path EnvPath(const char *name) {
+  const char *v = std::getenv(name);
+  if (!v || !*v)
+    return {};
+  return std::filesystem::path(v);
+}
+
+} // namespace
+
+bool OrtBuildHasTensorRtEpV2() {
+  return STUDIOCAST_ORT_HAS_TENSORRT_EP_V2 != 0;
+}
+
+std::filesystem::path DefaultTensorRtCachePath(int cuda_device_id) {
+  std::filesystem::path base = EnvPath("XDG_CACHE_HOME");
+  if (base.empty()) {
+    const auto home = EnvPath("HOME");
+    if (!home.empty()) {
+      base = home / ".cache";
+    }
+  }
+  if (base.empty()) {
+    std::error_code ec;
+    base = std::filesystem::temp_directory_path(ec);
+    if (ec || base.empty()) {
+      return {};
+    }
+  }
+
+  const int id = std::max(0, cuda_device_id);
+  return base / "studiocast" / "trt_cache" /
+         (std::string("gpu") + std::to_string(id));
+}
 
 bool OrtErrorLooksLikeVramOom(const std::string &ort_msg) {
   // Common failure strings seen from ORT CUDA EP when VRAM is exhausted or
@@ -46,14 +113,19 @@ std::string HumanizeOrtError(const std::string &ort_msg,
   return out;
 }
 
-OrtRuntimeInfo OrtSession::QueryRuntimeInfo() {
+OrtRuntimeInfo QueryRuntimeInfoUncached() {
   OrtRuntimeInfo out;
+
+#if defined(STUDIOCAST_ORT_HAS_CUDA_EP_V2) && STUDIOCAST_ORT_HAS_CUDA_EP_V2
+  out.cuda_ep_v2_build = true;
+#endif
 
 #if STUDIOCAST_HAVE_ONNXRUNTIME
   const char *v = OrtGetApiBase()->GetVersionString();
   if (v) {
     out.version = v;
   }
+  out.library_path = QueryOrtLibraryPath();
 
   try {
     auto &api = Ort::GetApi();
@@ -74,13 +146,303 @@ OrtRuntimeInfo OrtSession::QueryRuntimeInfo() {
     } else {
       Ort::ThrowOnError(api.ReleaseAvailableProviders(providers, num));
     }
-  } catch (const Ort::Exception &) {
-    // Best-effort only.
+  } catch (const Ort::Exception &e) {
+    out.warnings.push_back(std::string("onnxruntime_provider_query_failed: ") +
+                           e.what());
   }
 #endif
 
+  out.cuda_provider_present =
+      HasProvider(out.providers, "CUDAExecutionProvider");
+  out.tensorrt_provider_present =
+      HasProvider(out.providers, "TensorrtExecutionProvider");
+  out.cpu_provider_present = HasProvider(out.providers, "CPUExecutionProvider");
+
   return out;
 }
+
+OrtRuntimeInfo OrtSession::QueryRuntimeInfo() {
+  static const OrtRuntimeInfo cached = QueryRuntimeInfoUncached();
+  return cached;
+}
+
+namespace {
+
+void CopyRuntimeProvidersToInfo(const OrtRuntimeInfo &runtime,
+                                OrtSessionInfo *info) {
+  if (!info)
+    return;
+  info->advertised_providers = runtime.providers;
+  info->cuda_provider_advertised = runtime.cuda_provider_present;
+  info->tensorrt_provider_advertised = runtime.tensorrt_provider_present;
+  info->cpu_provider_advertised = runtime.cpu_provider_present;
+  info->warnings.insert(info->warnings.end(), runtime.warnings.begin(),
+                        runtime.warnings.end());
+}
+
+void MarkCreatedSessionProviders(OrtSessionInfo *info) {
+  if (!info)
+    return;
+  info->tensorrt_provider_usable = info->using_tensorrt;
+  info->cuda_provider_usable = info->using_cuda;
+  info->cpu_provider_usable = !info->using_tensorrt && !info->using_cuda;
+  if (info->cpu_provider_usable) {
+    info->active_provider = "cpu";
+    if (info->appended_providers.empty()) {
+      info->appended_provider = "cpu";
+    }
+  }
+}
+
+void PrependWarnings(OrtSessionInfo *dst,
+                     const std::vector<std::string> &warnings) {
+  if (!dst || warnings.empty())
+    return;
+  dst->warnings.insert(dst->warnings.begin(), warnings.begin(),
+                       warnings.end());
+}
+
+internal::OrtSessionCreateResult
+CallCreateSession(const internal::OrtSessionCreateHooks &hooks,
+                  internal::OrtSessionCreateAttempt attempt,
+                  const OrtSessionOptions &opts, OrtSessionInfo *info_out) {
+  if (!hooks.create_session) {
+    internal::OrtSessionCreateResult result;
+    result.error = "missing ONNX Runtime session create hook";
+    return result;
+  }
+  return hooks.create_session(hooks.context, attempt, opts, info_out);
+}
+
+} // namespace
+
+namespace internal {
+
+OrtSessionInfo PlanOrtProviderAttempt(const OrtRuntimeInfo &runtime,
+                                      const OrtSessionOptions &opts,
+                                      bool tensorrt_ep_v2_build,
+                                      const OrtProviderAppendHooks &hooks) {
+  OrtSessionInfo info;
+  info.using_tensorrt = false;
+  info.using_cuda = false;
+  info.cuda_needs_stream_sync = false;
+  info.advertised_providers.clear();
+  info.cuda_provider_advertised = false;
+  info.tensorrt_provider_advertised = false;
+  info.cpu_provider_advertised = false;
+  info.tensorrt_provider_appended = false;
+  info.cuda_provider_appended = false;
+  info.tensorrt_provider_usable = false;
+  info.cuda_provider_usable = false;
+  info.cpu_provider_usable = false;
+  info.tensorrt_session_create_failed_fell_back_to_cuda = false;
+  info.cuda_session_create_failed_fell_back_to_cpu = false;
+  info.active_provider = "cpu";
+  info.appended_provider = "cpu";
+  info.appended_providers.clear();
+  info.tensorrt_status =
+      opts.enable_tensorrt ? "requested" : "not_requested";
+  info.tensorrt_engine_cache_path =
+      opts.tensorrt_engine_cache_path.empty()
+          ? DefaultTensorRtCachePath(opts.cuda_device_id)
+          : opts.tensorrt_engine_cache_path;
+
+  CopyRuntimeProvidersToInfo(runtime, &info);
+
+  bool tensor_rt_needs_sync = false;
+  if (opts.enable_tensorrt) {
+    if (!tensorrt_ep_v2_build) {
+      info.tensorrt_status = "unsupported_in_build";
+      info.warnings.push_back(
+          "tensorrt_ep_unavailable: build does not expose TensorRT EP V2 "
+          "provider options");
+    } else if (!info.tensorrt_provider_advertised) {
+      info.tensorrt_status = "provider_not_advertised";
+      info.warnings.push_back(
+          "tensorrt_ep_unavailable: provider not advertised by ONNX Runtime");
+    } else if (!hooks.append_tensorrt) {
+      info.tensorrt_status = "append_hook_missing";
+      info.warnings.push_back(
+          "tensorrt_ep_unavailable: provider append hook missing");
+    } else {
+      const OrtProviderAppendResult trt =
+          hooks.append_tensorrt(hooks.context, opts);
+      info.tensorrt_status = trt.status;
+      if (!trt.cache_path.empty()) {
+        info.tensorrt_engine_cache_path = trt.cache_path;
+      }
+      info.warnings.insert(info.warnings.end(), trt.warnings.begin(),
+                           trt.warnings.end());
+      if (trt.appended) {
+        info.using_tensorrt = true;
+        info.tensorrt_provider_appended = true;
+        info.appended_providers.push_back("tensorrt");
+        tensor_rt_needs_sync = trt.needs_stream_sync;
+      }
+    }
+  }
+
+  bool cuda_needs_sync = false;
+  const bool should_append_cuda =
+      opts.prefer_cuda &&
+      (!opts.enable_tensorrt || opts.tensorrt_enable_cuda_fallback ||
+       !info.using_tensorrt);
+  if (should_append_cuda) {
+    if (!info.cuda_provider_advertised) {
+      info.warnings.push_back(
+          "cuda_ep_unavailable: provider not advertised by ONNX Runtime");
+    } else if (!hooks.append_cuda) {
+      info.warnings.push_back(
+          "cuda_ep_unavailable: provider append hook missing");
+    } else {
+      const OrtProviderAppendResult cuda =
+          hooks.append_cuda(hooks.context, opts);
+      cuda_needs_sync = cuda.needs_stream_sync;
+      info.warnings.insert(info.warnings.end(), cuda.warnings.begin(),
+                           cuda.warnings.end());
+      info.using_cuda = cuda.appended;
+      info.cuda_provider_appended = cuda.appended;
+    }
+  }
+  if (info.using_cuda) {
+    info.appended_providers.push_back("cuda");
+  }
+
+  if (!info.appended_providers.empty()) {
+    info.appended_provider = info.appended_providers.front();
+    info.active_provider = info.appended_provider;
+  }
+
+  if (info.using_tensorrt) {
+    info.tensorrt_status = "active";
+  }
+
+  info.cuda_needs_stream_sync =
+      (info.using_tensorrt && tensor_rt_needs_sync) ||
+      (info.using_cuda && cuda_needs_sync);
+  return info;
+}
+
+OrtSessionCreatePlanResult
+CreateOrtSessionWithProviderFallbacks(const OrtSessionOptions &opts,
+                                      const OrtSessionCreateHooks &hooks) {
+  OrtSessionCreatePlanResult plan;
+
+  auto try_cpu_fallback =
+      [&](const OrtSessionOptions &failed_opts,
+          const OrtSessionInfo &failed_info,
+          const std::string &failure_warning, OrtSessionInfo *fallback_info_out,
+          std::string *cpu_error) -> bool {
+    if (cpu_error)
+      cpu_error->clear();
+    if (!fallback_info_out || !failed_opts.prefer_cuda ||
+        !failed_info.using_cuda) {
+      return false;
+    }
+
+    OrtSessionOptions cpu_opts = failed_opts;
+    cpu_opts.prefer_cuda = false;
+    cpu_opts.enable_tensorrt = false;
+
+    OrtSessionInfo cpu_info;
+    const OrtSessionCreateResult cpu_create =
+        CallCreateSession(hooks, OrtSessionCreateAttempt::CpuOnly, cpu_opts,
+                          &cpu_info);
+    if (!cpu_create.created) {
+      if (cpu_error)
+        *cpu_error = cpu_create.error;
+      return false;
+    }
+
+    MarkCreatedSessionProviders(&cpu_info);
+    PrependWarnings(&cpu_info, failed_info.warnings);
+    cpu_info.cuda_session_create_failed_fell_back_to_cpu = true;
+    if (!failure_warning.empty()) {
+      cpu_info.warnings.push_back(failure_warning);
+    }
+    *fallback_info_out = std::move(cpu_info);
+    return true;
+  };
+
+  OrtSessionInfo info;
+  const OrtSessionCreateResult initial =
+      CallCreateSession(hooks, OrtSessionCreateAttempt::Initial, opts, &info);
+  if (initial.created) {
+    MarkCreatedSessionProviders(&info);
+    plan.created = true;
+    plan.info = std::move(info);
+    return plan;
+  }
+
+  const std::string first_error = initial.error;
+  if (opts.enable_tensorrt && info.using_tensorrt &&
+      opts.tensorrt_enable_cuda_fallback && opts.prefer_cuda) {
+    OrtSessionOptions retry_opts = opts;
+    retry_opts.enable_tensorrt = false;
+    OrtSessionInfo retry_info;
+    const OrtSessionCreateResult retry =
+        CallCreateSession(hooks, OrtSessionCreateAttempt::TensorRtDisabled,
+                          retry_opts, &retry_info);
+    if (retry.created) {
+      MarkCreatedSessionProviders(&retry_info);
+    } else {
+      std::string cpu_error;
+      const std::string cuda_warning =
+          std::string("cuda_session_create_failed_fell_back_to_cpu: ") +
+          retry.error;
+      if (!try_cpu_fallback(retry_opts, retry_info, cuda_warning, &retry_info,
+                            &cpu_error)) {
+        std::ostringstream oss;
+        oss << "TensorRT session creation failed: " << first_error
+            << "; CUDA fallback session creation also failed: "
+            << retry.error;
+        if (!cpu_error.empty()) {
+          oss << "; CPU fallback session creation also failed: " << cpu_error;
+        }
+        plan.error = oss.str();
+        return plan;
+      }
+    }
+
+    PrependWarnings(&retry_info, info.warnings);
+    retry_info.tensorrt_engine_cache_path = info.tensorrt_engine_cache_path;
+    retry_info.tensorrt_session_create_failed_fell_back_to_cuda =
+        retry_info.using_cuda;
+    retry_info.tensorrt_status =
+        retry_info.using_cuda ? "session_create_failed_fell_back_to_cuda"
+                              : "session_create_failed_fell_back_to_cpu";
+    retry_info.warnings.push_back(
+        std::string(retry_info.using_cuda
+                        ? "tensorrt_session_create_failed_fell_back_to_cuda: "
+                        : "tensorrt_session_create_failed_fell_back_to_cpu: ") +
+        first_error);
+    plan.created = true;
+    plan.info = std::move(retry_info);
+    return plan;
+  }
+
+  std::string cpu_error;
+  const std::string cuda_warning =
+      std::string("cuda_session_create_failed_fell_back_to_cpu: ") +
+      first_error;
+  if (!try_cpu_fallback(opts, info, cuda_warning, &info, &cpu_error)) {
+    if (!cpu_error.empty()) {
+      std::ostringstream oss;
+      oss << "CUDA session creation failed: " << first_error
+          << "; CPU fallback session creation also failed: " << cpu_error;
+      plan.error = oss.str();
+      return plan;
+    }
+    plan.error = first_error;
+    return plan;
+  }
+
+  plan.created = true;
+  plan.info = std::move(info);
+  return plan;
+}
+
+} // namespace internal
 
 #if STUDIOCAST_HAVE_ONNXRUNTIME
 namespace {
@@ -157,13 +519,169 @@ std::string TensorDesc(const TensorTypeAndShapeInfo &ti) {
   return oss.str();
 }
 
-bool TryAppendCudaEp(Ort::SessionOptions *so, const OrtSessionOptions &opts,
-                     bool *needs_stream_sync, std::string *warn) {
-  if (warn)
-    warn->clear();
-  if (needs_stream_sync)
-    *needs_stream_sync = false;
+void AppendTensorRtOption(std::vector<std::string> *keys,
+                          std::vector<std::string> *values,
+                          std::string key, std::string value) {
+  keys->push_back(std::move(key));
+  values->push_back(std::move(value));
+}
 
+#if STUDIOCAST_ORT_HAS_TENSORRT_EP_V2
+OrtTensorRTProviderOptionsV2 *
+CreateConfiguredTensorRtOptions(const OrtSessionOptions &opts,
+                                const std::filesystem::path &cache_path,
+                                bool include_builder_optimization_level) {
+  const auto &api = Ort::GetApi();
+
+  OrtTensorRTProviderOptionsV2 *trt_opts_v2 = nullptr;
+  Ort::ThrowOnError(api.CreateTensorRTProviderOptions(&trt_opts_v2));
+
+  try {
+    std::vector<std::string> keys;
+    std::vector<std::string> values;
+    keys.reserve(7);
+    values.reserve(7);
+
+    AppendTensorRtOption(&keys, &values, "device_id",
+                         std::to_string(opts.cuda_device_id));
+    AppendTensorRtOption(&keys, &values, "trt_max_workspace_size",
+                         std::to_string(opts.tensorrt_max_workspace_size));
+    AppendTensorRtOption(&keys, &values, "trt_fp16_enable",
+                         opts.tensorrt_fp16_enable ? "1" : "0");
+    AppendTensorRtOption(&keys, &values, "trt_engine_cache_enable",
+                         opts.tensorrt_engine_cache_enable ? "1" : "0");
+    if (opts.tensorrt_engine_cache_enable && !cache_path.empty()) {
+      AppendTensorRtOption(&keys, &values, "trt_engine_cache_path",
+                           cache_path.string());
+    }
+    if (include_builder_optimization_level) {
+      AppendTensorRtOption(
+          &keys, &values, "trt_builder_optimization_level",
+          std::to_string(opts.tensorrt_builder_optimization_level));
+    }
+
+    std::vector<const char *> key_ptrs;
+    std::vector<const char *> value_ptrs;
+    key_ptrs.reserve(keys.size());
+    value_ptrs.reserve(values.size());
+    for (const auto &k : keys)
+      key_ptrs.push_back(k.c_str());
+    for (const auto &v : values)
+      value_ptrs.push_back(v.c_str());
+
+    Ort::ThrowOnError(api.UpdateTensorRTProviderOptions(
+        trt_opts_v2, key_ptrs.data(), value_ptrs.data(), key_ptrs.size()));
+    return trt_opts_v2;
+  } catch (...) {
+    api.ReleaseTensorRTProviderOptions(trt_opts_v2);
+    throw;
+  }
+}
+#endif
+
+internal::OrtProviderAppendResult
+TryAppendTensorRtEp(Ort::SessionOptions *so, const OrtSessionOptions &opts) {
+  internal::OrtProviderAppendResult result;
+  result.cache_path =
+      opts.tensorrt_engine_cache_path.empty()
+          ? DefaultTensorRtCachePath(opts.cuda_device_id)
+          : opts.tensorrt_engine_cache_path;
+
+  if (!so) {
+    result.status = "invalid_session_options";
+    result.warnings.push_back("tensorrt_ep_unavailable: null session options");
+    return result;
+  }
+
+#if !STUDIOCAST_ORT_HAS_TENSORRT_EP_V2
+  result.status = "unsupported_in_build";
+  result.warnings.push_back(
+      "tensorrt_ep_unavailable: build does not expose TensorRT EP V2 provider "
+      "options");
+  return result;
+#else
+  const auto &api = Ort::GetApi();
+  try {
+    // Some ORT provider APIs may log internally. Ensure the process-global ORT
+    // env/logger exists before calling into provider setup.
+    (void)GlobalEnv();
+
+    if (opts.tensorrt_engine_cache_enable && !result.cache_path.empty()) {
+      std::error_code ec;
+      std::filesystem::create_directories(result.cache_path, ec);
+      if (ec) {
+        result.warnings.push_back(
+            std::string("tensorrt_cache_dir_unavailable: ") + ec.message());
+      }
+    }
+
+    OrtTensorRTProviderOptionsV2 *trt_opts_v2 = nullptr;
+    try {
+      trt_opts_v2 = CreateConfiguredTensorRtOptions(
+          opts, result.cache_path, /*include_builder_optimization_level=*/true);
+    } catch (const Ort::Exception &e) {
+      const std::string msg = e.what();
+      if (msg.find("trt_builder_optimization_level") == std::string::npos) {
+        throw;
+      }
+      result.warnings.push_back(
+          std::string("tensorrt_builder_optimization_level_unavailable: ") +
+          msg);
+      trt_opts_v2 = CreateConfiguredTensorRtOptions(
+          opts, result.cache_path,
+          /*include_builder_optimization_level=*/false);
+    }
+
+    struct Guard {
+      const OrtApi *api = nullptr;
+      OrtTensorRTProviderOptionsV2 *opts = nullptr;
+      ~Guard() {
+        if (api && opts) {
+          api->ReleaseTensorRTProviderOptions(opts);
+        }
+      }
+    } guard{&api, trt_opts_v2};
+
+    if (opts.user_compute_stream != nullptr) {
+      try {
+        Ort::ThrowOnError(api.UpdateTensorRTProviderOptionsWithValue(
+            trt_opts_v2, "user_compute_stream",
+            reinterpret_cast<void *>(opts.user_compute_stream)));
+        result.needs_stream_sync = false;
+      } catch (const Ort::Exception &e) {
+        result.needs_stream_sync = true;
+        result.warnings.push_back(
+            std::string("tensorrt_user_compute_stream_unavailable: ") +
+            e.what());
+      }
+    } else {
+      result.needs_stream_sync = true;
+    }
+
+    Ort::ThrowOnError(
+        api.SessionOptionsAppendExecutionProvider_TensorRT_V2(*so,
+                                                              trt_opts_v2));
+    result.appended = true;
+    result.status = "appended";
+    return result;
+  } catch (const Ort::Exception &e) {
+    result.status = "unavailable";
+    result.warnings.push_back(std::string("tensorrt_ep_unavailable: ") +
+                              e.what());
+    result.needs_stream_sync = false;
+    return result;
+  }
+#endif
+}
+
+internal::OrtProviderAppendResult TryAppendCudaEp(Ort::SessionOptions *so,
+                                                  const OrtSessionOptions &opts) {
+  internal::OrtProviderAppendResult result;
+  if (!so) {
+    result.status = "invalid_session_options";
+    result.warnings.push_back("cuda_ep_unavailable: null session options");
+    return result;
+  }
   try {
     // Some ORT CUDA EP APIs may log internally. Ensure the process-global ORT
     // env/logger exists before calling into provider setup.
@@ -189,37 +707,133 @@ bool TryAppendCudaEp(Ort::SessionOptions *so, const OrtSessionOptions &opts,
     Ort::ThrowOnError(
         api.UpdateCUDAProviderOptions(cuda_opts_v2, keys, values, 1));
 
+    const auto try_update_string_option = [&](const char *key,
+                                              const std::string &value) {
+      if (value.empty())
+        return;
+      const char *opt_keys[] = {key};
+      const char *opt_values[] = {value.c_str()};
+      try {
+        Ort::ThrowOnError(api.UpdateCUDAProviderOptions(cuda_opts_v2, opt_keys,
+                                                        opt_values, 1));
+      } catch (const Ort::Exception &e) {
+        result.warnings.push_back(std::string("cuda_ep_option_unavailable: ") +
+                                  key + ": " + e.what());
+      }
+    };
+
+    const std::string gpu_mem_limit =
+        opts.cuda_gpu_mem_limit > 0 ? std::to_string(opts.cuda_gpu_mem_limit)
+                                    : std::string{};
+    const std::string do_copy_in_default_stream =
+        opts.cuda_do_copy_in_default_stream ? "1" : "0";
+
+    try_update_string_option("gpu_mem_limit", gpu_mem_limit);
+    try_update_string_option("arena_extend_strategy",
+                             opts.cuda_arena_extend_strategy);
+    try_update_string_option("cudnn_conv_algo_search",
+                             opts.cuda_cudnn_conv_algo_search);
+    try_update_string_option("do_copy_in_default_stream",
+                             do_copy_in_default_stream);
+
     if (opts.user_compute_stream != nullptr) {
       Ort::ThrowOnError(api.UpdateCUDAProviderOptionsWithValue(
           cuda_opts_v2, "user_compute_stream",
           reinterpret_cast<void *>(opts.user_compute_stream)));
-      if (needs_stream_sync)
-        *needs_stream_sync = false;
+      result.needs_stream_sync = false;
     } else {
       // Without user_compute_stream, ORT may use internal streams.
-      if (needs_stream_sync)
-        *needs_stream_sync = true;
+      result.needs_stream_sync = true;
     }
 
     Ort::ThrowOnError(
         api.SessionOptionsAppendExecutionProvider_CUDA_V2(*so, cuda_opts_v2));
-    return true;
+    result.appended = true;
+    result.status = "appended";
+    return result;
 #else
     OrtCUDAProviderOptions cuda_opts{};
     cuda_opts.device_id = opts.cuda_device_id;
     so->AppendExecutionProvider_CUDA(cuda_opts);
 
     // Legacy CUDA EP does not expose stream interop.
-    if (needs_stream_sync)
-      *needs_stream_sync = true;
-    return true;
+    result.needs_stream_sync = true;
+    result.appended = true;
+    result.status = "appended";
+    return result;
 #endif
   } catch (const Ort::Exception &e) {
-    if (warn)
-      *warn = e.what();
-    if (needs_stream_sync)
-      *needs_stream_sync = false;
-    return false;
+    result.status = "unavailable";
+    result.warnings.push_back(std::string("cuda_ep_unavailable: ") + e.what());
+    result.needs_stream_sync = false;
+    return result;
+  }
+}
+
+struct ProviderAppendContext {
+  Ort::SessionOptions *session_options = nullptr;
+};
+
+internal::OrtProviderAppendResult AppendTensorRtForSessionOptions(
+    void *context, const OrtSessionOptions &opts) {
+  auto *append_context = static_cast<ProviderAppendContext *>(context);
+  return TryAppendTensorRtEp(
+      append_context ? append_context->session_options : nullptr, opts);
+}
+
+internal::OrtProviderAppendResult
+AppendCudaForSessionOptions(void *context, const OrtSessionOptions &opts) {
+  auto *append_context = static_cast<ProviderAppendContext *>(context);
+  return TryAppendCudaEp(
+      append_context ? append_context->session_options : nullptr, opts);
+}
+
+void ConfigureExecutionProviders(Ort::SessionOptions *so,
+                                 const OrtSessionOptions &opts,
+                                 OrtSessionInfo *info) {
+  if (!info)
+    return;
+
+  ProviderAppendContext context{so};
+  internal::OrtProviderAppendHooks hooks;
+  hooks.context = &context;
+  hooks.append_tensorrt = AppendTensorRtForSessionOptions;
+  hooks.append_cuda = AppendCudaForSessionOptions;
+  *info = internal::PlanOrtProviderAttempt(
+      OrtSession::QueryRuntimeInfo(), opts, OrtBuildHasTensorRtEpV2(), hooks);
+}
+
+struct SessionCreateContext {
+  const std::string *model = nullptr;
+  std::unique_ptr<Ort::Session> *session_out = nullptr;
+};
+
+internal::OrtSessionCreateResult
+CreateOrtSessionForPlan(void *context, internal::OrtSessionCreateAttempt,
+                        const OrtSessionOptions &session_opts,
+                        OrtSessionInfo *provider_info) {
+  auto *create_context = static_cast<SessionCreateContext *>(context);
+  internal::OrtSessionCreateResult result;
+  if (!create_context || !create_context->model ||
+      !create_context->session_out) {
+    result.error = "invalid ONNX Runtime session create context";
+    return result;
+  }
+
+  try {
+    Ort::SessionOptions so;
+    so.SetIntraOpNumThreads(1);
+    so.SetInterOpNumThreads(1);
+    so.SetGraphOptimizationLevel(ORT_ENABLE_EXTENDED);
+    ConfigureExecutionProviders(&so, session_opts, provider_info);
+    auto session = std::make_unique<Ort::Session>(
+        GlobalEnv(), create_context->model->c_str(), so);
+    *create_context->session_out = std::move(session);
+    result.created = true;
+    return result;
+  } catch (const Ort::Exception &e) {
+    result.error = e.what();
+    return result;
   }
 }
 
@@ -246,6 +860,26 @@ struct OrtSession::Impl {
   std::vector<const char *> scratch_output_names;
   std::vector<Ort::Value> scratch_inputs;
   std::vector<Ort::Value> scratch_outputs;
+
+  void ClearCpuRunScratch() noexcept {
+    scratch_input_names.clear();
+    scratch_output_names.clear();
+    scratch_inputs.clear();
+    scratch_outputs.clear();
+  }
+
+  void ClearCudaRunScratch() noexcept {
+    if (binding) {
+      try {
+        binding->ClearBoundInputs();
+        binding->ClearBoundOutputs();
+      } catch (...) {
+        // Best-effort cleanup only. The caller's run result/error remains the
+        // source of truth.
+      }
+    }
+    ClearCpuRunScratch();
+  }
 #endif
 
   void LatchFailure(const std::string &err) {
@@ -269,6 +903,21 @@ OrtSession::OrtSession(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 OrtSession::~OrtSession() = default;
 
 const OrtSessionInfo &OrtSession::info() const { return impl_->info; }
+
+void OrtSession::ReserveRunScratch(std::size_t input_count,
+                                   std::size_t output_count) {
+#if STUDIOCAST_HAVE_ONNXRUNTIME
+  if (!impl_)
+    return;
+  impl_->scratch_input_names.reserve(input_count);
+  impl_->scratch_output_names.reserve(output_count);
+  impl_->scratch_inputs.reserve(input_count);
+  impl_->scratch_outputs.reserve(output_count);
+#else
+  (void)input_count;
+  (void)output_count;
+#endif
+}
 
 bool OrtSession::HasLatchedFailure() const {
   return impl_ ? impl_->latched_failure : false;
@@ -305,27 +954,24 @@ OrtSession::Create(const std::filesystem::path &model_path,
       return nullptr;
     }
 
-    Ort::SessionOptions so;
-    so.SetIntraOpNumThreads(1);
-    so.SetInterOpNumThreads(1);
-    so.SetGraphOptimizationLevel(ORT_ENABLE_EXTENDED);
-
-    bool using_cuda = false;
-    bool cuda_needs_sync = false;
-    std::string cuda_warn;
-    if (opts.prefer_cuda) {
-      using_cuda = TryAppendCudaEp(&so, opts, &cuda_needs_sync, &cuda_warn);
+    std::unique_ptr<Ort::Session> session;
+    SessionCreateContext create_context{&model, &session};
+    internal::OrtSessionCreateHooks create_hooks;
+    create_hooks.context = &create_context;
+    create_hooks.create_session = CreateOrtSessionForPlan;
+    internal::OrtSessionCreatePlanResult create_plan =
+        internal::CreateOrtSessionWithProviderFallbacks(opts, create_hooks);
+    if (!create_plan.created || !session) {
+      if (error) {
+        *error = HumanizeOrtError(
+            create_plan.error.empty()
+                ? "ONNX Runtime session creation failed without details"
+                : create_plan.error,
+            model_path);
+      }
+      return nullptr;
     }
-
-    auto session =
-        std::make_unique<Ort::Session>(GlobalEnv(), model.c_str(), so);
-
-    OrtSessionInfo info;
-    info.using_cuda = using_cuda;
-    info.cuda_needs_stream_sync = using_cuda && cuda_needs_sync;
-    if (!cuda_warn.empty() && !using_cuda && opts.prefer_cuda) {
-      info.warnings.push_back(std::string("cuda_ep_unavailable: ") + cuda_warn);
-    }
+    OrtSessionInfo info = std::move(create_plan.info);
 
     Ort::AllocatorWithDefaultOptions alloc;
 
@@ -466,6 +1112,15 @@ bool OrtSession::RunCpu(const RunInput *inputs, std::size_t input_count,
   }
 
   try {
+    impl_->ClearCpuRunScratch();
+    struct ScratchGuard {
+      Impl *impl = nullptr;
+      ~ScratchGuard() {
+        if (impl)
+          impl->ClearCpuRunScratch();
+      }
+    } scratch_guard{impl_.get()};
+
     static Ort::MemoryInfo mem_info =
         Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
 
@@ -587,9 +1242,9 @@ bool OrtSession::RunCudaIoBinding(const CudaBindingInput *inputs,
       *error = "ORT session is not initialized.";
     return false;
   }
-  if (!impl_->info.using_cuda) {
+  if (!impl_->info.using_cuda && !impl_->info.using_tensorrt) {
     if (error)
-      *error = "ORT session is not using CUDA EP.";
+      *error = "ORT session is not using a CUDA-capable EP.";
     return false;
   }
   if (!inputs || !outputs) {
@@ -605,6 +1260,15 @@ bool OrtSession::RunCudaIoBinding(const CudaBindingInput *inputs,
   }
 
   try {
+    impl_->ClearCudaRunScratch();
+    struct ScratchGuard {
+      Impl *impl = nullptr;
+      ~ScratchGuard() {
+        if (impl)
+          impl->ClearCudaRunScratch();
+      }
+    } scratch_guard{impl_.get()};
+
     if (!impl_->binding) {
       impl_->binding = std::make_unique<Ort::IoBinding>(*impl_->session);
     }
@@ -668,9 +1332,6 @@ bool OrtSession::RunCudaIoBinding(const CudaBindingInput *inputs,
           *impl_->cuda_mem_info, out.device_ptr, out.num_floats, out.shape,
           out.shape_rank));
     }
-
-    impl_->binding->ClearBoundInputs();
-    impl_->binding->ClearBoundOutputs();
 
     for (std::size_t i = 0; i < input_count; ++i) {
       impl_->binding->BindInput(inputs[i].name, impl_->scratch_inputs[i]);

@@ -9,6 +9,31 @@ namespace studiocast::open_cuda {
 struct OpenCudaDiagnostics {
   bool ok = false;
 
+  // Best-effort ONNX Runtime details (cheap provider/runtime discovery only).
+  std::string onnxruntime_version;
+  std::vector<std::string> onnxruntime_providers;
+  bool onnxruntime_cuda_provider_present = false;
+  bool onnxruntime_tensorrt_provider_present = false;
+  bool onnxruntime_cpu_provider_present = false;
+  bool onnxruntime_cuda_ep_v2_build = false;
+  std::string onnxruntime_library_path;
+  std::vector<std::string> onnxruntime_warnings;
+
+  // Best-effort CUDA driver/context probe.
+  bool cuda_driver_api_available = false;
+  bool cuda_context_available = false;
+  int cuda_device_count = -1;
+  int cuda_driver_version = 0;
+  std::string cuda_driver_error;
+  std::string cuda_context_error;
+
+  // TensorRT request/support status for Open CUDA matting.
+  bool tensorrt_supported = false;
+  bool tensorrt_available = false;
+  bool tensorrt_requested = false;
+  std::string tensorrt_cache_path;
+  std::string tensorrt_status;
+
   // Model pack IDs discovered/usable by this engine.
   std::vector<std::string> installed_models;
 

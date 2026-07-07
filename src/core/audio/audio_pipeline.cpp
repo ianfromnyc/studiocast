@@ -744,6 +744,12 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
 
   stop_.store(false, std::memory_order_release);
   {
+    std::lock_guard<std::mutex> lock(startup_mu_);
+    startup_complete_ = false;
+    startup_ok_ = false;
+    startup_error_.clear();
+  }
+  {
     std::lock_guard<std::mutex> lock(io_mu_);
     io_ = CreateIo();
     if (!io_) {
@@ -757,6 +763,18 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
 
   running_.store(true, std::memory_order_release);
   thread_ = std::thread([this, cfg] { ThreadMain(cfg); });
+
+  std::unique_lock<std::mutex> startup_lock(startup_mu_);
+  startup_cv_.wait(startup_lock, [this] { return startup_complete_; });
+  const bool startup_ok = startup_ok_;
+  std::string startup_error = startup_error_;
+  startup_lock.unlock();
+
+  if (!startup_ok) {
+    if (error)
+      *error = std::move(startup_error);
+    return false;
+  }
   return true;
 }
 
@@ -808,6 +826,20 @@ void AudioPipeline::SetLastError(std::string msg) {
   last_error_ = std::move(msg);
 }
 
+void AudioPipeline::CompleteStartup(bool ok, std::string error) {
+  if (!ok) {
+    running_.store(false, std::memory_order_release);
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(startup_mu_);
+    startup_ok_ = ok;
+    startup_error_ = std::move(error);
+    startup_complete_ = true;
+  }
+  startup_cv_.notify_all();
+}
+
 std::unique_ptr<AudioPipelineIo> AudioPipeline::CreateIo() const {
   if (hooks_.create_io) {
     return hooks_.create_io();
@@ -837,17 +869,22 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
 
   AudioPipelineIo *io = GetActiveIo();
   if (!io) {
-    SetLastError("Audio pipeline I/O backend is not available.");
+    const std::string startup_error =
+        "Audio pipeline I/O backend is not available.";
+    SetLastError(startup_error);
+    CompleteStartup(false, startup_error);
     return;
   }
 
   std::string io_err;
   if (!io->Open(cfg, &io_err)) {
     if (!stop_.load(std::memory_order_acquire) && !io_err.empty()) {
-      SetLastError(std::move(io_err));
+      SetLastError(io_err);
     }
+    CompleteStartup(false, std::move(io_err));
     return;
   }
+  CompleteStartup(true, {});
 
   std::vector<float> in(samples_per_frame);
   std::vector<float> out(samples_per_frame);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -48,8 +49,9 @@ private:
   std::thread accept_th_;
 
   mutable std::mutex mu_;
-  std::vector<std::thread> client_threads_;
-  std::vector<int> client_fds_; // for shutdown
+  std::condition_variable client_cv_;
+  std::vector<int> client_fds_; // active client fds for shutdown
+  std::size_t active_clients_ = 0;
 };
 
 } // namespace studiocast::ipc

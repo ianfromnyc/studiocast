@@ -4,6 +4,8 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -14,12 +16,17 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QStyle>
+#include <QThread>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -73,9 +80,8 @@ QString HumanDaemonError(const QString &raw) {
   const QJsonDocument doc =
       QJsonDocument::fromJson(trimmed.toUtf8(), &parseError);
   if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
-    const QString error = doc.object().value(QStringLiteral("error"))
-                              .toString()
-                              .trimmed();
+    const QString error =
+        doc.object().value(QStringLiteral("error")).toString().trimmed();
     if (!error.isEmpty())
       return error;
   }
@@ -90,8 +96,8 @@ bool ParseJsonObject(const std::string &json, QJsonObject *out,
       QJsonDocument::fromJson(QByteArray::fromStdString(json), &parseError);
   if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
     if (error) {
-      *error = QStringLiteral("JSON parse error: %1")
-                   .arg(parseError.errorString());
+      *error =
+          QStringLiteral("JSON parse error: %1").arg(parseError.errorString());
     }
     return false;
   }
@@ -127,8 +133,7 @@ void SetEditTextIfNotFocused(QLineEdit *edit, const QString &text) {
     edit->setText(text);
 }
 
-QPlainTextEdit *RawTextBox(QWidget *parent, int minHeight,
-                           bool wrap = false) {
+QPlainTextEdit *RawTextBox(QWidget *parent, int minHeight, bool wrap = false) {
   auto *text = new QPlainTextEdit(parent);
   text->setReadOnly(true);
   text->setLineWrapMode(wrap ? QPlainTextEdit::WidgetWidth
@@ -143,8 +148,132 @@ QFrame *Panel(QWidget *parent) {
   return frame;
 }
 
-void AddStatusLine(QVBoxLayout *layout, const QString &label,
-                   QLabel **valueOut, QWidget *parent) {
+QString TailForDialog(const QString &text, qsizetype maxChars = 5000) {
+  QString trimmed = text.trimmed();
+  if (trimmed.size() > maxChars)
+    trimmed = QStringLiteral("...\n") + trimmed.right(maxChars);
+  return trimmed;
+}
+
+QLabel *DialogTitleLabel(const QString &text, QWidget *parent) {
+  auto *label = new QLabel(text, parent);
+  label->setProperty("scRole", "homeCardTitle");
+  label->setWordWrap(true);
+  return label;
+}
+
+QLabel *DialogBanner(const QString &text, const QString &status,
+                     QWidget *parent) {
+  auto *label = new QLabel(text, parent);
+  label->setProperty("scBanner", status);
+  label->setWordWrap(true);
+  return label;
+}
+
+void SetPrimaryDialogButton(QPushButton *button) {
+  if (!button)
+    return;
+  button->setProperty("scVariant", "primary");
+}
+
+bool LooksLikeSudoPasswordPrompt(const QString &text) {
+  const QString lower = text.toLower();
+  return lower.contains(QStringLiteral("[sudo] password")) ||
+         lower.contains(QStringLiteral("sudo password")) ||
+         (lower.contains(QStringLiteral("password for ")) &&
+          lower.contains(QChar(':')));
+}
+
+QString VirtualCameraRecoveryScript() {
+  return QStringLiteral(R"(set -u
+SUDO_PROMPT="${STUDIOCAST_GUI_SUDO_PROMPT:-[sudo] password for %u: }"
+stopped=0
+restart_done=0
+
+cleanup() {
+  if [ "$stopped" = "1" ] && [ "$restart_done" != "1" ]; then
+    echo "[StudioCast] Restarting studiocastd.service..."
+    systemctl --user restart studiocastd.service >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+echo "[StudioCast] Stopping studiocastd.service..."
+if systemctl --user stop studiocastd.service; then
+  stopped=1
+else
+  echo "[StudioCast] Warning: could not stop studiocastd.service; continuing."
+fi
+
+echo "[StudioCast] Reloading v4l2loopback..."
+sudo -S -p "$SUDO_PROMPT" modprobe -r v4l2loopback && \
+  sudo -S -p "$SUDO_PROMPT" modprobe v4l2loopback \
+    devices=1 video_nr=10 card_label="StudioCast Camera" exclusive_caps=1
+reload_status=$?
+
+echo "[StudioCast] Restarting studiocastd.service..."
+restart_done=1
+systemctl --user restart studiocastd.service
+restart_status=$?
+
+if [ "$reload_status" -ne 0 ]; then
+  exit "$reload_status"
+fi
+exit "$restart_status"
+)");
+}
+
+bool ConfirmVirtualCameraRecoveryDialog(QWidget *parent) {
+  QMessageBox box(parent);
+  box.setIcon(QMessageBox::Warning);
+  box.setWindowTitle(QStringLiteral("Restart StudioCast Camera"));
+  box.setText(QStringLiteral("Reload the StudioCast virtual camera?"));
+  box.setInformativeText(QStringLiteral(
+      "StudioCast will stop the daemon, unload and reload v4l2loopback as "
+      "/dev/video10, then restart the daemon. Apps currently using "
+      "StudioCast Camera may need to reconnect."));
+  auto *confirmButton =
+      box.addButton(QStringLiteral("Restart Camera"), QMessageBox::AcceptRole);
+  box.addButton(QMessageBox::Cancel);
+  box.setDefaultButton(QMessageBox::Cancel);
+  box.exec();
+  return box.clickedButton() == confirmButton;
+}
+
+void ShowVirtualCameraRecoveryDialog(QWidget *parent, const QString &heading,
+                                     const QString &message,
+                                     const QString &detailsText,
+                                     const QString &status) {
+  QDialog dialog(parent);
+  dialog.setObjectName(QStringLiteral("virtualCameraRecoveryResultDialog"));
+  dialog.setWindowTitle(QStringLiteral("StudioCast Camera Recovery"));
+  dialog.setModal(true);
+  dialog.resize(680, detailsText.trimmed().isEmpty() ? 260 : 520);
+
+  auto *root = new QVBoxLayout(&dialog);
+  root->setContentsMargins(18, 18, 18, 18);
+  root->setSpacing(12);
+  root->addWidget(DialogTitleLabel(heading, &dialog));
+  root->addWidget(DialogBanner(message, status, &dialog));
+
+  if (!detailsText.trimmed().isEmpty()) {
+    auto *details = RawTextBox(&dialog, 260, true);
+    details->setObjectName(
+        QStringLiteral("virtualCameraRecoveryResultDetails"));
+    details->setPlainText(detailsText);
+    root->addWidget(details, 1);
+  }
+
+  auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+  SetPrimaryDialogButton(buttons->button(QDialogButtonBox::Close));
+  QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog,
+                   &QDialog::reject);
+  root->addWidget(buttons);
+  dialog.exec();
+}
+
+void AddStatusLine(QVBoxLayout *layout, const QString &label, QLabel **valueOut,
+                   QWidget *parent) {
   auto *row = new QHBoxLayout();
   row->setContentsMargins(0, 0, 0, 0);
   row->setSpacing(12);
@@ -182,9 +311,8 @@ QString EffectModelId(const QJsonObject &effects,
                       std::initializer_list<QString> keys) {
   QString fallback;
   for (const QString &key : keys) {
-    const QString value = ObjectValue(effects, key)
-                              .value(QStringLiteral("model_id"))
-                              .toString();
+    const QString value =
+        ObjectValue(effects, key).value(QStringLiteral("model_id")).toString();
     if (fallback.isEmpty())
       fallback = value;
     if (!value.trimmed().isEmpty())
@@ -226,7 +354,8 @@ AdvancedPage::AdvancedPage(QWidget *parent) : QWidget(parent) {
   socketPathLabel_ = ValueLabel(QStringLiteral("Unknown"), daemonBox);
   socketRow->addWidget(socketPathLabel_, 1);
   copySocketButton_ = new QPushButton(QStringLiteral("Copy"), daemonBox);
-  copySocketButton_->setIcon(style()->standardIcon(QStyle::SP_FileDialogListView));
+  copySocketButton_->setIcon(
+      style()->standardIcon(QStyle::SP_FileDialogListView));
   socketRow->addWidget(copySocketButton_, 0);
   daemonLayout->addLayout(socketRow);
 
@@ -248,16 +377,56 @@ AdvancedPage::AdvancedPage(QWidget *parent) : QWidget(parent) {
   auto *cameraBox = new QGroupBox(QStringLiteral("Camera System"), this);
   auto *cameraLayout = new QVBoxLayout(cameraBox);
   cameraLayout->setSpacing(10);
-  cameraStateLabel_ = ValueLabel(QStringLiteral("Waiting for daemon status."),
-                                 cameraBox);
+  cameraStateLabel_ =
+      ValueLabel(QStringLiteral("Waiting for daemon status."), cameraBox);
   cameraLayout->addWidget(cameraStateLabel_);
   alwaysOnCheck_ =
       new QCheckBox(QStringLiteral("Always-on camera processing"), cameraBox);
   cameraLayout->addWidget(alwaysOnCheck_);
+  allowCpuResizeCheck_ =
+      new QCheckBox(QStringLiteral("Allow CPU resize fallback"), cameraBox);
+  allowCpuResizeCheck_->setToolTip(QStringLiteral(
+      "Uses CPU scaling when capture and virtual camera sizes differ and GPU "
+      "resize is unavailable."));
+  cameraLayout->addWidget(allowCpuResizeCheck_);
   cameraLayout->addWidget(MutedLabel(
-      QStringLiteral("This writes the daemon always_on camera flag directly."),
-      cameraBox));
+      QStringLiteral("These write daemon camera flags directly."), cameraBox));
   root->addWidget(cameraBox);
+
+  virtualCameraRecoveryBox_ =
+      new QGroupBox(QStringLiteral("Virtual Camera Recovery"), this);
+  virtualCameraRecoveryBox_->setObjectName(
+      QStringLiteral("virtual_camera_recovery_box"));
+  auto *recoveryLayout = new QVBoxLayout(virtualCameraRecoveryBox_);
+  recoveryLayout->setSpacing(10);
+  recoveryLayout->addWidget(MutedLabel(
+      QStringLiteral("Last-resort v4l2loopback reload for cases where the "
+                     "StudioCast Camera device is wedged."),
+      virtualCameraRecoveryBox_));
+  auto *recoveryButtons = new QHBoxLayout();
+  recoveryButtons->setContentsMargins(0, 0, 0, 0);
+  recoveryButtons->setSpacing(10);
+  restartVirtualCameraButton_ =
+      new QPushButton(QStringLiteral("Restart v4l2loopback + daemon"),
+                      virtualCameraRecoveryBox_);
+  restartVirtualCameraButton_->setObjectName(
+      QStringLiteral("restart_v4l2loopback_button"));
+  restartVirtualCameraButton_->setIcon(
+      style()->standardIcon(QStyle::SP_BrowserReload));
+  restartVirtualCameraButton_->setProperty("scVariant", "danger");
+  restartVirtualCameraButton_->setToolTip(QStringLiteral(
+      "systemctl --user stop studiocastd.service; sudo modprobe -r "
+      "v4l2loopback && sudo modprobe v4l2loopback devices=1 video_nr=10 "
+      "card_label=\"StudioCast Camera\" exclusive_caps=1; systemctl --user "
+      "restart studiocastd.service"));
+  virtualCameraRecoveryStatusLabel_ =
+      MutedLabel(QStringLiteral("Ready."), virtualCameraRecoveryBox_);
+  virtualCameraRecoveryStatusLabel_->setObjectName(
+      QStringLiteral("restart_v4l2loopback_status"));
+  recoveryButtons->addWidget(restartVirtualCameraButton_, 0);
+  recoveryButtons->addWidget(virtualCameraRecoveryStatusLabel_, 1);
+  recoveryLayout->addLayout(recoveryButtons);
+  root->addWidget(virtualCameraRecoveryBox_);
 
   auto *lifecycleBox =
       new QGroupBox(QStringLiteral("Virtual Audio Lifecycle"), this);
@@ -266,9 +435,8 @@ AdvancedPage::AdvancedPage(QWidget *parent) : QWidget(parent) {
   audioLifecycleLabel_ =
       ValueLabel(QStringLiteral("Waiting for audio status."), lifecycleBox);
   lifecycleLayout->addWidget(audioLifecycleLabel_);
-  pulseStateLabel_ =
-      MutedLabel(QStringLiteral("PulseAudio status has not been checked."),
-                 lifecycleBox);
+  pulseStateLabel_ = MutedLabel(
+      QStringLiteral("PulseAudio status has not been checked."), lifecycleBox);
   lifecycleLayout->addWidget(pulseStateLabel_);
 
   auto *micButtons = new QHBoxLayout();
@@ -309,8 +477,8 @@ AdvancedPage::AdvancedPage(QWidget *parent) : QWidget(parent) {
   auto *audioPanel = Panel(modelsBox);
   auto *audioPanelLayout = new QVBoxLayout(audioPanel);
   audioPanelLayout->setSpacing(8);
-  audioPanelLayout->addWidget(ValueLabel(QStringLiteral("Open Audio"),
-                                         audioPanel));
+  audioPanelLayout->addWidget(
+      ValueLabel(QStringLiteral("Open Audio"), audioPanel));
   micModelIdEdit_ =
       AddEditRow(audioPanelLayout, QStringLiteral("Microphone model ID"),
                  QStringLiteral("<auto>"), audioPanel);
@@ -331,12 +499,11 @@ AdvancedPage::AdvancedPage(QWidget *parent) : QWidget(parent) {
   auto *videoPanel = Panel(modelsBox);
   auto *videoPanelLayout = new QVBoxLayout(videoPanel);
   videoPanelLayout->setSpacing(8);
-  videoPanelLayout->addWidget(ValueLabel(QStringLiteral("Open Video"),
-                                         videoPanel));
-  virtualBackgroundModelIdEdit_ =
-      AddEditRow(videoPanelLayout,
-                 QStringLiteral("Virtual background model ID"),
-                 QStringLiteral("<auto>"), videoPanel);
+  videoPanelLayout->addWidget(
+      ValueLabel(QStringLiteral("Open Video"), videoPanel));
+  virtualBackgroundModelIdEdit_ = AddEditRow(
+      videoPanelLayout, QStringLiteral("Virtual background model ID"),
+      QStringLiteral("<auto>"), videoPanel);
   autoFrameModelIdEdit_ =
       AddEditRow(videoPanelLayout, QStringLiteral("Auto frame model ID"),
                  QStringLiteral("<auto>"), videoPanel);
@@ -346,10 +513,9 @@ AdvancedPage::AdvancedPage(QWidget *parent) : QWidget(parent) {
   denoiseModelIdEdit_ =
       AddEditRow(videoPanelLayout, QStringLiteral("Video denoise model ID"),
                  QStringLiteral("<auto>"), videoPanel);
-  virtualBackgroundReplacePathEdit_ =
-      AddEditRow(videoPanelLayout,
-                 QStringLiteral("Background replace image path"),
-                 QStringLiteral("/path/to/background.ppm"), videoPanel);
+  virtualBackgroundReplacePathEdit_ = AddEditRow(
+      videoPanelLayout, QStringLiteral("Background replace image path"),
+      QStringLiteral("/path/to/background.ppm"), videoPanel);
   virtualKeyLightHdriPathEdit_ =
       AddEditRow(videoPanelLayout, QStringLiteral("Key light HDRI path"),
                  QStringLiteral("/path/to/light.hdr"), videoPanel);
@@ -365,24 +531,24 @@ AdvancedPage::AdvancedPage(QWidget *parent) : QWidget(parent) {
   legacyLayout->setSpacing(10);
 
   auto *sourceRow = new QHBoxLayout();
-  sourceRow->addWidget(new QLabel(QStringLiteral("Input source:"),
-                                  legacyLoopbackBox_));
+  sourceRow->addWidget(
+      new QLabel(QStringLiteral("Input source:"), legacyLoopbackBox_));
   legacySourceCombo_ = new QComboBox(legacyLoopbackBox_);
   legacySourceCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
   sourceRow->addWidget(legacySourceCombo_, 1);
   legacyLayout->addLayout(sourceRow);
 
   auto *portRow = new QHBoxLayout();
-  portRow->addWidget(new QLabel(QStringLiteral("Input port:"),
-                                legacyLoopbackBox_));
+  portRow->addWidget(
+      new QLabel(QStringLiteral("Input port:"), legacyLoopbackBox_));
   legacyPortCombo_ = new QComboBox(legacyLoopbackBox_);
   legacyPortCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
   portRow->addWidget(legacyPortCombo_, 1);
   legacyLayout->addLayout(portRow);
 
   auto *latencyRow = new QHBoxLayout();
-  latencyRow->addWidget(new QLabel(QStringLiteral("Latency (ms):"),
-                                   legacyLoopbackBox_));
+  latencyRow->addWidget(
+      new QLabel(QStringLiteral("Latency (ms):"), legacyLoopbackBox_));
   legacyLatencySpin_ = new QSpinBox(legacyLoopbackBox_);
   legacyLatencySpin_->setRange(1, 200);
   legacyLatencySpin_->setValue(10);
@@ -391,12 +557,10 @@ AdvancedPage::AdvancedPage(QWidget *parent) : QWidget(parent) {
   legacyLayout->addLayout(latencyRow);
 
   auto *legacyButtons = new QHBoxLayout();
-  startLegacyLoopbackButton_ =
-      new QPushButton(QStringLiteral("Start legacy loopback"),
-                      legacyLoopbackBox_);
-  stopLegacyLoopbackButton_ =
-      new QPushButton(QStringLiteral("Stop legacy loopback"),
-                      legacyLoopbackBox_);
+  startLegacyLoopbackButton_ = new QPushButton(
+      QStringLiteral("Start legacy loopback"), legacyLoopbackBox_);
+  stopLegacyLoopbackButton_ = new QPushButton(
+      QStringLiteral("Stop legacy loopback"), legacyLoopbackBox_);
   legacyButtons->addWidget(startLegacyLoopbackButton_);
   legacyButtons->addWidget(stopLegacyLoopbackButton_);
   legacyButtons->addStretch(1);
@@ -419,11 +583,12 @@ AdvancedPage::AdvancedPage(QWidget *parent) : QWidget(parent) {
   connect(copySocketButton_, &QPushButton::clicked, this, [this] {
     CopyText(socketPathLabel_ ? socketPathLabel_->text() : QString());
   });
-  connect(copyRawStatusButton_, &QPushButton::clicked, this, [this] {
-    CopyText(currentRawStatus_);
-  });
+  connect(copyRawStatusButton_, &QPushButton::clicked, this,
+          [this] { CopyText(currentRawStatus_); });
   connect(alwaysOnCheck_, &QCheckBox::toggled, this,
           &AdvancedPage::OnAlwaysOnToggled);
+  connect(allowCpuResizeCheck_, &QCheckBox::toggled, this,
+          &AdvancedPage::OnAllowCpuResizeToggled);
   connect(createVirtualMicButton_, &QPushButton::clicked, this,
           &AdvancedPage::OnCreateVirtualMic);
   connect(destroyVirtualMicButton_, &QPushButton::clicked, this,
@@ -440,6 +605,8 @@ AdvancedPage::AdvancedPage(QWidget *parent) : QWidget(parent) {
           &AdvancedPage::OnSaveVideoModelOverrides);
   connect(refreshPulseButton_, &QPushButton::clicked, this,
           &AdvancedPage::OnRefreshPulseState);
+  connect(restartVirtualCameraButton_, &QPushButton::clicked, this,
+          &AdvancedPage::OnRestartVirtualCamera);
   connect(legacySourceCombo_,
           QOverload<int>::of(&QComboBox::currentIndexChanged), this,
           &AdvancedPage::OnLegacySourceChanged);
@@ -505,10 +672,17 @@ void AdvancedPage::ApplySnapshotJson(const QJsonObject &root) {
 
   const QJsonObject video = ObjectValue(root, QStringLiteral("video"));
   currentAlwaysOn_ = video.value(QStringLiteral("always_on")).toBool(false);
+  currentAllowCpuResize_ =
+      video.value(QStringLiteral("allow_cpu_resize")).toBool(true);
   if (alwaysOnCheck_) {
     alwaysOnCheck_->blockSignals(true);
     alwaysOnCheck_->setChecked(currentAlwaysOn_);
     alwaysOnCheck_->blockSignals(false);
+  }
+  if (allowCpuResizeCheck_) {
+    allowCpuResizeCheck_->blockSignals(true);
+    allowCpuResizeCheck_->setChecked(currentAllowCpuResize_);
+    allowCpuResizeCheck_->blockSignals(false);
   }
 
   if (cameraStateLabel_) {
@@ -517,11 +691,11 @@ void AdvancedPage::ApplySnapshotJson(const QJsonObject &root) {
     const QString state =
         pipeline.value(QStringLiteral("state")).toString().trimmed();
     cameraStateLabel_->setText(
-        QStringLiteral("enabled=%1, always_on=%2%3")
+        QStringLiteral("enabled=%1, always_on=%2, cpu_resize_fallback=%3%4")
             .arg(BoolLabel(enabled), BoolLabel(currentAlwaysOn_),
-                 state.isEmpty()
-                     ? QString()
-                     : QStringLiteral(", pipeline=%1").arg(state)));
+                 BoolLabel(currentAllowCpuResize_),
+                 state.isEmpty() ? QString()
+                                 : QStringLiteral(", pipeline=%1").arg(state)));
   }
 
   const QJsonObject audio = ObjectValue(root, QStringLiteral("audio"));
@@ -532,8 +706,8 @@ void AdvancedPage::ApplySnapshotJson(const QJsonObject &root) {
   configuredSpeakersEnabled_ =
       audio.value(QStringLiteral("speakers_enabled")).toBool(false);
 
-  const bool micPresent = audio.value(QStringLiteral("mic_present"))
-                              .toBool(configuredVirtualMic_);
+  const bool micPresent =
+      audio.value(QStringLiteral("mic_present")).toBool(configuredVirtualMic_);
   const QJsonObject speakers = ObjectValue(audio, QStringLiteral("speakers"));
   const bool speakersPresent = speakers.value(QStringLiteral("present"))
                                    .toBool(configuredVirtualSpeakers_);
@@ -555,9 +729,8 @@ void AdvancedPage::ApplySnapshotJson(const QJsonObject &root) {
                                  : QStringLiteral("missing"),
                  speakersRoutingActive_ ? QStringLiteral("active")
                                         : QStringLiteral("stopped"),
-                 routeMode.isEmpty()
-                     ? QString()
-                     : QStringLiteral(" (%1)").arg(routeMode)));
+                 routeMode.isEmpty() ? QString()
+                                     : QStringLiteral(" (%1)").arg(routeMode)));
   }
 
   const QJsonObject audioEffects =
@@ -570,9 +743,8 @@ void AdvancedPage::ApplySnapshotJson(const QJsonObject &root) {
                           mic.value(QStringLiteral("model_id")).toString());
   SetEditTextIfNotFocused(micModelPathEdit_,
                           mic.value(QStringLiteral("model_path")).toString());
-  SetEditTextIfNotFocused(
-      speakerModelIdEdit_,
-      speaker.value(QStringLiteral("model_id")).toString());
+  SetEditTextIfNotFocused(speakerModelIdEdit_,
+                          speaker.value(QStringLiteral("model_id")).toString());
   SetEditTextIfNotFocused(
       speakerModelPathEdit_,
       speaker.value(QStringLiteral("model_path")).toString());
@@ -640,6 +812,30 @@ void AdvancedPage::OnAlwaysOnToggled(bool checked) {
   currentAlwaysOn_ = checked;
   SetResult(checked ? QStringLiteral("Always-on camera was enabled.")
                     : QStringLiteral("Always-on camera was disabled."),
+            QStringLiteral("good"));
+}
+
+void AdvancedPage::OnAllowCpuResizeToggled(bool checked) {
+  if (updatingUi_)
+    return;
+
+  QString error;
+  const std::string request = std::string("SET_VIDEO_CONFIG "
+                                          "allow_cpu_resize=") +
+                              (checked ? "1" : "0");
+  if (!SendDaemonRequest(request, &error)) {
+    if (allowCpuResizeCheck_) {
+      allowCpuResizeCheck_->blockSignals(true);
+      allowCpuResizeCheck_->setChecked(currentAllowCpuResize_);
+      allowCpuResizeCheck_->blockSignals(false);
+    }
+    ShowFailure(QStringLiteral("CPU Resize Fallback Failed"), error);
+    return;
+  }
+
+  currentAllowCpuResize_ = checked;
+  SetResult(checked ? QStringLiteral("CPU resize fallback was enabled.")
+                    : QStringLiteral("CPU resize fallback was disabled."),
             QStringLiteral("good"));
 }
 
@@ -857,8 +1053,97 @@ void AdvancedPage::OnSaveVideoModelOverrides() {
 
 void AdvancedPage::OnRefreshPulseState() {
   RefreshPulseState();
-  SetResult(QStringLiteral("PulseAudio state refreshed."),
-            pactlOk_ ? QStringLiteral("good") : QStringLiteral("warning"));
+  SetResult(QStringLiteral("PulseAudio refresh started."),
+            QStringLiteral("warning"));
+}
+
+void AdvancedPage::OnRestartVirtualCamera() {
+  if (virtualCameraRecoveryProcess_)
+    return;
+
+  if (!ConfirmVirtualCameraRecoveryDialog(this)) {
+    SetResult(QStringLiteral("Virtual camera recovery cancelled."),
+              QStringLiteral("warning"));
+    return;
+  }
+
+  const QString bash = QStandardPaths::findExecutable(QStringLiteral("bash"));
+  if (bash.isEmpty()) {
+    ShowFailure(QStringLiteral("Restart StudioCast Camera Failed"),
+                QStringLiteral("Could not find bash to run the recovery "
+                               "command."));
+    return;
+  }
+
+  virtualCameraRecoveryOutput_.clear();
+  virtualCameraRecoveryPromptBuffer_.clear();
+  virtualCameraRecoveryPasswordDialogOpen_ = false;
+  virtualCameraRecoveryPasswordCancelled_ = false;
+
+  virtualCameraRecoveryProcess_ = new QProcess(this);
+  virtualCameraRecoveryProcess_->setProcessChannelMode(
+      QProcess::SeparateChannels);
+  QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+  environment.insert(QStringLiteral("STUDIOCAST_GUI_SUDO_STDIN"),
+                     QStringLiteral("1"));
+  environment.insert(QStringLiteral("STUDIOCAST_GUI_SUDO_PROMPT"),
+                     QStringLiteral("[sudo] password for %u: "));
+  virtualCameraRecoveryProcess_->setProcessEnvironment(environment);
+
+  if (virtualCameraRecoveryStatusLabel_) {
+    virtualCameraRecoveryStatusLabel_->setText(
+        QStringLiteral("Stopping daemon and preparing v4l2loopback reload..."));
+    SetDynamicProperty(virtualCameraRecoveryStatusLabel_, "scStatus",
+                       QStringLiteral("warning"));
+  }
+  SetResult(QStringLiteral("Virtual camera recovery started."),
+            QStringLiteral("warning"));
+
+  connect(virtualCameraRecoveryProcess_, &QProcess::readyReadStandardOutput,
+          this, [this] {
+            if (virtualCameraRecoveryProcess_) {
+              AppendVirtualCameraRecoveryOutput(
+                  virtualCameraRecoveryProcess_->readAllStandardOutput());
+            }
+          });
+  connect(virtualCameraRecoveryProcess_, &QProcess::readyReadStandardError,
+          this, [this] {
+            if (virtualCameraRecoveryProcess_) {
+              AppendVirtualCameraRecoveryErrorOutput(
+                  virtualCameraRecoveryProcess_->readAllStandardError());
+            }
+          });
+  connect(virtualCameraRecoveryProcess_, &QProcess::errorOccurred, this,
+          [this](QProcess::ProcessError processError) {
+            if (processError != QProcess::FailedToStart ||
+                !virtualCameraRecoveryProcess_) {
+              return;
+            }
+
+            const QString message =
+                virtualCameraRecoveryProcess_->errorString();
+            if (virtualCameraRecoveryStatusLabel_) {
+              virtualCameraRecoveryStatusLabel_->setText(
+                  QStringLiteral("Virtual camera recovery failed to start."));
+              SetDynamicProperty(virtualCameraRecoveryStatusLabel_, "scStatus",
+                                 QStringLiteral("error"));
+            }
+            QProcess *process = virtualCameraRecoveryProcess_;
+            virtualCameraRecoveryProcess_ = nullptr;
+            if (process)
+              process->deleteLater();
+            UpdateButtonStates();
+            ShowFailure(QStringLiteral("Restart StudioCast Camera Failed"),
+                        QStringLiteral("Failed to start recovery command: %1")
+                            .arg(message));
+          });
+  connect(virtualCameraRecoveryProcess_,
+          QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+          &AdvancedPage::FinishVirtualCameraRecovery);
+
+  UpdateButtonStates();
+  virtualCameraRecoveryProcess_->start(
+      bash, {QStringLiteral("-c"), VirtualCameraRecoveryScript()});
 }
 
 void AdvancedPage::OnLegacySourceChanged(int /*index*/) {
@@ -930,9 +1215,201 @@ void AdvancedPage::OnStopLegacyLoopback() {
 #endif
 }
 
+void AdvancedPage::AppendVirtualCameraRecoveryOutput(const QByteArray &bytes) {
+  virtualCameraRecoveryOutput_ += QString::fromLocal8Bit(bytes);
+}
+
+void AdvancedPage::AppendVirtualCameraRecoveryErrorOutput(
+    const QByteArray &bytes) {
+  const QString text = QString::fromLocal8Bit(bytes);
+  virtualCameraRecoveryOutput_ += text;
+  virtualCameraRecoveryPromptBuffer_ += text;
+  if (virtualCameraRecoveryPromptBuffer_.size() > 1000) {
+    virtualCameraRecoveryPromptBuffer_ =
+        virtualCameraRecoveryPromptBuffer_.right(1000);
+  }
+
+  if (!virtualCameraRecoveryPasswordDialogOpen_ &&
+      LooksLikeSudoPasswordPrompt(virtualCameraRecoveryPromptBuffer_)) {
+    virtualCameraRecoveryPromptBuffer_.clear();
+    PromptForVirtualCameraRecoveryPassword();
+  }
+}
+
+void AdvancedPage::PromptForVirtualCameraRecoveryPassword() {
+  if (!virtualCameraRecoveryProcess_ ||
+      virtualCameraRecoveryPasswordDialogOpen_) {
+    return;
+  }
+
+  virtualCameraRecoveryPasswordDialogOpen_ = true;
+  if (virtualCameraRecoveryStatusLabel_) {
+    virtualCameraRecoveryStatusLabel_->setText(
+        QStringLiteral("Waiting for sudo password..."));
+    SetDynamicProperty(virtualCameraRecoveryStatusLabel_, "scStatus",
+                       QStringLiteral("warning"));
+  }
+
+  QDialog dialog(this);
+  dialog.setObjectName(QStringLiteral("virtualCameraRecoveryPasswordDialog"));
+  dialog.setWindowTitle(QStringLiteral("StudioCast Camera Recovery"));
+  dialog.setModal(true);
+  dialog.resize(460, 220);
+
+  auto *root = new QVBoxLayout(&dialog);
+  root->setContentsMargins(18, 18, 18, 18);
+  root->setSpacing(12);
+  root->addWidget(
+      DialogTitleLabel(QStringLiteral("Sudo password required"), &dialog));
+  root->addWidget(MutedLabel(
+      QStringLiteral("StudioCast needs your account password to reload the "
+                     "v4l2loopback kernel module."),
+      &dialog));
+
+  auto *passwordEdit = new QLineEdit(&dialog);
+  passwordEdit->setObjectName(
+      QStringLiteral("virtualCameraRecoveryPasswordEdit"));
+  passwordEdit->setEchoMode(QLineEdit::Password);
+  passwordEdit->setPlaceholderText(QStringLiteral("Password"));
+  root->addWidget(passwordEdit);
+
+  auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
+  auto *continueButton = buttons->addButton(QStringLiteral("Continue"),
+                                            QDialogButtonBox::AcceptRole);
+  SetPrimaryDialogButton(continueButton);
+  continueButton->setDefault(true);
+  QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog,
+                   &QDialog::accept);
+  QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog,
+                   &QDialog::reject);
+  root->addWidget(buttons);
+
+  passwordEdit->setFocus(Qt::OtherFocusReason);
+  const int result = dialog.exec();
+  virtualCameraRecoveryPasswordDialogOpen_ = false;
+
+  if (!virtualCameraRecoveryProcess_)
+    return;
+
+  if (result == QDialog::Accepted) {
+    virtualCameraRecoveryProcess_->write(passwordEdit->text().toLocal8Bit());
+    virtualCameraRecoveryProcess_->write("\n");
+    if (virtualCameraRecoveryStatusLabel_) {
+      virtualCameraRecoveryStatusLabel_->setText(
+          QStringLiteral("Reloading v4l2loopback..."));
+      SetDynamicProperty(virtualCameraRecoveryStatusLabel_, "scStatus",
+                         QStringLiteral("warning"));
+    }
+    return;
+  }
+
+  virtualCameraRecoveryPasswordCancelled_ = true;
+  virtualCameraRecoveryOutput_ += QStringLiteral(
+      "\n[StudioCast] Virtual camera recovery cancelled while waiting for "
+      "sudo password.\n");
+  // Let sudo see EOF so the shell can continue to the daemon restart step.
+  virtualCameraRecoveryProcess_->closeWriteChannel();
+}
+
+void AdvancedPage::FinishVirtualCameraRecovery(
+    int exitCode, QProcess::ExitStatus exitStatus) {
+  QProcess *process = virtualCameraRecoveryProcess_;
+  if (!process)
+    return;
+
+  AppendVirtualCameraRecoveryOutput(process->readAllStandardOutput());
+  virtualCameraRecoveryOutput_ +=
+      QString::fromLocal8Bit(process->readAllStandardError());
+  const bool ok = exitStatus == QProcess::NormalExit && exitCode == 0;
+  const bool cancelled = virtualCameraRecoveryPasswordCancelled_;
+
+  if (virtualCameraRecoveryStatusLabel_) {
+    virtualCameraRecoveryStatusLabel_->setText(
+        cancelled ? QStringLiteral("Virtual camera recovery cancelled.")
+        : ok ? QStringLiteral("Virtual camera recovery completed. Status will "
+                              "refresh shortly.")
+             : QStringLiteral("Virtual camera recovery failed. See details."));
+    SetDynamicProperty(virtualCameraRecoveryStatusLabel_, "scStatus",
+                       cancelled ? QStringLiteral("warning")
+                       : ok      ? QStringLiteral("good")
+                                 : QStringLiteral("error"));
+  }
+
+  if (cancelled) {
+    ShowVirtualCameraRecoveryDialog(
+        this, QStringLiteral("Virtual camera recovery cancelled"),
+        QStringLiteral("The recovery was cancelled before sudo "
+                       "authentication completed."),
+        QString(), QStringLiteral("warning"));
+    SetResult(QStringLiteral("Virtual camera recovery cancelled."),
+              QStringLiteral("warning"));
+  } else if (ok) {
+    ShowVirtualCameraRecoveryDialog(
+        this, QStringLiteral("Virtual camera recovery completed"),
+        QStringLiteral("v4l2loopback was reloaded and studiocastd.service was "
+                       "restarted."),
+        QString(), QStringLiteral("info"));
+    SetResult(QStringLiteral("Virtual camera recovery completed."),
+              QStringLiteral("good"));
+  } else {
+    QString details = TailForDialog(virtualCameraRecoveryOutput_);
+    if (details.isEmpty())
+      details = QStringLiteral("No output was captured.");
+    ShowVirtualCameraRecoveryDialog(
+        this, QStringLiteral("Virtual camera recovery failed"),
+        QStringLiteral("The recovery command exited with code %1.")
+            .arg(exitCode),
+        details, QStringLiteral("error"));
+    SetResult(QStringLiteral("Virtual camera recovery failed."),
+              QStringLiteral("error"));
+  }
+
+  process->deleteLater();
+  virtualCameraRecoveryProcess_ = nullptr;
+  virtualCameraRecoveryPromptBuffer_.clear();
+  virtualCameraRecoveryPasswordDialogOpen_ = false;
+  virtualCameraRecoveryPasswordCancelled_ = false;
+  UpdateButtonStates();
+}
+
 void AdvancedPage::RefreshPulseState() {
-  std::string details;
-  pactlOk_ = studiocast::audio::pulse::PactlAvailable(&details);
+  if (pulseRefreshThread_)
+    return;
+
+  if (pulseStateLabel_) {
+    pulseStateLabel_->setText(QStringLiteral("Refreshing PulseAudio state..."));
+    SetDynamicProperty(pulseStateLabel_, "scStatus", QStringLiteral("warning"));
+  }
+  if (refreshPulseButton_)
+    refreshPulseButton_->setEnabled(false);
+
+  auto result = std::make_shared<PulseRefreshResult>();
+  auto *thread = QThread::create([result] {
+    result->pactlOk =
+        studiocast::audio::pulse::PactlAvailable(&result->pactlDetails);
+    result->localAudioStatusText =
+        QString::fromStdString(studiocast::audio::StatusText());
+    if (!result->pactlOk)
+      return;
+    result->modules =
+        studiocast::audio::pulse::ListModules(&result->moduleError);
+    result->sources =
+        studiocast::audio::pulse::ListSourcesDetailed(&result->sourceError);
+  });
+  pulseRefreshThread_ = thread;
+  connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+  connect(thread, &QThread::finished, this, [this, thread, result] {
+    if (pulseRefreshThread_ == thread)
+      pulseRefreshThread_ = nullptr;
+    ApplyPulseRefreshResult(*result);
+    if (refreshPulseButton_)
+      refreshPulseButton_->setEnabled(true);
+  });
+  thread->start();
+}
+
+void AdvancedPage::ApplyPulseRefreshResult(const PulseRefreshResult &result) {
+  pactlOk_ = result.pactlOk;
   hasVirtualMicSink_ = false;
   hasVirtualMicSource_ = false;
   hasLegacyMicLoopback_ = false;
@@ -940,30 +1417,27 @@ void AdvancedPage::RefreshPulseState() {
   hasVirtualSpeakersLoopback_ = false;
 
   if (localAudioStatusText_) {
-    SetPlainTextPreservingScroll(
-        localAudioStatusText_,
-        QString::fromStdString(studiocast::audio::StatusText()));
+    SetPlainTextPreservingScroll(localAudioStatusText_,
+                                 result.localAudioStatusText);
   }
 
   if (!pactlOk_) {
     if (pulseStateLabel_) {
       pulseStateLabel_->setText(
           QStringLiteral("pactl unavailable%1")
-              .arg(details.empty()
+              .arg(result.pactlDetails.empty()
                        ? QString()
-                       : QStringLiteral(": %1")
-                             .arg(QString::fromStdString(details))));
+                       : QStringLiteral(": %1").arg(
+                             QString::fromStdString(result.pactlDetails))));
       SetDynamicProperty(pulseStateLabel_, "scStatus",
                          QStringLiteral("warning"));
     }
-    RefreshLegacySources();
+    RefreshLegacySources({});
     UpdateButtonStates();
     return;
   }
 
-  std::string error;
-  const auto modules = studiocast::audio::pulse::ListModules(&error);
-  for (const auto &module : modules) {
+  for (const auto &module : result.modules) {
     if (module.name == "module-null-sink" &&
         Contains(module.args, "sink_name=studiocast_sink")) {
       hasVirtualMicSink_ = true;
@@ -991,25 +1465,25 @@ void AdvancedPage::RefreshPulseState() {
         QStringLiteral("pactl available; virtual_mic_modules=%1/%2, "
                        "mic_loopback=%3, speakers_sink=%4, "
                        "speakers_loopback=%5")
-            .arg(BoolLabel(hasVirtualMicSink_),
-                 BoolLabel(hasVirtualMicSource_),
+            .arg(BoolLabel(hasVirtualMicSink_), BoolLabel(hasVirtualMicSource_),
                  BoolLabel(hasLegacyMicLoopback_),
                  BoolLabel(hasVirtualSpeakersSink_),
                  BoolLabel(hasVirtualSpeakersLoopback_));
-    if (!error.empty())
+    if (!result.moduleError.empty())
       text += QStringLiteral("; module query warning: %1")
-                  .arg(QString::fromStdString(error));
+                  .arg(QString::fromStdString(result.moduleError));
     pulseStateLabel_->setText(text);
     SetDynamicProperty(pulseStateLabel_, "scStatus",
-                       error.empty() ? QStringLiteral("good")
-                                     : QStringLiteral("warning"));
+                       result.moduleError.empty() ? QStringLiteral("good")
+                                                  : QStringLiteral("warning"));
   }
 
-  RefreshLegacySources();
+  RefreshLegacySources(result.sources);
   UpdateButtonStates();
 }
 
-void AdvancedPage::RefreshLegacySources() {
+void AdvancedPage::RefreshLegacySources(
+    const std::vector<studiocast::audio::pulse::PactlSourceInfo> &sources) {
   if (!legacySourceCombo_)
     return;
 
@@ -1020,8 +1494,7 @@ void AdvancedPage::RefreshLegacySources() {
   cachedSources_.clear();
 
   if (!pactlOk_) {
-    legacySourceCombo_->addItem(QStringLiteral("pactl unavailable"),
-                                QString());
+    legacySourceCombo_->addItem(QStringLiteral("pactl unavailable"), QString());
     legacySourceCombo_->setEnabled(false);
     legacySourceCombo_->blockSignals(false);
     updatingUi_ = false;
@@ -1033,8 +1506,7 @@ void AdvancedPage::RefreshLegacySources() {
   legacySourceCombo_->addItem(QStringLiteral("Default Pulse source"),
                               QString());
 
-  std::string error;
-  cachedSources_ = studiocast::audio::pulse::ListSourcesDetailed(&error);
+  cachedSources_ = sources;
   for (const auto &source : cachedSources_) {
     if (source.name.empty())
       continue;
@@ -1086,9 +1558,8 @@ void AdvancedPage::UpdateLegacyPorts() {
   int firstAvailableIndex = -1;
   for (std::size_t i = 0; i < info->ports.size(); ++i) {
     const auto &port = info->ports[i];
-    QString label = QString::fromStdString(port.description.empty()
-                                               ? port.name
-                                               : port.description);
+    QString label = QString::fromStdString(
+        port.description.empty() ? port.name : port.description);
     if (!port.available)
       label += QStringLiteral(" (unavailable)");
     legacyPortCombo_->addItem(label, QString::fromStdString(port.name));
@@ -1117,10 +1588,14 @@ void AdvancedPage::UpdateButtonStates() {
 
   if (alwaysOnCheck_)
     alwaysOnCheck_->setEnabled(daemonReachable_);
+  if (allowCpuResizeCheck_)
+    allowCpuResizeCheck_->setEnabled(daemonReachable_);
   if (saveAudioModelsButton_)
     saveAudioModelsButton_->setEnabled(daemonReachable_);
   if (saveVideoModelsButton_)
     saveVideoModelsButton_->setEnabled(daemonReachable_);
+  if (restartVirtualCameraButton_)
+    restartVirtualCameraButton_->setEnabled(!virtualCameraRecoveryProcess_);
 
 #ifdef NDEBUG
   const bool canLifecycleMutate = pactlOk_ && daemonReachable_;
@@ -1134,16 +1609,16 @@ void AdvancedPage::UpdateButtonStates() {
     createVirtualMicButton_->setEnabled(canLifecycleMutate);
   if (destroyVirtualMicButton_) {
     destroyVirtualMicButton_->setEnabled(
-        canLifecycleMutate && (configuredVirtualMic_ || hasVirtualMicSink_ ||
-                               hasVirtualMicSource_));
+        canLifecycleMutate &&
+        (configuredVirtualMic_ || hasVirtualMicSink_ || hasVirtualMicSource_));
   }
   if (enableVirtualSpeakersButton_)
     enableVirtualSpeakersButton_->setEnabled(canLifecycleMutate);
   if (stopSpeakersRoutingButton_) {
-    stopSpeakersRoutingButton_->setEnabled(
-        canLifecycleMutate &&
-        (configuredSpeakersEnabled_ || speakersRoutingActive_ ||
-         hasVirtualSpeakersLoopback_));
+    stopSpeakersRoutingButton_->setEnabled(canLifecycleMutate &&
+                                           (configuredSpeakersEnabled_ ||
+                                            speakersRoutingActive_ ||
+                                            hasVirtualSpeakersLoopback_));
   }
   if (destroyVirtualSpeakersButton_) {
     destroyVirtualSpeakersButton_->setEnabled(
@@ -1152,9 +1627,9 @@ void AdvancedPage::UpdateButtonStates() {
   }
 
   if (startLegacyLoopbackButton_) {
-    startLegacyLoopbackButton_->setEnabled(
-        canLegacyMutate && legacySourceCombo_ &&
-        legacySourceCombo_->isEnabled());
+    startLegacyLoopbackButton_->setEnabled(canLegacyMutate &&
+                                           legacySourceCombo_ &&
+                                           legacySourceCombo_->isEnabled());
   }
   if (stopLegacyLoopbackButton_)
     stopLegacyLoopbackButton_->setEnabled(canLegacyMutate &&
@@ -1179,10 +1654,9 @@ bool AdvancedPage::SendDaemonRequest(const std::string &request,
 
   if (!res.ok) {
     if (error) {
-      *error = HumanDaemonError(
-          QString::fromStdString(res.error_json.empty()
-                                     ? std::string("daemon_error")
-                                     : res.error_json));
+      *error = HumanDaemonError(QString::fromStdString(
+          res.error_json.empty() ? std::string("daemon_error")
+                                 : res.error_json));
     }
     return false;
   }
@@ -1190,8 +1664,8 @@ bool AdvancedPage::SendDaemonRequest(const std::string &request,
   return true;
 }
 
-bool AdvancedPage::FetchDaemonJson(const std::string &request,
-                                   QJsonObject *out, QString *error) {
+bool AdvancedPage::FetchDaemonJson(const std::string &request, QJsonObject *out,
+                                   QString *error) {
   studiocast::ipc::DaemonCallResult res;
   studiocast::ipc::DaemonCallOptions options;
   options.connect_timeout_ms = 500;
@@ -1208,10 +1682,9 @@ bool AdvancedPage::FetchDaemonJson(const std::string &request,
 
   if (!res.ok) {
     if (error) {
-      *error = HumanDaemonError(
-          QString::fromStdString(res.error_json.empty()
-                                     ? std::string("daemon_error")
-                                     : res.error_json));
+      *error = HumanDaemonError(QString::fromStdString(
+          res.error_json.empty() ? std::string("daemon_error")
+                                 : res.error_json));
     }
     return false;
   }
@@ -1239,8 +1712,8 @@ bool AdvancedPage::SaveAudioModelOverrides(QString *error) {
       ObjectValue(audioConfig, QStringLiteral("audio_effects"));
   if (effects.isEmpty()) {
     if (error) {
-      *error = QStringLiteral(
-          "Daemon audio config did not include audio_effects.");
+      *error =
+          QStringLiteral("Daemon audio config did not include audio_effects.");
     }
     return false;
   }
@@ -1248,19 +1721,18 @@ bool AdvancedPage::SaveAudioModelOverrides(QString *error) {
   QJsonObject mic = ObjectValue(effects, QStringLiteral("microphone"));
   mic.insert(QStringLiteral("model_id"),
              micModelIdEdit_ ? micModelIdEdit_->text().trimmed() : QString());
-  mic.insert(
-      QStringLiteral("model_path"),
-      micModelPathEdit_ ? micModelPathEdit_->text().trimmed() : QString());
+  mic.insert(QStringLiteral("model_path"),
+             micModelPathEdit_ ? micModelPathEdit_->text().trimmed()
+                               : QString());
   effects.insert(QStringLiteral("microphone"), mic);
 
   QJsonObject speaker = ObjectValue(effects, QStringLiteral("speaker"));
-  speaker.insert(
-      QStringLiteral("model_id"),
-      speakerModelIdEdit_ ? speakerModelIdEdit_->text().trimmed() : QString());
+  speaker.insert(QStringLiteral("model_id"),
+                 speakerModelIdEdit_ ? speakerModelIdEdit_->text().trimmed()
+                                     : QString());
   speaker.insert(QStringLiteral("model_path"),
-                 speakerModelPathEdit_
-                     ? speakerModelPathEdit_->text().trimmed()
-                     : QString());
+                 speakerModelPathEdit_ ? speakerModelPathEdit_->text().trimmed()
+                                       : QString());
   effects.insert(QStringLiteral("speaker"), speaker);
 
   QJsonObject patch;
@@ -1331,8 +1803,7 @@ bool AdvancedPage::SaveVideoModelOverrides(QString *error) {
       std::string("SET_VIDEO_EFFECTS_JSON ") + CompactJson(effects), error);
 }
 
-bool AdvancedPage::ConfirmDestructive(const QString &title,
-                                      const QString &text,
+bool AdvancedPage::ConfirmDestructive(const QString &title, const QString &text,
                                       const QString &detail,
                                       const QString &confirmText) {
   QMessageBox box(this);
@@ -1356,8 +1827,7 @@ void AdvancedPage::SetResult(const QString &text, const QString &status) {
 }
 
 void AdvancedPage::ShowFailure(const QString &title, const QString &details) {
-  SetResult(QStringLiteral("Advanced action failed."),
-            QStringLiteral("error"));
+  SetResult(QStringLiteral("Advanced action failed."), QStringLiteral("error"));
   QMessageBox::critical(this, title,
                         details.trimmed().isEmpty()
                             ? QStringLiteral("The action failed.")

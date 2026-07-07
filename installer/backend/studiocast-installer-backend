@@ -54,6 +54,7 @@ LOAD_LOOPBACK=1
 PERSIST_LOOPBACK=1
 WITH_SERVICE=1
 WITH_MODELS=0
+OPEN_BACKENDS=1
 FRESH_BUILD=0
 REMOVE_USER_DATA=0
 SOURCE_EXPLICIT=0
@@ -82,6 +83,19 @@ BUILD_TARGETS=(
   "studiocast-maxine"
   "studiocast-video"
   "studiocast-audio"
+)
+
+DEFAULT_OPEN_AUDIO_MODEL_IDS=(
+  "fastenhancer_s_vd_v1"
+  "fastenhancer_m_vd_v1"
+)
+
+DEFAULT_OPEN_VIDEO_MODEL_IDS=(
+  "modnet-webnn-256-fp32"
+  "yunet_opencv_zoo_2023mar_fp32"
+  "dlib_68_ibug_300w"
+  "gaze_correction_cam_flx_v0_1_1"
+  "fastdvdnet_sigma15"
 )
 
 usage() {
@@ -129,7 +143,9 @@ Install/update options:
   --load-loopback | --no-load-loopback
   --persist-loopback | --no-persist-loopback
   --service | --no-service
-  --models | --no-models    Curated model packs are network downloads; default is off.
+  --models | --no-models    Download default Open Audio/Open Video model packs; default is off.
+  --open-backends | --no-open-backends
+                            Explicitly configure Open Video/Open CUDA and Open Audio support; default is on.
   --fresh-build | --no-fresh-build
 
 Uninstall/clean-install options:
@@ -391,6 +407,104 @@ service_state_value() {
   printf '%s' "${value}"
 }
 
+onnxruntime_library_dirs() {
+  local d
+  if have_cmd pkg-config && pkg-config --exists onnxruntime; then
+    d="$(pkg-config --variable=libdir onnxruntime 2>/dev/null || true)"
+    [[ -n "${d}" ]] && printf '%s\n' "${d}"
+    pkg-config --libs-only-L onnxruntime 2>/dev/null | tr ' ' '\n' |
+      sed -n 's/^-L//p'
+  fi
+
+  printf '%s\n' \
+    /usr/local/lib \
+    /usr/lib \
+    /usr/lib/x86_64-linux-gnu \
+    /opt/studiocast/onnxruntime/*/onnxruntime-linux-*/lib
+}
+
+detect_onnxruntime_cuda_provider_path() {
+  local d provider
+  while IFS= read -r d; do
+    [[ -n "${d}" ]] || continue
+    for provider in "${d}/libonnxruntime_providers_cuda.so"; do
+      if [[ -f "${provider}" ]]; then
+        printf '%s\n' "${provider}"
+        return 0
+      fi
+    done
+  done < <(onnxruntime_library_dirs | awk '!seen[$0]++')
+  return 1
+}
+
+detect_maxine_base_dir() {
+  printf '%s\n' "${XDG_DATA_HOME_DIR}/${APP_ID}/maxine"
+}
+
+print_optional_components_json() {
+  local cuda_available=0 cuda_summary cuda_details
+  if have_cmd nvidia-smi; then
+    if cuda_details="$(nvidia-smi -L 2>&1)" && [[ -n "${cuda_details}" ]]; then
+      cuda_available=1
+      cuda_summary="NVIDIA driver/GPU detected with nvidia-smi."
+    else
+      cuda_details="${cuda_details:-nvidia-smi did not report a GPU.}"
+      cuda_summary="NVIDIA CUDA driver/GPU was not detected."
+    fi
+  else
+    cuda_details="nvidia-smi was not found."
+    cuda_summary="NVIDIA CUDA driver/GPU was not detected."
+  fi
+
+  local ort_present=0 ort_version="" ort_cuda_provider=0 ort_provider_path=""
+  if have_cmd pkg-config && pkg-config --exists onnxruntime; then
+    ort_present=1
+    ort_version="$(pkg-config --modversion onnxruntime 2>/dev/null || true)"
+  elif have_cmd ldconfig && ldconfig -p 2>/dev/null | grep -q 'libonnxruntime\.so'; then
+    ort_present=1
+    ort_version="found-via-ldconfig"
+  fi
+  if ort_provider_path="$(detect_onnxruntime_cuda_provider_path 2>/dev/null || true)" &&
+     [[ -n "${ort_provider_path}" ]]; then
+    ort_cuda_provider=1
+  fi
+
+  local maxine_base vfx_root ar_root afx_root
+  local maxine_vfx=0 maxine_ar=0 maxine_afx=0 maxine_complete=0
+  maxine_base="$(detect_maxine_base_dir)"
+  vfx_root="${maxine_base}/VideoFX"
+  ar_root="${maxine_base}/ARSDK"
+  afx_root="${maxine_base}/Audio_Effects_SDK"
+  [[ -d "${vfx_root}" ]] && maxine_vfx=1
+  [[ -d "${ar_root}" ]] && maxine_ar=1
+  [[ -d "${afx_root}" ]] && maxine_afx=1
+  [[ "${maxine_vfx}" -eq 1 && "${maxine_ar}" -eq 1 && "${maxine_afx}" -eq 1 ]] && maxine_complete=1
+
+  printf '{'
+  printf '"cuda":{'
+  printf '"available":'; json_bool "${cuda_available}"; printf ','
+  printf '"summary":'; json_string "${cuda_summary}"; printf ','
+  printf '"details":'; json_string "${cuda_details}"; printf ','
+  printf '"install_docs":'; json_string "docs/open_source_video_models_install.md"
+  printf '},'
+  printf '"onnxruntime_cuda":{'
+  printf '"present":'; json_bool "${ort_present}"; printf ','
+  printf '"version":'; json_string "${ort_version}"; printf ','
+  printf '"cuda_provider_present":'; json_bool "${ort_cuda_provider}"; printf ','
+  printf '"cuda_provider_path":'; json_string "${ort_provider_path}"; printf ','
+  printf '"install_docs":'; json_string "docs/open_source_video_models_install.md"
+  printf '},'
+  printf '"maxine_sdk":{'
+  printf '"complete":'; json_bool "${maxine_complete}"; printf ','
+  printf '"base_dir":'; json_string "${maxine_base}"; printf ','
+  printf '"vfx_present":'; json_bool "${maxine_vfx}"; printf ','
+  printf '"ar_present":'; json_bool "${maxine_ar}"; printf ','
+  printf '"afx_present":'; json_bool "${maxine_afx}"; printf ','
+  printf '"install_docs":'; json_string "docs/maxine_install.md"
+  printf '}'
+  printf '}'
+}
+
 print_status_human() {
   local project_version installed_version manifest_state active enabled
   project_version="$(project_version_from "${REPO_ROOT}")"
@@ -464,7 +578,9 @@ print_status_json() {
     printf '"executable":'; json_bool "$([[ -x "${path}" ]] && echo 1 || echo 0)"
     printf '}'
   done
-  printf ']'
+  printf '],'
+  printf '"optional_components":'
+  print_optional_components_json
   printf '}\n'
 }
 
@@ -619,10 +735,14 @@ plan_workflow() {
       PLAN_CHANGES+=("Install StudioCast binary symlinks only; do not install/start the user service.")
     fi
     if [[ "${WITH_MODELS}" -eq 1 ]]; then
-      PLAN_CHANGES+=("Download/install curated Open Audio and Open Video model packs.")
+      PLAN_CHANGES+=("Download/install default Open Audio and Open Video model packs.")
     else
       PLAN_PRESERVED+=("Maxine/NVIDIA SDK assets and model packs remain optional; missing SDKs do not block open-source build/install.")
     fi
+    if [[ "${OPEN_BACKENDS}" -eq 1 ]]; then
+      PLAN_CHANGES+=("Force Linux CMake configuration to keep Open Video/Open CUDA and Open Audio enabled.")
+    fi
+    PLAN_CHANGES+=("Enable CPU resize fallback in the daemon config by default.")
     PLAN_CHANGES+=("Write install manifest: ${MANIFEST_PATH}.")
   fi
 
@@ -640,11 +760,30 @@ plan_workflow() {
         [[ "${YES}" -eq 1 ]] && setup_args+=("--yes")
         add_plan_command "${plan_source_dir}/scripts/setup.sh" "${setup_args[@]}"
       fi
-      add_plan_command cmake -S "${plan_source_dir}" -B "${BUILD_DIR}" -G Ninja -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
+      local -a cmake_configure_args=(-S "${plan_source_dir}" -B "${BUILD_DIR}" -G Ninja -DCMAKE_BUILD_TYPE="${BUILD_TYPE}")
+      if [[ "${OPEN_BACKENDS}" -eq 1 && "$(uname -s 2>/dev/null || true)" == "Linux" ]]; then
+        cmake_configure_args+=(-DSTUDIOCAST_ENABLE_OPEN_CUDA=ON -DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON)
+      fi
+      add_plan_command cmake "${cmake_configure_args[@]}"
       add_plan_command cmake --build "${BUILD_DIR}" --target "${BUILD_TARGETS[@]}"
       local -a install_args=("user-service" "--build-dir" "${BUILD_DIR}" "--yes")
       [[ "${WITH_SERVICE}" -ne 1 ]] && install_args+=("--link-bins-only")
       add_plan_command "${plan_source_dir}/scripts/install.sh" "${install_args[@]}"
+      if [[ "${WITH_MODELS}" -eq 1 ]]; then
+        local -a audio_model_args=("open-audio-models")
+        local audio_model_id
+        for audio_model_id in "${DEFAULT_OPEN_AUDIO_MODEL_IDS[@]}"; do
+          audio_model_args+=("--model" "${audio_model_id}")
+        done
+        add_plan_command "${plan_source_dir}/scripts/install.sh" "${audio_model_args[@]}"
+
+        local -a video_model_args=("open-video-models")
+        local video_model_id
+        for video_model_id in "${DEFAULT_OPEN_VIDEO_MODEL_IDS[@]}"; do
+          video_model_args+=("--model" "${video_model_id}")
+        done
+        add_plan_command "${plan_source_dir}/scripts/install.sh" "${video_model_args[@]}"
+      fi
       ;;
     uninstall)
       add_plan_command "${REPO_ROOT}/scripts/uninstall.sh" --yes
@@ -801,7 +940,11 @@ configure_build() {
 
   log "Configuring CMake build: ${BUILD_DIR}"
   run_cmd mkdir -p -- "$(dirname "${BUILD_DIR}")"
-  run_cmd cmake -S "${EFFECTIVE_SOURCE_DIR}" -B "${BUILD_DIR}" -G Ninja -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
+  local -a cmake_configure_args=(-S "${EFFECTIVE_SOURCE_DIR}" -B "${BUILD_DIR}" -G Ninja -DCMAKE_BUILD_TYPE="${BUILD_TYPE}")
+  if [[ "${OPEN_BACKENDS}" -eq 1 && "$(uname -s 2>/dev/null || true)" == "Linux" ]]; then
+    cmake_configure_args+=(-DSTUDIOCAST_ENABLE_OPEN_CUDA=ON -DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON)
+  fi
+  run_cmd cmake "${cmake_configure_args[@]}"
 }
 
 build_studiocast() {
@@ -820,9 +963,61 @@ install_binaries_and_service() {
 
 install_models_if_requested() {
   [[ "${WITH_MODELS}" -eq 1 ]] || return 0
-  log "Installing curated Open Audio and Open Video model packs"
-  run_cmd "${EFFECTIVE_SOURCE_DIR}/scripts/install.sh" open-audio-models
-  run_cmd "${EFFECTIVE_SOURCE_DIR}/scripts/install.sh" open-video-models
+  log "Installing default Open Audio and Open Video model packs"
+
+  local -a audio_args=("open-audio-models")
+  local audio_model_id
+  for audio_model_id in "${DEFAULT_OPEN_AUDIO_MODEL_IDS[@]}"; do
+    audio_args+=("--model" "${audio_model_id}")
+  done
+
+  local -a video_args=("open-video-models")
+  local video_model_id
+  for video_model_id in "${DEFAULT_OPEN_VIDEO_MODEL_IDS[@]}"; do
+    video_args+=("--model" "${video_model_id}")
+  done
+
+  run_cmd "${EFFECTIVE_SOURCE_DIR}/scripts/install.sh" "${audio_args[@]}"
+  run_cmd "${EFFECTIVE_SOURCE_DIR}/scripts/install.sh" "${video_args[@]}"
+}
+
+configure_daemon_defaults() {
+  local conf="${APP_CONFIG_DIR}/daemon.conf"
+  log "Ensuring daemon CPU resize fallback is enabled by default"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    print_cmd mkdir -p -- "${APP_CONFIG_DIR}"
+    printf '+ ensure-daemon-config %q %q\n' "${conf}" "video.scaling.allow_cpu_resize=true"
+    return 0
+  fi
+
+  mkdir -p -- "${APP_CONFIG_DIR}"
+  if [[ ! -f "${conf}" ]]; then
+    {
+      printf '# StudioCast daemon (studiocastd) configuration\n'
+      printf '# This file is managed by the StudioCast GUI / studiocastctl.\n\n'
+      printf 'video.scaling.allow_cpu_resize = true\n'
+    } > "${conf}"
+    return 0
+  fi
+
+  local tmp="${conf}.tmp"
+  awk '
+    BEGIN { done = 0 }
+    /^[[:space:]]*video[.]scaling[.]allow_cpu_resize[[:space:]]*=/ {
+      print "video.scaling.allow_cpu_resize = true"
+      done = 1
+      next
+    }
+    { print }
+    END {
+      if (!done) {
+        print ""
+        print "video.scaling.allow_cpu_resize = true"
+      }
+    }
+  ' "${conf}" > "${tmp}"
+  mv -- "${tmp}" "${conf}"
 }
 
 write_manifest() {
@@ -918,6 +1113,7 @@ run_install_like_workflow() {
   run_setup_deps
   configure_build
   build_studiocast
+  configure_daemon_defaults
   install_binaries_and_service
   install_models_if_requested
 
@@ -1009,6 +1205,8 @@ parse_options() {
       --no-service) WITH_SERVICE=0; shift ;;
       --models) WITH_MODELS=1; shift ;;
       --no-models) WITH_MODELS=0; shift ;;
+      --open-backends) OPEN_BACKENDS=1; shift ;;
+      --no-open-backends) OPEN_BACKENDS=0; shift ;;
       --fresh-build) FRESH_BUILD=1; shift ;;
       --no-fresh-build) FRESH_BUILD=0; shift ;;
       --preserve-user-data) REMOVE_USER_DATA=0; shift ;;

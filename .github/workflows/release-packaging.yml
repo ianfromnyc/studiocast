@@ -87,13 +87,9 @@ jobs:
         run: |
           packaging/appimage/build_appimage.sh --clean --appimage-required
 
-      - name: Verify source archive artifact
+      - name: Verify GUI installer bundle
         run: |
-          version="$(tr -d '[:space:]' < VERSION)"
-          source_archive="StudioCast-${version}-source.tar.gz"
-          checksum_file="dist/appimage/StudioCast-Installer-${version}-$(uname -m).sha256"
-          test -f "dist/appimage/${source_archive}"
-          grep -F "  ${source_archive}" "${checksum_file}"
+          packaging/appimage/verify_bundle.sh --require-appimage
 
       - name: Upload release packaging artifacts
         uses: actions/upload-artifact@v4

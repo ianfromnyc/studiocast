@@ -203,13 +203,14 @@ std::string BroadcastAudioEffectsToJson(const BroadcastAudioEffects &effects) {
   return oss.str();
 }
 
-bool ParseBroadcastAudioEffectsJson(
+namespace {
+
+bool ParseBroadcastAudioEffectsJsonInto(
     const studiocast::util::json::Value &root, BroadcastAudioEffects *out,
     const BroadcastAudioEffectsJsonParseOptions &options,
     std::vector<std::string> *warnings, std::string *error) {
   if (!out)
     return Fail(error, "output pointer is null");
-  *out = BroadcastAudioEffects{};
 
   const Value::Object *obj = nullptr;
   if (!ParseRootObject(root, &obj, warnings, error))
@@ -436,6 +437,25 @@ bool ParseBroadcastAudioEffectsJson(
   return ValidateMicExclusivity(*out, error);
 }
 
+} // namespace
+
+bool ParseBroadcastAudioEffectsJson(
+    const studiocast::util::json::Value &root, BroadcastAudioEffects *out,
+    const BroadcastAudioEffectsJsonParseOptions &options,
+    std::vector<std::string> *warnings, std::string *error) {
+  if (!out)
+    return Fail(error, "output pointer is null");
+
+  BroadcastAudioEffects parsed{};
+  if (!ParseBroadcastAudioEffectsJsonInto(root, &parsed, options, warnings,
+                                          error)) {
+    return false;
+  }
+
+  *out = parsed;
+  return true;
+}
+
 bool ParseBroadcastAudioEffectsJsonText(
     const std::string &jsonText, BroadcastAudioEffects *out,
     const BroadcastAudioEffectsJsonParseOptions &options,
@@ -444,6 +464,34 @@ bool ParseBroadcastAudioEffectsJsonText(
   if (!studiocast::util::json::Parse(jsonText, &root, error))
     return false;
   return ParseBroadcastAudioEffectsJson(root, out, options, warnings, error);
+}
+
+bool ApplyBroadcastAudioEffectsPatchJson(
+    const studiocast::util::json::Value &root, BroadcastAudioEffects *effects,
+    const BroadcastAudioEffectsJsonParseOptions &options,
+    std::vector<std::string> *warnings, std::string *error) {
+  if (!effects)
+    return Fail(error, "effects pointer is null");
+
+  BroadcastAudioEffects patched = *effects;
+  if (!ParseBroadcastAudioEffectsJsonInto(root, &patched, options, warnings,
+                                          error)) {
+    return false;
+  }
+
+  *effects = patched;
+  return true;
+}
+
+bool ApplyBroadcastAudioEffectsPatchJsonText(
+    const std::string &jsonText, BroadcastAudioEffects *effects,
+    const BroadcastAudioEffectsJsonParseOptions &options,
+    std::vector<std::string> *warnings, std::string *error) {
+  Value root;
+  if (!studiocast::util::json::Parse(jsonText, &root, error))
+    return false;
+  return ApplyBroadcastAudioEffectsPatchJson(root, effects, options, warnings,
+                                             error);
 }
 
 } // namespace studiocast::audio::effects

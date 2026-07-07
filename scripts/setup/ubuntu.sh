@@ -77,6 +77,12 @@ fi
 
 log() { echo "[setup] $*"; }
 
+if [[ "${STUDIOCAST_GUI_SUDO_STDIN:-0}" == "1" ]]; then
+  sudo() {
+    command sudo -S -p "${STUDIOCAST_GUI_SUDO_PROMPT:-[sudo] password for %u: }" "$@"
+  }
+fi
+
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "[setup] Missing required command: $1"; exit 1; }
 }
@@ -381,7 +387,9 @@ fi
 
 if [[ "$DO_BUILD" -eq 1 ]]; then
   log "Configuring + building into: $BUILD_DIR (type: $BUILD_TYPE)"
-  cmake -S . -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+  cmake -S . -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+    -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON \
+    -DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON
   cmake --build "$BUILD_DIR"
   log "Built. Useful commands:"
   echo "  $BUILD_DIR/studiocast --version"

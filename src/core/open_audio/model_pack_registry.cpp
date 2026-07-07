@@ -9,6 +9,15 @@
 
 namespace fs = std::filesystem;
 
+namespace studiocast::model_integrity_internal {
+
+std::string NormalizeSha256Hex(std::string s);
+bool IsSha256Hex(const std::string &s);
+bool ComputeSha256File(const fs::path &path, std::string *out,
+                       std::string *error);
+
+} // namespace studiocast::model_integrity_internal
+
 namespace studiocast::open_audio {
 
 namespace {
@@ -115,6 +124,28 @@ bool GetStringArrayOptional(const util::json::Value::Object &o, const char *key,
   return true;
 }
 
+bool IsPlaceholderModelId(const std::string &id) {
+  return id.find("placeholder") != std::string::npos;
+}
+
+std::string ClassifyLoadError(const std::string &err) {
+  if (err.find("missing ONNX file") != std::string::npos ||
+      err.find("missing model.json") != std::string::npos ||
+      err.find("No such") != std::string::npos) {
+    return "missing";
+  }
+  return "invalid_manifest";
+}
+
+std::string ClassifiedMessage(const std::string &status,
+                              const std::string &message) {
+  if (message.empty())
+    return status;
+  if (message.starts_with(status + ":"))
+    return message;
+  return status + ": " + message;
+}
+
 bool ParseModelJsonV1(const fs::path &pack_dir, ModelPack *out,
                       std::string *error) {
   const fs::path manifestPath = pack_dir / "model.json";
@@ -143,6 +174,15 @@ bool ParseModelJsonV1(const fs::path &pack_dir, ModelPack *out,
     return false;
   if (!GetStringRequired(*obj, "onnx_filename", &out->onnx_filename, error))
     return false;
+
+  const auto *originVal = Get(*obj, "origin");
+  if (originVal) {
+    const auto *originObj = originVal->AsObject();
+    if (!originObj)
+      return Fail(error, "model.json: field 'origin' must be an object");
+    if (!GetStringOptional(*originObj, "sha256", &out->origin_sha256, error))
+      return false;
+  }
 
   // Optional fields
   if (!GetStringArrayOptional(*obj, "effects", &out->effects, error))
@@ -351,6 +391,112 @@ bool ParseModelJsonV1(const fs::path &pack_dir, ModelPack *out,
   return true;
 }
 
+ModelFileVerification VerifyOnnxFile(const ModelPack &pack) {
+  ModelFileVerification out;
+  out.name = pack.onnx_filename;
+  out.kind = "onnx";
+  out.path = pack.onnx_path;
+  out.expected_sha256 =
+      studiocast::model_integrity_internal::NormalizeSha256Hex(
+          pack.origin_sha256);
+
+  std::error_code ec;
+  if (!fs::exists(pack.onnx_path, ec) || ec) {
+    out.status = "missing";
+    out.message =
+        std::string("missing ONNX file: ") + PathForError(pack.onnx_path);
+    out.ok = false;
+    return out;
+  }
+  if (!fs::is_regular_file(pack.onnx_path, ec) || ec) {
+    out.status = "missing";
+    out.message = std::string("ONNX path is not a regular file: ") +
+                  PathForError(pack.onnx_path);
+    out.ok = false;
+    return out;
+  }
+
+  if (out.expected_sha256.empty()) {
+    out.status = "unchecked";
+    out.message = "no origin.sha256 in model.json";
+    out.ok = true;
+    return out;
+  }
+  if (!studiocast::model_integrity_internal::IsSha256Hex(
+          out.expected_sha256)) {
+    out.status = "invalid_manifest";
+    out.message =
+        "model.json: origin.sha256 must be a 64-character hex SHA-256 digest";
+    out.ok = false;
+    return out;
+  }
+  out.checksum_kind = "installed_sha256";
+
+  std::string err;
+  if (!studiocast::model_integrity_internal::ComputeSha256File(
+          pack.onnx_path, &out.actual_sha256, &err)) {
+    out.status = "read_error";
+    out.message = err.empty() ? std::string("failed to hash ONNX file") : err;
+    out.ok = false;
+    return out;
+  }
+
+  if (out.actual_sha256 != out.expected_sha256) {
+    out.status = "checksum_mismatch";
+    out.message = "checksum_mismatch: expected " + out.expected_sha256 +
+                  ", got " + out.actual_sha256;
+    out.ok = false;
+    return out;
+  }
+
+  out.status = "ok";
+  out.message = "sha256 OK";
+  out.ok = true;
+  return out;
+}
+
+ModelPackVerification VerifyParsedPack(const ModelPack &pack) {
+  ModelPackVerification out;
+  out.id = pack.id;
+  out.display_name = pack.display_name;
+  out.root_dir = pack.root_dir;
+  out.manifest_path = pack.manifest_path;
+
+  if (IsPlaceholderModelId(pack.id)) {
+    out.status = "placeholder";
+    out.message =
+        "placeholder: model id contains 'placeholder' and is skipped by default";
+    out.ok = false;
+    return out;
+  }
+
+  auto vf = VerifyOnnxFile(pack);
+  out.files.push_back(std::move(vf));
+  out.ok = out.files.front().ok;
+  out.status = out.ok ? "ok" : out.files.front().status;
+  out.message = out.ok ? "ok" : out.files.front().message;
+  return out;
+}
+
+ModelPackVerification FailedVerification(const fs::path &pack_dir,
+                                         const ModelPack &pack,
+                                         const std::string &err) {
+  ModelPackVerification out;
+  out.id = pack.id.empty() ? pack_dir.filename().string() : pack.id;
+  out.display_name = pack.display_name;
+  out.root_dir = pack_dir;
+  out.manifest_path = pack_dir / "model.json";
+  out.status =
+      IsPlaceholderModelId(pack.id) ? "placeholder" : ClassifyLoadError(err);
+  const std::string msg =
+      IsPlaceholderModelId(pack.id)
+          ? "model id contains 'placeholder' and is skipped by default"
+          : (err.empty() ? "failed to load model pack" : err);
+  out.message = ClassifiedMessage(out.status, msg);
+  out.ok = false;
+  return out;
+}
+
 } // namespace
 
 ModelPackRegistry
@@ -392,7 +538,21 @@ ModelPackRegistry::Scan(const fs::path &open_audio_models_dir) {
     ModelPack pack;
     std::string perr;
     if (!ParseModelJsonV1(d, &pack, &perr)) {
-      reg.problems_[dirKey] = perr;
+      const std::string key = pack.id.empty() ? dirKey : pack.id;
+      const std::string status =
+          IsPlaceholderModelId(pack.id) ? "placeholder" : ClassifyLoadError(perr);
+      const std::string msg =
+          IsPlaceholderModelId(pack.id)
+              ? "model id contains 'placeholder' and is skipped by default"
+              : perr;
+      reg.problems_[key] = ClassifiedMessage(status, msg);
+      continue;
+    }
+
+    if (IsPlaceholderModelId(pack.id)) {
+      reg.problems_[pack.id] =
+          "placeholder: model id contains 'placeholder' and is skipped by "
+          "default";
       continue;
     }
 
@@ -407,13 +567,14 @@ ModelPackRegistry::Scan(const fs::path &open_audio_models_dir) {
 
     if (!fs::exists(pack.onnx_path, ec) || ec) {
       reg.problems_[pack.id] =
-          std::string("missing ONNX file: ") + PathForError(pack.onnx_path);
+          std::string("missing: missing ONNX file: ") +
+          PathForError(pack.onnx_path);
       ec.clear();
       continue;
     }
     if (!fs::is_regular_file(pack.onnx_path, ec) || ec) {
       reg.problems_[pack.id] =
-          std::string("ONNX path is not a regular file: ") +
+          std::string("missing: ONNX path is not a regular file: ") +
           PathForError(pack.onnx_path);
       ec.clear();
       continue;
@@ -428,6 +589,69 @@ ModelPackRegistry::Scan(const fs::path &open_audio_models_dir) {
   return reg;
 }
 
+std::vector<ModelPackVerification>
+ModelPackRegistry::Verify(const fs::path &open_audio_models_dir) {
+  std::vector<ModelPackVerification> out;
+
+  std::error_code ec;
+  if (!fs::exists(open_audio_models_dir, ec) || ec) {
+    return out;
+  }
+  if (!fs::is_directory(open_audio_models_dir, ec) || ec) {
+    ModelPackVerification r;
+    r.id = open_audio_models_dir.filename().string();
+    r.root_dir = open_audio_models_dir;
+    r.manifest_path = open_audio_models_dir / "model.json";
+    r.status = "invalid_manifest";
+    r.message = "invalid_manifest: open_audio models path is not a directory: " +
+                PathForError(open_audio_models_dir);
+    r.ok = false;
+    out.push_back(std::move(r));
+    return out;
+  }
+
+  std::vector<fs::path> dirs;
+  for (fs::directory_iterator it(open_audio_models_dir, ec);
+       !ec && it != fs::directory_iterator(); it.increment(ec)) {
+    const auto &e = *it;
+    if (!e.is_directory(ec) || ec) {
+      ec.clear();
+      continue;
+    }
+    dirs.push_back(e.path());
+  }
+  if (ec) {
+    ModelPackVerification r;
+    r.id = open_audio_models_dir.string();
+    r.root_dir = open_audio_models_dir;
+    r.status = "read_error";
+    r.message = std::string("failed to scan directory: ") + ec.message();
+    r.ok = false;
+    out.push_back(std::move(r));
+    return out;
+  }
+
+  std::sort(dirs.begin(), dirs.end(), [](const fs::path &a, const fs::path &b) {
+    return a.filename().string() < b.filename().string();
+  });
+
+  for (const auto &d : dirs) {
+    ModelPack pack;
+    std::string err;
+    if (!ParseModelJsonV1(d, &pack, &err)) {
+      out.push_back(FailedVerification(d, pack, err));
+      continue;
+    }
+
+    out.push_back(VerifyParsedPack(pack));
+  }
+
+  std::sort(out.begin(), out.end(),
+            [](const ModelPackVerification &a,
+               const ModelPackVerification &b) { return a.id < b.id; });
+  return out;
+}
+
 ModelPackRegistry ModelPackRegistry::ScanDefault() {
   const auto modelsRoot = studiocast::util::StudioCastModelsDir();
   if (modelsRoot.empty()) {
@@ -435,6 +659,14 @@ ModelPackRegistry ModelPackRegistry::ScanDefault() {
     return Scan(fs::path{"~/.local/share/studiocast/models/open_audio"});
   }
   return Scan(modelsRoot / "open_audio");
+}
+
+std::vector<ModelPackVerification> ModelPackRegistry::VerifyDefault() {
+  const auto modelsRoot = studiocast::util::StudioCastModelsDir();
+  if (modelsRoot.empty()) {
+    return Verify(fs::path{"~/.local/share/studiocast/models/open_audio"});
+  }
+  return Verify(modelsRoot / "open_audio");
 }
 
 std::optional<ModelPack>

@@ -48,4 +48,16 @@ bool CompositeAlphaSolidU8x3(const CudaImage &fg, const CudaImage &alpha,
                              studiocast::maxine::CUstream stream,
                              std::string *error_out);
 
+// out = key-light blend over src, masked by a frame-sized f32 alpha matte.
+//
+// - src/out must be rgb_u8 with identical dimensions.
+// - alpha must be f32_1 with identical dimensions; values are clamped to
+// [0..1].
+// - The operation is enqueued on the provided stream and does not synchronize.
+bool ApplyKeyLightU8x3(const CudaImage &src, const CudaImage &alpha,
+                       float target_r, float target_g, float target_b,
+                       float intensity01, float direction, const CudaImage &out,
+                       studiocast::maxine::CUstream stream,
+                       std::string *error_out);
+
 } // namespace studiocast::cuda::kernels

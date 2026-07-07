@@ -159,6 +159,7 @@ private:
 
   ModelPackRegistry registry_;
   std::string active_model_id_;
+  std::string active_requested_model_id_;
   std::string required_landmarks_id_;
   std::filesystem::path left_model_path_;
   std::filesystem::path right_model_path_;

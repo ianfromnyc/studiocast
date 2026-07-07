@@ -15,6 +15,9 @@ struct ModelPack {
   std::string display_name;
   std::string onnx_filename;
 
+  // Optional installed ONNX SHA-256 from model.json origin.sha256.
+  std::string origin_sha256;
+
   // Optional: which effects this model claims to support.
   // Values should use stable effect IDs (see
   // core/audio/effects/broadcast_audio_effect_contract.h).
@@ -71,6 +74,29 @@ struct ModelPack {
   std::optional<std::filesystem::path> license_path;
 };
 
+struct ModelFileVerification {
+  std::string name;
+  std::string kind;
+  std::filesystem::path path;
+  std::string expected_sha256;
+  std::string actual_sha256;
+  std::string checksum_kind; // installed_sha256 or empty.
+  std::string status;
+  std::string message;
+  bool ok = false;
+};
+
+struct ModelPackVerification {
+  std::string id;
+  std::string display_name;
+  std::filesystem::path root_dir;
+  std::filesystem::path manifest_path;
+  std::string status;
+  std::string message;
+  bool ok = false;
+  std::vector<ModelFileVerification> files;
+};
+
 // Registry for model packs under:
 //   <models_root>/open_audio/<model_id>/
 // where <models_root> is normally ~/.local/share/studiocast/models.
@@ -86,6 +112,12 @@ public:
 
   // Convenience for scanning the default XDG location.
   static ModelPackRegistry ScanDefault();
+
+  // Explicit integrity verification. This may hash large model files and should
+  // be used from tools/self-tests rather than polling status paths.
+  static std::vector<ModelPackVerification>
+  Verify(const std::filesystem::path &open_audio_models_dir);
+  static std::vector<ModelPackVerification> VerifyDefault();
 
   const std::vector<ModelPack> &ListModels() const { return models_; }
   std::optional<ModelPack> ResolveModel(const std::string &id) const;

@@ -258,15 +258,6 @@ bool ApplyVirtualBackgroundEffectPatch(VirtualBackgroundMode mode,
   if (found)
     fx->virtual_background.replace_path = rp;
 
-  if (mode == VirtualBackgroundMode::replace &&
-      fx->virtual_background.mode == VirtualBackgroundMode::replace &&
-      fx->virtual_background.replace_path.empty()) {
-    if (error)
-      *error =
-          "replace_path is required when virtual background mode is 'replace'";
-    return false;
-  }
-
   return true;
 }
 
@@ -925,14 +916,6 @@ bool ApplyBroadcastCameraEffectsPatchJson(
                effects::contract::kVirtualKeyLightPanMax);
 
   effects->vignette.intensity = ClampInt(effects->vignette.intensity, 0, 100);
-
-  if (effects->virtual_background.mode == VirtualBackgroundMode::replace &&
-      effects->virtual_background.replace_path.empty()) {
-    if (error)
-      *error =
-          "replace_path is required when virtual background mode is 'replace'";
-    return false;
-  }
 
   return true;
 }

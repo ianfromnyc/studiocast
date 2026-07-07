@@ -22,6 +22,7 @@
 #include "core/util/json.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/effects/broadcast_effects.h"
+#include "core/video/v4l2loopback.h"
 #include "studiocast/version.h"
 
 namespace {
@@ -745,7 +746,8 @@ void Usage(const char *argv0) {
       << "  " << argv0 << " enable <0|1>\n"
       << "  " << argv0
       << " video set [input=/dev/videoX|auto] [output=/dev/videoY|auto] "
-         "[width=N] [height=N] [fps=N] [always_on=0|1]\n"
+         "[width=N] [height=N] [fps=N] [always_on=0|1] "
+         "[allow_cpu_resize=0|1]\n"
       << "  " << argv0
       << " video vb --model <id> [--mode blur|remove|replace] [--engine "
          "auto|maxine|open_cuda]\n"
@@ -763,7 +765,7 @@ void Usage(const char *argv0) {
       << "  " << argv0 << " enable 1\n"
       << "  " << argv0
       << " video set input=/dev/video0 output=/dev/video10 width=1280 "
-         "height=720 fps=30\n"
+         "height=720 fps=30 allow_cpu_resize=1\n"
       << "  " << argv0 << " video vb --list-models\n"
       << "  " << argv0
       << " video vb --model modnet-webnn-256-fp32 --mode remove\n"
@@ -937,6 +939,15 @@ int main(int argc, char **argv) {
       } else {
         out << res.json << "\n";
       }
+    }
+
+    section("Video: v4l2loopback diagnostics");
+    {
+      const auto rep = studiocast::video::ProbeLoopbackDiagnostics();
+      const auto text = rep.ToText();
+      out << text;
+      if (!text.empty() && text.back() != '\n')
+        out << "\n";
     }
 
     section("IPC: GET_AUDIO_CONFIG");

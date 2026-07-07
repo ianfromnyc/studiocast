@@ -11,6 +11,7 @@
 #include <QScrollArea>
 #include <QStackedWidget>
 #include <QStyle>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <algorithm>
@@ -74,6 +75,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   connect(statusPoller_, &StatusPoller::StatusChanged, this,
           &MainWindow::UpdateStatus);
   statusPoller_->Start(2000);
+  statusPoller_->RefreshDiagnosticsNow();
 }
 
 void MainWindow::BuildUi() {
@@ -135,7 +137,8 @@ void MainWindow::BuildUi() {
   auto *serviceLayout = new QVBoxLayout(serviceBox);
   serviceLayout->setContentsMargins(10, 6, 10, 6);
   serviceLayout->setSpacing(2);
-  serviceStateLabel_ = new QLabel(QStringLiteral("Checking service"), serviceBox);
+  serviceStateLabel_ =
+      new QLabel(QStringLiteral("Checking service"), serviceBox);
   serviceStateLabel_->setProperty("scRole", "value");
   serviceDetailLabel_ = MutedLabel(QString(), serviceBox);
   serviceLayout->addWidget(serviceStateLabel_);
@@ -153,11 +156,12 @@ void MainWindow::BuildUi() {
   // TODO(gui-reface): Add microphone meters only after daemon-provided meter
   // data exists.
   // TODO(gui-reface): Add speaker test tone only after backend support exists.
-  pages_->addWidget(WrapScrollable(new VideoPage(pages_), pages_));
-  pages_->addWidget(
-      WrapScrollable(new AudioPage(AudioPageMode::Microphone, pages_), pages_));
-  pages_->addWidget(
-      WrapScrollable(new AudioPage(AudioPageMode::Speakers, pages_), pages_));
+  videoPage_ = new VideoPage(pages_);
+  pages_->addWidget(WrapScrollable(videoPage_, pages_));
+  microphonePage_ = new AudioPage(AudioPageMode::Microphone, pages_);
+  pages_->addWidget(WrapScrollable(microphonePage_, pages_));
+  speakersPage_ = new AudioPage(AudioPageMode::Speakers, pages_);
+  pages_->addWidget(WrapScrollable(speakersPage_, pages_));
 
   enginesModelsPage_ = new EnginesModelsPage(pages_);
   pages_->addWidget(WrapScrollable(enginesModelsPage_, pages_));
@@ -198,6 +202,34 @@ void MainWindow::ConnectSignals() {
   connect(homePage_, &HomePage::SupportRequested, this,
           [navigateTo] { navigateTo(QStringLiteral("Support")); });
 
+  connect(enginesModelsPage_, &EnginesModelsPage::ModelsInstallFinished, this,
+          [this] {
+            if (statusPoller_)
+              statusPoller_->RefreshDiagnosticsNow();
+          });
+  connect(enginesModelsPage_, &EnginesModelsPage::SetupRepairFinished, this,
+          [this] {
+            auto refresh = [this] {
+              if (statusPoller_)
+                statusPoller_->RefreshDiagnosticsNow();
+            };
+            refresh();
+            QTimer::singleShot(1500, this, refresh);
+            QTimer::singleShot(4000, this, refresh);
+          });
+  connect(videoPage_, &VideoPage::StatusRefreshRequested, this, [this] {
+    if (statusPoller_)
+      statusPoller_->PollNow();
+  });
+  connect(microphonePage_, &AudioPage::StatusRefreshRequested, this, [this] {
+    if (statusPoller_)
+      statusPoller_->PollNow();
+  });
+  connect(speakersPage_, &AudioPage::StatusRefreshRequested, this, [this] {
+    if (statusPoller_)
+      statusPoller_->PollNow();
+  });
+
   connect(nav_, &QListWidget::currentRowChanged, this, [this](int row) {
     if (row < 0 || row >= pages_->count())
       return;
@@ -220,6 +252,12 @@ void MainWindow::UpdateStatus(const DaemonStatusSnapshot &snapshot) {
 
   if (homePage_)
     homePage_->UpdateStatus(snapshot);
+  if (videoPage_)
+    videoPage_->UpdateStatus(snapshot);
+  if (microphonePage_)
+    microphonePage_->UpdateStatus(snapshot);
+  if (speakersPage_)
+    speakersPage_->UpdateStatus(snapshot);
   if (enginesModelsPage_)
     enginesModelsPage_->UpdateStatus(snapshot);
   if (supportPage_)

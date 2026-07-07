@@ -343,6 +343,7 @@ private:
 struct ResettingOpenIoState {
   std::mutex mu;
   std::condition_variable cv;
+  bool open_started = false;
   bool stop_requested = false;
   int request_stop_calls = 0;
 };
@@ -424,6 +425,12 @@ public:
   }
 
   bool Open(const AudioPipelineConfig &, std::string *error) override {
+    {
+      std::lock_guard<std::mutex> lock(state_->mu);
+      state_->open_started = true;
+      state_->cv.notify_all();
+    }
+
     std::this_thread::sleep_for(reset_delay_);
 
     std::unique_lock<std::mutex> lock(state_->mu);
@@ -3795,8 +3802,19 @@ bool TestStopInterruptsOpenAfterEarlyStopReset() {
   AudioPipelineConfig cfg;
 
   std::string err;
-  if (!pipeline.Start(cfg, &err)) {
-    std::cerr << "pipeline.Start failed: " << err << "\n";
+  auto start_future = std::async(std::launch::async, [&] {
+    return pipeline.Start(cfg, &err);
+  });
+
+  if (!WaitUntil(
+          [&] {
+            std::lock_guard<std::mutex> lock(state->mu);
+            return state->open_started;
+          },
+          250ms)) {
+    std::cerr << "pipeline.Start did not enter Open()\n";
+    pipeline.Stop();
+    (void)start_future.get();
     return false;
   }
 
@@ -3807,6 +3825,9 @@ bool TestStopInterruptsOpenAfterEarlyStopReset() {
   const bool stop_ready =
       (stop_future.wait_for(100ms) == std::future_status::ready);
   (void)stop_future.get();
+  const bool start_ready =
+      (start_future.wait_for(100ms) == std::future_status::ready);
+  const bool start_ok = start_ready ? start_future.get() : true;
 
   int request_stop_calls = 0;
   {
@@ -3816,6 +3837,13 @@ bool TestStopInterruptsOpenAfterEarlyStopReset() {
 
   if (!stop_ready) {
     std::cerr << "Stop() stayed blocked while Open() reset an early stop\n";
+    return false;
+  }
+
+  if (!start_ready || start_ok) {
+    std::cerr << "Start() did not return false after Stop() interrupted Open(); "
+              << "ready=" << start_ready << " ok=" << start_ok
+              << " err='" << err << "'\n";
     return false;
   }
 
@@ -3883,7 +3911,7 @@ bool TestStopInterruptsBlockedFlush() {
   return true;
 }
 
-bool TestStartReusesPipelineAfterWorkerExit() {
+bool TestStartReturnsOpenFailureAndCanRetry() {
   std::atomic<int> open_calls{0};
   CopyProcessor processor;
 
@@ -3894,35 +3922,40 @@ bool TestStartReusesPipelineAfterWorkerExit() {
   AudioPipelineConfig cfg;
 
   std::string err;
-  if (!pipeline.Start(cfg, &err)) {
-    std::cerr << "first pipeline.Start failed: " << err << "\n";
+  if (pipeline.Start(cfg, &err)) {
+    std::cerr << "first pipeline.Start succeeded despite open failure\n";
+    return false;
+  }
+  if (err.find("synthetic open failure") == std::string::npos) {
+    std::cerr << "first Start() did not return open error; err='" << err
+              << "'\n";
     return false;
   }
 
-  if (!WaitUntil(
-          [&] {
-            return open_calls.load(std::memory_order_relaxed) >= 1 &&
-                   !pipeline.GetStats().running;
-          },
-          250ms)) {
-    std::cerr << "first worker did not exit after open failure\n";
-    pipeline.Stop();
+  if (open_calls.load(std::memory_order_relaxed) != 1 ||
+      pipeline.GetStats().running) {
+    std::cerr << "first failed start left pipeline running; opens="
+              << open_calls.load()
+              << " running=" << pipeline.GetStats().running << "\n";
     return false;
   }
 
-  if (!pipeline.Start(cfg, &err)) {
-    std::cerr << "second pipeline.Start failed: " << err << "\n";
+  err.clear();
+  if (pipeline.Start(cfg, &err)) {
+    std::cerr << "second pipeline.Start succeeded despite open failure\n";
+    return false;
+  }
+  if (err.find("synthetic open failure") == std::string::npos) {
+    std::cerr << "second Start() did not return open error; err='" << err
+              << "'\n";
     return false;
   }
 
-  if (!WaitUntil(
-          [&] {
-            return open_calls.load(std::memory_order_relaxed) >= 2 &&
-                   !pipeline.GetStats().running;
-          },
-          250ms)) {
-    std::cerr << "second worker did not exit after open failure\n";
-    pipeline.Stop();
+  if (open_calls.load(std::memory_order_relaxed) != 2 ||
+      pipeline.GetStats().running) {
+    std::cerr << "second failed start left pipeline running; opens="
+              << open_calls.load()
+              << " running=" << pipeline.GetStats().running << "\n";
     return false;
   }
 
@@ -4409,8 +4442,8 @@ int main() {
       {"stop interrupts open after early stop reset",
        &TestStopInterruptsOpenAfterEarlyStopReset},
       {"stop interrupts blocked flush", &TestStopInterruptsBlockedFlush},
-      {"start reuses pipeline after worker exit",
-       &TestStartReusesPipelineAfterWorkerExit},
+      {"start returns open failure and can retry",
+       &TestStartReturnsOpenFailureAndCanRetry},
       {"pipeline surfaces capture disconnect",
        &TestPipelineSurfacesCaptureDisconnectError},
       {"latency guard sums capture and playback before resync",

@@ -1,9 +1,11 @@
 #pragma once
 
 #include <QJsonObject>
+#include <QProcess>
 #include <QString>
 #include <QWidget>
 
+#include <string>
 #include <vector>
 
 #include "core/audio/pulse/pactl.h"
@@ -16,6 +18,7 @@ class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
 class QSpinBox;
+class QThread;
 
 namespace studiocast::gui {
 
@@ -31,6 +34,7 @@ public:
 
 private slots:
   void OnAlwaysOnToggled(bool checked);
+  void OnAllowCpuResizeToggled(bool checked);
   void OnCreateVirtualMic();
   void OnDestroyVirtualMic();
   void OnEnableVirtualSpeakers();
@@ -39,16 +43,34 @@ private slots:
   void OnSaveAudioModelOverrides();
   void OnSaveVideoModelOverrides();
   void OnRefreshPulseState();
+  void OnRestartVirtualCamera();
   void OnLegacySourceChanged(int index);
   void OnStartLegacyLoopback();
   void OnStopLegacyLoopback();
 
 private:
+  struct PulseRefreshResult {
+    bool pactlOk = false;
+    std::string pactlDetails;
+    std::vector<studiocast::audio::pulse::PactlModule> modules;
+    std::string moduleError;
+    std::vector<studiocast::audio::pulse::PactlSourceInfo> sources;
+    std::string sourceError;
+    QString localAudioStatusText;
+  };
+
   void ApplySnapshotJson(const QJsonObject &root);
   void RefreshPulseState();
-  void RefreshLegacySources();
+  void ApplyPulseRefreshResult(const PulseRefreshResult &result);
+  void RefreshLegacySources(
+      const std::vector<studiocast::audio::pulse::PactlSourceInfo> &sources);
   void UpdateLegacyPorts();
   void UpdateButtonStates();
+  void AppendVirtualCameraRecoveryOutput(const QByteArray &bytes);
+  void AppendVirtualCameraRecoveryErrorOutput(const QByteArray &bytes);
+  void PromptForVirtualCameraRecoveryPassword();
+  void FinishVirtualCameraRecovery(int exitCode,
+                                   QProcess::ExitStatus exitStatus);
 
   bool SendDaemonRequest(const std::string &request, QString *error);
   bool FetchDaemonJson(const std::string &request, QJsonObject *out,
@@ -58,8 +80,7 @@ private:
   bool SaveVideoModelOverrides(QString *error);
 
   bool ConfirmDestructive(const QString &title, const QString &text,
-                          const QString &detail,
-                          const QString &confirmText);
+                          const QString &detail, const QString &confirmText);
   void SetResult(const QString &text, const QString &status);
   void ShowFailure(const QString &title, const QString &details);
 
@@ -72,6 +93,11 @@ private:
 
   QLabel *cameraStateLabel_ = nullptr;
   QCheckBox *alwaysOnCheck_ = nullptr;
+  QCheckBox *allowCpuResizeCheck_ = nullptr;
+
+  QGroupBox *virtualCameraRecoveryBox_ = nullptr;
+  QPushButton *restartVirtualCameraButton_ = nullptr;
+  QLabel *virtualCameraRecoveryStatusLabel_ = nullptr;
 
   QLabel *audioLifecycleLabel_ = nullptr;
   QLabel *pulseStateLabel_ = nullptr;
@@ -110,6 +136,7 @@ private:
   bool updatingUi_ = false;
   bool daemonReachable_ = false;
   bool currentAlwaysOn_ = false;
+  bool currentAllowCpuResize_ = true;
   bool pactlOk_ = false;
   bool hasVirtualMicSink_ = false;
   bool hasVirtualMicSource_ = false;
@@ -120,6 +147,12 @@ private:
   bool configuredVirtualSpeakers_ = false;
   bool configuredSpeakersEnabled_ = false;
   bool speakersRoutingActive_ = false;
+  QThread *pulseRefreshThread_ = nullptr;
+  QProcess *virtualCameraRecoveryProcess_ = nullptr;
+  QString virtualCameraRecoveryOutput_;
+  QString virtualCameraRecoveryPromptBuffer_;
+  bool virtualCameraRecoveryPasswordDialogOpen_ = false;
+  bool virtualCameraRecoveryPasswordCancelled_ = false;
 
   std::vector<studiocast::audio::pulse::PactlSourceInfo> cachedSources_;
 };

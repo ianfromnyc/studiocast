@@ -277,6 +277,10 @@ QLabel[scBanner] {
   padding: 10px 12px;
 }
 
+QFrame[scBanner] {
+  border-radius: 10px;
+}
+
 QLabel[scBanner="info"] {
   background: rgba(45, 212, 255, 0.10);
   border: 1px solid rgba(45, 212, 255, 0.28);
@@ -287,6 +291,11 @@ QLabel[scBanner="warning"] {
   background: rgba(255, 176, 32, 0.10);
   border: 1px solid rgba(255, 176, 32, 0.28);
   color: #FFEFD6;
+}
+
+QFrame[scBanner="warning"] {
+  background: rgba(255, 176, 32, 0.10);
+  border: 1px solid rgba(255, 176, 32, 0.28);
 }
 
 QLabel[scBanner="error"] {

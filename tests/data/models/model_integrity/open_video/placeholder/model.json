@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "id": "video_placeholder_pack",
+  "display_name": "Video Placeholder",
+  "task": "face_detection",
+  "files": [
+    {
+      "name": "model.fixture",
+      "kind": "onnx",
+      "role": "main",
+      "sha256": ""
+    }
+  ]
+}

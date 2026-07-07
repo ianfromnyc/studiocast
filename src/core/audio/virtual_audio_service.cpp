@@ -140,6 +140,68 @@ WorkerDeathRetryDelay(const VirtualAudioServiceConfig &cfg) {
   return std::chrono::milliseconds(std::max(25, cfg.start_retry_ms));
 }
 
+void SetOpenAudioRuntimeModel(
+    OpenAudioRuntimeStatus *status,
+    const studiocast::open_audio::ResolvedOpenAudioModel &model) {
+  if (!status)
+    return;
+  status->selected_model_id = model.model_id;
+  status->selected_model_path = model.onnx_path.string();
+}
+
+OpenAudioRuntimeStatus MakeActiveOpenAudioRuntimeStatus(
+    const studiocast::open_audio::ResolvedOpenAudioModel &model,
+    const studiocast::open_audio::OpenAudioAudioProcessor &processor) {
+  OpenAudioRuntimeStatus status;
+  status.active = true;
+  status.active_provider = processor.ActiveProviderForStatus();
+  status.using_cpu_fallback = processor.UsingCpuFallbackForStatus();
+  status.last_runtime_warning = processor.LastStartupWarningForStatus();
+  SetOpenAudioRuntimeModel(&status, model);
+  return status;
+}
+
+void MarkOpenAudioRuntimeDisabled(OpenAudioRuntimeStatus *status,
+                                  const std::string &warning) {
+  if (!status)
+    return;
+  status->active = false;
+  status->disabled = true;
+  status->active_provider = "disabled";
+  status->last_runtime_warning = warning;
+}
+
+std::string StripAudioProcessorWarningPrefix(std::string warning) {
+  const std::string prefix = "AudioProcessor warning: ";
+  if (warning.compare(0, prefix.size(), prefix) == 0)
+    warning.erase(0, prefix.size());
+  return warning;
+}
+
+void ApplyOpenAudioRuntimeWarning(OpenAudioRuntimeStatus *status,
+                                  const std::string &pipeline_error) {
+  if (!status || pipeline_error.find("Open Audio") == std::string::npos)
+    return;
+
+  const std::string warning =
+      StripAudioProcessorWarningPrefix(pipeline_error);
+  status->last_runtime_warning = warning;
+
+  if (warning.find("switched to CPU fallback") != std::string::npos) {
+    status->active = true;
+    status->disabled = false;
+    status->using_cpu_fallback = true;
+    status->active_provider = "cpu";
+  } else if (warning.find("disabled after repeated runtime failures") !=
+             std::string::npos) {
+    MarkOpenAudioRuntimeDisabled(status, warning);
+  } else if (warning.find("initialization failed") != std::string::npos ||
+             warning.find("init failed") != std::string::npos ||
+             warning.find("temporarily disabled") != std::string::npos) {
+    MarkOpenAudioRuntimeDisabled(status, warning);
+  }
+}
+
 std::optional<std::string>
 ChooseSpeakerTargetSinkName(const std::string &configured_target,
                             std::string *error) {
@@ -289,6 +351,8 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
     st_.speakers_consumer_present = false;
     st_.speakers_consumer_count = 0;
     st_.speakers_consumer_error.clear();
+    st_.open_audio_runtime = {};
+    st_.speakers_open_audio_runtime = {};
     st_.pipeline_frames_processed = 0;
     st_.pipeline_process_time_us_sum = 0;
     st_.pipeline_process_time_us_max = 0;
@@ -353,6 +417,8 @@ void VirtualAudioService::Stop() {
     st_.speakers_consumer_present = false;
     st_.speakers_consumer_count = 0;
     st_.speakers_consumer_error.clear();
+    st_.open_audio_runtime = {};
+    st_.speakers_open_audio_runtime = {};
     st_.pipeline_frames_processed = 0;
     st_.pipeline_process_time_us_sum = 0;
     st_.pipeline_process_time_us_max = 0;
@@ -820,6 +886,7 @@ void VirtualAudioService::ThreadMain() {
             st_.speakers_effects_note.clear();
             st_.speakers_intensity = 0.0f;
             st_.speakers_pipeline_last_error.clear();
+            st_.speakers_open_audio_runtime = {};
             st_.speakers_pipeline_state = "disabled";
             st_.speakers_pipeline_idle_reason =
                 "Speaker processing is not requested.";
@@ -909,6 +976,7 @@ void VirtualAudioService::ThreadMain() {
           st_.speakers_effects_note.clear();
           st_.speakers_intensity = 0.0f;
           st_.speakers_pipeline_last_error.clear();
+          st_.speakers_open_audio_runtime = {};
           st_.speakers_pipeline_state = "disabled";
           st_.speakers_pipeline_idle_reason =
               "Speaker processing is not requested.";
@@ -1009,6 +1077,7 @@ void VirtualAudioService::ThreadMain() {
         st_.speakers_effects_note.clear();
         st_.speakers_intensity = 0.0f;
         st_.speakers_pipeline_last_error.clear();
+        st_.speakers_open_audio_runtime = {};
         st_.speakers_pipeline_state = "idle_no_consumer";
         st_.speakers_pipeline_idle_reason =
             speakerConsumers.error.empty()
@@ -1046,6 +1115,7 @@ void VirtualAudioService::ThreadMain() {
           st_.speakers_pipeline_last_error =
               "Speaker processing blocked while stopping existing loopback: " +
               speakerLoopbackStopError;
+          st_.speakers_open_audio_runtime = {};
           st_.speakers_pipeline_state = "blocked";
           st_.speakers_pipeline_idle_reason.clear();
           clearSpeakerPipelineStatsLocked();
@@ -1075,6 +1145,7 @@ void VirtualAudioService::ThreadMain() {
             st_.speakers_pipeline_last_error =
                 "Virtual speakers device not created.";
           }
+          st_.speakers_open_audio_runtime = {};
           st_.speakers_pipeline_state = "failed";
           st_.speakers_pipeline_idle_reason.clear();
         }
@@ -1108,7 +1179,9 @@ void VirtualAudioService::ThreadMain() {
           nextSpeakerAvailabilityProbe = now + availabilityProbeTtl;
         }
         AudioBackendAvailability speakerAvail = *cachedSpeakerAvailability;
+        bool speakerOpenAudioCooldownActive = false;
         if (now < speakerOpenAudioCooldownUntil) {
+          speakerOpenAudioCooldownActive = true;
           speakerAvail.open_source_ok = false;
           speakerAvail.open_source_reason =
               speakerOpenAudioCooldownReason.empty()
@@ -1131,6 +1204,15 @@ void VirtualAudioService::ThreadMain() {
           desiredSpkBackend = "maxine";
         } else if (wantSpkOpenAudio) {
           desiredSpkBackend = "open_source";
+        }
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          if (speakerOpenAudioCooldownActive) {
+            MarkOpenAudioRuntimeDisabled(&st_.speakers_open_audio_runtime,
+                                         speakerAvail.open_source_reason);
+          } else if (!wantSpkOpenAudio) {
+            st_.speakers_open_audio_runtime = {};
+          }
         }
 
         // Choose target sink. If misconfigured (virtual sink), fall back to a
@@ -1173,6 +1255,7 @@ void VirtualAudioService::ThreadMain() {
                                         "no valid output sink was found.";
             st_.speakers_intensity = speakerPlan.intensity;
             st_.speakers_pipeline_last_error = sinkErr;
+            st_.speakers_open_audio_runtime = {};
             st_.speakers_pipeline_state = "failed";
             st_.speakers_pipeline_idle_reason.clear();
             clearSpeakerPipelineStatsLocked();
@@ -1237,6 +1320,10 @@ void VirtualAudioService::ThreadMain() {
               st_.speakers_routing_active = false;
               st_.speaker_target_sink_active.clear();
               st_.speakers_pipeline_last_error = spkTerminalError;
+              ApplyOpenAudioRuntimeWarning(&st_.speakers_open_audio_runtime,
+                                           spkTerminalError);
+              if (st_.speakers_open_audio_runtime.active)
+                st_.speakers_open_audio_runtime.active = false;
               st_.speakers_pipeline_state = "failed";
               st_.speakers_pipeline_idle_reason.clear();
               clearSpeakerPipelineStatsLocked();
@@ -1290,6 +1377,12 @@ void VirtualAudioService::ThreadMain() {
                 spk_processor = std::make_unique<PassthroughAudioProcessor>();
                 {
                   std::lock_guard<std::mutex> lock(mu_);
+                  st_.speakers_open_audio_runtime = {};
+                  SetOpenAudioRuntimeModel(&st_.speakers_open_audio_runtime,
+                                           selected);
+                  MarkOpenAudioRuntimeDisabled(
+                      &st_.speakers_open_audio_runtime,
+                      "Open Audio init failed: " + oerr);
                   st_.speakers_backend_active = "passthrough";
                   st_.speakers_effects_note =
                       "Open-source speaker backend failed to initialize; using "
@@ -1299,6 +1392,11 @@ void VirtualAudioService::ThreadMain() {
                       "Open Audio init failed: " + oerr;
                 }
               } else {
+                {
+                  std::lock_guard<std::mutex> lock(mu_);
+                  st_.speakers_open_audio_runtime =
+                      MakeActiveOpenAudioRuntimeStatus(selected, *oa);
+                }
                 spk_processor = std::move(oa);
               }
             } else if (wantSpkMaxine) {
@@ -1476,6 +1574,8 @@ void VirtualAudioService::ThreadMain() {
                 st_.speakers_pipeline_resync_events = 0;
                 st_.speakers_pipeline_last_error =
                     "Failed to start speaker pipeline: " + perr;
+                if (st_.speakers_open_audio_runtime.active)
+                  st_.speakers_open_audio_runtime.active = false;
                 st_.speakers_pipeline_state = "failed";
                 st_.speakers_pipeline_idle_reason.clear();
               }
@@ -1523,6 +1623,8 @@ void VirtualAudioService::ThreadMain() {
               st_.speakers_pipeline_resync_events = stats.resync_events;
               if (!stats.last_error.empty()) {
                 st_.speakers_pipeline_last_error = stats.last_error;
+                ApplyOpenAudioRuntimeWarning(&st_.speakers_open_audio_runtime,
+                                             stats.last_error);
               }
               st_.speakers_pipeline_state =
                   stats.running ? "running" : "failed";
@@ -1571,6 +1673,7 @@ void VirtualAudioService::ThreadMain() {
         st_.intensity = 0.0f;
         st_.effects_backend_active.clear();
         st_.effects_note.clear();
+        st_.open_audio_runtime = {};
         st_.pipeline_active_needed = false;
         st_.pipeline_state = cfg.enabled ? "idle_no_consumer" : "disabled";
         st_.pipeline_idle_reason =
@@ -1606,6 +1709,7 @@ void VirtualAudioService::ThreadMain() {
 
     // Backend selection.
     AudioBackendAvailability avail;
+    bool micOpenAudioCooldownActive = false;
     if (AnyMicrophoneEffectRequested(cfg.effects)) {
       const auto now2 = steady_clock::now();
       const auto micAvailabilityKey =
@@ -1621,6 +1725,7 @@ void VirtualAudioService::ThreadMain() {
       }
       avail = *cachedMicAvailability;
       if (now2 < openAudioCooldownUntil) {
+        micOpenAudioCooldownActive = true;
         avail.open_source_ok = false;
         avail.open_source_reason = openAudioCooldownReason.empty()
                                        ? "Open Audio backend is temporarily "
@@ -1633,6 +1738,10 @@ void VirtualAudioService::ThreadMain() {
       std::lock_guard<std::mutex> lock(mu_);
       st_.effects_backend_active = std::string(ToString(decision.backend));
       st_.effects_note = decision.note;
+      if (micOpenAudioCooldownActive) {
+        MarkOpenAudioRuntimeDisabled(&st_.open_audio_runtime,
+                                     avail.open_source_reason);
+      }
     }
 
 #if !STUDIOCAST_HAVE_PULSE_SIMPLE
@@ -1670,6 +1779,8 @@ void VirtualAudioService::ThreadMain() {
               stats.pulse_playback_latency_us_last;
           st_.pipeline_pulse_latency_us_max = stats.pulse_latency_us_max;
           st_.pipeline_resync_events = stats.resync_events;
+          ApplyOpenAudioRuntimeWarning(&st_.open_audio_runtime,
+                                       stats.last_error);
           st_.pipeline_state = stats.running ? "running" : "failed";
           if (!stats.running) {
             st_.pipeline_starting = false;
@@ -1698,6 +1809,10 @@ void VirtualAudioService::ThreadMain() {
       desiredBackend = "maxine";
     } else if (wantOpenAudio) {
       desiredBackend = "open_source";
+    }
+    if (!wantOpenAudio && !micOpenAudioCooldownActive) {
+      std::lock_guard<std::mutex> lock(mu_);
+      st_.open_audio_runtime = {};
     }
 
     const bool micRestartKeyChanged =
@@ -1746,6 +1861,9 @@ void VirtualAudioService::ThreadMain() {
         st_.pipeline_starting = false;
         st_.pipeline_state = "failed";
         st_.pipeline_idle_reason.clear();
+        ApplyOpenAudioRuntimeWarning(&st_.open_audio_runtime, terminalError);
+        if (st_.open_audio_runtime.active)
+          st_.open_audio_runtime.active = false;
         clearMicPipelineStatsLocked();
       }
       SleepFor(milliseconds(pollMs));
@@ -1808,12 +1926,21 @@ void VirtualAudioService::ThreadMain() {
           // open_source this tick).
           {
             std::lock_guard<std::mutex> lock(mu_);
+            st_.open_audio_runtime = {};
+            SetOpenAudioRuntimeModel(&st_.open_audio_runtime, selected);
+            MarkOpenAudioRuntimeDisabled(&st_.open_audio_runtime,
+                                         "Open Audio init failed: " + oerr);
             st_.effects_backend_active = "passthrough";
             st_.effects_note = "Open-source audio backend failed to "
                                "initialize; using pass-through.\n" +
                                oerr;
           }
         } else {
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            st_.open_audio_runtime =
+                MakeActiveOpenAudioRuntimeStatus(selected, *oa);
+          }
           processor = std::move(oa);
         }
 
@@ -1844,6 +1971,8 @@ void VirtualAudioService::ThreadMain() {
             st_.pipeline_running = false;
             st_.pipeline_state = "failed";
             st_.pipeline_idle_reason.clear();
+            if (st_.open_audio_runtime.active)
+              st_.open_audio_runtime.active = false;
             clearMicPipelineStatsLocked();
           }
           SleepFor(milliseconds(pollMs));
@@ -1891,6 +2020,8 @@ void VirtualAudioService::ThreadMain() {
               stats.pulse_playback_latency_us_last;
           st_.pipeline_pulse_latency_us_max = stats.pulse_latency_us_max;
           st_.pipeline_resync_events = stats.resync_events;
+          ApplyOpenAudioRuntimeWarning(&st_.open_audio_runtime,
+                                       stats.last_error);
           st_.pipeline_state = stats.running ? "running" : "failed";
           if (stats.running)
             st_.pipeline_idle_reason.clear();

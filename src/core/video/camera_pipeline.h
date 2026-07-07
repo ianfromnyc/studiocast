@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -52,13 +53,13 @@ struct CameraPipelineConfig {
   ScalingBackendPreference scaling_backend =
       ScalingBackendPreference::auto_select;
 
-  // When false (default), the pipeline will NOT perform CPU resizing when
-  // output dimensions differ from the source frame.
+  // When false, the pipeline will NOT perform CPU resizing when output
+  // dimensions differ from the source frame.
   //
   // If an output resize is required and GPU resize is unavailable, the
   // pipeline reports an explicit error and stops instead of silently
   // spending tens of milliseconds per frame.
-  bool allow_cpu_resize = false;
+  bool allow_cpu_resize = true;
 
   studiocast::video::effects::BroadcastCameraEffects effects{};
 };
@@ -120,7 +121,44 @@ struct CameraPipelineStatus {
     std::uint64_t active_frames = 0;
     std::uint64_t upload_calls = 0;
     std::uint64_t download_calls = 0;
+    std::uint64_t final_download_calls = 0;
+    std::uint64_t cpu_continuation_download_calls = 0;
+    std::uint64_t alpha_download_calls = 0;
+    std::uint64_t matte_frame_upload_calls = 0;
+    std::uint64_t standalone_scaler_upload_calls = 0;
+    std::uint64_t standalone_scaler_download_calls = 0;
+    std::uint64_t denoise_tensor_upload_calls = 0;
+    std::uint64_t denoise_tensor_download_calls = 0;
+    std::uint64_t forced_sync_calls = 0;
+    std::uint64_t cpu_tail_stage_calls = 0;
+    std::uint64_t cpu_tail_key_light_calls = 0;
+    std::uint64_t cpu_tail_auto_frame_calls = 0;
+    std::uint64_t cpu_tail_auto_frame_face_tracking_calls = 0;
+    std::uint64_t cpu_tail_auto_frame_matte_tracking_calls = 0;
+    std::uint64_t cpu_tail_auto_frame_cpu_crop_calls = 0;
+    std::uint64_t cpu_tail_denoise_calls = 0;
   } open_cuda_transfers{};
+
+  // Optional Maxine transfer counters (emitted in status JSON only when
+  // STUDIOCAST_DEBUG_MAXINE_TRANSFERS=1 is set for the daemon).
+  struct MaxineTransfers {
+    std::uint64_t active_frames = 0;
+    std::uint64_t rgb_to_bgr_calls = 0;
+    std::uint64_t upload_calls = 0;
+    std::uint64_t green_screen_calls = 0;
+    std::uint64_t duplicate_green_screen_calls = 0;
+    std::uint64_t shared_green_screen_matte_reuse_calls = 0;
+    std::uint64_t shared_green_screen_matte_incompatible_calls = 0;
+    std::uint64_t shared_green_screen_input_incompatible_calls = 0;
+    std::uint64_t download_calls = 0;
+    std::uint64_t final_download_calls = 0;
+    std::uint64_t cpu_continuation_download_calls = 0;
+    std::uint64_t bgr_to_rgb_calls = 0;
+    std::uint64_t deferred_readbacks = 0;
+    std::uint64_t forced_sync_calls = 0;
+    std::uint64_t standalone_scaler_upload_calls = 0;
+    std::uint64_t standalone_scaler_download_calls = 0;
+  } maxine_transfers{};
 
   // Debug/status for effects.
   std::string
@@ -128,7 +166,57 @@ struct CameraPipelineStatus {
   std::string
       effects_note; // e.g. "Maxine requested but unavailable; effects disabled"
 
+  struct DegradedEffect {
+    bool active = false;
+    std::string effect_id;
+    std::string backend;
+    std::string reason;
+    std::string state;
+    int failure_count = 0;
+    int cooldown_frames = 0;
+  };
+
+  // Cached on effect state transitions/config changes only. When active, the
+  // effect has been bypassed and the frame loop is continuing pass-through.
+  DegradedEffect degraded_effect{};
+
   std::string last_error;
+};
+
+class OptionalEffectBreaker {
+public:
+  static constexpr int kInitialCooldownFrames = 30;
+  static constexpr int kMaxCooldownFrames = 300;
+
+  bool active() const { return active_; }
+  bool AllowsAttempt(std::uint64_t frame_index) const;
+  void Reset();
+  void OnFailure(std::string_view effect, std::string_view effect_backend,
+                 std::string failure_reason, std::uint64_t frame_index,
+                 int order);
+  bool OnSuccess();
+  bool MarkRetryReadyIfDue(std::uint64_t frame_index);
+  CameraPipelineStatus::DegradedEffect
+  ToStatus(std::uint64_t frame_index) const;
+
+  const std::string &effect_id() const { return effect_id_; }
+  const std::string &backend() const { return backend_; }
+  const std::string &reason() const { return reason_; }
+  int failure_count() const { return failure_count_; }
+  int trip_order() const { return trip_order_; }
+
+private:
+  static int CooldownFramesForFailureCount(int failure_count);
+
+  bool active_ = false;
+  std::string effect_id_;
+  std::string backend_;
+  std::string reason_;
+  int failure_count_ = 0;
+  int cooldown_frames_ = 0;
+  std::uint64_t retry_frame_index_ = 0;
+  int trip_order_ = 0;
+  bool retry_ready_published_ = false;
 };
 
 class CameraPipelineRunner {
@@ -213,6 +301,7 @@ private:
   CameraPipelineStatus::Debug debug_{};
 
   CameraPipelineStatus::OpenCudaTransfers open_cuda_transfers_{};
+  CameraPipelineStatus::MaxineTransfers maxine_transfers_{};
 
   // Effects: updated live by SetEffects.
   mutable std::mutex effects_mu_;
@@ -222,6 +311,7 @@ private:
   // changes).
   std::string effects_backends_;
   std::string effects_note_;
+  CameraPipelineStatus::DegradedEffect degraded_effect_{};
 
   std::string last_error_;
 

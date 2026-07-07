@@ -93,8 +93,7 @@ if (STUDIOCAST_ENABLE_OPEN_CUDA)
     if (_studiocast_onnxruntime_found)
         message(STATUS "ONNX Runtime found (${_studiocast_onnxruntime_target}); Open CUDA backend enabled.")
     else()
-        message(STATUS "ONNX Runtime not found; disabling Open CUDA backend. Install onnxruntime or set ONNXRUNTIME_ROOT.")
-        set(STUDIOCAST_ENABLE_OPEN_CUDA OFF CACHE BOOL "Enable Open CUDA backend (requires ONNX Runtime + CUDA EP)" FORCE)
+        message(STATUS "ONNX Runtime not found; Open CUDA backend will be unavailable until ONNX Runtime is installed or ONNXRUNTIME_ROOT is set.")
     endif()
 endif()
 
@@ -127,6 +126,7 @@ add_library(studiocast_core
         src/core/open_video/model_pack_registry.h
         src/core/open_video/model_pack_registry.cpp
         src/core/open_video/frame_analysis_cache.h
+        src/core/open_video/latest_frame_wins_worker.h
         src/core/open_video/yunet_face_detector.h
         src/core/open_video/yunet_face_detector.cpp
         src/core/open_video/fastdvdnet_denoiser.h
@@ -429,6 +429,10 @@ target_include_directories(studiocast PRIVATE
         "${STUDIOCAST_GENERATED_DIR}"
 )
 
+target_compile_definitions(studiocast PRIVATE
+        STUDIOCAST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
 studiocast_set_project_warnings(studiocast)
 studiocast_enable_sanitizers(studiocast)
 
@@ -701,6 +705,31 @@ if (BUILD_TESTING)
 
     add_test(NAME studiocast-maxine-paths-tests COMMAND studiocast-maxine-paths-tests)
 
+    add_executable(studiocast-model-registry-tests
+            tests/model_pack_registry_tests.cpp
+    )
+
+    target_link_libraries(studiocast-model-registry-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-model-registry-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-model-registry-tests)
+    studiocast_enable_sanitizers(studiocast-model-registry-tests)
+
+    set_target_properties(studiocast-model-registry-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-model-registry-tests COMMAND studiocast-model-registry-tests)
+    set_tests_properties(studiocast-model-registry-tests PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+
     add_executable(studiocast-ipc-tests
             tests/ipc_client_tests.cpp
     )
@@ -725,12 +754,22 @@ if (BUILD_TESTING)
 
     add_executable(studiocast-gui-status-tests
             tests/gui_status_snapshot_tests.cpp
+            src/gui/text_edit_utils.h
+            src/gui/text_edit_utils.cpp
+            src/gui/pages/engines_models_page.h
+            src/gui/pages/engines_models_page.cpp
+            src/gui/pages/video_page.h
+            src/gui/pages/video_page.cpp
             src/gui/status/daemon_status_snapshot.h
             src/gui/status/daemon_status_snapshot.cpp
+            src/gui/status/pending_daemon_write_guard.h
+            src/gui/status/status_poller.h
+            src/gui/status/status_poller.cpp
     )
 
     target_link_libraries(studiocast-gui-status-tests PRIVATE
             Qt${QT_VERSION_MAJOR}::Widgets
+            studiocast_core
     )
 
     target_include_directories(studiocast-gui-status-tests PRIVATE
@@ -742,15 +781,176 @@ if (BUILD_TESTING)
     studiocast_enable_sanitizers(studiocast-gui-status-tests)
 
     set_target_properties(studiocast-gui-status-tests PROPERTIES
-            AUTOMOC OFF
+            AUTOMOC ON
             AUTOUIC OFF
             AUTORCC OFF
     )
 
     add_test(NAME studiocast-gui-status-tests COMMAND studiocast-gui-status-tests)
 
+    add_executable(studiocast-effect-schema-tests
+            tests/effect_schema_tests.cpp
+    )
+
+    target_link_libraries(studiocast-effect-schema-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-effect-schema-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-effect-schema-tests)
+    studiocast_enable_sanitizers(studiocast-effect-schema-tests)
+
+    set_target_properties(studiocast-effect-schema-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-effect-schema-tests COMMAND studiocast-effect-schema-tests)
+
+    add_executable(studiocast-daemon-status-tests
+            tests/daemon_status_tests.cpp
+    )
+
+    target_link_libraries(studiocast-daemon-status-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-daemon-status-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-daemon-status-tests)
+    studiocast_enable_sanitizers(studiocast-daemon-status-tests)
+
+    set_target_properties(studiocast-daemon-status-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-daemon-status-tests
+            COMMAND studiocast-daemon-status-tests)
+
+    add_executable(studiocast-exec-tests
+            tests/exec_tests.cpp
+    )
+
+    target_link_libraries(studiocast-exec-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-exec-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-exec-tests)
+    studiocast_enable_sanitizers(studiocast-exec-tests)
+
+    set_target_properties(studiocast-exec-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-exec-tests COMMAND studiocast-exec-tests)
+
+    add_executable(studiocast-installer-backend-tests
+            tests/installer_backend_tests.cpp
+    )
+
+    target_link_libraries(studiocast-installer-backend-tests PRIVATE
+            studiocast_core
+    )
+
+    target_include_directories(studiocast-installer-backend-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    target_compile_definitions(studiocast-installer-backend-tests PRIVATE
+            STUDIOCAST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-installer-backend-tests)
+    studiocast_enable_sanitizers(studiocast-installer-backend-tests)
+
+    set_target_properties(studiocast-installer-backend-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-installer-backend-tests
+            COMMAND studiocast-installer-backend-tests)
+
+    add_executable(studiocast-installer-wizard-tests
+            tests/installer_wizard_tests.cpp
+            installer/gui/installer_wizard.h
+            installer/gui/installer_wizard.cpp
+    )
+
+    target_link_libraries(studiocast-installer-wizard-tests PRIVATE
+            Qt${QT_VERSION_MAJOR}::Widgets
+    )
+
+    target_include_directories(studiocast-installer-wizard-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/installer/gui"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    target_compile_definitions(studiocast-installer-wizard-tests PRIVATE
+            STUDIOCAST_INSTALLER_BACKEND_SOURCE_PATH="${CMAKE_CURRENT_SOURCE_DIR}/installer/backend/studiocast-installer-backend"
+            STUDIOCAST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-installer-wizard-tests)
+    studiocast_enable_sanitizers(studiocast-installer-wizard-tests)
+
+    set_target_properties(studiocast-installer-wizard-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-installer-wizard-tests
+            COMMAND studiocast-installer-wizard-tests)
+
+    add_executable(studiocast-cmake-open-backend-cache-tests
+            tests/cmake_open_backend_cache_tests.cpp
+    )
+
+    target_link_libraries(studiocast-cmake-open-backend-cache-tests PRIVATE
+            studiocast_core
+    )
+
+    target_include_directories(studiocast-cmake-open-backend-cache-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    target_compile_definitions(studiocast-cmake-open-backend-cache-tests PRIVATE
+            STUDIOCAST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+            STUDIOCAST_CMAKE_COMMAND="${CMAKE_COMMAND}"
+    )
+
+    studiocast_set_project_warnings(studiocast-cmake-open-backend-cache-tests)
+    studiocast_enable_sanitizers(studiocast-cmake-open-backend-cache-tests)
+
+    set_target_properties(studiocast-cmake-open-backend-cache-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-cmake-open-backend-cache-tests
+            COMMAND studiocast-cmake-open-backend-cache-tests)
+
     add_executable(studiocast-video-tests
             tests/video_service_tests.cpp
+            tests/latest_frame_wins_worker_tests.cpp
+            tests/open_video_denoise_contract_tests.cpp
     )
 
     target_link_libraries(studiocast-video-tests PRIVATE studiocast_core)
@@ -770,4 +970,27 @@ if (BUILD_TESTING)
     )
 
     add_test(NAME studiocast-video-tests COMMAND studiocast-video-tests)
+
+    add_executable(studiocast-v4l2loopback-diagnostics-tests
+            tests/v4l2loopback_diagnostics_tests.cpp
+    )
+
+    target_link_libraries(studiocast-v4l2loopback-diagnostics-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-v4l2loopback-diagnostics-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-v4l2loopback-diagnostics-tests)
+    studiocast_enable_sanitizers(studiocast-v4l2loopback-diagnostics-tests)
+
+    set_target_properties(studiocast-v4l2loopback-diagnostics-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-v4l2loopback-diagnostics-tests
+            COMMAND studiocast-v4l2loopback-diagnostics-tests)
 endif()

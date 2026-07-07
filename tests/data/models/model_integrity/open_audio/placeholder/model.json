@@ -1,0 +1,7 @@
+{
+  "id": "audio_placeholder_pack",
+  "display_name": "Audio Placeholder",
+  "sample_rate": 16000,
+  "channels": 1,
+  "onnx_filename": "model.fixture"
+}

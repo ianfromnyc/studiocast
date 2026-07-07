@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QMap>
 #include <QString>
 #include <QStringList>
 
@@ -29,6 +30,44 @@ struct DeviceReadiness {
   QStringList disabledReasons;
 };
 
+struct EffectPlanDisabledReason {
+  QString effectId;
+  QString reason;
+};
+
+struct VideoEffectPlan {
+  QStringList orderedEffectIds;
+  QString vignetteAttachToEffectId;
+  std::vector<EffectPlanDisabledReason> disabledEffects;
+};
+
+struct EffectReadiness {
+  QString effectId;
+  ReadinessState state = ReadinessState::Unknown;
+  QString summary;
+  QString detail;
+  QString backend;
+  QString requestedModelId;
+  QString resolvedModelId;
+  QString reason;
+};
+
+struct AudioEndpointStatus {
+  bool present = false;
+  bool enabled = false;
+  bool virtualDevicePresent = false;
+  bool consumerPresent = false;
+  int consumerCount = 0;
+  QString action;
+  DeviceReadiness readiness;
+  QString configuredDevice;
+  QString resolvedDevice;
+  QString activeDevice;
+  QString routeMode;
+  QString activeBackend;
+  QString rawJson;
+};
+
 struct EngineModelEntry {
   QString id;
   QString displayName;
@@ -43,6 +82,17 @@ struct ConfiguredModelEntry {
   QString modelPath;
   bool modelIdReported = false;
   bool modelIdExplicitlyMissing = false;
+};
+
+struct OpenAudioRuntimeSnapshot {
+  bool present = false;
+  bool active = false;
+  bool usingCpuFallback = false;
+  bool disabled = false;
+  QString activeProvider;
+  QString selectedModelId;
+  QString selectedModelPath;
+  QString lastRuntimeWarning;
 };
 
 struct EngineStatus {
@@ -86,10 +136,18 @@ struct DaemonStatusSnapshot {
   DeviceReadiness speakers;
   QString videoEffectsEnginePreference;
   QString audioEffectsEnginePreference;
+  QString rawVideoEffectsJson;
+  QString rawAudioEffectsJson;
+  VideoEffectPlan videoEffectPlan;
+  QMap<QString, EffectReadiness> videoEffectReadiness;
   QString videoEffectsActiveBackends;
   QString microphoneActiveBackend;
   QString speakersActiveBackend;
   QString speakersRouteMode;
+  AudioEndpointStatus microphoneEndpoint;
+  AudioEndpointStatus speakersEndpoint;
+  OpenAudioRuntimeSnapshot microphoneOpenAudioRuntime;
+  OpenAudioRuntimeSnapshot speakersOpenAudioRuntime;
 
   EngineStatus maxine;
   EngineStatus openCuda;

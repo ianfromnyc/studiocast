@@ -1,5 +1,7 @@
 #include "core/cuda/kernels/resize_bilinear.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <mutex>
@@ -7,10 +9,11 @@
 namespace studiocast::cuda::kernels {
 namespace {
 
-// Bilinear resize kernel (interleaved u8x3, pitch-aware).
+// Bilinear crop+resize kernel (interleaved u8x3, pitch-aware).
 // Parameters:
 //   srcPtr, srcPitch, srcW, srcH,
-//   dstPtr, dstPitch, dstW, dstH
+//   dstPtr, dstPitch, dstW, dstH,
+//   cropX, cropY, cropW, cropH
 static constexpr const char *kResizeBilinearPtx = R"ptx(
 .version 6.0
 .target sm_30
@@ -24,7 +27,11 @@ static constexpr const char *kResizeBilinearPtx = R"ptx(
     .param .u64 dstPtr,
     .param .u32 dstPitch,
     .param .u32 dstW,
-    .param .u32 dstH
+    .param .u32 dstH,
+    .param .f32 cropX,
+    .param .f32 cropY,
+    .param .f32 cropW,
+    .param .f32 cropH
 )
 {
     .reg .pred  %p<6>;
@@ -40,6 +47,10 @@ static constexpr const char *kResizeBilinearPtx = R"ptx(
     ld.param.u32 %r4, [dstPitch];
     ld.param.u32 %r5, [dstW];
     ld.param.u32 %r6, [dstH];
+    ld.param.f32 %f45, [cropX];
+    ld.param.f32 %f46, [cropY];
+    ld.param.f32 %f47, [cropW];
+    ld.param.f32 %f48, [cropH];
 
     mov.u32 %r7, %ctaid.x;
     mov.u32 %r8, %ntid.x;
@@ -56,26 +67,26 @@ static constexpr const char *kResizeBilinearPtx = R"ptx(
     or.pred %p3, %p1, %p2;
     @%p3 bra DONE;
 
-    // sx = srcW / dstW
-    cvt.rn.f32.u32 %f1, %r2;
+    // sx = cropW / dstW
     cvt.rn.f32.u32 %f2, %r5;
-    div.rn.f32 %f3, %f1, %f2;
+    div.rn.f32 %f3, %f47, %f2;
 
-    // sy = srcH / dstH
-    cvt.rn.f32.u32 %f4, %r3;
+    // sy = cropH / dstH
     cvt.rn.f32.u32 %f5, %r6;
-    div.rn.f32 %f6, %f4, %f5;
+    div.rn.f32 %f6, %f48, %f5;
 
-    // srcX = (x + 0.5) * sx - 0.5
+    // srcX = cropX + (x + 0.5) * sx - 0.5
     cvt.rn.f32.s32 %f7, %r10;
     add.f32 %f7, %f7, 0f3F000000; // 0.5
     mul.f32 %f7, %f7, %f3;
+    add.f32 %f7, %f7, %f45;
     add.f32 %f7, %f7, 0fBF000000; // -0.5
 
-    // srcY = (y + 0.5) * sy - 0.5
+    // srcY = cropY + (y + 0.5) * sy - 0.5
     cvt.rn.f32.s32 %f8, %r14;
     add.f32 %f8, %f8, 0f3F000000; // 0.5
     mul.f32 %f8, %f8, %f6;
+    add.f32 %f8, %f8, %f46;
     add.f32 %f8, %f8, 0fBF000000; // -0.5
 
     // x0,y0 = trunc(srcX/srcY), then clamp to [0, srcW-1] / [0, srcH-1]
@@ -318,31 +329,51 @@ bool IsResizeBilinearAvailable(std::string *error_out) {
 bool ResizeBilinear(const CudaImage &src, const CudaImage &dst,
                     studiocast::maxine::CUstream stream,
                     std::string *error_out) {
+  return CropResizeBilinear(src, dst, 0.0f, 0.0f, static_cast<float>(src.w),
+                            static_cast<float>(src.h), stream, error_out);
+}
+
+bool CropResizeBilinear(const CudaImage &src, const CudaImage &dst,
+                        float crop_x, float crop_y, float crop_w, float crop_h,
+                        studiocast::maxine::CUstream stream,
+                        std::string *error_out) {
   if (error_out)
     error_out->clear();
   if (!src.Valid() || !dst.Valid()) {
     if (error_out)
-      *error_out = "ResizeBilinear: invalid src/dst image.";
+      *error_out = "CropResizeBilinear: invalid src/dst image.";
     return false;
   }
   if (src.format != dst.format) {
     if (error_out)
-      *error_out = "ResizeBilinear: src/dst formats must match.";
+      *error_out = "CropResizeBilinear: src/dst formats must match.";
     return false;
   }
   if (src.format != PixelFormatGpu::rgb_u8 &&
       src.format != PixelFormatGpu::bgr_u8) {
     if (error_out)
       *error_out =
-          "ResizeBilinear: unsupported format (expected rgb_u8 or bgr_u8).";
+          "CropResizeBilinear: unsupported format (expected rgb_u8 or bgr_u8).";
     return false;
   }
   if (src.pitch > std::numeric_limits<std::uint32_t>::max() ||
       dst.pitch > std::numeric_limits<std::uint32_t>::max()) {
     if (error_out)
-      *error_out = "ResizeBilinear: pitch too large for PTX kernel ABI.";
+      *error_out = "CropResizeBilinear: pitch too large for PTX kernel ABI.";
     return false;
   }
+  if (!std::isfinite(crop_x) || !std::isfinite(crop_y) ||
+      !std::isfinite(crop_w) || !std::isfinite(crop_h)) {
+    if (error_out)
+      *error_out =
+          "CropResizeBilinear: crop rectangle contains non-finite values.";
+    return false;
+  }
+
+  crop_w = std::clamp(crop_w, 1.0f, static_cast<float>(src.w));
+  crop_h = std::clamp(crop_h, 1.0f, static_cast<float>(src.h));
+  crop_x = std::clamp(crop_x, 0.0f, static_cast<float>(src.w) - crop_w);
+  crop_y = std::clamp(crop_y, 0.0f, static_cast<float>(src.h) - crop_h);
 
   studiocast::maxine::CudaDriverApi *cuda = nullptr;
   if (!EnsureCudaReady(&cuda, error_out))
@@ -371,6 +402,10 @@ bool ResizeBilinear(const CudaImage &src, const CudaImage &dst,
       const_cast<std::uint32_t *>(&dst_pitch),
       const_cast<std::uint32_t *>(&dst_w),
       const_cast<std::uint32_t *>(&dst_h),
+      &crop_x,
+      &crop_y,
+      &crop_w,
+      &crop_h,
   };
 
   constexpr unsigned int block_x = 16;

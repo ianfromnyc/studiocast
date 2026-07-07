@@ -1,6 +1,8 @@
 #include "daemon_client.h"
 
+#include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <sstream>
 
@@ -15,8 +17,20 @@
 namespace studiocast::ipc {
 namespace {
 
+using Clock = std::chrono::steady_clock;
+
 int PositiveTimeoutOrFallback(int value, int fallback) {
   return value > 0 ? value : fallback;
+}
+
+int RemainingTimeoutMs(Clock::time_point deadline) {
+  const auto now = Clock::now();
+  if (now >= deadline)
+    return 0;
+
+  const auto remaining =
+      std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+  return std::max(1, static_cast<int>(remaining.count()));
 }
 
 bool SetNonBlocking(int fd, std::string *error) {
@@ -61,6 +75,36 @@ bool WaitFd(int fd, short events, int timeout_ms, const char *what,
   }
 }
 
+bool WaitFdUntil(int fd, short events, Clock::time_point deadline,
+                 const char *what, std::string *error) {
+  pollfd pfd{};
+  pfd.fd = fd;
+  pfd.events = events;
+
+  for (;;) {
+    const int timeoutMs = RemainingTimeoutMs(deadline);
+    if (timeoutMs <= 0) {
+      if (error)
+        *error = std::string(what) + " timed out after total I/O deadline";
+      return false;
+    }
+
+    const int r = ::poll(&pfd, 1, timeoutMs);
+    if (r > 0)
+      return true;
+    if (r == 0) {
+      if (error)
+        *error = std::string(what) + " timed out after total I/O deadline";
+      return false;
+    }
+    if (errno == EINTR)
+      continue;
+    if (error)
+      *error = std::string(what) + " poll failed: " + std::strerror(errno);
+    return false;
+  }
+}
+
 bool FinishConnect(int fd, int timeout_ms, const std::string &path,
                    std::string *error) {
   std::string werr;
@@ -87,24 +131,29 @@ bool FinishConnect(int fd, int timeout_ms, const std::string &path,
   return true;
 }
 
-bool WriteAll(int fd, const void *data, std::size_t bytes, int timeout_ms,
-              std::string *error) {
+bool WriteAll(int fd, const void *data, std::size_t bytes,
+              Clock::time_point deadline, std::string *error) {
   const char *p = static_cast<const char *>(data);
   std::size_t n = 0;
   while (n < bytes) {
     std::string perr;
-    if (!WaitFd(fd, POLLOUT, timeout_ms, "write", &perr)) {
+    if (!WaitFdUntil(fd, POLLOUT, deadline, "write", &perr)) {
       if (error)
         *error = perr;
       return false;
     }
 
-    const ssize_t w = ::write(fd, p + n, bytes - n);
+    const ssize_t w = ::send(fd, p + n, bytes - n, MSG_NOSIGNAL);
     if (w < 0) {
       if (errno == EINTR)
         continue;
       if (errno == EAGAIN || errno == EWOULDBLOCK)
         continue;
+      if (errno == EPIPE || errno == ECONNRESET) {
+        if (error)
+          *error = "connection closed during write";
+        return false;
+      }
       if (error)
         *error = std::string("write failed: ") + std::strerror(errno);
       return false;
@@ -119,7 +168,8 @@ bool WriteAll(int fd, const void *data, std::size_t bytes, int timeout_ms,
   return true;
 }
 
-bool ReadLine(int fd, std::string *line, int timeout_ms, std::string *error) {
+bool ReadLine(int fd, std::string *line, Clock::time_point deadline,
+              std::string *error) {
   if (!line)
     return false;
   line->clear();
@@ -129,7 +179,7 @@ bool ReadLine(int fd, std::string *line, int timeout_ms, std::string *error) {
 
   while (line->size() < kMax) {
     std::string perr;
-    if (!WaitFd(fd, POLLIN, timeout_ms, "read", &perr)) {
+    if (!WaitFdUntil(fd, POLLIN, deadline, "read", &perr)) {
       if (error)
         *error = perr;
       return false;
@@ -141,6 +191,11 @@ bool ReadLine(int fd, std::string *line, int timeout_ms, std::string *error) {
         continue;
       if (errno == EAGAIN || errno == EWOULDBLOCK)
         continue;
+      if (errno == EPIPE || errno == ECONNRESET) {
+        if (error)
+          *error = "connection closed during read";
+        return false;
+      }
       if (error)
         *error = std::string("read failed: ") + std::strerror(errno);
       return false;
@@ -238,8 +293,11 @@ bool DaemonCall(const std::string &request_line, DaemonCallResult *out,
   std::string wire = request_line;
   wire.push_back('\n');
 
+  const auto ioDeadline =
+      Clock::now() + std::chrono::milliseconds(ioTimeoutMs);
+
   std::string werr;
-  if (!WriteAll(fd, wire.data(), wire.size(), ioTimeoutMs, &werr)) {
+  if (!WriteAll(fd, wire.data(), wire.size(), ioDeadline, &werr)) {
     ::close(fd);
     if (error)
       *error = werr;
@@ -248,7 +306,7 @@ bool DaemonCall(const std::string &request_line, DaemonCallResult *out,
 
   std::string line;
   std::string rerr;
-  if (!ReadLine(fd, &line, ioTimeoutMs, &rerr)) {
+  if (!ReadLine(fd, &line, ioDeadline, &rerr)) {
     ::close(fd);
     if (error)
       *error = rerr;

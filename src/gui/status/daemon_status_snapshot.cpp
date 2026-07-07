@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <limits>
+#include <optional>
 
 namespace studiocast::gui {
 namespace {
@@ -35,6 +36,32 @@ QJsonObject EngineObject(const QJsonObject &root, const QString &key) {
   return ObjectValue(root, key);
 }
 
+QStringList CombinedStringListValue(const QJsonObject &obj,
+                                    std::initializer_list<QString> keys);
+
+OpenAudioRuntimeSnapshot ParseOpenAudioRuntime(const QJsonObject &obj) {
+  const QJsonObject runtime =
+      ObjectValue(obj, QStringLiteral("open_audio_runtime"));
+  OpenAudioRuntimeSnapshot out;
+  out.present = !runtime.isEmpty();
+  if (!out.present)
+    return out;
+
+  out.active = runtime.value(QStringLiteral("active")).toBool(false);
+  out.usingCpuFallback =
+      runtime.value(QStringLiteral("using_cpu_fallback")).toBool(false);
+  out.disabled = runtime.value(QStringLiteral("disabled")).toBool(false);
+  out.activeProvider =
+      runtime.value(QStringLiteral("active_provider")).toString().trimmed();
+  out.selectedModelId =
+      runtime.value(QStringLiteral("selected_model_id")).toString().trimmed();
+  out.selectedModelPath =
+      runtime.value(QStringLiteral("selected_model_path")).toString().trimmed();
+  out.lastRuntimeWarning =
+      runtime.value(QStringLiteral("last_runtime_warning")).toString().trimmed();
+  return out;
+}
+
 QStringList StringListValue(const QJsonObject &obj, const QString &key) {
   QStringList out;
   const QJsonArray array = obj.value(key).toArray();
@@ -47,6 +74,71 @@ QStringList StringListValue(const QJsonObject &obj, const QString &key) {
 }
 
 QString LowerTrimmed(const QString &value) { return value.trimmed().toLower(); }
+
+ReadinessState ParseReadinessState(const QString &value,
+                                   ReadinessState fallback =
+                                       ReadinessState::Unknown) {
+  const QString state = LowerTrimmed(value);
+  if (state.isEmpty())
+    return fallback;
+  if (state == QStringLiteral("ready"))
+    return ReadinessState::Ready;
+  if (state == QStringLiteral("needs_setup") ||
+      state == QStringLiteral("setup_needed"))
+    return ReadinessState::NeedsSetup;
+  if (state == QStringLiteral("daemon_unavailable") ||
+      state == QStringLiteral("service_unavailable"))
+    return ReadinessState::DaemonUnavailable;
+  if (state == QStringLiteral("missing_virtual_device") ||
+      state == QStringLiteral("virtual_device_missing"))
+    return ReadinessState::MissingVirtualDevice;
+  if (state == QStringLiteral("no_physical_device") ||
+      state == QStringLiteral("missing_physical_device") ||
+      state == QStringLiteral("physical_device_missing"))
+    return ReadinessState::NoPhysicalDevice;
+  if (state == QStringLiteral("idle") ||
+      state == QStringLiteral("waiting_for_app") ||
+      state == QStringLiteral("idle_no_consumer"))
+    return ReadinessState::Idle;
+  if (state == QStringLiteral("processing") ||
+      state == QStringLiteral("running") ||
+      state == QStringLiteral("starting"))
+    return ReadinessState::Processing;
+  if (state == QStringLiteral("recoverable_error") ||
+      state == QStringLiteral("needs_attention") ||
+      state == QStringLiteral("backend_unavailable"))
+    return ReadinessState::RecoverableError;
+  if (state == QStringLiteral("fatal_error") ||
+      state == QStringLiteral("blocked"))
+    return ReadinessState::FatalError;
+  if (state == QStringLiteral("missing_model") ||
+      state == QStringLiteral("model_missing"))
+    return ReadinessState::MissingModel;
+  return fallback;
+}
+
+bool HasReadinessContent(const DeviceReadiness &readiness) {
+  return readiness.state != ReadinessState::Unknown ||
+         !readiness.summary.trimmed().isEmpty() ||
+         !readiness.detail.trimmed().isEmpty() ||
+         !readiness.notes.isEmpty() || !readiness.disabledReasons.isEmpty();
+}
+
+DeviceReadiness ParseReadinessObject(const QJsonObject &obj) {
+  DeviceReadiness out;
+  if (obj.isEmpty())
+    return out;
+
+  out.state = ParseReadinessState(obj.value(QStringLiteral("state")).toString());
+  out.summary = obj.value(QStringLiteral("summary")).toString().trimmed();
+  out.detail = obj.value(QStringLiteral("detail")).toString().trimmed();
+  out.notes = CombinedStringListValue(
+      obj, {QStringLiteral("notes"), QStringLiteral("warnings")});
+  out.disabledReasons = CombinedStringListValue(
+      obj, {QStringLiteral("disabled_reasons"),
+            QStringLiteral("disabledReasons")});
+  return out;
+}
 
 QString PipelineState(const QJsonObject &obj) {
   return LowerTrimmed(obj.value(QStringLiteral("state")).toString());
@@ -82,26 +174,98 @@ QStringList StringMapDetails(const QJsonObject &obj, const QString &key) {
   return out;
 }
 
-QStringList DisabledEffectReasons(const QJsonObject &video) {
-  QStringList out;
-  const QJsonObject plan = ObjectValue(video, QStringLiteral("effects_plan"));
+QJsonObject EffectPlanObject(const QJsonObject &video) {
+  const QJsonObject pipeline = ObjectValue(video, QStringLiteral("pipeline"));
+  const QJsonObject nested =
+      ObjectValue(pipeline, QStringLiteral("effects_plan"));
+  if (!nested.isEmpty())
+    return nested;
+  return ObjectValue(video, QStringLiteral("effects_plan"));
+}
+
+VideoEffectPlan ParseVideoEffectPlan(const QJsonObject &video) {
+  VideoEffectPlan out;
+  const QJsonObject plan = EffectPlanObject(video);
+  if (plan.isEmpty())
+    return out;
+
+  const QJsonArray ordered = plan.value(QStringLiteral("ordered")).toArray();
+  for (const QJsonValue &value : ordered) {
+    const QString id = value.toString().trimmed();
+    if (!id.isEmpty())
+      out.orderedEffectIds.push_back(id);
+  }
+
+  out.vignetteAttachToEffectId =
+      plan.value(QStringLiteral("vignette_attach_to")).toString().trimmed();
+
   const QJsonArray disabled = plan.value(QStringLiteral("disabled")).toArray();
   for (const QJsonValue &value : disabled) {
     if (!value.isObject())
       continue;
     const QJsonObject obj = value.toObject();
-    const QString id = obj.value(QStringLiteral("id")).toString().trimmed();
-    const QString reason =
-        obj.value(QStringLiteral("reason")).toString().trimmed();
-    if (id.isEmpty() && reason.isEmpty())
+    EffectPlanDisabledReason entry;
+    entry.effectId = obj.value(QStringLiteral("id")).toString().trimmed();
+    entry.reason = obj.value(QStringLiteral("reason")).toString().trimmed();
+    if (entry.effectId.isEmpty() && entry.reason.isEmpty())
       continue;
-    if (reason.isEmpty()) {
-      out.push_back(id);
-    } else if (id.isEmpty()) {
-      out.push_back(reason);
+    out.disabledEffects.push_back(entry);
+  }
+  return out;
+}
+
+QStringList DisabledEffectReasons(const QJsonObject &video) {
+  QStringList out;
+  const VideoEffectPlan plan = ParseVideoEffectPlan(video);
+  for (const EffectPlanDisabledReason &entry : plan.disabledEffects) {
+    if (entry.effectId.isEmpty() && entry.reason.isEmpty())
+      continue;
+    if (entry.reason.isEmpty()) {
+      out.push_back(entry.effectId);
+    } else if (entry.effectId.isEmpty()) {
+      out.push_back(entry.reason);
     } else {
-      out.push_back(QStringLiteral("%1: %2").arg(id, reason));
+      out.push_back(QStringLiteral("%1: %2").arg(entry.effectId, entry.reason));
     }
+  }
+  return out;
+}
+
+QJsonObject EffectReadinessObject(const QJsonObject &video) {
+  const QJsonObject topLevel =
+      ObjectValue(video, QStringLiteral("effect_readiness"));
+  if (!topLevel.isEmpty())
+    return topLevel;
+  return ObjectValue(ObjectValue(video, QStringLiteral("pipeline")),
+                     QStringLiteral("effect_readiness"));
+}
+
+QMap<QString, EffectReadiness>
+ParseVideoEffectReadiness(const QJsonObject &video) {
+  QMap<QString, EffectReadiness> out;
+  const QJsonObject readiness = EffectReadinessObject(video);
+  for (auto it = readiness.constBegin(); it != readiness.constEnd(); ++it) {
+    if (!it.value().isObject())
+      continue;
+    const QJsonObject obj = it.value().toObject();
+    EffectReadiness entry;
+    entry.effectId = FirstNonEmpty(
+        {obj.value(QStringLiteral("id")).toString(), it.key()});
+    if (entry.effectId.isEmpty())
+      continue;
+    entry.state = ParseReadinessState(
+        obj.value(QStringLiteral("state")).toString());
+    entry.summary = obj.value(QStringLiteral("summary")).toString().trimmed();
+    entry.detail = obj.value(QStringLiteral("detail")).toString().trimmed();
+    entry.backend = obj.value(QStringLiteral("backend")).toString().trimmed();
+    entry.requestedModelId =
+        FirstNonEmpty({obj.value(QStringLiteral("requested_model_id"))
+                           .toString(),
+                       obj.value(QStringLiteral("model_id")).toString()});
+    entry.resolvedModelId =
+        obj.value(QStringLiteral("resolved_model_id")).toString().trimmed();
+    entry.reason = obj.value(QStringLiteral("reason")).toString().trimmed();
+    out.insert(entry.effectId, entry);
   }
   return out;
 }
@@ -471,6 +635,39 @@ DeviceReadiness WithNotes(DeviceReadiness out, const QStringList &notes,
   return out;
 }
 
+std::optional<DeviceReadiness> MissingModelReadiness(const QJsonObject &video) {
+  const QMap<QString, EffectReadiness> effects = ParseVideoEffectReadiness(video);
+  for (auto it = effects.constBegin(); it != effects.constEnd(); ++it) {
+    const EffectReadiness &effect = it.value();
+    if (effect.state != ReadinessState::MissingModel)
+      continue;
+
+    QString detail = effect.detail;
+    if (detail.isEmpty())
+      detail = effect.reason;
+    if (detail.isEmpty() && !effect.requestedModelId.isEmpty()) {
+      detail = QStringLiteral("Configured model %1 is not installed.")
+                   .arg(effect.requestedModelId);
+    }
+
+    return MakeDevice(
+        ReadinessState::MissingModel,
+        effect.summary.isEmpty()
+            ? QStringLiteral("A configured camera effect model is missing.")
+            : effect.summary,
+        detail);
+  }
+  return std::nullopt;
+}
+
+std::optional<DeviceReadiness> ExplicitReadiness(const QJsonObject &obj) {
+  const DeviceReadiness readiness =
+      ParseReadinessObject(ObjectValue(obj, QStringLiteral("readiness")));
+  if (HasReadinessContent(readiness))
+    return readiness;
+  return std::nullopt;
+}
+
 DeviceReadiness ParseCamera(const QJsonObject &video) {
   if (video.isEmpty()) {
     return MakeDevice(ReadinessState::Unknown,
@@ -538,6 +735,10 @@ DeviceReadiness ParseCamera(const QJsonObject &video) {
         notes, disabledReasons);
   }
 
+  if (const auto missingModel = MissingModelReadiness(video)) {
+    return WithNotes(*missingModel, notes, disabledReasons);
+  }
+
   const bool enabled = video.value(QStringLiteral("enabled")).toBool(false);
   const bool running = pipeline.value(QStringLiteral("running")).toBool(false);
   const bool starting = pipeline.value(QStringLiteral("starting")).toBool(false);
@@ -575,6 +776,11 @@ DeviceReadiness ParseMicrophone(const QJsonObject &audio) {
   if (audio.isEmpty()) {
     return MakeDevice(ReadinessState::Unknown,
                       QStringLiteral("Microphone status is not reported."));
+  }
+
+  if (const auto explicitReadiness =
+          ExplicitReadiness(ObjectValue(audio, QStringLiteral("microphone")))) {
+    return *explicitReadiness;
   }
 
   const QString sourceError =
@@ -677,6 +883,9 @@ DeviceReadiness ParseSpeakers(const QJsonObject &audio) {
     return MakeDevice(ReadinessState::Unknown,
                       QStringLiteral("Speakers status is not reported."));
   }
+
+  if (const auto explicitReadiness = ExplicitReadiness(speakers))
+    return *explicitReadiness;
 
   QStringList notes;
   const QString effectsNote =
@@ -798,6 +1007,80 @@ DeviceReadiness ParseSpeakers(const QJsonObject &audio) {
       notes);
 }
 
+AudioEndpointStatus ParseMicrophoneEndpoint(const QJsonObject &audio,
+                                            const DeviceReadiness &readiness) {
+  AudioEndpointStatus out;
+  if (audio.isEmpty())
+    return out;
+
+  const QJsonObject microphone =
+      ObjectValue(audio, QStringLiteral("microphone"));
+  const QJsonObject pipeline = ObjectValue(audio, QStringLiteral("pipeline"));
+  out.present = true;
+  out.enabled = audio.value(QStringLiteral("enabled")).toBool(false);
+  out.virtualDevicePresent =
+      audio.value(QStringLiteral("mic_present"))
+          .toBool(audio.value(QStringLiteral("create_virtual_mic"))
+                      .toBool(false));
+  out.consumerPresent =
+      audio.value(QStringLiteral("mic_consumer_present")).toBool(false);
+  out.consumerCount =
+      audio.value(QStringLiteral("mic_consumer_count")).toInt(0);
+  out.action = FirstNonEmpty(
+      {microphone.value(QStringLiteral("action")).toString(),
+       microphone.value(QStringLiteral("primary_action")).toString(),
+       audio.value(QStringLiteral("microphone_action")).toString()});
+  out.readiness = ExplicitReadiness(microphone).value_or(readiness);
+  out.configuredDevice = audio.value(QStringLiteral("source")).toString();
+  out.resolvedDevice =
+      audio.value(QStringLiteral("source_resolved")).toString();
+  out.activeDevice = FirstNonEmpty(
+      {microphone.value(QStringLiteral("active_device")).toString(),
+       audio.value(QStringLiteral("selected_source")).toString(),
+       out.resolvedDevice});
+  out.activeBackend = FirstNonEmpty(
+      {microphone.value(QStringLiteral("active_backend")).toString(),
+       pipeline.value(QStringLiteral("backend_active")).toString()});
+  out.rawJson = RawObjectText(microphone);
+  return out;
+}
+
+AudioEndpointStatus ParseSpeakersEndpoint(const QJsonObject &audio,
+                                          const DeviceReadiness &readiness) {
+  AudioEndpointStatus out;
+  const QJsonObject speakers = ObjectValue(audio, QStringLiteral("speakers"));
+  if (speakers.isEmpty())
+    return out;
+
+  out.present = true;
+  out.enabled = speakers.value(QStringLiteral("enabled")).toBool(false);
+  out.virtualDevicePresent =
+      speakers.value(QStringLiteral("present"))
+          .toBool(audio.value(QStringLiteral("create_virtual_speakers"))
+                      .toBool(false));
+  out.consumerPresent =
+      speakers.value(QStringLiteral("consumer_present")).toBool(false);
+  out.consumerCount =
+      speakers.value(QStringLiteral("consumer_count")).toInt(0);
+  out.action = FirstNonEmpty(
+      {speakers.value(QStringLiteral("action")).toString(),
+       speakers.value(QStringLiteral("primary_action")).toString()});
+  out.readiness = ExplicitReadiness(speakers).value_or(readiness);
+  out.configuredDevice = speakers.value(QStringLiteral("target_sink")).toString();
+  out.resolvedDevice =
+      speakers.value(QStringLiteral("target_sink_resolved")).toString();
+  out.activeDevice =
+      speakers.value(QStringLiteral("target_sink_active")).toString();
+  out.routeMode = speakers.value(QStringLiteral("route_mode")).toString();
+  out.activeBackend =
+      FirstNonEmpty({speakers.value(QStringLiteral("backend_active")).toString(),
+                     ObjectValue(speakers, QStringLiteral("pipeline"))
+                         .value(QStringLiteral("backend_active"))
+                         .toString()});
+  out.rawJson = RawObjectText(speakers);
+  return out;
+}
+
 } // namespace
 
 DaemonStatusSnapshot DaemonStatusSnapshot::Unreachable(const QString &error) {
@@ -857,9 +1140,17 @@ DaemonStatusSnapshot DaemonStatusSnapshot::FromJson(const QString &json) {
 
   const QJsonObject video = ObjectValue(root, QStringLiteral("video"));
   const QJsonObject audio = ObjectValue(root, QStringLiteral("audio"));
+  out.rawVideoEffectsJson =
+      RawObjectText(ObjectValue(video, QStringLiteral("video_effects")));
+  out.rawAudioEffectsJson =
+      RawObjectText(ObjectValue(audio, QStringLiteral("audio_effects")));
+  out.videoEffectPlan = ParseVideoEffectPlan(video);
+  out.videoEffectReadiness = ParseVideoEffectReadiness(video);
   out.camera = ParseCamera(video);
   out.microphone = ParseMicrophone(audio);
   out.speakers = ParseSpeakers(audio);
+  out.microphoneEndpoint = ParseMicrophoneEndpoint(audio, out.microphone);
+  out.speakersEndpoint = ParseSpeakersEndpoint(audio, out.speakers);
   out.videoEffectsEnginePreference =
       ObjectValue(video, QStringLiteral("video_effects"))
           .value(QStringLiteral("engine"))
@@ -876,6 +1167,8 @@ DaemonStatusSnapshot DaemonStatusSnapshot::FromJson(const QString &json) {
       ObjectValue(audio, QStringLiteral("pipeline"))
           .value(QStringLiteral("backend_active"))
           .toString();
+  out.microphoneOpenAudioRuntime =
+      ParseOpenAudioRuntime(ObjectValue(audio, QStringLiteral("pipeline")));
   const QJsonObject speakers = ObjectValue(audio, QStringLiteral("speakers"));
   out.speakersRouteMode = speakers.value(QStringLiteral("route_mode")).toString();
   out.speakersActiveBackend =
@@ -883,6 +1176,7 @@ DaemonStatusSnapshot DaemonStatusSnapshot::FromJson(const QString &json) {
                      ObjectValue(speakers, QStringLiteral("pipeline"))
                          .value(QStringLiteral("backend_active"))
                          .toString()});
+  out.speakersOpenAudioRuntime = ParseOpenAudioRuntime(speakers);
 
   out.maxine = ParseEngine(EngineObject(root, QStringLiteral("maxine")),
                            QStringLiteral("maxine"), QStringLiteral("Maxine"));

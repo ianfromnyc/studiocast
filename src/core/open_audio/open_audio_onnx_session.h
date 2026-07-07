@@ -13,6 +13,12 @@ namespace studiocast::open_audio {
 struct OrtRuntimeInfo {
   std::string version;
   std::vector<std::string> providers;
+  bool cuda_provider_present = false;
+  bool tensorrt_provider_present = false;
+  bool cpu_provider_present = false;
+  bool cuda_ep_v2_build = false;
+  std::string library_path;
+  std::vector<std::string> warnings;
 };
 
 // Options for creating an ONNX Runtime session.
@@ -28,6 +34,18 @@ struct OrtSessionOptions {
 // Best-effort model I/O description extracted from the session.
 struct OrtSessionInfo {
   bool using_cuda = false;
+
+  std::vector<std::string> advertised_providers;
+  bool cuda_provider_advertised = false;
+  bool tensorrt_provider_advertised = false;
+  bool cpu_provider_advertised = false;
+  bool cuda_provider_appended = false;
+  bool cuda_provider_usable = false;
+  bool cpu_provider_usable = false;
+  bool cuda_session_create_failed_fell_back_to_cpu = false;
+  std::string active_provider;
+  std::string appended_provider;
+  std::vector<std::string> appended_providers;
 
   std::vector<std::string> input_names;
   std::vector<std::string> output_names;
@@ -69,6 +87,9 @@ public:
   OpenAudioOrtSession &operator=(const OpenAudioOrtSession &) = delete;
 
   const OrtSessionInfo &info() const;
+
+  // Pre-size reusable run scratch buffers during setup.
+  void ReserveRunScratch(std::size_t input_count, std::size_t output_count);
 
   struct OrtRunInput {
     const char *name = nullptr;

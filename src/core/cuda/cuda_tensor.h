@@ -39,6 +39,11 @@ struct CudaTensor {
                               int c_in, int h_in, int w_in,
                               std::string *error_out);
 
+  bool UploadFromCpuF32(studiocast::maxine::CudaDriverApi *cuda,
+                        const float *src, std::size_t src_floats,
+                        studiocast::maxine::CUstream stream,
+                        std::string *error_out) const;
+
   bool DownloadToCpuF32(studiocast::maxine::CudaDriverApi *cuda,
                         std::vector<float> *out,
                         studiocast::maxine::CUstream stream,

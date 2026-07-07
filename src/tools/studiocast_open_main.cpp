@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <iomanip>
@@ -103,6 +105,28 @@ bool HasArg(int argc, char **argv, std::string_view flag) {
   return false;
 }
 
+std::string ToLowerAscii(std::string s) {
+  for (char &c : s) {
+    const unsigned char uc = static_cast<unsigned char>(c);
+    c = static_cast<char>(std::tolower(uc));
+  }
+  return s;
+}
+
+bool EnvFlagEnabled(const char *name) {
+  const char *v = std::getenv(name);
+  if (!v || !*v)
+    return false;
+  const std::string value = ToLowerAscii(v);
+  return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+bool HasProvider(const std::vector<std::string> &providers,
+                 const char *provider) {
+  return std::find(providers.begin(), providers.end(), provider) !=
+         providers.end();
+}
+
 std::string GetArgValue(int argc, char **argv, std::string_view key) {
   for (int i = 1; i + 1 < argc; ++i) {
     if (argv[i] && std::string_view(argv[i]) == key) {
@@ -110,6 +134,30 @@ std::string GetArgValue(int argc, char **argv, std::string_view key) {
     }
   }
   return "";
+}
+
+const char *YesNo(bool v) { return v ? "yes" : "no"; }
+
+void PrintOrtRuntimeInfo(const studiocast::onnx::OrtRuntimeInfo &ort) {
+  std::cout << "ONNX Runtime version: "
+            << (ort.version.empty() ? "(unknown)" : ort.version) << "\n";
+  std::cout << "ONNX Runtime library: "
+            << (ort.library_path.empty() ? "(unknown)" : ort.library_path)
+            << "\n";
+  std::cout << "ORT CUDA EP V2 build: " << YesNo(ort.cuda_ep_v2_build)
+            << "\n";
+  std::cout << "Provider present: CUDA="
+            << YesNo(ort.cuda_provider_present)
+            << " TensorRT=" << YesNo(ort.tensorrt_provider_present)
+            << " CPU=" << YesNo(ort.cpu_provider_present) << "\n";
+  if (ort.providers.empty()) {
+    std::cout << "Available providers: (unknown)\n";
+  } else {
+    std::cout << "Available providers:\n";
+    for (const auto &p : ort.providers) {
+      std::cout << "  - " << p << "\n";
+    }
+  }
 }
 
 static int CmdPaths() {
@@ -212,8 +260,8 @@ static int CmdVideoPaths() {
   std::cout << "  - Segmentation/matting packs (task=matting) are consumed by "
                "the Open CUDA backend.\n";
   std::cout << "  - Other tasks (face_detection, eye_contact, video_denoise, "
-               "etc.) are tracked here\n";
-  std::cout << "    for future open-source video effects.\n";
+               "etc.) are consumed by\n";
+  std::cout << "    Open Video camera effects and shared analysis stages.\n";
   return 0;
 }
 
@@ -232,8 +280,6 @@ static int CmdVideoListModels(int argc, char **argv) {
     std::cout << "Valid model packs:\n";
     std::string current_task;
     for (const auto &m : models) {
-      if (m.task != "matting")
-        continue;
       if (!task_filter.empty() && m.task != task_filter)
         continue;
       if (m.task != current_task) {
@@ -293,6 +339,9 @@ static int CmdVideoInstallHints(const char *argv0) {
   std::cout << "StudioCast Open Video Install Hints\n\n";
   std::cout << "Model packs root:\n  " << OpenCudaRootForDisplay() << "\n\n";
 
+  std::cout << "Quick install (source builds):\n";
+  std::cout << "  ./scripts/install.sh open-video-models\n\n";
+
   std::cout << "A model pack is a directory containing model.json + model "
                "assets + LICENSE.txt.\n";
   std::cout << "The directory name does NOT need to match model.json:id "
@@ -339,16 +388,12 @@ static int CmdVideoSelfTest(int argc, char **argv) {
   return 2;
 #else
   const auto ort = studiocast::onnx::OrtSession::QueryRuntimeInfo();
-  std::cout << "ONNX Runtime version: "
-            << (ort.version.empty() ? "(unknown)" : ort.version) << "\n";
-  if (ort.providers.empty()) {
-    std::cout << "Available providers: (unknown)\n";
-  } else {
-    std::cout << "Available providers:\n";
-    for (const auto &p : ort.providers) {
-      std::cout << "  - " << p << "\n";
-    }
-  }
+  PrintOrtRuntimeInfo(ort);
+
+  const bool tensorrt_requested =
+      !cpu_only && EnvFlagEnabled("STUDIOCAST_OPEN_CUDA_TENSORRT");
+  const bool tensorrt_provider_available =
+      HasProvider(ort.providers, "TensorrtExecutionProvider");
 
   std::vector<fs::path> onnx_paths;
   std::string chosen;
@@ -412,9 +457,22 @@ static int CmdVideoSelfTest(int argc, char **argv) {
     std::cout << "Task filter: " << task << "\n";
   std::cout << "CUDA preference: "
             << (cpu_only ? "CPU-only" : "AUTO (prefer CUDA)") << "\n";
+  std::cout << "TensorRT request: "
+            << (tensorrt_requested ? "enabled" : "disabled") << "\n";
+  if (tensorrt_requested) {
+    std::cout << "TensorRT build support: "
+              << (studiocast::onnx::OrtBuildHasTensorRtEpV2() ? "yes" : "no")
+              << "\n";
+    std::cout << "TensorRT provider available: "
+              << (tensorrt_provider_available ? "yes" : "no") << "\n";
+    std::cout << "TensorRT cache: "
+              << studiocast::onnx::DefaultTensorRtCachePath(0).string()
+              << "\n";
+  }
 
   studiocast::onnx::OrtSessionOptions opts;
   opts.prefer_cuda = !cpu_only;
+  opts.enable_tensorrt = tensorrt_requested;
 
   int failures = 0;
   for (const auto &onnx : onnx_paths) {
@@ -430,7 +488,38 @@ static int CmdVideoSelfTest(int argc, char **argv) {
       continue;
     }
 
+    std::cout << "  active_provider: "
+              << (info.active_provider.empty() ? "(unknown)"
+                                               : info.active_provider)
+              << "\n";
+    std::cout << "  appended_provider: "
+              << (info.appended_provider.empty() ? "(none)"
+                                                 : info.appended_provider)
+              << "\n";
+    if (!info.appended_providers.empty()) {
+      std::cout << "  appended_providers: ";
+      for (std::size_t i = 0; i < info.appended_providers.size(); ++i) {
+        if (i)
+          std::cout << ", ";
+        std::cout << info.appended_providers[i];
+      }
+      std::cout << "\n";
+    }
+    std::cout << "  using_tensorrt: "
+              << (info.using_tensorrt ? "yes" : "no") << "\n";
     std::cout << "  using_cuda: " << (info.using_cuda ? "yes" : "no") << "\n";
+    if (tensorrt_requested || info.using_tensorrt ||
+        (!info.tensorrt_status.empty() &&
+         info.tensorrt_status != "not_requested")) {
+      std::cout << "  tensorrt_status: "
+                << (info.tensorrt_status.empty() ? "(unknown)"
+                                                 : info.tensorrt_status)
+                << "\n";
+      if (!info.tensorrt_engine_cache_path.empty()) {
+        std::cout << "  tensorrt_cache: "
+                  << info.tensorrt_engine_cache_path.string() << "\n";
+      }
+    }
     if (!info.warnings.empty()) {
       std::cout << "  warnings:\n";
       for (const auto &w : info.warnings) {
@@ -529,10 +618,10 @@ static int CmdAudioInstallHints(const char *argv0) {
   std::cout << "Model packs root:\n  " << OpenAudioRootForDisplay() << "\n\n";
 
   std::cout << "Quick install (source builds):\n";
-  std::cout << "  ./scripts/install_open_audio_models.sh\n\n";
+  std::cout << "  ./scripts/install.sh open-audio-models\n\n";
   std::cout << "Curated pack IDs: fastenhancer_s_vd_v1, fastenhancer_m_vd_v1, "
                "fastenhancer_l_vd_v1\n";
-  std::cout << "Docs: docs/open_audio_install.md\n\n";
+  std::cout << "Docs: docs/open_source_audio_models_install.md\n\n";
 
   std::cout << "A model pack is a directory containing model.json, model.onnx, "
                "LICENSE.txt.\n";
@@ -580,18 +669,13 @@ static int CmdAudioSelfTest(int argc, char **argv) {
                "install onnxruntime dev package).\n";
   return 2;
 #else
-  const auto ort =
-      studiocast::open_audio::OpenAudioOrtSession::QueryRuntimeInfo();
-  std::cout << "ONNX Runtime version: "
-            << (ort.version.empty() ? "(unknown)" : ort.version) << "\n";
-  if (ort.providers.empty()) {
-    std::cout << "Available providers: (unknown)\n";
-  } else {
-    std::cout << "Available providers:\n";
-    for (const auto &p : ort.providers) {
-      std::cout << "  - " << p << "\n";
-    }
-  }
+  const auto ort = studiocast::onnx::OrtSession::QueryRuntimeInfo();
+  PrintOrtRuntimeInfo(ort);
+  std::cout << "Open Audio acceleration likely: "
+            << (ort.cuda_provider_present
+                    ? "cuda"
+                    : ort.cpu_provider_present ? "cpu_fallback" : "unknown")
+            << "\n";
 
   studiocast::audio::effects::BroadcastAudioEffects fx;
   fx.microphone.model_id = model_id;
@@ -782,16 +866,13 @@ static int CmdAudioBench(int argc, char **argv) {
   std::cout << "Provider pref : "
             << (cpu_only ? "CPU-only" : "CUDA (fallback to CPU)") << "\n\n";
 
-  const auto ort =
-      studiocast::open_audio::OpenAudioOrtSession::QueryRuntimeInfo();
-  std::cout << "ONNX Runtime version: "
-            << (ort.version.empty() ? "(unknown)" : ort.version) << "\n";
-  if (!ort.providers.empty()) {
-    std::cout << "Available providers:\n";
-    for (const auto &p : ort.providers) {
-      std::cout << "  - " << p << "\n";
-    }
-  }
+  const auto ort = studiocast::onnx::OrtSession::QueryRuntimeInfo();
+  PrintOrtRuntimeInfo(ort);
+  std::cout << "Open Audio acceleration likely: "
+            << (ort.cuda_provider_present
+                    ? "cuda"
+                    : ort.cpu_provider_present ? "cpu_fallback" : "unknown")
+            << "\n";
   std::cout << "\n";
 
   studiocast::open_audio::OrtSessionOptions opts;

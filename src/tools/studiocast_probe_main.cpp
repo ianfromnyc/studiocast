@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <csetjmp>
@@ -9,6 +10,7 @@
 #include <fstream>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -39,11 +41,15 @@
 #include "core/maxine/paths.h"
 #include "core/maxine/reason_codes.h"
 #include "core/maxine/vfx_api.h"
+#include "core/onnx/ort_session.h"
+#include "core/open_audio/model_pack_registry.h"
+#include "core/open_audio/open_audio_diagnostics.h"
 #include "core/open_video/model_pack_registry.h"
 #include "core/probe/probe.h"
 #include "core/util/json.h"
 #include "core/util/strings.h"
 #include "core/util/ttl_cache.h"
+#include "core/util/xdg.h"
 #include "core/video/broadcast_camera_effects_json.h"
 #include "core/video/broadcast_camera_effects_legacy_adapter.h"
 #include "core/video/camera_effects_json.h"
@@ -69,6 +75,268 @@ bool hasArg(int argc, char **argv, std::string_view flag) {
       return true;
   }
   return false;
+}
+
+struct VerifyFileResult {
+  std::string name;
+  std::string kind;
+  std::string role;
+  std::filesystem::path path;
+  std::string expected_sha256;
+  std::string actual_sha256;
+  std::string checksum_kind;
+  std::string status;
+  std::string message;
+  bool ok = false;
+};
+
+struct VerifyModelResult {
+  std::string engine;
+  std::string id;
+  std::string display_name;
+  std::string task;
+  std::filesystem::path root_dir;
+  std::filesystem::path manifest_path;
+  std::string status;
+  std::string message;
+  bool ok = false;
+  std::vector<VerifyFileResult> files;
+};
+
+struct VerifyEngineResult {
+  std::string engine;
+  std::filesystem::path root;
+  std::vector<VerifyModelResult> models;
+
+  bool Ok() const {
+    for (const auto &m : models) {
+      if (!m.ok)
+        return false;
+    }
+    return true;
+  }
+};
+
+std::string JsonEscape(const std::string &s) {
+  return studiocast::util::json::EscapeString(s);
+}
+
+std::string BoolJson(bool v) { return v ? "true" : "false"; }
+
+std::filesystem::path DefaultModelsRoot() {
+  const auto root = studiocast::util::StudioCastModelsDir();
+  if (!root.empty())
+    return root;
+  return std::filesystem::path{"~/.local/share/studiocast/models"};
+}
+
+VerifyFileResult
+ConvertVerifyFile(const studiocast::open_video::ModelFileVerification &f) {
+  VerifyFileResult out;
+  out.name = f.name;
+  out.kind = f.kind;
+  out.role = f.role;
+  out.path = f.path;
+  out.expected_sha256 = f.expected_sha256;
+  out.actual_sha256 = f.actual_sha256;
+  out.checksum_kind = f.checksum_kind;
+  out.status = f.status;
+  out.message = f.message;
+  out.ok = f.ok;
+  return out;
+}
+
+VerifyFileResult
+ConvertVerifyFile(const studiocast::open_audio::ModelFileVerification &f) {
+  VerifyFileResult out;
+  out.name = f.name;
+  out.kind = f.kind;
+  out.path = f.path;
+  out.expected_sha256 = f.expected_sha256;
+  out.actual_sha256 = f.actual_sha256;
+  out.checksum_kind = f.checksum_kind;
+  out.status = f.status;
+  out.message = f.message;
+  out.ok = f.ok;
+  return out;
+}
+
+VerifyModelResult
+ConvertVerifyModel(const std::string &engine,
+                   const studiocast::open_video::ModelPackVerification &m) {
+  VerifyModelResult out;
+  out.engine = engine;
+  out.id = m.id;
+  out.display_name = m.display_name;
+  out.task = m.task;
+  out.root_dir = m.root_dir;
+  out.manifest_path = m.manifest_path;
+  out.status = m.status;
+  out.message = m.message;
+  out.ok = m.ok;
+  out.files.reserve(m.files.size());
+  for (const auto &f : m.files)
+    out.files.push_back(ConvertVerifyFile(f));
+  return out;
+}
+
+VerifyModelResult
+ConvertVerifyModel(const std::string &engine,
+                   const studiocast::open_audio::ModelPackVerification &m) {
+  VerifyModelResult out;
+  out.engine = engine;
+  out.id = m.id;
+  out.display_name = m.display_name;
+  out.root_dir = m.root_dir;
+  out.manifest_path = m.manifest_path;
+  out.status = m.status;
+  out.message = m.message;
+  out.ok = m.ok;
+  out.files.reserve(m.files.size());
+  for (const auto &f : m.files)
+    out.files.push_back(ConvertVerifyFile(f));
+  return out;
+}
+
+std::vector<VerifyEngineResult> VerifyDefaultModels() {
+  const auto modelsRoot = DefaultModelsRoot();
+  VerifyEngineResult video;
+  video.engine = "open_video";
+  video.root = modelsRoot / "open_video";
+  for (const auto &m :
+       studiocast::open_video::ModelPackRegistry::Verify(video.root)) {
+    video.models.push_back(ConvertVerifyModel(video.engine, m));
+  }
+
+  VerifyEngineResult audio;
+  audio.engine = "open_audio";
+  audio.root = modelsRoot / "open_audio";
+  for (const auto &m :
+       studiocast::open_audio::ModelPackRegistry::Verify(audio.root)) {
+    audio.models.push_back(ConvertVerifyModel(audio.engine, m));
+  }
+
+  std::vector<VerifyEngineResult> engines;
+  engines.push_back(std::move(video));
+  engines.push_back(std::move(audio));
+  return engines;
+}
+
+bool VerifyEnginesOk(const std::vector<VerifyEngineResult> &engines) {
+  for (const auto &engine : engines) {
+    if (!engine.Ok())
+      return false;
+  }
+  return true;
+}
+
+std::string StatusText(const std::string &status, const std::string &message) {
+  if (message.empty() || message == "ok" || message == status)
+    return status;
+  if (message.starts_with(status + ":"))
+    return message;
+  return status + ": " + message;
+}
+
+std::string VerifyModelsToText(const std::vector<VerifyEngineResult> &engines) {
+  std::ostringstream oss;
+  oss << "StudioCast model verification\n";
+  for (const auto &engine : engines) {
+    oss << "\n" << engine.engine << " (" << engine.root.string() << ")\n";
+    if (engine.models.empty()) {
+      oss << "  no model packs found\n";
+      continue;
+    }
+    for (const auto &m : engine.models) {
+      oss << "  " << (m.ok ? "OK" : "FAIL") << " " << m.id;
+      if (!m.task.empty())
+        oss << " [" << m.task << "]";
+      oss << " - " << StatusText(m.status, m.message) << "\n";
+      for (const auto &f : m.files) {
+        oss << "    " << (f.ok ? "OK" : "FAIL") << " " << f.name;
+        if (!f.kind.empty())
+          oss << " (" << f.kind << ")";
+        oss << " - " << StatusText(f.status, f.message) << "\n";
+      }
+    }
+  }
+  return oss.str();
+}
+
+void AppendJsonFile(std::ostringstream *oss, const VerifyFileResult &f) {
+  *oss << "{";
+  *oss << "\"name\":\"" << JsonEscape(f.name) << "\",";
+  *oss << "\"kind\":\"" << JsonEscape(f.kind) << "\",";
+  *oss << "\"role\":\"" << JsonEscape(f.role) << "\",";
+  *oss << "\"path\":\"" << JsonEscape(f.path.string()) << "\",";
+  *oss << "\"expected_sha256\":\"" << JsonEscape(f.expected_sha256) << "\",";
+  *oss << "\"actual_sha256\":\"" << JsonEscape(f.actual_sha256) << "\",";
+  *oss << "\"checksum_kind\":\"" << JsonEscape(f.checksum_kind) << "\",";
+  *oss << "\"status\":\"" << JsonEscape(f.status) << "\",";
+  *oss << "\"message\":\"" << JsonEscape(f.message) << "\",";
+  *oss << "\"ok\":" << BoolJson(f.ok);
+  *oss << "}";
+}
+
+void AppendJsonModel(std::ostringstream *oss, const VerifyModelResult &m) {
+  *oss << "{";
+  *oss << "\"engine\":\"" << JsonEscape(m.engine) << "\",";
+  *oss << "\"id\":\"" << JsonEscape(m.id) << "\",";
+  *oss << "\"display_name\":\"" << JsonEscape(m.display_name) << "\",";
+  *oss << "\"task\":\"" << JsonEscape(m.task) << "\",";
+  *oss << "\"root_dir\":\"" << JsonEscape(m.root_dir.string()) << "\",";
+  *oss << "\"manifest_path\":\"" << JsonEscape(m.manifest_path.string())
+       << "\",";
+  *oss << "\"status\":\"" << JsonEscape(m.status) << "\",";
+  *oss << "\"message\":\"" << JsonEscape(m.message) << "\",";
+  *oss << "\"ok\":" << BoolJson(m.ok) << ",";
+  *oss << "\"files\":[";
+  for (std::size_t i = 0; i < m.files.size(); ++i) {
+    if (i)
+      *oss << ",";
+    AppendJsonFile(oss, m.files[i]);
+  }
+  *oss << "]";
+  *oss << "}";
+}
+
+std::string VerifyModelsToJson(const std::vector<VerifyEngineResult> &engines) {
+  std::ostringstream oss;
+  oss << "{";
+  oss << "\"ok\":" << BoolJson(VerifyEnginesOk(engines)) << ",";
+  oss << "\"engines\":[";
+  for (std::size_t i = 0; i < engines.size(); ++i) {
+    if (i)
+      oss << ",";
+    const auto &engine = engines[i];
+    oss << "{";
+    oss << "\"engine\":\"" << JsonEscape(engine.engine) << "\",";
+    oss << "\"root\":\"" << JsonEscape(engine.root.string()) << "\",";
+    oss << "\"ok\":" << BoolJson(engine.Ok()) << ",";
+    oss << "\"models\":[";
+    for (std::size_t j = 0; j < engine.models.size(); ++j) {
+      if (j)
+        oss << ",";
+      AppendJsonModel(&oss, engine.models[j]);
+    }
+    oss << "]";
+    oss << "}";
+  }
+  oss << "]";
+  oss << "}";
+  return oss.str();
+}
+
+int RunVerifyModels(bool json, bool strict) {
+  const auto engines = VerifyDefaultModels();
+  if (json) {
+    std::printf("%s\n", VerifyModelsToJson(engines).c_str());
+  } else {
+    std::printf("%s", VerifyModelsToText(engines).c_str());
+  }
+  if (!strict)
+    return 0;
+  return VerifyEnginesOk(engines) ? 0 : 1;
 }
 
 bool WritePngRgb24File(const std::filesystem::path &path, int w, int h,
@@ -464,6 +732,19 @@ int RunSelfTest() {
     {
       studiocast::open_cuda::OpenCudaDiagnostics od;
       od.ok = true;
+      od.onnxruntime_version = "1.24.1-test";
+      od.onnxruntime_providers = {"TensorrtExecutionProvider",
+                                  "CUDAExecutionProvider",
+                                  "CPUExecutionProvider"};
+      od.onnxruntime_cuda_provider_present = true;
+      od.onnxruntime_tensorrt_provider_present = true;
+      od.onnxruntime_cpu_provider_present = true;
+      od.onnxruntime_cuda_ep_v2_build = true;
+      od.onnxruntime_library_path = "/opt/ort/lib/libonnxruntime.so";
+      od.cuda_driver_api_available = true;
+      od.cuda_context_available = true;
+      od.cuda_device_count = 1;
+      od.cuda_driver_version = 12040;
       od.default_model_id = reg.DefaultModelIdForTask("matting");
       for (const auto &m : reg.ListModels()) {
         if (m.task != "matting")
@@ -480,8 +761,49 @@ int RunSelfTest() {
         od.models.push_back(std::move(mi));
       }
       od.missing_models = reg.Problems();
+      od.tensorrt_supported = true;
+      od.tensorrt_available = true;
+      od.tensorrt_requested = true;
+      od.tensorrt_cache_path = "/tmp/studiocast/trt_cache/gpu0";
+      od.tensorrt_status = "available";
 
       const std::string j = od.ToJson();
+      expectContains("OpenCudaDiagnosticsJson.onnxruntime_version", j,
+                     "\"onnxruntime_version\":\"1.24.1-test\"");
+      expectContains("OpenCudaDiagnosticsJson.onnxruntime_providers", j,
+                     "\"onnxruntime_providers\":[\"TensorrtExecutionProvider\","
+                     "\"CUDAExecutionProvider\","
+                     "\"CPUExecutionProvider\"]");
+      expectContains("OpenCudaDiagnosticsJson.cuda_provider_present", j,
+                     "\"onnxruntime_cuda_provider_present\":true");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_provider_present", j,
+                     "\"onnxruntime_tensorrt_provider_present\":true");
+      expectContains("OpenCudaDiagnosticsJson.cpu_provider_present", j,
+                     "\"onnxruntime_cpu_provider_present\":true");
+      expectContains("OpenCudaDiagnosticsJson.cuda_ep_v2_build", j,
+                     "\"onnxruntime_cuda_ep_v2_build\":true");
+      expectContains("OpenCudaDiagnosticsJson.ort_library_path", j,
+                     "\"onnxruntime_library_path\":\"/opt/ort/lib/"
+                     "libonnxruntime.so\"");
+      expectContains("OpenCudaDiagnosticsJson.cuda_driver_api_available", j,
+                     "\"cuda_driver_api_available\":true");
+      expectContains("OpenCudaDiagnosticsJson.cuda_context_available", j,
+                     "\"cuda_context_available\":true");
+      expectContains("OpenCudaDiagnosticsJson.cuda_device_count", j,
+                     "\"cuda_device_count\":1");
+      expectContains("OpenCudaDiagnosticsJson.cuda_driver_version", j,
+                     "\"cuda_driver_version\":12040");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_supported", j,
+                     "\"tensorrt_supported\":true");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_available", j,
+                     "\"tensorrt_available\":true");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_requested", j,
+                     "\"tensorrt_requested\":true");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_cache_path", j,
+                     "\"tensorrt_cache_path\":\"/tmp/studiocast/trt_cache/"
+                     "gpu0\"");
+      expectContains("OpenCudaDiagnosticsJson.tensorrt_status", j,
+                     "\"tensorrt_status\":\"available\"");
       expectContains("OpenCudaDiagnosticsJson.default_model_id", j,
                      "\"default_model_id\":\"mock_model\"");
       expectContains("OpenCudaDiagnosticsJson.models", j, "\"models\":[");
@@ -498,6 +820,63 @@ int RunSelfTest() {
       // Backward compatibility field.
       expectContains("OpenCudaDiagnosticsJson.installed_models", j,
                      "\"installed_models\":[");
+
+      const auto trt_cache =
+          studiocast::onnx::DefaultTensorRtCachePath(/*cuda_device_id=*/2);
+      expectEq("DefaultTensorRtCachePath.filename",
+               trt_cache.filename().string(), "gpu2");
+      expectEq("DefaultTensorRtCachePath.parent",
+               trt_cache.parent_path().filename().string(), "trt_cache");
+
+      if (packOpt) {
+        studiocast::open_cuda::OpenCudaMattingSession::Options trt_opts;
+        trt_opts.device_id = 2;
+        trt_opts.enable_tensorrt = true;
+        studiocast::open_cuda::OpenCudaMattingSession sess(nullptr, *packOpt,
+                                                           trt_opts);
+        expectTrue("OpenCudaMattingSession options propagate TensorRT",
+                   sess.options().enable_tensorrt);
+        expectIntEq("OpenCudaMattingSession options propagate device_id",
+                    sess.options().device_id, 2);
+      }
+    }
+
+    // Open Audio diagnostics JSON keeps legacy ORT fields and includes
+    // provider/runtime details used by daemon/GUI/CLI diagnostics.
+    {
+      studiocast::open_audio::OpenAudioDiagnostics od;
+      od.ok = true;
+      od.onnxruntime_version = "1.20.0";
+      od.onnxruntime_providers = {"CPUExecutionProvider"};
+      od.onnxruntime_cuda_provider_present = false;
+      od.onnxruntime_tensorrt_provider_present = false;
+      od.onnxruntime_cpu_provider_present = true;
+      od.onnxruntime_cuda_ep_v2_build = false;
+      od.onnxruntime_library_path = "/opt/ort/lib/libonnxruntime.so";
+      od.acceleration_likely = "cpu_fallback";
+      od.installed_models = {"fastenhancer_s_vd_v1"};
+      od.default_model_id = "fastenhancer_s_vd_v1";
+
+      const std::string j = od.ToJson();
+      expectContains("OpenAudioDiagnosticsJson.onnxruntime_version", j,
+                     "\"onnxruntime_version\":\"1.20.0\"");
+      expectContains("OpenAudioDiagnosticsJson.onnxruntime_providers", j,
+                     "\"onnxruntime_providers\":[\"CPUExecutionProvider\"]");
+      expectContains("OpenAudioDiagnosticsJson.cuda_provider_present", j,
+                     "\"onnxruntime_cuda_provider_present\":false");
+      expectContains("OpenAudioDiagnosticsJson.tensorrt_provider_present", j,
+                     "\"onnxruntime_tensorrt_provider_present\":false");
+      expectContains("OpenAudioDiagnosticsJson.cpu_provider_present", j,
+                     "\"onnxruntime_cpu_provider_present\":true");
+      expectContains("OpenAudioDiagnosticsJson.cuda_ep_v2_build", j,
+                     "\"onnxruntime_cuda_ep_v2_build\":false");
+      expectContains("OpenAudioDiagnosticsJson.ort_library_path", j,
+                     "\"onnxruntime_library_path\":\"/opt/ort/lib/"
+                     "libonnxruntime.so\"");
+      expectContains("OpenAudioDiagnosticsJson.acceleration_likely", j,
+                     "\"acceleration_likely\":\"cpu_fallback\"");
+      expectContains("OpenAudioDiagnosticsJson.installed_models", j,
+                     "\"installed_models\":[\"fastenhancer_s_vd_v1\"]");
     }
   }
 
@@ -1199,6 +1578,89 @@ int RunSelfTest() {
                 std::printf("[FAIL] CudaResizeBilinear\n  max_abs_diff=%d "
                             "(want <= 1)\n",
                             max_abs_diff);
+              }
+            }
+          }
+
+          if (failures == 0) {
+            constexpr float crop_x = 2.25f;
+            constexpr float crop_y = 1.50f;
+            constexpr float crop_w = 7.50f;
+            constexpr float crop_h = 4.00f;
+            std::vector<std::uint8_t> cpu_crop(
+                dst_stride * static_cast<std::size_t>(dst_h), 0);
+            for (int y = 0; y < dst_h; ++y) {
+              const float src_y = crop_y +
+                                  (static_cast<float>(y) + 0.5f) *
+                                      (crop_h / static_cast<float>(dst_h)) -
+                                  0.5f;
+              const float sy =
+                  std::clamp(src_y, 0.0f, static_cast<float>(src_h - 1));
+              const int y0 = static_cast<int>(sy);
+              const int y1 = std::min(y0 + 1, src_h - 1);
+              const float ty = sy - static_cast<float>(y0);
+              for (int x = 0; x < dst_w; ++x) {
+                const float src_x = crop_x +
+                                    (static_cast<float>(x) + 0.5f) *
+                                        (crop_w / static_cast<float>(dst_w)) -
+                                    0.5f;
+                const float sx =
+                    std::clamp(src_x, 0.0f, static_cast<float>(src_w - 1));
+                const int x0 = static_cast<int>(sx);
+                const int x1 = std::min(x0 + 1, src_w - 1);
+                const float tx = sx - static_cast<float>(x0);
+                for (int c = 0; c < 3; ++c) {
+                  const auto ch = static_cast<std::size_t>(c);
+                  const float p00 =
+                      src_rgb[static_cast<std::size_t>(y0) * src_stride +
+                              static_cast<std::size_t>(x0) * 3u + ch];
+                  const float p10 =
+                      src_rgb[static_cast<std::size_t>(y0) * src_stride +
+                              static_cast<std::size_t>(x1) * 3u + ch];
+                  const float p01 =
+                      src_rgb[static_cast<std::size_t>(y1) * src_stride +
+                              static_cast<std::size_t>(x0) * 3u + ch];
+                  const float p11 =
+                      src_rgb[static_cast<std::size_t>(y1) * src_stride +
+                              static_cast<std::size_t>(x1) * 3u + ch];
+                  const float v0 = p00 + (p10 - p00) * tx;
+                  const float v1 = p01 + (p11 - p01) * tx;
+                  const int iv =
+                      static_cast<int>(std::lround(v0 + (v1 - v0) * ty));
+                  cpu_crop[static_cast<std::size_t>(y) * dst_stride +
+                           static_cast<std::size_t>(x) * 3u + ch] =
+                      static_cast<std::uint8_t>(std::clamp(iv, 0, 255));
+                }
+              }
+            }
+
+            if (!studiocast::cuda::kernels::CropResizeBilinear(
+                    gpu_src, gpu_dst, crop_x, crop_y, crop_w, crop_h, stream,
+                    &err)) {
+              fail("CudaCropResizeBilinear", "Kernel failed: " + err);
+            } else {
+              std::vector<std::uint8_t> gpu_crop(
+                  dst_stride * static_cast<std::size_t>(dst_h), 0xCD);
+              if (!gpu_dst.DownloadToCpuRgb24(&cuda, gpu_crop.data(),
+                                              dst_stride, stream, &err)) {
+                fail("CudaCropResizeBilinear", "Download failed: " + err);
+              } else if (!cuda.StreamSynchronize(stream, &err)) {
+                fail("CudaCropResizeBilinear",
+                     "StreamSynchronize failed: " + err);
+              } else {
+                int max_abs_diff = 0;
+                for (std::size_t i = 0;
+                     i < cpu_crop.size() && i < gpu_crop.size(); ++i) {
+                  const int d = static_cast<int>(cpu_crop[i]) -
+                                static_cast<int>(gpu_crop[i]);
+                  max_abs_diff = std::max(max_abs_diff, std::abs(d));
+                }
+                if (max_abs_diff > 1) {
+                  ++failures;
+                  std::printf("[FAIL] CudaCropResizeBilinear\n  "
+                              "max_abs_diff=%d (want <= 1)\n",
+                              max_abs_diff);
+                }
               }
             }
           }
@@ -2205,9 +2667,13 @@ int RunSelfTest() {
                  dc.video_effects.virtual_key_light.enabled);
       expectIntEq("daemon_config migrate key_light intensity",
                   dc.video_effects.virtual_key_light.intensity, 42);
+      expectTrue("daemon_config default allow CPU resize",
+                 dc.video_allow_cpu_resize);
 
       const auto vc = studiocast::config::ToVideoServiceConfig(dc);
       expectTrue("ToVideoServiceConfig mirror", vc.pipeline.effects.mirror);
+      expectTrue("ToVideoServiceConfig allow CPU resize",
+                 vc.pipeline.allow_cpu_resize);
       expectTrue("ToVideoServiceConfig scaling backend gpu",
                  vc.pipeline.scaling_backend ==
                      studiocast::video::ScalingBackendPreference::gpu);
@@ -2293,6 +2759,9 @@ int RunSelfTest() {
           expectTrue("saved config has video.scaling.backend",
                      content.find("video.scaling.backend") !=
                          std::string::npos);
+          expectTrue("saved config has video.scaling.allow_cpu_resize true",
+                     content.find("video.scaling.allow_cpu_resize = true") !=
+                         std::string::npos);
           expectTrue("saved config removes video.mirror",
                      content.find("video.mirror") == std::string::npos);
           expectTrue("saved config removes video.background",
@@ -2304,6 +2773,7 @@ int RunSelfTest() {
 
         const auto dc2 = studiocast::config::LoadDaemonConfig();
         const auto vc2 = studiocast::config::ToVideoServiceConfig(dc2);
+        expectTrue("roundtrip allow CPU resize", vc2.pipeline.allow_cpu_resize);
         expectTrue("roundtrip vb blur",
                    vc2.pipeline.effects.virtual_background.mode ==
                        studiocast::video::effects::VirtualBackgroundMode::blur);
@@ -2332,6 +2802,21 @@ int RunSelfTest() {
                    ac2.effects.microphone.room_echo_removal_enabled);
         expectIntEq("roundtrip audio strength", ac2.effects.microphone.strength,
                     55);
+      }
+
+      // Explicit CPU-resize opt-out should still be respected.
+      {
+        std::ofstream out(confPath);
+        out << "video.scaling.allow_cpu_resize = false\n";
+      }
+      {
+        const auto dc_no_cpu = studiocast::config::LoadDaemonConfig();
+        expectTrue("explicit CPU resize opt-out parses false",
+                   !dc_no_cpu.video_allow_cpu_resize);
+        const auto vc_no_cpu =
+            studiocast::config::ToVideoServiceConfig(dc_no_cpu);
+        expectTrue("explicit CPU resize opt-out reaches service config",
+                   !vc_no_cpu.pipeline.allow_cpu_resize);
       }
 
       // Audio effects JSON parsing should tolerate unknown keys
@@ -2416,6 +2901,28 @@ int RunSelfTest() {
               studiocast::video::effects::VirtualBackgroundMode::replace);
       expectEq("effects patch replace_path", fx.virtual_background.replace_path,
                "/tmp/some path/with spaces/bg.ppm");
+    }
+
+    {
+      studiocast::video::effects::BroadcastCameraEffects emptyPathFx;
+      const std::string replaceWithoutPath =
+          "{\"virtual_background.replace\":{\"enabled\":true,"
+          "\"replace_path\":\"\"}}";
+      jerr.clear();
+      if (!studiocast::video::ApplyBroadcastCameraEffectsPatchJsonText(
+              replaceWithoutPath, &emptyPathFx, &jerr)) {
+        ++failures;
+        std::printf("[FAIL] ApplyBroadcastCameraEffectsPatchJsonText "
+                    "replace without path: %s\n",
+                    jerr.c_str());
+      } else {
+        expectTrue("effects patch replace without path keeps replace mode",
+                   emptyPathFx.virtual_background.mode ==
+                       studiocast::video::effects::VirtualBackgroundMode::
+                           replace);
+        expectEq("effects patch replace without path keeps empty path",
+                 emptyPathFx.virtual_background.replace_path, "");
+      }
     }
 
     const std::string af =
@@ -2607,6 +3114,36 @@ int RunSelfTest() {
       }
     }
 
+    {
+      const std::string replaceWithoutPath =
+          "{\"schema_version\":1,\"virtual_background\":{\"mode\":\"replace\","
+          "\"replace_path\":\"\"}}";
+      BroadcastCameraEffects tmp;
+      warnings.clear();
+      err.clear();
+      opt.allow_unknown_keys = false;
+      if (!ParseBroadcastCameraEffectsJsonText(replaceWithoutPath, &tmp, opt,
+                                               &warnings, &err)) {
+        ++failures;
+        std::printf("[FAIL] BroadcastCameraEffects replace without path should "
+                    "parse: %s\n",
+                    err.c_str());
+      } else {
+        expectTrue("BroadcastCameraEffects replace without path mode",
+                   tmp.virtual_background.mode ==
+                       VirtualBackgroundMode::replace);
+        expectEq("BroadcastCameraEffects replace without path empty path",
+                 tmp.virtual_background.replace_path, "");
+        expectTrue(
+            "BroadcastCameraEffects replace without path warning",
+            std::any_of(warnings.begin(), warnings.end(),
+                        [](const std::string &w) {
+                          return w.find("replace_path is empty") !=
+                                 std::string::npos;
+                        }));
+      }
+    }
+
     // Unknown key strict vs compat.
     {
       const std::string u = "{\"schema_version\":1,\"unknown\":123}";
@@ -2656,21 +3193,26 @@ int RunSelfTest() {
       }
     }
 
-    // Validation: conflict between auto_frame and virtual_background.
+    // Validation: auto_frame and virtual_background can run together.
     {
-      const std::string conflict =
+      const std::string paired =
           "{\"schema_version\":1,\"auto_frame\":{\"enabled\":true},\"virtual_"
           "background\":{\"mode\":\"blur\"}}";
       BroadcastCameraEffects tmp;
       warnings.clear();
       err.clear();
-      if (ParseBroadcastCameraEffectsJsonText(conflict, &tmp, opt, &warnings,
-                                              &err)) {
+      if (!ParseBroadcastCameraEffectsJsonText(paired, &tmp, opt, &warnings,
+                                               &err)) {
         ++failures;
-        std::printf("[FAIL] BroadcastCameraEffects conflict should fail\n");
+        std::printf("[FAIL] BroadcastCameraEffects paired effects should pass: "
+                    "%s\n",
+                    err.c_str());
       } else {
-        expectContains("BroadcastCameraEffects conflict msg", err,
-                       "auto_frame.enabled");
+        expectTrue("BroadcastCameraEffects paired auto_frame preserved",
+                   tmp.auto_frame.enabled);
+        expectTrue("BroadcastCameraEffects paired virtual_background preserved",
+                   tmp.virtual_background.mode ==
+                       VirtualBackgroundMode::blur);
       }
     }
 
@@ -2954,6 +3496,29 @@ int RunSelfTest() {
       const auto gate2 =
           studiocast::video::effects::EvaluateOpenCudaGate(fx, available);
       expectTrue("open_cuda_gate blur allowed when available", gate2.ok);
+
+      {
+        using studiocast::video::effects::contract::kEffectIdVideoNoiseRemoval;
+
+        studiocast::video::effects::BroadcastCameraEffects fx_denoise;
+        fx_denoise.engine =
+            studiocast::video::effects::EffectsEnginePreference::open_cuda;
+        fx_denoise.video_noise_removal.enabled = true;
+
+        studiocast::open_cuda::OpenCudaDiagnostics ort_cuda_missing;
+        ort_cuda_missing.ok = true;
+        ort_cuda_missing.available_effects = {
+            std::string(kEffectIdVideoNoiseRemoval)};
+        ort_cuda_missing
+            .blocked_effects[std::string(kEffectIdVirtualBackgroundBlur)] =
+            "onnxruntime_cuda_provider_unavailable";
+
+        const auto gate_denoise =
+            studiocast::video::effects::EvaluateOpenCudaGate(fx_denoise,
+                                                             ort_cuda_missing);
+        expectTrue("open_cuda_gate denoise allowed without ort cuda ep",
+                   gate_denoise.ok);
+      }
 
       // Auto Frame (Open CUDA) is also gated by the Open CUDA diagnostics.
       {
@@ -3534,6 +4099,10 @@ int main(int argc, char **argv) {
   const bool json = hasArg(argc, argv, "--json");
   const bool verbose = hasArg(argc, argv, "--verbose");
   const bool strict = hasArg(argc, argv, "--strict");
+
+  if (hasArg(argc, argv, "--verify-models")) {
+    return RunVerifyModels(json, strict);
+  }
 
   const auto report = studiocast::probe::Run(verbose);
 

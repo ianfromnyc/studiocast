@@ -12,11 +12,13 @@ namespace studiocast::gui {
 
 struct DaemonStatusSnapshot;
 class AdvancedPage;
+class AudioPage;
 class EnginesModelsPage;
 class HomePage;
 class SettingsPage;
 class SupportPage;
 class StatusPoller;
+class VideoPage;
 
 class MainWindow final : public QMainWindow {
   Q_OBJECT
@@ -40,6 +42,9 @@ private:
   QStringList pageTitles_;
 
   HomePage *homePage_ = nullptr;
+  VideoPage *videoPage_ = nullptr;
+  AudioPage *microphonePage_ = nullptr;
+  AudioPage *speakersPage_ = nullptr;
   EnginesModelsPage *enginesModelsPage_ = nullptr;
   SupportPage *supportPage_ = nullptr;
   SettingsPage *settingsPage_ = nullptr;

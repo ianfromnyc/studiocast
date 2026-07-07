@@ -75,6 +75,7 @@ private:
   bool input_is_nhwc_ = false;
 
   std::string active_model_id_;
+  std::string active_requested_model_id_;
   std::filesystem::path active_model_path_;
 
   ModelPackRegistry registry_;

@@ -89,6 +89,7 @@ void GazeCorrectionEyeContact::Reset() {
   using_cpu_fallback_ = false;
   registry_ = ModelPackRegistry();
   active_model_id_.clear();
+  active_requested_model_id_.clear();
   required_landmarks_id_.clear();
   left_model_path_.clear();
   right_model_path_.clear();
@@ -469,6 +470,12 @@ bool GazeCorrectionEyeContact::EnsureInitialized(
       *error = sticky_warning_;
     return false;
   }
+
+  if (initialized_ && left_.session_active && right_.session_active &&
+      requested_model_id == active_requested_model_id_) {
+    return true;
+  }
+
   // Resolve desired model id.
   ModelPackRegistry reg = ModelPackRegistry::ScanDefault();
   const std::string desired = requested_model_id.empty()
@@ -482,6 +489,7 @@ bool GazeCorrectionEyeContact::EnsureInitialized(
 
   if (initialized_ && desired == active_model_id_) {
     registry_ = std::move(reg);
+    active_requested_model_id_ = requested_model_id;
     return true;
   }
 
@@ -529,6 +537,7 @@ bool GazeCorrectionEyeContact::EnsureInitialized(
   }
 
   initialized_ = true;
+  active_requested_model_id_ = requested_model_id;
   return true;
 #endif
 }

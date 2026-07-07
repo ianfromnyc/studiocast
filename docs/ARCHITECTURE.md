@@ -119,7 +119,8 @@ microphone enhancement (noise removal + “studio voice”). Model packs live un
 ${XDG_DATA_HOME:-~/.local/share}/studiocast/models/open_audio/<model_id>/
 ```
 
-See `docs/open_audio_install.md` for the installer script, pack schema, and validation tooling.
+See `docs/open_source_audio_models_install.md` for the installer script, pack
+schema, and validation tooling.
 
 ## Audio device safety
 

@@ -42,4 +42,18 @@ bool ParseBroadcastAudioEffectsJsonText(
     const BroadcastAudioEffectsJsonParseOptions &options,
     std::vector<std::string> *warnings, std::string *error);
 
+// Applies a partial canonical JSON patch to an existing effect object.
+//
+// Missing fields preserve the current value in `effects`. On validation or
+// parse failure, `effects` is left unchanged.
+bool ApplyBroadcastAudioEffectsPatchJson(
+    const studiocast::util::json::Value &root, BroadcastAudioEffects *effects,
+    const BroadcastAudioEffectsJsonParseOptions &options,
+    std::vector<std::string> *warnings, std::string *error);
+
+bool ApplyBroadcastAudioEffectsPatchJsonText(
+    const std::string &jsonText, BroadcastAudioEffects *effects,
+    const BroadcastAudioEffectsJsonParseOptions &options,
+    std::vector<std::string> *warnings, std::string *error);
+
 } // namespace studiocast::audio::effects

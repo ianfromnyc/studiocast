@@ -82,7 +82,7 @@ For a general overview of the open-source video model pack taxonomy (face detect
 
 For sourcing/conversion/hosting of the actual model binaries (ONNX / dlib files), see:
 
-- `docs/open_video_model_conversion.md`
+- `docs/open_source_video_model_conversion_to_onnx.md`
 
 ### Model pack layout
 

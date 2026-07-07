@@ -12,8 +12,25 @@ namespace studiocast::onnx {
 // Best-effort ONNX Runtime runtime information.
 struct OrtRuntimeInfo {
   std::string version;
+
+  // Providers advertised by ONNX Runtime. This does not prove that the
+  // provider shared library and its CUDA/TensorRT dependencies can be loaded.
   std::vector<std::string> providers;
+  bool cuda_provider_present = false;
+  bool tensorrt_provider_present = false;
+  bool cpu_provider_present = false;
+  bool cuda_ep_v2_build = false;
+  std::string library_path;
+  std::vector<std::string> warnings;
 };
+
+// Returns true when the headers used for this build expose the TensorRT EP V2
+// provider-options API. Runtime availability still depends on the ORT build and
+// installed provider libraries.
+bool OrtBuildHasTensorRtEpV2();
+
+// Default TensorRT engine cache path for a CUDA device.
+std::filesystem::path DefaultTensorRtCachePath(int cuda_device_id);
 
 // Options for creating an ONNX Runtime session.
 struct OrtSessionOptions {
@@ -24,6 +41,12 @@ struct OrtSessionOptions {
   // CUDA device id to use when CUDA EP is available.
   int cuda_device_id = 0;
 
+  // Optional CUDA EP V2 provider options. Zero/empty means "use ORT default".
+  std::uint64_t cuda_gpu_mem_limit = 0;
+  std::string cuda_arena_extend_strategy;
+  std::string cuda_cudnn_conv_algo_search;
+  bool cuda_do_copy_in_default_stream = true;
+
   // Optional compute stream (CUDA stream) to use when supported by the CUDA EP.
   //
   // When non-null and the build exposes CUDA EP V2 provider options
@@ -33,16 +56,57 @@ struct OrtSessionOptions {
   // When null, ORT may use internal streams and the caller may need to
   // synchronize around calls that produce/consume GPU buffers.
   void *user_compute_stream = nullptr;
+
+  // If true, attempt to append TensorRT EP before CUDA EP. This is currently
+  // intended for Open CUDA matting only; callers must opt in explicitly.
+  bool enable_tensorrt = false;
+
+  // If TensorRT is requested, append CUDA EP after TensorRT so unsupported
+  // subgraphs can stay on GPU. CPU remains ORT's final fallback in code paths
+  // that already permit CPU sessions.
+  bool tensorrt_enable_cuda_fallback = true;
+
+  // TensorRT provider defaults for the Open CUDA matting path.
+  std::uint64_t tensorrt_max_workspace_size = 2ull * 1024ull * 1024ull * 1024ull;
+  bool tensorrt_fp16_enable = true;
+  bool tensorrt_engine_cache_enable = true;
+  std::filesystem::path tensorrt_engine_cache_path;
+  int tensorrt_builder_optimization_level = 3;
 };
 
 // Best-effort model I/O description extracted from the session.
 struct OrtSessionInfo {
+  bool using_tensorrt = false;
   bool using_cuda = false;
+
+  // Providers advertised by ORT at session-creation time. These are separated
+  // from provider append/use results because ORT can advertise CUDA/TensorRT
+  // while the provider library or runtime dependencies fail to load.
+  std::vector<std::string> advertised_providers;
+  bool cuda_provider_advertised = false;
+  bool tensorrt_provider_advertised = false;
+  bool cpu_provider_advertised = false;
+
+  bool tensorrt_provider_appended = false;
+  bool cuda_provider_appended = false;
+  bool tensorrt_provider_usable = false;
+  bool cuda_provider_usable = false;
+  bool cpu_provider_usable = false;
+
+  bool tensorrt_session_create_failed_fell_back_to_cuda = false;
+  bool cuda_session_create_failed_fell_back_to_cpu = false;
 
   // If true, the session is using CUDA EP but is not guaranteed to run on the
   // caller's stream (e.g., user_compute_stream unavailable). Callers
   // integrating with an explicit stream must synchronize for correctness.
   bool cuda_needs_stream_sync = false;
+
+  // Provider/status diagnostics for tools and engine JSON.
+  std::string active_provider;
+  std::string appended_provider;
+  std::vector<std::string> appended_providers;
+  std::string tensorrt_status;
+  std::filesystem::path tensorrt_engine_cache_path;
 
   std::vector<std::string> input_names;
   std::vector<std::string> output_names;
@@ -60,6 +124,65 @@ struct OrtSessionInfo {
   // Non-fatal warnings collected during session creation.
   std::vector<std::string> warnings;
 };
+
+namespace internal {
+
+// Internal seam for session-creation-time provider planning. It is intentionally
+// limited to provider append/session-create outcomes so tests can cover fallback
+// behavior without loading real CUDA/TensorRT ORT providers.
+struct OrtProviderAppendResult {
+  bool appended = false;
+  bool needs_stream_sync = false;
+  std::filesystem::path cache_path;
+  std::string status;
+  std::vector<std::string> warnings;
+};
+
+using OrtProviderAppendFn = OrtProviderAppendResult (*)(
+    void *context, const OrtSessionOptions &opts);
+
+struct OrtProviderAppendHooks {
+  void *context = nullptr;
+  OrtProviderAppendFn append_tensorrt = nullptr;
+  OrtProviderAppendFn append_cuda = nullptr;
+};
+
+enum class OrtSessionCreateAttempt {
+  Initial,
+  TensorRtDisabled,
+  CpuOnly,
+};
+
+struct OrtSessionCreateResult {
+  bool created = false;
+  std::string error;
+};
+
+using OrtSessionCreateFn = OrtSessionCreateResult (*)(
+    void *context, OrtSessionCreateAttempt attempt,
+    const OrtSessionOptions &opts, OrtSessionInfo *info_out);
+
+struct OrtSessionCreateHooks {
+  void *context = nullptr;
+  OrtSessionCreateFn create_session = nullptr;
+};
+
+struct OrtSessionCreatePlanResult {
+  bool created = false;
+  OrtSessionInfo info;
+  std::string error;
+};
+
+OrtSessionInfo PlanOrtProviderAttempt(const OrtRuntimeInfo &runtime,
+                                      const OrtSessionOptions &opts,
+                                      bool tensorrt_ep_v2_build,
+                                      const OrtProviderAppendHooks &hooks);
+
+OrtSessionCreatePlanResult
+CreateOrtSessionWithProviderFallbacks(const OrtSessionOptions &opts,
+                                      const OrtSessionCreateHooks &hooks);
+
+} // namespace internal
 
 // Returns true if the ORT exception text looks like CUDA VRAM exhaustion.
 bool OrtErrorLooksLikeVramOom(const std::string &ort_msg);
@@ -91,6 +214,10 @@ public:
   OrtSession &operator=(const OrtSession &) = delete;
 
   const OrtSessionInfo &info() const;
+
+  // Pre-size reusable run scratch buffers during setup. This is optional, but
+  // realtime callers should use it once binding counts are known.
+  void ReserveRunScratch(std::size_t input_count, std::size_t output_count);
 
   struct RunInput {
     const char *name = nullptr;
@@ -135,6 +262,10 @@ public:
   // stream. In that case, callers integrating with an explicit stream must
   // synchronize before/after this call so producer/consumer kernels see
   // consistent data.
+  //
+  // The wrapper clears bound Ort::Value objects before returning, so caller
+  // owned device buffers only need to remain valid for the duration of this
+  // call and any required caller-side stream synchronization.
   bool RunCudaIoBinding(const CudaBindingInput *inputs, std::size_t input_count,
                         const CudaBindingOutput *outputs,
                         std::size_t output_count, std::string *error);

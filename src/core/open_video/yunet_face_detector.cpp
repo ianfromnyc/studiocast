@@ -67,7 +67,9 @@ JsonObject(const util::json::Value::Object &obj, const std::string &key) {
 void YunetFaceDetector::Reset() {
   initialized_ = false;
   input_is_nhwc_ = false;
+  settings_ = Settings{};
   active_model_id_.clear();
+  active_requested_model_id_.clear();
   active_model_path_.clear();
   session_.reset();
   session_info_ = studiocast::onnx::OrtSessionInfo{};
@@ -285,6 +287,11 @@ bool YunetFaceDetector::EnsureInitialized(const std::string &requested_model_id,
   if (error)
     error->clear();
 
+  if (initialized_ && session_ &&
+      requested_model_id == active_requested_model_id_) {
+    return true;
+  }
+
   ModelPackRegistry reg = ModelPackRegistry::ScanDefault();
   const auto it = reg.Tasks().find("face_detection");
   if (it == reg.Tasks().end() || it->second.empty()) {
@@ -302,6 +309,7 @@ bool YunetFaceDetector::EnsureInitialized(const std::string &requested_model_id,
                                    : requested_model_id;
   if (initialized_ && model_id == active_model_id_) {
     registry_ = std::move(reg);
+    active_requested_model_id_ = requested_model_id;
     return true;
   }
 
@@ -354,6 +362,7 @@ bool YunetFaceDetector::EnsureInitialized(const std::string &requested_model_id,
 
   session_ = std::move(sess);
   active_model_id_ = model_id;
+  active_requested_model_id_ = requested_model_id;
   active_model_path_ = model_path;
 
   std::string bind_err;
