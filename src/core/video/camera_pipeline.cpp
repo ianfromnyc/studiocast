@@ -2145,6 +2145,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     std::optional<studiocast::open_video::ModelPack> pack;
     std::unique_ptr<studiocast::open_cuda::OpenCudaMattingSession> session;
     studiocast::open_video::FrameArtifactCache matte_artifacts;
+    studiocast::open_video::FrameMatteArtifactKey cuda_matte_artifact_key;
+    studiocast::open_video::FrameMatteArtifactKey cpu_matte_artifact_key;
+    bool matte_artifact_keys_valid = false;
 
     // GPU buffers.
     studiocast::cuda::CudaImage frame_rgb; // rgb_u8, WxH
@@ -2237,6 +2240,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       cached_alpha_cpu_valid = false;
       alpha_cpu.clear();
       matte_artifacts.ClearArtifacts();
+      ClearMatteArtifactKeys();
 
       cached_bg_src_path.clear();
       cached_bg_src_mtime = {};
@@ -2254,6 +2258,69 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       initialized = false;
       enabled = false;
       last_error.clear();
+    }
+
+    void ClearMatteArtifactKeys() {
+      cuda_matte_artifact_key = {};
+      cpu_matte_artifact_key = {};
+      matte_artifact_keys_valid = false;
+    }
+
+    void RefreshMatteArtifactKeys(int frame_w, int frame_h) {
+      if (!pack.has_value() || !pack->matting.has_value()) {
+        ClearMatteArtifactKeys();
+        return;
+      }
+
+      const int matte_w = pack->matting->input.width;
+      const int matte_h = pack->matting->input.height;
+      const auto stream_handle = reinterpret_cast<std::uintptr_t>(vb_stream);
+      if (matte_artifact_keys_valid &&
+          cuda_matte_artifact_key.frame_width == frame_w &&
+          cuda_matte_artifact_key.frame_height == frame_h &&
+          cuda_matte_artifact_key.matte_width == matte_w &&
+          cuda_matte_artifact_key.matte_height == matte_h &&
+          cuda_matte_artifact_key.stream == stream_handle) {
+        return;
+      }
+
+      if (matte_artifact_keys_valid) {
+        InvalidateMatteCache();
+      }
+
+      studiocast::open_video::FrameMatteArtifactKey base_key;
+      base_key.provider_id = "open_cuda";
+      base_key.model_id = active_model_id;
+      base_key.frame_width = frame_w;
+      base_key.frame_height = frame_h;
+      base_key.matte_width = matte_w;
+      base_key.matte_height = matte_h;
+      base_key.stream = stream_handle;
+
+      cpu_matte_artifact_key = base_key;
+      cpu_matte_artifact_key.storage =
+          studiocast::open_video::FrameMatteStorage::cpu_f32_alpha;
+      cuda_matte_artifact_key = std::move(base_key);
+      cuda_matte_artifact_key.storage =
+          studiocast::open_video::FrameMatteStorage::cuda_f32_alpha;
+      matte_artifact_keys_valid = true;
+    }
+
+    const studiocast::open_video::FrameMatteArtifactKey *
+    MatteArtifactKeyForStorage(
+        studiocast::open_video::FrameMatteStorage storage) const {
+      if (!matte_artifact_keys_valid) {
+        return nullptr;
+      }
+      switch (storage) {
+      case studiocast::open_video::FrameMatteStorage::cpu_f32_alpha:
+        return &cpu_matte_artifact_key;
+      case studiocast::open_video::FrameMatteStorage::cuda_f32_alpha:
+        return &cuda_matte_artifact_key;
+      case studiocast::open_video::FrameMatteStorage::maxine_gpu_alpha:
+        return nullptr;
+      }
+      return nullptr;
     }
 
     bool EnsureInitialized(
@@ -2357,6 +2424,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           cached_alpha_cpu_valid = false;
           alpha_cpu.clear();
           matte_artifacts.ClearArtifacts();
+          ClearMatteArtifactKeys();
         }
 
         const auto p = reg.Find("matting", requested_model_id);
@@ -2471,6 +2539,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       // Strength is the canonical knob; clamp once for deterministic behavior.
       (void)fx;
 
+      RefreshMatteArtifactKeys(frame_w, frame_h);
+
       initialized = true;
       enabled = true;
       return true;
@@ -2572,23 +2642,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return true;
     }
 
-    studiocast::open_video::FrameMatteArtifactKey
-    BuildMatteArtifactKey(studiocast::open_video::FrameMatteStorage storage,
-                          int width, int height) const {
-      studiocast::open_video::FrameMatteArtifactKey key;
-      key.provider_id = "open_cuda";
-      key.model_id = active_model_id;
-      key.storage = storage;
-      key.frame_width = width;
-      key.frame_height = height;
-      if (pack.has_value() && pack->matting.has_value()) {
-        key.matte_width = pack->matting->input.width;
-        key.matte_height = pack->matting->input.height;
-      }
-      key.stream = reinterpret_cast<std::uintptr_t>(vb_stream);
-      return key;
-    }
-
     void PublishMatteArtifact(
         std::uint64_t capture_sequence,
         const studiocast::open_video::FrameMatteArtifactKey &key,
@@ -2628,11 +2681,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      const auto matte_key = BuildMatteArtifactKey(
-          studiocast::open_video::FrameMatteStorage::cuda_f32_alpha, width,
-          height);
+      const auto *matte_key = MatteArtifactKeyForStorage(
+          studiocast::open_video::FrameMatteStorage::cuda_f32_alpha);
+      if (!matte_key) {
+        if (error)
+          *error = "Open CUDA: matte artifact key not initialized.";
+        return false;
+      }
       if (cached_matte_valid && cached_matte_sequence == capture_sequence &&
-          matte_artifacts.FindMatte(capture_sequence, matte_key)) {
+          matte_artifacts.FindMatte(capture_sequence, *matte_key)) {
         return true;
       }
 
@@ -2646,7 +2703,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       cached_matte_valid = true;
       cached_matte_sequence = capture_sequence;
       cached_alpha_cpu_valid = false;
-      PublishMatteArtifact(capture_sequence, matte_key,
+      PublishMatteArtifact(capture_sequence, *matte_key,
                            static_cast<std::uintptr_t>(alpha_tensor.ptr),
                            static_cast<std::uintptr_t>(alpha_model_view.ptr));
       return true;
@@ -2676,11 +2733,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      const auto matte_key = BuildMatteArtifactKey(
-          studiocast::open_video::FrameMatteStorage::cuda_f32_alpha, width,
-          height);
+      const auto *matte_key = MatteArtifactKeyForStorage(
+          studiocast::open_video::FrameMatteStorage::cuda_f32_alpha);
+      if (!matte_key) {
+        if (error)
+          *error = "Open CUDA: matte artifact key not initialized.";
+        return false;
+      }
       if (cached_matte_valid && cached_matte_sequence == capture_sequence &&
-          matte_artifacts.FindMatte(capture_sequence, matte_key)) {
+          matte_artifacts.FindMatte(capture_sequence, *matte_key)) {
         return true;
       }
 
@@ -2703,7 +2764,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       cached_matte_valid = true;
       cached_matte_sequence = capture_sequence;
       cached_alpha_cpu_valid = false;
-      PublishMatteArtifact(capture_sequence, matte_key,
+      PublishMatteArtifact(capture_sequence, *matte_key,
                            static_cast<std::uintptr_t>(alpha_tensor.ptr),
                            static_cast<std::uintptr_t>(alpha_model_view.ptr));
       return true;
@@ -2726,13 +2787,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (out_alpha_h)
         *out_alpha_h = 0;
 
-      if (cached_alpha_cpu_valid &&
+      if (width > 0 && height > 0) {
+        RefreshMatteArtifactKeys(width, height);
+      }
+      const auto *cached_cpu_matte_key = MatteArtifactKeyForStorage(
+          studiocast::open_video::FrameMatteStorage::cpu_f32_alpha);
+      if (width > 0 && height > 0 && cached_cpu_matte_key &&
+          cached_alpha_cpu_valid &&
           cached_alpha_cpu_sequence == capture_sequence &&
-          matte_artifacts.FindMatte(
-              capture_sequence,
-              BuildMatteArtifactKey(
-                  studiocast::open_video::FrameMatteStorage::cpu_f32_alpha,
-                  width, height))) {
+          matte_artifacts.FindMatte(capture_sequence,
+                                    *cached_cpu_matte_key)) {
         if (out_alpha)
           *out_alpha = &alpha_cpu;
         if (pack.has_value()) {
@@ -2778,11 +2842,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       cached_alpha_cpu_valid = true;
       cached_alpha_cpu_sequence = capture_sequence;
-      const auto cpu_matte_key = BuildMatteArtifactKey(
-          studiocast::open_video::FrameMatteStorage::cpu_f32_alpha, width,
-          height);
+      const auto *cpu_matte_key = MatteArtifactKeyForStorage(
+          studiocast::open_video::FrameMatteStorage::cpu_f32_alpha);
+      if (!cpu_matte_key) {
+        if (error)
+          *error = "Open CUDA: matte artifact key not initialized.";
+        return false;
+      }
       PublishMatteArtifact(
-          capture_sequence, cpu_matte_key,
+          capture_sequence, *cpu_matte_key,
           reinterpret_cast<std::uintptr_t>(alpha_cpu.data()),
           static_cast<std::uintptr_t>(alpha_cpu.size()));
       if (out_alpha)

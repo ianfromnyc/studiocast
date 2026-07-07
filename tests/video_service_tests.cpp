@@ -23,6 +23,7 @@ bool TestFrameArtifactCacheReusesCompatibleMatteWithinFrame();
 bool TestFrameArtifactCacheReusesCompatibleMaxineMatteWithinFrame();
 bool TestFrameArtifactCacheSeparatesIncompatibleMatteKeys();
 bool TestFrameArtifactCacheInvalidatesMatteOnNewFrame();
+bool TestFrameArtifactCachePrecomputedMatteKeysPreserveCompatibility();
 bool TestV4l2CapturePreferenceTreats720pAsMjpegWorthy();
 bool TestV4l2YuyvRequestTriesMjpegFirstAtHdWhenPreferred();
 bool TestV4l2YuyvRequestFallsBackToMjpegAfterYuyvAtLowResolution();
@@ -909,6 +910,9 @@ int main() {
        &studiocast::tests::TestFrameArtifactCacheSeparatesIncompatibleMatteKeys},
       {"frame artifact cache invalidates matte on new frame",
        &studiocast::tests::TestFrameArtifactCacheInvalidatesMatteOnNewFrame},
+      {"frame artifact cache precomputed matte keys preserve compatibility",
+       &studiocast::tests::
+           TestFrameArtifactCachePrecomputedMatteKeysPreserveCompatibility},
       {"V4L2 capture treats 720p as MJPEG-worthy",
        &studiocast::tests::TestV4l2CapturePreferenceTreats720pAsMjpegWorthy},
       {"V4L2 YUYV request tries MJPEG first at HD when preferred",
