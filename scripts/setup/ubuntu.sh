@@ -87,6 +87,18 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "[setup] Missing required command: $1"; exit 1; }
 }
 
+onnxruntime_package_name() {
+  local arch="$1"
+  local flavor="$2"
+  local version="$3"
+
+  if [[ "${flavor}" == "cpu" ]]; then
+    printf 'onnxruntime-linux-%s-%s\n' "${arch}" "${version}"
+  else
+    printf 'onnxruntime-linux-%s-%s-%s\n' "${arch}" "${flavor}" "${version}"
+  fi
+}
+
 APT_ARGS=()
 APT_GET_ARGS=()
 
@@ -106,12 +118,14 @@ ensure_onnxruntime_available() {
     return 0
   fi
 
-  local ort_tgz="onnxruntime-linux-${ORT_ARCH}-${ORT_FLAVOR}-${ORT_VERSION}.tgz"
+  local ort_name
+  ort_name="$(onnxruntime_package_name "${ORT_ARCH}" "${ORT_FLAVOR}" "${ORT_VERSION}")"
+  local ort_tgz="${ort_name}.tgz"
   local ort_url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ort_tgz}"
 
   # Install location for the extracted upstream tarball.
   local ort_prefix="/opt/studiocast/onnxruntime/${ORT_VERSION}"
-  local ort_root="${ort_prefix}/onnxruntime-linux-${ORT_ARCH}-${ORT_FLAVOR}-${ORT_VERSION}"
+  local ort_root="${ort_prefix}/${ort_name}"
 
   local tmpdir
   tmpdir="$(mktemp -d)"
