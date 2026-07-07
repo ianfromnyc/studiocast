@@ -1155,6 +1155,15 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   // Negotiated formats (what the driver actually gave us / accepted).
   oss << "\"capture_format\":" << CaptureFormatToJson(st.pipeline.capture)
       << ",";
+  oss << "\"capture_fallback\":{";
+  oss << "\"state\":\""
+      << JsonEscape(st.pipeline.capture_fallback_state.empty()
+                        ? std::string("none")
+                        : st.pipeline.capture_fallback_state)
+      << "\",";
+  oss << "\"reason\":\""
+      << JsonEscape(st.pipeline.capture_fallback_reason) << "\"";
+  oss << "},";
   oss << "\"output_format\":" << ActualFormatToJson(st.pipeline.output) << ",";
 
   // Scaling status (active backend + from/to formats).
@@ -1415,11 +1424,12 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
 
   std::string audioSourceResolved =
       ast.selected_source.empty() ? acfg.source_name : ast.selected_source;
-  std::string audioSourceError;
-  std::vector<std::string> audioSourceWarnings;
+  std::string audioSourceError = ast.source_error;
+  std::vector<std::string> audioSourceWarnings = ast.source_warnings;
   {
     std::string reason;
-    if (studiocast::audio::IsUnsafeInputSourceName(acfg.source_name, &reason)) {
+    if (audioSourceError.empty() &&
+        studiocast::audio::IsUnsafeInputSourceName(acfg.source_name, &reason)) {
       audioSourceError = reason;
     }
   }
@@ -1449,6 +1459,10 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"source_resolved\":\""
       << JsonEscape(audioSourceResolved.empty() ? std::string("auto")
                                                 : audioSourceResolved)
+      << "\",";
+  oss << "\"source_availability\":\""
+      << JsonEscape(ast.source_availability.empty() ? std::string("unknown")
+                                                    : ast.source_availability)
       << "\",";
   oss << "\"source_error\":\"" << JsonEscape(audioSourceError) << "\",";
   oss << "\"source_warnings\":[";

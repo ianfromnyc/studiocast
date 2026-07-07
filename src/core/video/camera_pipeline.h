@@ -74,6 +74,11 @@ struct CameraPipelineStatus {
   CaptureFormat capture{};
   ActualFormat output{};
 
+  // Runtime capture fallback state. Common values: "none" or
+  // "raw_after_mjpeg_decode_failure".
+  std::string capture_fallback_state = "none";
+  std::string capture_fallback_reason;
+
   // Active output-scaling backend.
   // Common values: "cpu", "gpu:maxine", "gpu:open_cuda" (empty when idle)
   std::string scaling_backend_active;
@@ -289,6 +294,8 @@ private:
   std::string output_device_;
   CaptureFormat capture_{};
   ActualFormat output_{};
+  std::string capture_fallback_state_ = "none";
+  std::string capture_fallback_reason_;
   std::string scaling_backend_active_;
   CaptureFormat scaling_from_{};
   ActualFormat scaling_to_{};

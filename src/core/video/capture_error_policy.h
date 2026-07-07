@@ -2,6 +2,8 @@
 
 #include <string_view>
 
+#include "core/video/v4l2_capture.h"
+
 namespace studiocast::video {
 
 // Centralized policy for deciding whether a capture failure should be treated
@@ -22,6 +24,12 @@ inline bool IsRecoverableCaptureAcquireFailure(std::string_view err) {
     return true;
 
   return false;
+}
+
+inline bool ShouldFallbackToRawAfterMjpegDecodeFailure(
+    const CaptureFormat &capture, bool fallback_already_attempted) {
+  return capture.format == CapturePixelFormat::mjpeg &&
+         !fallback_already_attempted;
 }
 
 } // namespace studiocast::video

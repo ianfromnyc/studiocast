@@ -19,6 +19,21 @@ enum class CapturePixelFormat {
 // but can do 1080p+ in MJPEG).
 bool ShouldPreferMjpegForResolution(int width, int height);
 
+struct CaptureFormatSupport {
+  bool yuyv = false;
+
+  // True when either MJPEG or JPEG compressed capture is supported.
+  bool mjpeg = false;
+};
+
+// Pure negotiation helper used by `V4l2Capture::Open()` and tests. It returns
+// the pixel-format attempt order after applying MJPEG preference and removing
+// unsupported YUYV/MJPEG attempts.
+std::vector<CapturePixelFormat>
+CaptureFormatTryOrderForRequest(CapturePixelFormat requested,
+                                bool prefer_mjpeg, int width, int height,
+                                CaptureFormatSupport support);
+
 struct CaptureFormat {
   int width = 0;
   int height = 0;

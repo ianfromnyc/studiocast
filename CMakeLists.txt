@@ -694,6 +694,10 @@ if (BUILD_TESTING)
             "${STUDIOCAST_GENERATED_DIR}"
     )
 
+    target_compile_definitions(studiocast-maxine-paths-tests PRIVATE
+            STUDIOCAST_CXX_COMPILER="${CMAKE_CXX_COMPILER}"
+    )
+
     studiocast_set_project_warnings(studiocast-maxine-paths-tests)
     studiocast_enable_sanitizers(studiocast-maxine-paths-tests)
 
@@ -951,6 +955,8 @@ if (BUILD_TESTING)
             tests/video_service_tests.cpp
             tests/latest_frame_wins_worker_tests.cpp
             tests/open_video_denoise_contract_tests.cpp
+            tests/frame_artifact_cache_tests.cpp
+            tests/v4l2_capture_negotiation_tests.cpp
     )
 
     target_link_libraries(studiocast-video-tests PRIVATE studiocast_core)

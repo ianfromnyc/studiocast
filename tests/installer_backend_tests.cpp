@@ -219,6 +219,127 @@ bool TestStatusReportsOptionalComponents() {
                         "docs/maxine_install.md");
 }
 
+bool IsSkippedPackageSafetyDir(const fs::path &p) {
+  const std::string name = p.filename().string();
+  return name == ".git" || name == ".idea" || name == "build" ||
+         name.rfind("cmake-build", 0) == 0;
+}
+
+bool IsForbiddenBundledMaxineArtifact(const fs::path &p) {
+  const std::string name = p.filename().string();
+  const char *forbidden_prefixes[] = {
+      "libVideoFX.so",       "libnvvfx.so",
+      "libNvVFX.so",         "libnvVideoEffects.so",
+      "libNVVideoEffects.so", "libnvARPose.so",
+      "libnvar.so",          "libNvAR.so",
+      "libnv_audiofx.so",    "NVIDIA_VFX_SDK_linux",
+      "NVIDIA_AR_SDK_linux", "Audio_Effects_SDK.tar",
+  };
+  for (const char *prefix : forbidden_prefixes) {
+    if (name.rfind(prefix, 0) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool CmakeInstallBlocksContainForbiddenMaxineArtifact(const std::string &cmake,
+                                                      std::string *matched) {
+  const std::string forbidden[] = {
+      "VideoFX",       "ARSDK",          "Audio_Effects_SDK",
+      "libVideoFX.so", "libnv_audiofx.so", "libnvARPose.so",
+  };
+
+  std::size_t pos = 0;
+  while ((pos = cmake.find("install(", pos)) != std::string::npos) {
+    std::size_t end = cmake.find("\n)", pos);
+    if (end == std::string::npos) {
+      end = cmake.find(')', pos);
+    }
+    if (end == std::string::npos) {
+      end = cmake.size();
+    }
+    const std::string block = cmake.substr(pos, end - pos + 1);
+    for (const std::string &needle : forbidden) {
+      if (block.find(needle) != std::string::npos) {
+        if (matched)
+          *matched = needle;
+        return true;
+      }
+    }
+    pos = end + 1;
+  }
+  return false;
+}
+
+bool TestPackageSafetyDoesNotBundleOrInstallMaxineArtifacts() {
+  const fs::path repo = fs::path(STUDIOCAST_SOURCE_DIR);
+  if (!Expect(!repo.empty() && fs::exists(repo),
+              "source directory should exist for package safety test")) {
+    return false;
+  }
+
+  std::error_code ec;
+  for (fs::recursive_directory_iterator it(repo, ec), end; it != end;
+       it.increment(ec)) {
+    if (ec) {
+      std::cerr << "repository walk failed: " << ec.message() << "\n";
+      return false;
+    }
+    if (it->is_directory(ec) && IsSkippedPackageSafetyDir(it->path())) {
+      it.disable_recursion_pending();
+      continue;
+    }
+    if (it->is_regular_file(ec) &&
+        IsForbiddenBundledMaxineArtifact(it->path())) {
+      std::cerr << "forbidden bundled Maxine SDK artifact found: "
+                << it->path() << "\n";
+      return false;
+    }
+  }
+
+  const std::string cmake =
+      [&] {
+        std::ifstream in(repo / "CMakeLists.txt");
+        return std::string(std::istreambuf_iterator<char>(in),
+                           std::istreambuf_iterator<char>());
+      }();
+  std::string matched;
+  if (CmakeInstallBlocksContainForbiddenMaxineArtifact(cmake, &matched)) {
+    std::cerr << "CMake install/package surface mentions forbidden Maxine "
+                 "artifact pattern: "
+              << matched << "\n";
+    return false;
+  }
+
+  ScopedTempDir temp("studiocast-installer-backend-maxine-safety");
+  if (!Expect(temp.ok(), temp.error().c_str()))
+    return false;
+
+  studiocast::util::ExecCaptureOptions options;
+  options.timeout_ms = 10000;
+  const auto result = studiocast::util::ExecCapture(
+      BackendCommand(temp, "plan repair --json"), options);
+
+  return Expect(result.exit_code == 0,
+                "installer backend plan repair should exit successfully") &&
+         Expect(result.stdout_str.find("scripts/setup/maxine.sh") ==
+                    std::string::npos,
+                "default installer plan should not run Maxine setup") &&
+         Expect(result.stdout_str.find("install_feature.sh") ==
+                    std::string::npos,
+                "default installer plan should not run Maxine feature "
+                "installers") &&
+         Expect(result.stdout_str.find("download_features.sh") ==
+                    std::string::npos,
+                "default installer plan should not run Maxine feature "
+                "downloaders") &&
+         Expect(result.stdout_str.find("NGC_API_KEY") == std::string::npos &&
+                    result.stdout_str.find("NGC_CLI_API_KEY") ==
+                        std::string::npos,
+                "default installer plan should not mention NGC secrets");
+}
+
 bool TestUserServiceDryRunRestartsServiceAfterInstall() {
   ScopedTempDir temp("studiocast-user-service-dry-run");
   if (!Expect(temp.ok(), temp.error().c_str()))
@@ -271,6 +392,7 @@ int main() {
   ok = TestRepairPlanCanDisableOpenBackendConfigureFlags() && ok;
   ok = TestRepairDryRunIncludesOpenBackendConfigureFlags() && ok;
   ok = TestStatusReportsOptionalComponents() && ok;
+  ok = TestPackageSafetyDoesNotBundleOrInstallMaxineArtifacts() && ok;
   ok = TestUserServiceDryRunRestartsServiceAfterInstall() && ok;
   return ok ? 0 : 1;
 }

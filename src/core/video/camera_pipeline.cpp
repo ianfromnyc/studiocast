@@ -424,6 +424,8 @@ CameraPipelineStatus CameraPipeline::Status() const {
   if (running_ || starting_) {
     s.capture = capture_;
     s.output = output_;
+    s.capture_fallback_state = capture_fallback_state_;
+    s.capture_fallback_reason = capture_fallback_reason_;
     s.scaling_backend_active = scaling_backend_active_;
     s.scaling_from = scaling_from_;
     s.scaling_to = scaling_to_;
@@ -442,6 +444,8 @@ CameraPipelineStatus CameraPipeline::Status() const {
     // attempting to renegotiate caps.
     s.capture = CaptureFormat{};
     s.output = writer_.IsOpen() ? writer_.Actual() : ActualFormat{};
+    s.capture_fallback_state = "none";
+    s.capture_fallback_reason.clear();
     s.scaling_backend_active.clear();
     s.scaling_from = CaptureFormat{};
     s.scaling_to = ActualFormat{};
@@ -511,6 +515,8 @@ bool CameraPipeline::Start(const CameraPipelineConfig &cfg,
   output_device_.clear();
   capture_ = CaptureFormat{};
   output_ = ActualFormat{};
+  capture_fallback_state_ = "none";
+  capture_fallback_reason_.clear();
   scaling_backend_active_.clear();
   scaling_from_ = CaptureFormat{};
   scaling_to_ = ActualFormat{};
@@ -892,6 +898,8 @@ void CameraPipeline::Stop() {
       starting_ = false;
       capture_ = CaptureFormat{};
       output_ = ActualFormat{};
+      capture_fallback_state_ = "none";
+      capture_fallback_reason_.clear();
       scaling_backend_active_.clear();
       scaling_from_ = CaptureFormat{};
       scaling_to_ = ActualFormat{};
@@ -906,6 +914,8 @@ void CameraPipeline::Stop() {
   starting_ = false;
   capture_ = CaptureFormat{};
   output_ = ActualFormat{};
+  capture_fallback_state_ = "none";
+  capture_fallback_reason_.clear();
   scaling_backend_active_.clear();
   scaling_from_ = CaptureFormat{};
   scaling_to_ = ActualFormat{};
@@ -1001,7 +1011,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   }
 
-  const auto capA = cap.Actual();
+  auto capA = cap.Actual();
 
   // Open (or reuse) writer to v4l2loopback output.
   {
@@ -2134,6 +2144,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     std::optional<studiocast::open_video::ModelPack> pack;
     std::unique_ptr<studiocast::open_cuda::OpenCudaMattingSession> session;
+    studiocast::open_video::FrameArtifactCache matte_artifacts;
 
     // GPU buffers.
     studiocast::cuda::CudaImage frame_rgb; // rgb_u8, WxH
@@ -2225,6 +2236,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       cached_alpha_cpu_sequence = 0;
       cached_alpha_cpu_valid = false;
       alpha_cpu.clear();
+      matte_artifacts.ClearArtifacts();
 
       cached_bg_src_path.clear();
       cached_bg_src_mtime = {};
@@ -2344,6 +2356,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           cached_alpha_cpu_sequence = 0;
           cached_alpha_cpu_valid = false;
           alpha_cpu.clear();
+          matte_artifacts.ClearArtifacts();
         }
 
         const auto p = reg.Find("matting", requested_model_id);
@@ -2559,12 +2572,41 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return true;
     }
 
+    studiocast::open_video::FrameMatteArtifactKey
+    BuildMatteArtifactKey(studiocast::open_video::FrameMatteStorage storage,
+                          int width, int height) const {
+      studiocast::open_video::FrameMatteArtifactKey key;
+      key.provider_id = "open_cuda";
+      key.model_id = active_model_id;
+      key.storage = storage;
+      key.frame_width = width;
+      key.frame_height = height;
+      if (pack.has_value() && pack->matting.has_value()) {
+        key.matte_width = pack->matting->input.width;
+        key.matte_height = pack->matting->input.height;
+      }
+      key.stream = reinterpret_cast<std::uintptr_t>(vb_stream);
+      return key;
+    }
+
+    void PublishMatteArtifact(
+        std::uint64_t capture_sequence,
+        const studiocast::open_video::FrameMatteArtifactKey &key,
+        std::uintptr_t handle, std::uintptr_t aux_handle = 0) {
+      studiocast::open_video::FrameMatteArtifact artifact;
+      artifact.key = key;
+      artifact.handle = handle;
+      artifact.aux_handle = aux_handle;
+      (void)matte_artifacts.StoreMatte(capture_sequence, std::move(artifact));
+    }
+
     void InvalidateMatteCache() {
       cached_matte_sequence = 0;
       cached_matte_valid = false;
       cached_alpha_cpu_sequence = 0;
       cached_alpha_cpu_valid = false;
       alpha_cpu.clear();
+      matte_artifacts.ClearArtifacts();
     }
 
     // Ensure matting inference has been run for this frame, using a GPU input
@@ -2586,7 +2628,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      if (cached_matte_valid && cached_matte_sequence == capture_sequence) {
+      const auto matte_key = BuildMatteArtifactKey(
+          studiocast::open_video::FrameMatteStorage::cuda_f32_alpha, width,
+          height);
+      if (cached_matte_valid && cached_matte_sequence == capture_sequence &&
+          matte_artifacts.FindMatte(capture_sequence, matte_key)) {
         return true;
       }
 
@@ -2600,6 +2646,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       cached_matte_valid = true;
       cached_matte_sequence = capture_sequence;
       cached_alpha_cpu_valid = false;
+      PublishMatteArtifact(capture_sequence, matte_key,
+                           static_cast<std::uintptr_t>(alpha_tensor.ptr),
+                           static_cast<std::uintptr_t>(alpha_model_view.ptr));
       return true;
     }
 
@@ -2627,7 +2676,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      if (cached_matte_valid && cached_matte_sequence == capture_sequence) {
+      const auto matte_key = BuildMatteArtifactKey(
+          studiocast::open_video::FrameMatteStorage::cuda_f32_alpha, width,
+          height);
+      if (cached_matte_valid && cached_matte_sequence == capture_sequence &&
+          matte_artifacts.FindMatte(capture_sequence, matte_key)) {
         return true;
       }
 
@@ -2650,6 +2703,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       cached_matte_valid = true;
       cached_matte_sequence = capture_sequence;
       cached_alpha_cpu_valid = false;
+      PublishMatteArtifact(capture_sequence, matte_key,
+                           static_cast<std::uintptr_t>(alpha_tensor.ptr),
+                           static_cast<std::uintptr_t>(alpha_model_view.ptr));
       return true;
     }
 
@@ -2671,7 +2727,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         *out_alpha_h = 0;
 
       if (cached_alpha_cpu_valid &&
-          cached_alpha_cpu_sequence == capture_sequence) {
+          cached_alpha_cpu_sequence == capture_sequence &&
+          matte_artifacts.FindMatte(
+              capture_sequence,
+              BuildMatteArtifactKey(
+                  studiocast::open_video::FrameMatteStorage::cpu_f32_alpha,
+                  width, height))) {
         if (out_alpha)
           *out_alpha = &alpha_cpu;
         if (pack.has_value()) {
@@ -2717,6 +2778,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       cached_alpha_cpu_valid = true;
       cached_alpha_cpu_sequence = capture_sequence;
+      const auto cpu_matte_key = BuildMatteArtifactKey(
+          studiocast::open_video::FrameMatteStorage::cpu_f32_alpha, width,
+          height);
+      PublishMatteArtifact(
+          capture_sequence, cpu_matte_key,
+          reinterpret_cast<std::uintptr_t>(alpha_cpu.data()),
+          static_cast<std::uintptr_t>(alpha_cpu.size()));
       if (out_alpha)
         *out_alpha = &alpha_cpu;
       if (out_alpha_w)
@@ -3710,7 +3778,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       const float intensity01 =
-          std::clamp(fx.virtual_key_light.intensity / 100.0f, 0.0f, 1.0f);
+          Clamp01FromPercent(fx.virtual_key_light.intensity);
       if (intensity01 <= 0.0001f) {
         return true;
       }
@@ -3846,7 +3914,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       const float intensity01 =
-          std::clamp(fx.virtual_key_light.intensity / 100.0f, 0.0f, 1.0f);
+          Clamp01FromPercent(fx.virtual_key_light.intensity);
       if (intensity01 <= 0.0001f) {
         return true;
       }
@@ -6812,6 +6880,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   int output_format_changes = 0;
   int output_refresh_failures = 0;
   int output_write_recoveries = 0;
+  bool raw_capture_fallback_attempted = false;
 
   auto ActualFormatToString = [](const ActualFormat &a) {
     std::ostringstream oss;
@@ -6829,6 +6898,61 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
   constexpr int kOutputRefreshEveryFrames = 30;
   int frames_until_output_refresh = kOutputRefreshEveryFrames;
+
+  auto TryRawCaptureFallbackAfterMjpegFailure =
+      [&](const std::string &reason, std::string *error) -> bool {
+    if (error)
+      error->clear();
+    if (!ShouldFallbackToRawAfterMjpegDecodeFailure(
+            capA, raw_capture_fallback_attempted)) {
+      if (error)
+        *error = reason;
+      return false;
+    }
+
+    raw_capture_fallback_attempted = true;
+    const int old_w = capA.width;
+    const int old_h = capA.height;
+    const int fallback_fps = capA.fps > 0 ? capA.fps : cfg.fps;
+
+    std::string open_err;
+    if (!cap.Open(inDev, old_w, old_h, fallback_fps, CapturePixelFormat::yuyv,
+                  /*prefer_mjpeg=*/false, &open_err)) {
+      if (error)
+        *error = reason + " Raw YUYV fallback failed: " + open_err;
+      return false;
+    }
+
+    CaptureFormat fallback = cap.Actual();
+    if (fallback.format != CapturePixelFormat::yuyv || fallback.width != old_w ||
+        fallback.height != old_h) {
+      if (error) {
+        std::ostringstream oss;
+        oss << reason << " Raw YUYV fallback negotiated "
+            << fallback.width << "x" << fallback.height << " "
+            << fallback.pixfmt << ", expected " << old_w << "x" << old_h
+            << " YUYV.";
+        *error = oss.str();
+      }
+      return false;
+    }
+
+    capA = fallback;
+    rgbStride = rgb.stride_bytes;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      capture_ = capA;
+      scaling_from_ = capA;
+      capture_fallback_state_ = "raw_after_mjpeg_decode_failure";
+      capture_fallback_reason_ = reason;
+    }
+
+    if (debug_v4l2_neg) {
+      std::fprintf(stderr, "capture fallback: %s; reopened %s as %s\n",
+                   reason.c_str(), inDev.c_str(), capA.pixfmt.c_str());
+    }
+    return true;
+  };
 
   auto RefreshOutputActual = [&](const char *reason, bool force) -> bool {
     if (!writer_.IsOpen())
@@ -6962,8 +7086,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (f.bytes == 0) {
         std::string rerr;
         (void)cap.ReleaseFrame(f, &rerr);
+        std::string fallback_err;
+        if (TryRawCaptureFallbackAfterMjpegFailure(
+                "MJPEG frame was empty (bytesused=0).", &fallback_err)) {
+          continue;
+        }
         std::lock_guard<std::mutex> lock(mu_);
-        last_error_ = "MJPEG frame was empty (bytesused=0).";
+        last_error_ = fallback_err.empty()
+                          ? "MJPEG frame was empty (bytesused=0)."
+                          : fallback_err;
         break;
       }
       int decW = 0;
@@ -6972,22 +7103,32 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (!DecodeMjpegToRgb24(f.data, f.bytes, rgb, decW, decH, &decErr)) {
         std::string rerr;
         (void)cap.ReleaseFrame(f, &rerr);
-        std::lock_guard<std::mutex> lock(mu_);
-        last_error_ = "MJPEG decode failed";
+        std::string reason = "MJPEG decode failed";
         if (!decErr.empty())
-          last_error_ += ": " + decErr;
-        last_error_ += ".";
+          reason += ": " + decErr;
+        reason += ".";
+        std::string fallback_err;
+        if (TryRawCaptureFallbackAfterMjpegFailure(reason, &fallback_err)) {
+          continue;
+        }
+        std::lock_guard<std::mutex> lock(mu_);
+        last_error_ = fallback_err.empty() ? reason : fallback_err;
         break;
       }
 
       if (decW != capA.width || decH != capA.height) {
         std::string rerr;
         (void)cap.ReleaseFrame(f, &rerr);
-        std::lock_guard<std::mutex> lock(mu_);
         std::ostringstream oss;
         oss << "MJPEG decode size mismatch: got " << decW << "x" << decH
             << ", expected " << capA.width << "x" << capA.height << ".";
-        last_error_ = oss.str();
+        const std::string reason = oss.str();
+        std::string fallback_err;
+        if (TryRawCaptureFallbackAfterMjpegFailure(reason, &fallback_err)) {
+          continue;
+        }
+        std::lock_guard<std::mutex> lock(mu_);
+        last_error_ = fallback_err.empty() ? reason : fallback_err;
         break;
       }
 

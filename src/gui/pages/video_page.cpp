@@ -249,6 +249,8 @@ struct DaemonVideoStatus {
 
   NegotiatedFormat capture_format;
   NegotiatedFormat output_format;
+  QString capture_fallback_state;
+  QString capture_fallback_reason;
 
   // Output scaling info (from daemon status).
   QString scaling_backend_active;
@@ -363,6 +365,11 @@ bool ParseDaemonStatusJson(const std::string &json, DaemonVideoStatus *out,
 
   out->capture_format = parseFormat(video.value("capture_format").toObject());
   out->output_format = parseFormat(video.value("output_format").toObject());
+  const QJsonObject captureFallback =
+      video.value("capture_fallback").toObject();
+  out->capture_fallback_state =
+      captureFallback.value("state").toString(QStringLiteral("none"));
+  out->capture_fallback_reason = captureFallback.value("reason").toString();
 
   const QJsonObject scaling = video.value("scaling").toObject();
   if (!scaling.isEmpty()) {
@@ -3872,6 +3879,14 @@ void VideoPage::UpdateStatusText() {
   if (st.pipeline_running) {
     oss << "  Capture:    "
         << fmtLine(st.capture_format, /*withPixfmtFirst=*/true) << "\n";
+    if (!st.capture_fallback_state.isEmpty() &&
+        st.capture_fallback_state != QStringLiteral("none")) {
+      oss << "  Fallback:   " << st.capture_fallback_state.toStdString();
+      if (!st.capture_fallback_reason.isEmpty()) {
+        oss << " (" << st.capture_fallback_reason.toStdString() << ")";
+      }
+      oss << "\n";
+    }
     oss << "  Output:     "
         << fmtLine(st.output_format, /*withPixfmtFirst=*/false) << "\n";
 

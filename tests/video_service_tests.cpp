@@ -19,6 +19,18 @@ bool TestLatestFrameWinsStopWakesAndJoins();
 bool TestLatestFrameWinsGenerationRejectsStaleResults();
 bool TestLatestFrameWinsStatsCountersAndLastError();
 bool TestFastDvdnetDenoiseTensorContractIsDeclared();
+bool TestFrameArtifactCacheReusesCompatibleMatteWithinFrame();
+bool TestFrameArtifactCacheReusesCompatibleMaxineMatteWithinFrame();
+bool TestFrameArtifactCacheSeparatesIncompatibleMatteKeys();
+bool TestFrameArtifactCacheInvalidatesMatteOnNewFrame();
+bool TestV4l2CapturePreferenceTreats720pAsMjpegWorthy();
+bool TestV4l2YuyvRequestTriesMjpegFirstAtHdWhenPreferred();
+bool TestV4l2YuyvRequestFallsBackToMjpegAfterYuyvAtLowResolution();
+bool TestV4l2YuyvRequestDoesNotAddMjpegFallbackWhenPreferenceDisabled();
+bool TestV4l2UnsupportedFormatsAreSkippedWithoutDuplicates();
+bool TestV4l2ExplicitMjpegRequestDoesNotFallBackToYuyvInsideOpenOrder();
+bool TestV4l2FakeNegotiationUsesOrderedFallback();
+bool TestV4l2MjpegDecodeFailureFallsBackToRawOnce();
 } // namespace studiocast::tests
 
 namespace {
@@ -887,6 +899,37 @@ int main() {
        &studiocast::tests::TestLatestFrameWinsStatsCountersAndLastError},
       {"FastDVDnet denoise tensor contract is declared",
        &studiocast::tests::TestFastDvdnetDenoiseTensorContractIsDeclared},
+      {"frame artifact cache reuses compatible matte within frame",
+       &studiocast::tests::
+           TestFrameArtifactCacheReusesCompatibleMatteWithinFrame},
+      {"frame artifact cache reuses compatible Maxine matte within frame",
+       &studiocast::tests::
+           TestFrameArtifactCacheReusesCompatibleMaxineMatteWithinFrame},
+      {"frame artifact cache separates incompatible matte keys",
+       &studiocast::tests::TestFrameArtifactCacheSeparatesIncompatibleMatteKeys},
+      {"frame artifact cache invalidates matte on new frame",
+       &studiocast::tests::TestFrameArtifactCacheInvalidatesMatteOnNewFrame},
+      {"V4L2 capture treats 720p as MJPEG-worthy",
+       &studiocast::tests::TestV4l2CapturePreferenceTreats720pAsMjpegWorthy},
+      {"V4L2 YUYV request tries MJPEG first at HD when preferred",
+       &studiocast::tests::
+           TestV4l2YuyvRequestTriesMjpegFirstAtHdWhenPreferred},
+      {"V4L2 YUYV request falls back to MJPEG after YUYV at low resolution",
+       &studiocast::tests::
+           TestV4l2YuyvRequestFallsBackToMjpegAfterYuyvAtLowResolution},
+      {"V4L2 YUYV request does not add MJPEG fallback when disabled",
+       &studiocast::tests::
+           TestV4l2YuyvRequestDoesNotAddMjpegFallbackWhenPreferenceDisabled},
+      {"V4L2 unsupported formats are skipped without duplicates",
+       &studiocast::tests::
+           TestV4l2UnsupportedFormatsAreSkippedWithoutDuplicates},
+      {"V4L2 explicit MJPEG request does not fall back inside Open order",
+       &studiocast::tests::
+           TestV4l2ExplicitMjpegRequestDoesNotFallBackToYuyvInsideOpenOrder},
+      {"V4L2 fake negotiation uses ordered fallback",
+       &studiocast::tests::TestV4l2FakeNegotiationUsesOrderedFallback},
+      {"V4L2 MJPEG decode failure falls back to raw once",
+       &studiocast::tests::TestV4l2MjpegDecodeFailureFallsBackToRawOnce},
   };
 
   int failed = 0;

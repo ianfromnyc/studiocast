@@ -32,6 +32,19 @@ const std::string *StringAt(const JsonObject &obj, const std::string &key,
   return value;
 }
 
+const JsonArray *ArrayAt(const JsonObject &obj, const std::string &key,
+                         const char *message) {
+  const auto it = obj.find(key);
+  if (it == obj.end()) {
+    std::cerr << message << "\n";
+    return nullptr;
+  }
+  const JsonArray *value = it->second.AsArray();
+  if (!value)
+    std::cerr << message << "\n";
+  return value;
+}
+
 struct ReadinessFields {
   std::string state;
   std::string reason;
@@ -153,6 +166,64 @@ bool TestVideoStatusReportsAllowCpuResize() {
                 "video status should report allow_cpu_resize=false");
 }
 
+bool TestVideoStatusReportsCaptureFallbackState() {
+  studiocast::video::VirtualCameraServiceStatus videoStatus;
+  videoStatus.service_running = true;
+  videoStatus.virtual_device_present = true;
+  videoStatus.virtual_device_available = true;
+  videoStatus.pipeline.running = true;
+  videoStatus.pipeline.capture_fallback_state =
+      "raw_after_mjpeg_decode_failure";
+  videoStatus.pipeline.capture_fallback_reason =
+      "MJPEG decode failed: synthetic bad frame.";
+
+  studiocast::video::VirtualCameraServiceConfig videoConfig;
+  videoConfig.enabled = true;
+
+  studiocast::audio::VirtualAudioServiceStatus audioStatus;
+  audioStatus.service_running = true;
+  audioStatus.mic_present = true;
+
+  studiocast::audio::VirtualAudioServiceConfig audioConfig;
+
+  studiocast::util::json::Value rootValue;
+  std::string error;
+  if (!studiocast::util::json::Parse(
+          StatusToJson(videoStatus, videoConfig, audioStatus, audioConfig,
+                       std::filesystem::path("/tmp/studiocastd-test.sock"),
+                       /*maxineJson=*/"", /*openCudaJson=*/"",
+                       /*openAudioJson=*/"", /*loopbackJson=*/""),
+          &rootValue, &error)) {
+    std::cerr << "status JSON should parse: " << error << "\n";
+    return false;
+  }
+
+  const JsonObject *root = rootValue.AsObject();
+  if (!root) {
+    std::cerr << "status root should be an object\n";
+    return false;
+  }
+  const JsonObject *video = ObjectAt(*root, "video", "video should exist");
+  if (!video)
+    return false;
+  const JsonObject *fallback =
+      ObjectAt(*video, "capture_fallback", "capture_fallback should exist");
+  if (!fallback)
+    return false;
+
+  const std::string *state =
+      StringAt(*fallback, "state", "fallback state should exist");
+  const std::string *reason =
+      StringAt(*fallback, "reason", "fallback reason should exist");
+  if (!state || !reason)
+    return false;
+
+  return Expect(*state == "raw_after_mjpeg_decode_failure",
+                "status should report capture fallback state") &&
+         Expect(reason->find("MJPEG decode failed") != std::string::npos,
+                "status should report capture fallback reason");
+}
+
 bool TestExplicitOpenCudaEffectUnknownWithoutDiagnostics() {
   studiocast::video::effects::BroadcastCameraEffects effects;
   effects.engine =
@@ -191,12 +262,122 @@ bool TestBuiltinEffectReadyWithoutDiagnostics() {
                 "builtin effects should remain ready without diagnostics");
 }
 
+bool TestAudioStatusReportsResolvedSourceAndWarnings() {
+  studiocast::video::VirtualCameraServiceStatus videoStatus;
+  studiocast::video::VirtualCameraServiceConfig videoConfig;
+
+  studiocast::audio::VirtualAudioServiceStatus audioStatus;
+  audioStatus.service_running = true;
+  audioStatus.mic_present = true;
+  audioStatus.selected_source = "alsa_input.usb_status_mic";
+  audioStatus.source_warnings.push_back(
+      "Using safe source 'alsa_input.usb_status_mic' instead of unsafe Pulse "
+      "default source 'studiocast_speakers.monitor'.");
+
+  studiocast::audio::VirtualAudioServiceConfig audioConfig;
+  audioConfig.source_name.clear(); // auto
+
+  studiocast::util::json::Value rootValue;
+  std::string error;
+  if (!studiocast::util::json::Parse(
+          StatusToJson(videoStatus, videoConfig, audioStatus, audioConfig,
+                       std::filesystem::path("/tmp/studiocastd-test.sock"),
+                       /*maxineJson=*/"", /*openCudaJson=*/"",
+                       /*openAudioJson=*/"", /*loopbackJson=*/""),
+          &rootValue, &error)) {
+    std::cerr << "status JSON should parse: " << error << "\n";
+    return false;
+  }
+
+  const JsonObject *root = rootValue.AsObject();
+  if (!root) {
+    std::cerr << "status root should be an object\n";
+    return false;
+  }
+  const JsonObject *audio = ObjectAt(*root, "audio", "audio should exist");
+  if (!audio)
+    return false;
+
+  const std::string *source =
+      StringAt(*audio, "source", "audio source should exist");
+  const std::string *resolved =
+      StringAt(*audio, "source_resolved", "resolved source should exist");
+  const JsonArray *warnings =
+      ArrayAt(*audio, "source_warnings", "source_warnings should exist");
+  if (!source || !resolved || !warnings)
+    return false;
+
+  return Expect(*source == "auto",
+                "configured source should remain auto in status") &&
+         Expect(*resolved == "alsa_input.usb_status_mic",
+                "status should report resolved physical source") &&
+         Expect(!warnings->empty(),
+                "status should propagate source resolution warnings");
+}
+
+bool TestAudioStatusPropagatesSourceErrorFromService() {
+  studiocast::video::VirtualCameraServiceStatus videoStatus;
+  studiocast::video::VirtualCameraServiceConfig videoConfig;
+
+  studiocast::audio::VirtualAudioServiceStatus audioStatus;
+  audioStatus.service_running = true;
+  audioStatus.mic_present = true;
+  audioStatus.selected_source = "alsa_input.disconnected_mic";
+  audioStatus.source_error =
+      "Configured Pulse source 'alsa_input.disconnected_mic' is not currently "
+      "available.";
+
+  studiocast::audio::VirtualAudioServiceConfig audioConfig;
+  audioConfig.source_name = "alsa_input.disconnected_mic";
+
+  studiocast::util::json::Value rootValue;
+  std::string error;
+  if (!studiocast::util::json::Parse(
+          StatusToJson(videoStatus, videoConfig, audioStatus, audioConfig,
+                       std::filesystem::path("/tmp/studiocastd-test.sock"),
+                       /*maxineJson=*/"", /*openCudaJson=*/"",
+                       /*openAudioJson=*/"", /*loopbackJson=*/""),
+          &rootValue, &error)) {
+    std::cerr << "status JSON should parse: " << error << "\n";
+    return false;
+  }
+
+  const JsonObject *root = rootValue.AsObject();
+  if (!root) {
+    std::cerr << "status root should be an object\n";
+    return false;
+  }
+  const JsonObject *audio = ObjectAt(*root, "audio", "audio should exist");
+  if (!audio)
+    return false;
+
+  const std::string *source =
+      StringAt(*audio, "source", "audio source should exist");
+  const std::string *resolved =
+      StringAt(*audio, "source_resolved", "resolved source should exist");
+  const std::string *sourceError =
+      StringAt(*audio, "source_error", "source_error should exist");
+  if (!source || !resolved || !sourceError)
+    return false;
+
+  return Expect(*source == "alsa_input.disconnected_mic",
+                "configured disconnected source should be preserved") &&
+         Expect(*resolved == "alsa_input.disconnected_mic",
+                "resolved source should still identify selected source") &&
+         Expect(sourceError->find("not currently available") !=
+                    std::string::npos,
+                "source_error should propagate service availability error");
+}
+
 } // namespace
 
 int main() {
   bool ok = true;
   ok = TestVideoStatusReportsAllowCpuResize() && ok;
+  ok = TestVideoStatusReportsCaptureFallbackState() && ok;
   ok = TestExplicitOpenCudaEffectUnknownWithoutDiagnostics() && ok;
   ok = TestBuiltinEffectReadyWithoutDiagnostics() && ok;
+  ok = TestAudioStatusReportsResolvedSourceAndWarnings() && ok;
+  ok = TestAudioStatusPropagatesSourceErrorFromService() && ok;
   return ok ? 0 : 1;
 }
