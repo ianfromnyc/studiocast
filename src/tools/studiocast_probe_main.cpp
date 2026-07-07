@@ -2903,6 +2903,28 @@ int RunSelfTest() {
                "/tmp/some path/with spaces/bg.ppm");
     }
 
+    {
+      studiocast::video::effects::BroadcastCameraEffects emptyPathFx;
+      const std::string replaceWithoutPath =
+          "{\"virtual_background.replace\":{\"enabled\":true,"
+          "\"replace_path\":\"\"}}";
+      jerr.clear();
+      if (!studiocast::video::ApplyBroadcastCameraEffectsPatchJsonText(
+              replaceWithoutPath, &emptyPathFx, &jerr)) {
+        ++failures;
+        std::printf("[FAIL] ApplyBroadcastCameraEffectsPatchJsonText "
+                    "replace without path: %s\n",
+                    jerr.c_str());
+      } else {
+        expectTrue("effects patch replace without path keeps replace mode",
+                   emptyPathFx.virtual_background.mode ==
+                       studiocast::video::effects::VirtualBackgroundMode::
+                           replace);
+        expectEq("effects patch replace without path keeps empty path",
+                 emptyPathFx.virtual_background.replace_path, "");
+      }
+    }
+
     const std::string af =
         "{\"auto_frame\":{\"enabled\":true,\"strength\":77}}";
     jerr.clear();
@@ -3089,6 +3111,36 @@ int RunSelfTest() {
       } else {
         expectEq("BroadcastCameraEffects missing model_id default",
                  tmp2.virtual_background.model_id, "");
+      }
+    }
+
+    {
+      const std::string replaceWithoutPath =
+          "{\"schema_version\":1,\"virtual_background\":{\"mode\":\"replace\","
+          "\"replace_path\":\"\"}}";
+      BroadcastCameraEffects tmp;
+      warnings.clear();
+      err.clear();
+      opt.allow_unknown_keys = false;
+      if (!ParseBroadcastCameraEffectsJsonText(replaceWithoutPath, &tmp, opt,
+                                               &warnings, &err)) {
+        ++failures;
+        std::printf("[FAIL] BroadcastCameraEffects replace without path should "
+                    "parse: %s\n",
+                    err.c_str());
+      } else {
+        expectTrue("BroadcastCameraEffects replace without path mode",
+                   tmp.virtual_background.mode ==
+                       VirtualBackgroundMode::replace);
+        expectEq("BroadcastCameraEffects replace without path empty path",
+                 tmp.virtual_background.replace_path, "");
+        expectTrue(
+            "BroadcastCameraEffects replace without path warning",
+            std::any_of(warnings.begin(), warnings.end(),
+                        [](const std::string &w) {
+                          return w.find("replace_path is empty") !=
+                                 std::string::npos;
+                        }));
       }
     }
 

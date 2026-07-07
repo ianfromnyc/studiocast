@@ -52,13 +52,12 @@ jobs:
           ninja --version
           ${{ matrix.cxx }} --version
 
-      - name: Configure (open-source / no Maxine SDK required)
+      - name: Configure (default Open CUDA / no Maxine SDK required)
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DSTUDIOCAST_ENABLE_OPEN_CUDA=OFF \
             -DSTUDIOCAST_ENABLE_OPEN_AUDIO=OFF \
             -DSTUDIOCAST_ENABLE_DLIB=OFF
 
@@ -104,10 +103,9 @@ jobs:
           ninja --version
           g++ --version
 
-      - name: Configure (open-source / no Maxine SDK required)
+      - name: Configure (default Open CUDA / no Maxine SDK required)
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DSTUDIOCAST_ENABLE_OPEN_CUDA=OFF \
             -DSTUDIOCAST_ENABLE_OPEN_AUDIO=OFF \
             -DSTUDIOCAST_ENABLE_DLIB=OFF
 

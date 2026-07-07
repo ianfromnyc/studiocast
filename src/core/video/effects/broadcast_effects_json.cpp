@@ -420,9 +420,9 @@ bool ParseBroadcastCameraEffectsJson(
 
     if (out->virtual_background.mode == VirtualBackgroundMode::replace &&
         out->virtual_background.replace_path.empty()) {
-      return Fail(
-          error,
-          "virtual_background.replace_path is required when mode is 'replace'");
+      AddWarning(warnings, "virtual_background.replace_path is empty; "
+                           "replace mode will stay inactive until an image is "
+                           "selected");
     }
     if (out->virtual_background.mode != VirtualBackgroundMode::replace &&
         !out->virtual_background.replace_path.empty()) {

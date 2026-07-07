@@ -9,10 +9,12 @@
 #include <thread>
 
 #include <QApplication>
+#include <QAbstractItemModel>
 #include <QComboBox>
 #include <QEventLoop>
 #include <QFrame>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QTimer>
@@ -1528,6 +1530,206 @@ bool TestVideoPageKeepsUserSelectedInputWhenRoutineStatusStillAuto() {
                 "routine status must not reset a user-selected input to auto");
 }
 
+bool TestVideoPageEnablesAvailableVirtualBackgroundRemoveMode() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "maxine":{
+          "supported":false,
+          "ok":false,
+          "summary":"Maxine unavailable.",
+          "blocked_reason":"gpu_unsupported"
+        },
+        "open_cuda":{
+          "ok":true,
+          "installed_models":["modnet-webnn-256-fp32"],
+          "models":[
+            {
+              "id":"modnet-webnn-256-fp32",
+              "display_name":"MODNet",
+              "task":"matting"
+            }
+          ],
+          "missing_models":{},
+          "available_effects":[
+            "virtual_background.blur",
+            "virtual_background.remove",
+            "virtual_background.replace"
+          ],
+          "blocked_effects":{},
+          "install_hints":[]
+        },
+        "video":{
+          "enabled":false,
+          "virtual_device_present":true,
+          "virtual_device_available":true,
+          "consumer_count":0,
+          "video_effects":{
+            "engine":"open_cuda",
+            "virtual_background":{"mode":"none"}
+          },
+          "pipeline":{"running":false,"starting":false}
+        },
+        "audio":{
+          "enabled":false,
+          "mic_present":true,
+          "source_error":"",
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  studiocast::gui::VideoPage page;
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(json));
+
+  auto *backgroundCombo =
+      page.findChild<QComboBox *>(QStringLiteral("videoBackgroundModeCombo"));
+  if (!Expect(backgroundCombo != nullptr,
+              "video background mode combo should be findable"))
+    return false;
+
+  const int removeIndex =
+      backgroundCombo->findData(QStringLiteral("remove"));
+  if (!Expect(removeIndex >= 0,
+              "video background remove mode should exist in the combo"))
+    return false;
+
+  auto *model = backgroundCombo->model();
+  if (!Expect(model != nullptr,
+              "video background mode combo should have an item model"))
+    return false;
+
+  const QModelIndex removeModelIndex = model->index(removeIndex, 0);
+  return Expect(removeModelIndex.isValid(),
+                "video background remove model index should be valid") &&
+         Expect(model->flags(removeModelIndex).testFlag(Qt::ItemIsEnabled),
+                "available virtual_background.remove should be enabled in "
+                "the Camera page mode selector");
+}
+
+bool TestVideoPageKeepsReplaceModeSelectedWhileImagePathIsMissing() {
+  const QString json = QStringLiteral(
+      R"({
+        "service_running":true,
+        "maxine":{
+          "supported":false,
+          "ok":false,
+          "summary":"Maxine unavailable.",
+          "blocked_reason":"gpu_unsupported"
+        },
+        "open_cuda":{
+          "ok":true,
+          "installed_models":["modnet-webnn-256-fp32"],
+          "models":[
+            {
+              "id":"modnet-webnn-256-fp32",
+              "display_name":"MODNet",
+              "task":"matting"
+            }
+          ],
+          "missing_models":{},
+          "available_effects":[
+            "virtual_background.blur",
+            "virtual_background.remove",
+            "virtual_background.replace"
+          ],
+          "blocked_effects":{},
+          "install_hints":[]
+        },
+        "video":{
+          "enabled":false,
+          "virtual_device_present":true,
+          "virtual_device_available":true,
+          "consumer_count":0,
+          "video_effects":{
+            "engine":"open_cuda",
+            "virtual_background.blur":{"enabled":false,"model_id":"","strength":8},
+            "virtual_background.remove":{
+              "enabled":false,
+              "strength":8,
+              "model_id":"",
+              "remove_color":"#000000",
+              "greenscreen_mode":0,
+              "greenscreen_temporal":true
+            },
+            "virtual_background.replace":{
+              "enabled":true,
+              "strength":8,
+              "model_id":"",
+              "remove_color":"#000000",
+              "replace_path":"",
+              "greenscreen_mode":0,
+              "greenscreen_temporal":true
+            }
+          },
+          "pipeline":{
+            "running":false,
+            "starting":false,
+            "effects_plan":{
+              "ordered":[],
+              "disabled":[
+                {
+                  "id":"virtual_background.replace",
+                  "reason":"Disabled: virtual background replace requires `replace_path`."
+                }
+              ]
+            }
+          }
+        },
+        "audio":{
+          "enabled":false,
+          "mic_present":true,
+          "source_error":"",
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })");
+
+  studiocast::gui::VideoPage page;
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(json));
+
+  auto *backgroundCombo =
+      page.findChild<QComboBox *>(QStringLiteral("videoBackgroundModeCombo"));
+  auto *replaceEdit = page.findChild<QLineEdit *>(
+      QStringLiteral("videoBackgroundReplaceImageEdit"));
+  auto *browseButton = page.findChild<QPushButton *>(
+      QStringLiteral("videoBackgroundBrowseReplaceImageButton"));
+
+  return Expect(backgroundCombo != nullptr,
+                "video background mode combo should be findable") &&
+         Expect(replaceEdit != nullptr,
+                "replace image path edit should be findable") &&
+         Expect(browseButton != nullptr,
+                "replace image browse button should be findable") &&
+         Expect(backgroundCombo->currentData().toString() ==
+                    QStringLiteral("replace"),
+                "Camera page should keep Replace selected while image path is "
+                "missing") &&
+         Expect(!replaceEdit->isHidden(),
+                "replace image path edit should be visible when Replace is "
+                "selected") &&
+         Expect(replaceEdit->isEnabled(),
+                "replace image path edit should stay enabled so the user can "
+                "choose an image") &&
+         Expect(browseButton->isEnabled(),
+                "replace image browse button should stay enabled so the user "
+                "can choose an image");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -1555,5 +1757,7 @@ int main(int argc, char **argv) {
   ok = TestStatusPollerRefreshesDiagnosticsOutOfBand() && ok;
   ok = TestPendingDaemonWriteGuardSkipsRoutineStatusUntilWriteSettles() && ok;
   ok = TestVideoPageKeepsUserSelectedInputWhenRoutineStatusStillAuto() && ok;
+  ok = TestVideoPageEnablesAvailableVirtualBackgroundRemoveMode() && ok;
+  ok = TestVideoPageKeepsReplaceModeSelectedWhileImagePathIsMissing() && ok;
   return ok ? 0 : 1;
 }

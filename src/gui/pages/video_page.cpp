@@ -1120,6 +1120,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   auto *vbRow = new QHBoxLayout();
   vbRow->addWidget(new QLabel("Mode:", vbBox));
   backgroundCombo_ = new QComboBox(vbBox);
+  backgroundCombo_->setObjectName(QStringLiteral("videoBackgroundModeCombo"));
   backgroundCombo_->addItem("None", "none");
   backgroundCombo_->addItem("Blur", "blur");
   backgroundCombo_->addItem("Remove", "remove");
@@ -1159,8 +1160,12 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   backgroundReplaceImageLabel_ = new QLabel("Replace image:", vbBox);
   vbParamRow->addWidget(backgroundReplaceImageLabel_);
   backgroundReplaceImageEdit_ = new QLineEdit(vbBox);
+  backgroundReplaceImageEdit_->setObjectName(
+      QStringLiteral("videoBackgroundReplaceImageEdit"));
   vbParamRow->addWidget(backgroundReplaceImageEdit_, 1);
   browseReplaceImageBtn_ = new QPushButton("Browse…", vbBox);
+  browseReplaceImageBtn_->setObjectName(
+      QStringLiteral("videoBackgroundBrowseReplaceImageButton"));
   vbParamRow->addWidget(browseReplaceImageBtn_);
   vbLayout->addLayout(vbParamRow);
 
