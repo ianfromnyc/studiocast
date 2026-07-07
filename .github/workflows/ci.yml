@@ -146,10 +146,15 @@ jobs:
           ORT_ARCH: x64
           ORT_FLAVOR: cpu
         run: |
-          ort_tgz="onnxruntime-linux-${ORT_ARCH}-${ORT_FLAVOR}-${ORT_VERSION}.tgz"
+          if [[ "${ORT_FLAVOR}" == "cpu" ]]; then
+            ort_name="onnxruntime-linux-${ORT_ARCH}-${ORT_VERSION}"
+          else
+            ort_name="onnxruntime-linux-${ORT_ARCH}-${ORT_FLAVOR}-${ORT_VERSION}"
+          fi
+          ort_tgz="${ort_name}.tgz"
           ort_url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ort_tgz}"
           ort_prefix="/opt/studiocast/onnxruntime/${ORT_VERSION}"
-          ort_root="${ort_prefix}/onnxruntime-linux-${ORT_ARCH}-${ORT_FLAVOR}-${ORT_VERSION}"
+          ort_root="${ort_prefix}/${ort_name}"
 
           curl --fail --location --retry 3 --output "${RUNNER_TEMP}/${ort_tgz}" "${ort_url}"
           sudo mkdir -p "${ort_prefix}"
