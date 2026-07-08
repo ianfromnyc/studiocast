@@ -296,6 +296,9 @@ add_library(studiocast_core
         src/core/video/feed.cpp
         src/core/video/convert.h
         src/core/video/convert.cpp
+        src/core/video/convert_yuyv_rgb_internal.h
+        src/core/video/convert_yuyv_rgb_scalar.cpp
+        src/core/video/convert_yuyv_rgb_dispatch.cpp
         src/core/video/convert_rgb_yuyv_internal.h
         src/core/video/convert_rgb_yuyv_scalar.cpp
         src/core/video/convert_rgb_yuyv_dispatch.cpp
@@ -362,11 +365,14 @@ if (_studiocast_x86_simd)
     target_sources(studiocast_core PRIVATE
             src/core/video/convert_rgb_yuyv_ssse3.cpp
             src/core/video/convert_rgb_yuyv_avx2.cpp
+            src/core/video/convert_yuyv_rgb_sse41.cpp
     )
     set_source_files_properties(src/core/video/convert_rgb_yuyv_ssse3.cpp
             PROPERTIES COMPILE_OPTIONS "-O3;-mssse3")
     set_source_files_properties(src/core/video/convert_rgb_yuyv_avx2.cpp
             PROPERTIES COMPILE_OPTIONS "-O3;-mavx2")
+    set_source_files_properties(src/core/video/convert_yuyv_rgb_sse41.cpp
+            PROPERTIES COMPILE_OPTIONS "-O3;-msse4.1")
     target_compile_definitions(studiocast_core PRIVATE STUDIOCAST_HAVE_X86_SIMD=1)
 else()
     target_compile_definitions(studiocast_core PRIVATE STUDIOCAST_HAVE_X86_SIMD=0)
@@ -377,6 +383,8 @@ endif()
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         set_source_files_properties(
                 src/core/video/convert.cpp
+                src/core/video/convert_yuyv_rgb_scalar.cpp
+                src/core/video/convert_yuyv_rgb_dispatch.cpp
                 src/core/video/convert_rgb_yuyv_scalar.cpp
                 src/core/video/convert_rgb_yuyv_dispatch.cpp
                 PROPERTIES COMPILE_OPTIONS "-O3")

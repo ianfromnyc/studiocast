@@ -32,6 +32,8 @@ bool TestV4l2UnsupportedFormatsAreSkippedWithoutDuplicates();
 bool TestV4l2ExplicitMjpegRequestDoesNotFallBackToYuyvInsideOpenOrder();
 bool TestV4l2FakeNegotiationUsesOrderedFallback();
 bool TestV4l2MjpegDecodeFailureFallsBackToRawOnce();
+bool TestYuyvToRgb24MatchesBt601AndPreservesPadding();
+bool TestYuyvToRgb24BackendsMatchScalarReference();
 bool TestRgb24ToYuyvMatchesBt601WithinChromaRounding();
 bool TestRgb24ToYuyvBackendsMatchScalarReference();
 bool TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants();
@@ -990,6 +992,10 @@ int main() {
        &studiocast::tests::TestV4l2FakeNegotiationUsesOrderedFallback},
       {"V4L2 MJPEG decode failure falls back to raw once",
        &studiocast::tests::TestV4l2MjpegDecodeFailureFallsBackToRawOnce},
+      {"YUYV to RGB24 matches BT.601 and preserves padding",
+       &studiocast::tests::TestYuyvToRgb24MatchesBt601AndPreservesPadding},
+      {"YUYV to RGB24 backends match scalar reference",
+       &studiocast::tests::TestYuyvToRgb24BackendsMatchScalarReference},
       {"RGB24 to YUYV matches BT.601 within chroma rounding",
        &studiocast::tests::TestRgb24ToYuyvMatchesBt601WithinChromaRounding},
       {"RGB24 to YUYV backends match scalar reference",

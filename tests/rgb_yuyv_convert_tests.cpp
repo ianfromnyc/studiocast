@@ -1,5 +1,6 @@
 #include "core/video/convert.h"
 #include "core/video/convert_rgb_yuyv_internal.h"
+#include "core/video/convert_yuyv_rgb_internal.h"
 
 #include <algorithm>
 #include <array>
@@ -36,8 +37,37 @@ struct BackendCase {
   int chroma_tolerance;
 };
 
+struct YuyvToRgbBackendCase {
+  video::internal::YuyvToRgbBackend backend;
+};
+
 constexpr std::size_t ActiveYuyvBytes(int width) {
   return static_cast<std::size_t>((width + 1) / 2) * 4u;
+}
+
+constexpr std::size_t ActiveRgbBytes(int width) {
+  return static_cast<std::size_t>(width) * 3u;
+}
+
+inline std::uint8_t ClampReferenceByte(int v) {
+  if (v < 0)
+    return 0;
+  if (v > 255)
+    return 255;
+  return static_cast<std::uint8_t>(v);
+}
+
+void YuvToRgbReference(int y, int u, int v, std::uint8_t *r,
+                       std::uint8_t *g, std::uint8_t *b) {
+  int c = y - 16;
+  if (c < 0)
+    c = 0;
+  const int d = u - 128;
+  const int e = v - 128;
+
+  *r = ClampReferenceByte((298 * c + 409 * e + 128) >> 8);
+  *g = ClampReferenceByte((298 * c - 100 * d - 208 * e + 128) >> 8);
+  *b = ClampReferenceByte((298 * c + 516 * d + 128) >> 8);
 }
 
 void FillDeterministicRgb(std::vector<std::uint8_t> *src, int width, int height,
@@ -91,6 +121,29 @@ bool ConvertWithBackend(video::internal::Rgb24ToYuyvBackend backend,
   return false;
 }
 
+bool ConvertWithBackend(video::internal::YuyvToRgbBackend backend,
+                        const std::uint8_t *src, int width, int height,
+                        std::size_t src_stride, std::uint8_t *dst,
+                        std::size_t dst_stride) {
+  using video::internal::YuyvToRgbBackend;
+
+  if (!video::internal::YuyvToRgbBackendAvailable(backend))
+    return false;
+
+  switch (backend) {
+  case YuyvToRgbBackend::scalar:
+    video::internal::YuyvToRgbScalar(src, width, height, src_stride, dst,
+                                     dst_stride);
+    return true;
+  case YuyvToRgbBackend::sse41:
+    video::internal::YuyvToRgbSse41(src, width, height, src_stride, dst,
+                                    dst_stride);
+    return true;
+  }
+
+  return false;
+}
+
 bool CompareYuyvToReference(const std::vector<std::uint8_t> &actual,
                             const std::vector<std::uint8_t> &expected,
                             int width, int height, std::size_t dst_stride,
@@ -138,6 +191,183 @@ bool CompareYuyvToReference(const std::vector<std::uint8_t> &actual,
 }
 
 } // namespace
+
+bool TestYuyvToRgb24MatchesBt601AndPreservesPadding() {
+  const std::array<ConvertCase, 9> cases{{
+      {1, 3, 5, 8},
+      {2, 3, 4, 5},
+      {7, 5, 1, 7},
+      {8, 5, 8, 3},
+      {17, 11, 5, 8},
+      {31, 9, 7, 13},
+      {640, 480, 13, 16},
+      {1280, 720, 7, 32},
+      {1920, 1080, 5, 64},
+  }};
+
+  for (const ConvertCase &c : cases) {
+    const std::size_t src_stride = ActiveYuyvBytes(c.width) + c.src_padding;
+    const std::size_t dst_stride = ActiveRgbBytes(c.width) + c.dst_padding;
+    std::vector<std::uint8_t> src(src_stride *
+                                  static_cast<std::size_t>(c.height));
+    std::vector<std::uint8_t> dst(
+        dst_stride * static_cast<std::size_t>(c.height), 0xcd);
+
+    std::uint32_t state = static_cast<std::uint32_t>(c.width) * 131u +
+                          static_cast<std::uint32_t>(c.height) * 17u +
+                          0x9e37u;
+    const std::size_t active_src = ActiveYuyvBytes(c.width);
+    for (int y = 0; y < c.height; ++y) {
+      std::uint8_t *row = src.data() + static_cast<std::size_t>(y) * src_stride;
+      for (std::size_t x = 0; x < active_src; ++x) {
+        state = state * 1664525u + 1013904223u;
+        row[x] = static_cast<std::uint8_t>((state >> 24) & 0xffu);
+      }
+      for (std::size_t x = active_src; x < src_stride; ++x)
+        row[x] = 0xa5u;
+    }
+
+    video::YuyvToRgb24(src.data(), c.width, c.height, src_stride, dst.data(),
+                       dst_stride);
+
+    for (int y = 0; y < c.height; ++y) {
+      const std::uint8_t *s =
+          src.data() + static_cast<std::size_t>(y) * src_stride;
+      const std::uint8_t *d =
+          dst.data() + static_cast<std::size_t>(y) * dst_stride;
+
+      for (int x = 0; x < c.width; ++x) {
+        const std::size_t pair = static_cast<std::size_t>(x / 2) * 4u;
+        const int y_sample = s[pair + ((x & 1) ? 2u : 0u)];
+        const int u = s[pair + 1u];
+        const int v = s[pair + 3u];
+
+        std::uint8_t er = 0;
+        std::uint8_t eg = 0;
+        std::uint8_t eb = 0;
+        YuvToRgbReference(y_sample, u, v, &er, &eg, &eb);
+
+        const std::size_t out = static_cast<std::size_t>(x) * 3u;
+        if (d[out + 0] != er || d[out + 1] != eg || d[out + 2] != eb) {
+          std::cerr << "YUYV->RGB mismatch at " << x << "," << y << " for "
+                    << c.width << "x" << c.height << ": got "
+                    << static_cast<int>(d[out + 0]) << ","
+                    << static_cast<int>(d[out + 1]) << ","
+                    << static_cast<int>(d[out + 2]) << " expected "
+                    << static_cast<int>(er) << "," << static_cast<int>(eg)
+                    << "," << static_cast<int>(eb) << "\n";
+          return false;
+        }
+      }
+
+      const std::size_t active_dst = ActiveRgbBytes(c.width);
+      for (std::size_t i = active_dst; i < dst_stride; ++i) {
+        if (d[i] != 0xcdu) {
+          std::cerr << "YUYV->RGB overwrote destination padding at row " << y
+                    << " byte " << i << " for " << c.width << "x" << c.height
+                    << "\n";
+          return false;
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
+bool TestYuyvToRgb24BackendsMatchScalarReference() {
+  using video::internal::YuyvToRgbBackend;
+
+  const std::array<ConvertCase, 11> cases{{
+      {1, 3, 5, 8},
+      {2, 3, 4, 5},
+      {7, 5, 1, 7},
+      {8, 5, 8, 3},
+      {9, 5, 2, 11},
+      {15, 4, 5, 6},
+      {16, 4, 3, 9},
+      {17, 11, 5, 8},
+      {640, 480, 13, 16},
+      {1280, 720, 7, 32},
+      {1920, 1080, 5, 64},
+  }};
+
+  const std::array<YuyvToRgbBackendCase, 2> backends{{
+      {YuyvToRgbBackend::scalar},
+      {YuyvToRgbBackend::sse41},
+  }};
+
+  for (const ConvertCase &c : cases) {
+    const std::size_t src_stride = ActiveYuyvBytes(c.width) + c.src_padding;
+    const std::size_t dst_stride = ActiveRgbBytes(c.width) + c.dst_padding;
+    std::vector<std::uint8_t> src(src_stride *
+                                  static_cast<std::size_t>(c.height));
+
+    std::uint32_t state = static_cast<std::uint32_t>(c.width) * 971u +
+                          static_cast<std::uint32_t>(c.height) * 37u +
+                          0x1234u;
+    const std::size_t active_src = ActiveYuyvBytes(c.width);
+    for (int y = 0; y < c.height; ++y) {
+      std::uint8_t *row = src.data() + static_cast<std::size_t>(y) * src_stride;
+      for (std::size_t x = 0; x < active_src; ++x) {
+        state = state * 1664525u + 1013904223u;
+        row[x] = static_cast<std::uint8_t>((state >> 24) & 0xffu);
+      }
+      for (std::size_t x = active_src; x < src_stride; ++x)
+        row[x] = 0xa5u;
+    }
+
+    std::vector<std::uint8_t> expected(
+        dst_stride * static_cast<std::size_t>(c.height), 0xcd);
+    video::internal::YuyvToRgbScalar(src.data(), c.width, c.height, src_stride,
+                                     expected.data(), dst_stride);
+
+    for (const YuyvToRgbBackendCase &backend : backends) {
+      if (!video::internal::YuyvToRgbBackendAvailable(backend.backend))
+        continue;
+
+      std::vector<std::uint8_t> actual(
+          dst_stride * static_cast<std::size_t>(c.height), 0xcd);
+      if (!ConvertWithBackend(backend.backend, src.data(), c.width, c.height,
+                              src_stride, actual.data(), dst_stride)) {
+        std::cerr << "YUYV->RGB backend "
+                  << video::internal::YuyvToRgbBackendName(backend.backend)
+                  << " reported available but conversion failed\n";
+        return false;
+      }
+
+      for (int y = 0; y < c.height; ++y) {
+        const std::uint8_t *a =
+            actual.data() + static_cast<std::size_t>(y) * dst_stride;
+        const std::uint8_t *e =
+            expected.data() + static_cast<std::size_t>(y) * dst_stride;
+        for (std::size_t i = 0; i < ActiveRgbBytes(c.width); ++i) {
+          if (a[i] != e[i]) {
+            std::cerr << "YUYV->RGB backend "
+                      << video::internal::YuyvToRgbBackendName(backend.backend)
+                      << " mismatch at row " << y << " byte " << i << " for "
+                      << c.width << "x" << c.height << ": got "
+                      << static_cast<int>(a[i]) << " expected "
+                      << static_cast<int>(e[i]) << "\n";
+            return false;
+          }
+        }
+        for (std::size_t i = ActiveRgbBytes(c.width); i < dst_stride; ++i) {
+          if (a[i] != 0xcdu) {
+            std::cerr << "YUYV->RGB backend "
+                      << video::internal::YuyvToRgbBackendName(backend.backend)
+                      << " overwrote destination padding at row " << y
+                      << " byte " << i << " for " << c.width << "x"
+                      << c.height << "\n";
+            return false;
+          }
+        }
+      }
+    }
+  }
+
+  return true;
+}
 
 bool TestRgb24ToYuyvMatchesBt601WithinChromaRounding() {
   constexpr int width = 17;
