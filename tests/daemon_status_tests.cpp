@@ -166,6 +166,64 @@ bool TestVideoStatusReportsAllowCpuResize() {
                 "video status should report allow_cpu_resize=false");
 }
 
+bool TestVideoStatusReportsRequestedOutputFormat() {
+  studiocast::video::VirtualCameraServiceConfig videoConfig;
+  videoConfig.pipeline.output_format = studiocast::video::PixelFormat::yuyv;
+
+  studiocast::util::json::Value rootValue;
+  std::string error;
+  if (!studiocast::util::json::Parse(StatusForVideoConfig(videoConfig),
+                                     &rootValue, &error)) {
+    std::cerr << "status JSON should parse: " << error << "\n";
+    return false;
+  }
+
+  const JsonObject *root = rootValue.AsObject();
+  if (!root) {
+    std::cerr << "status root should be an object\n";
+    return false;
+  }
+
+  const JsonObject *video = ObjectAt(*root, "video", "video should exist");
+  if (!video)
+    return false;
+
+  const std::string *requested =
+      StringAt(*video, "output_format_requested",
+               "video status should include requested output format");
+  if (!requested)
+    return false;
+
+  const JsonObject *actual =
+      ObjectAt(*video, "output_format", "actual output_format should exist");
+  if (!actual)
+    return false;
+
+  studiocast::util::json::Value configValue;
+  if (!studiocast::util::json::Parse(ConfigToJson(videoConfig), &configValue,
+                                     &error)) {
+    std::cerr << "config JSON should parse: " << error << "\n";
+    return false;
+  }
+  const JsonObject *config = configValue.AsObject();
+  if (!config) {
+    std::cerr << "config root should be an object\n";
+    return false;
+  }
+  const std::string *configRequested =
+      StringAt(*config, "output_format_requested",
+               "config should include requested output format");
+  if (!configRequested)
+    return false;
+
+  return Expect(*requested == "yuyv",
+                "video status should report yuyv requested output format") &&
+         Expect(*configRequested == "yuyv",
+                "video config should report yuyv requested output format") &&
+         Expect(actual->find("width") != actual->end(),
+                "actual output_format should remain negotiated object");
+}
+
 bool TestVideoStatusReportsCaptureFallbackState() {
   studiocast::video::VirtualCameraServiceStatus videoStatus;
   videoStatus.service_running = true;
@@ -374,6 +432,7 @@ bool TestAudioStatusPropagatesSourceErrorFromService() {
 int main() {
   bool ok = true;
   ok = TestVideoStatusReportsAllowCpuResize() && ok;
+  ok = TestVideoStatusReportsRequestedOutputFormat() && ok;
   ok = TestVideoStatusReportsCaptureFallbackState() && ok;
   ok = TestExplicitOpenCudaEffectUnknownWithoutDiagnostics() && ok;
   ok = TestBuiltinEffectReadyWithoutDiagnostics() && ok;

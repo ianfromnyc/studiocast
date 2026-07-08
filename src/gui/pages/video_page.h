@@ -104,6 +104,7 @@ private:
 
   QComboBox *inputCombo_ = nullptr;
   QComboBox *outputCombo_ = nullptr;
+  QComboBox *outputFormatCombo_ = nullptr;
 
   QSpinBox *widthSpin_ = nullptr;
   QSpinBox *heightSpin_ = nullptr;

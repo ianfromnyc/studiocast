@@ -2625,6 +2625,18 @@ int RunSelfTest() {
 
       const fs::path confPath = fs::path(dir) / "studiocast" / "daemon.conf";
 
+      {
+        const auto dc_default = studiocast::config::LoadDaemonConfig();
+        expectTrue("daemon_config default output_format rgb24",
+                   dc_default.video_output_format ==
+                       studiocast::video::PixelFormat::rgb24);
+        const auto vc_default =
+            studiocast::config::ToVideoServiceConfig(dc_default);
+        expectTrue("ToVideoServiceConfig default output_format rgb24",
+                   vc_default.pipeline.output_format ==
+                       studiocast::video::PixelFormat::rgb24);
+      }
+
       // Legacy background keys should migrate into canonical
       // `video.effects.json`.
       {
@@ -2669,11 +2681,17 @@ int RunSelfTest() {
                   dc.video_effects.virtual_key_light.intensity, 42);
       expectTrue("daemon_config default allow CPU resize",
                  dc.video_allow_cpu_resize);
+      expectTrue("daemon_config missing output_format defaults rgb24",
+                 dc.video_output_format ==
+                     studiocast::video::PixelFormat::rgb24);
 
       const auto vc = studiocast::config::ToVideoServiceConfig(dc);
       expectTrue("ToVideoServiceConfig mirror", vc.pipeline.effects.mirror);
       expectTrue("ToVideoServiceConfig allow CPU resize",
                  vc.pipeline.allow_cpu_resize);
+      expectTrue("ToVideoServiceConfig output_format rgb24",
+                 vc.pipeline.output_format ==
+                     studiocast::video::PixelFormat::rgb24);
       expectTrue("ToVideoServiceConfig scaling backend gpu",
                  vc.pipeline.scaling_backend ==
                      studiocast::video::ScalingBackendPreference::gpu);
@@ -2739,6 +2757,7 @@ int RunSelfTest() {
         dc_save.audio_effects.microphone.noise_removal_enabled = true;
         dc_save.audio_effects.microphone.room_echo_removal_enabled = true;
         dc_save.audio_effects.microphone.strength = 55;
+        dc_save.video_output_format = studiocast::video::PixelFormat::yuyv;
 
         std::string err;
         if (!studiocast::config::SaveDaemonConfig(dc_save, &err)) {
@@ -2762,6 +2781,9 @@ int RunSelfTest() {
           expectTrue("saved config has video.scaling.allow_cpu_resize true",
                      content.find("video.scaling.allow_cpu_resize = true") !=
                          std::string::npos);
+          expectTrue("saved config has video.output_format yuyv",
+                     content.find("video.output_format = yuyv") !=
+                         std::string::npos);
           expectTrue("saved config removes video.mirror",
                      content.find("video.mirror") == std::string::npos);
           expectTrue("saved config removes video.background",
@@ -2774,6 +2796,9 @@ int RunSelfTest() {
         const auto dc2 = studiocast::config::LoadDaemonConfig();
         const auto vc2 = studiocast::config::ToVideoServiceConfig(dc2);
         expectTrue("roundtrip allow CPU resize", vc2.pipeline.allow_cpu_resize);
+        expectTrue("roundtrip output_format yuyv",
+                   vc2.pipeline.output_format ==
+                       studiocast::video::PixelFormat::yuyv);
         expectTrue("roundtrip vb blur",
                    vc2.pipeline.effects.virtual_background.mode ==
                        studiocast::video::effects::VirtualBackgroundMode::blur);
@@ -2817,6 +2842,20 @@ int RunSelfTest() {
             studiocast::config::ToVideoServiceConfig(dc_no_cpu);
         expectTrue("explicit CPU resize opt-out reaches service config",
                    !vc_no_cpu.pipeline.allow_cpu_resize);
+      }
+
+      // Invalid persisted output format safely falls back to the default.
+      {
+        std::ofstream out(confPath);
+        out << "video.output_format = not_a_format\n";
+      }
+      {
+        const auto dc_bad_fmt = studiocast::config::LoadDaemonConfig();
+        const auto vc_bad_fmt =
+            studiocast::config::ToVideoServiceConfig(dc_bad_fmt);
+        expectTrue("invalid output_format falls back rgb24",
+                   vc_bad_fmt.pipeline.output_format ==
+                       studiocast::video::PixelFormat::rgb24);
       }
 
       // Audio effects JSON parsing should tolerate unknown keys

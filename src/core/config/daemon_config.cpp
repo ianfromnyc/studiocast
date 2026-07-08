@@ -190,6 +190,10 @@ DaemonConfig LoadDaemonConfig() {
       if (auto it = kv.find("video.fps"); it != kv.end()) {
         s.video_fps = ParseInt(it->second, s.video_fps);
       }
+      if (auto it = kv.find("video.output_format"); it != kv.end()) {
+        if (const auto parsed = studiocast::video::ParsePixelFormat(it->second))
+          s.video_output_format = *parsed;
+      }
       if (auto it = kv.find("video.prefer_mjpeg"); it != kv.end()) {
         s.video_prefer_mjpeg = ParseBool(it->second, s.video_prefer_mjpeg);
       }
@@ -667,6 +671,8 @@ bool SaveDaemonConfig(const DaemonConfig &s, std::string *error) {
   out << "video.width = " << s.video_width << "\n";
   out << "video.height = " << s.video_height << "\n";
   out << "video.fps = " << s.video_fps << "\n";
+  out << "video.output_format = "
+      << studiocast::video::PixelFormatName(s.video_output_format) << "\n";
   out << "video.prefer_mjpeg = " << (s.video_prefer_mjpeg ? "true" : "false")
       << "\n";
   out << "video.scaling.backend = " << s.video_scaling_backend << "\n";
@@ -726,6 +732,7 @@ ToVideoServiceConfig(const DaemonConfig &s) {
   cfg.pipeline.width = s.video_width;
   cfg.pipeline.height = s.video_height;
   cfg.pipeline.fps = s.video_fps;
+  cfg.pipeline.output_format = s.video_output_format;
   cfg.pipeline.prefer_mjpeg = s.video_prefer_mjpeg;
   cfg.pipeline.scaling_backend = ParseScalingBackendPreference(
       s.video_scaling_backend,
@@ -753,6 +760,7 @@ void ApplyVideoServiceConfigToDaemonConfig(
   out->video_width = cfg.pipeline.width;
   out->video_height = cfg.pipeline.height;
   out->video_fps = cfg.pipeline.fps;
+  out->video_output_format = cfg.pipeline.output_format;
   out->video_prefer_mjpeg = cfg.pipeline.prefer_mjpeg;
   out->video_scaling_backend =
       ScalingBackendPreferenceToString(cfg.pipeline.scaling_backend);

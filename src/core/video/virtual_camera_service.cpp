@@ -138,6 +138,8 @@ std::string DiffPipelineCfg(const CameraPipelineConfig &a,
   add_i("w", a.width, b.width);
   add_i("h", a.height, b.height);
   add_i("fps", a.fps, b.fps);
+  add_i("output_format", static_cast<int>(a.output_format),
+        static_cast<int>(b.output_format));
   add_b("prefer_mjpeg", a.prefer_mjpeg, b.prefer_mjpeg);
   add_i("scaling_backend", static_cast<int>(a.scaling_backend),
         static_cast<int>(b.scaling_backend));
@@ -225,6 +227,7 @@ bool VirtualCameraService::NeedsPipelineRestart(const CameraPipelineConfig &a,
          a.output_device != b.output_device ||
          a.capture_mode != b.capture_mode || a.width != b.width ||
          a.height != b.height || a.fps != b.fps ||
+         a.output_format != b.output_format ||
          a.prefer_mjpeg != b.prefer_mjpeg ||
          a.scaling_backend != b.scaling_backend ||
          a.allow_cpu_resize != b.allow_cpu_resize;

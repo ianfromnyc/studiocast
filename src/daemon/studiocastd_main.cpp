@@ -80,6 +80,8 @@ void Usage(const char *argv0) {
       << "  --width N                Requested width (default: 1280)\n"
       << "  --height N               Requested height (default: 720)\n"
       << "  --fps N                  Requested fps (default: 30)\n"
+      << "  --output-format F        Virtual camera output: rgb24|yuyv "
+         "(default: rgb24)\n"
       << "  --mirror                 Enable mirror (horizontal flip)\n"
       << "  --background MODE         Background effect: "
          "none|blur|remove|replace|auto_frame (default: none)\n"
@@ -1116,6 +1118,10 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"always_on\":" << BoolJson(cfg.always_on) << ",";
   oss << "\"allow_cpu_resize\":" << BoolJson(cfg.pipeline.allow_cpu_resize)
       << ",";
+  oss << "\"output_format_requested\":\""
+      << JsonEscape(
+             studiocast::video::PixelFormatName(cfg.pipeline.output_format))
+      << "\",";
   oss << "\"virtual_device_present\":" << BoolJson(st.virtual_device_present)
       << ",";
   oss << "\"virtual_device_available\":"
@@ -1672,6 +1678,10 @@ ConfigToJson(const studiocast::video::VirtualCameraServiceConfig &cfg) {
   oss << "\"width\":" << cfg.pipeline.width << ",";
   oss << "\"height\":" << cfg.pipeline.height << ",";
   oss << "\"fps\":" << cfg.pipeline.fps << ",";
+  oss << "\"output_format_requested\":\""
+      << JsonEscape(
+             studiocast::video::PixelFormatName(cfg.pipeline.output_format))
+      << "\",";
   oss << "\"allow_cpu_resize\":" << BoolJson(cfg.pipeline.allow_cpu_resize)
       << ",";
   oss << "\"mirror\":" << BoolJson(cfg.pipeline.effects.mirror) << ",";
@@ -2059,6 +2069,14 @@ int main(int argc, char **argv) {
   cfg.pipeline.width = GetArgInt(argc, argv, "--width", cfg.pipeline.width);
   cfg.pipeline.height = GetArgInt(argc, argv, "--height", cfg.pipeline.height);
   cfg.pipeline.fps = GetArgInt(argc, argv, "--fps", cfg.pipeline.fps);
+  if (const auto v = GetArgValue(argc, argv, "--output-format"); !v.empty()) {
+    if (const auto parsed = studiocast::video::ParsePixelFormat(v)) {
+      cfg.pipeline.output_format = *parsed;
+    } else {
+      std::cerr << "WARN: unknown --output-format value: " << v
+                << " (expected rgb24|yuyv)\n";
+    }
+  }
 
   // Convenience: if the user sets a sentinel width/height and didn't explicitly
   // set a capture mode, treat it as capture auto.
@@ -2366,6 +2384,15 @@ int main(int argc, char **argv) {
               }
               if (auto it = pc.kv.find("fps"); it != pc.kv.end()) {
                 newCfg.pipeline.fps = std::atoi(it->second.c_str());
+              }
+              if (auto it = pc.kv.find("output_format"); it != pc.kv.end()) {
+                const auto parsed =
+                    studiocast::video::ParsePixelFormat(it->second);
+                if (!parsed) {
+                  return std::string("ERR ") +
+                         ErrorJson("output_format must be rgb24|yuyv");
+                }
+                newCfg.pipeline.output_format = *parsed;
               }
               if (auto it = pc.kv.find("always_on"); it != pc.kv.end()) {
                 bool v = false;

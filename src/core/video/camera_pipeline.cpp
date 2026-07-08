@@ -82,6 +82,36 @@ std::string ToLowerAscii(std::string s) {
   return s;
 }
 
+bool ActualMatchesOutputRequest(const ActualFormat &actual, int width,
+                                int height, int fps,
+                                PixelFormat requested_format, bool strict_fps) {
+  if (actual.width != width || actual.height != height)
+    return false;
+  if (actual.format != requested_format)
+    return false;
+  if (strict_fps && actual.fps != fps)
+    return false;
+  return true;
+}
+
+std::string ActualOutputMismatchMessage(const ActualFormat &actual, int width,
+                                        int height, int fps,
+                                        PixelFormat requested_format,
+                                        bool strict_fps) {
+  std::ostringstream oss;
+  oss << "requested output_format=" << PixelFormatName(requested_format) << " "
+      << width << "x" << height;
+  if (strict_fps)
+    oss << "@" << fps;
+  oss << ", negotiated output_format=" << PixelFormatName(actual.format) << " "
+      << actual.width << "x" << actual.height;
+  if (actual.fps > 0)
+    oss << "@" << actual.fps;
+  if (!actual.pixfmt.empty())
+    oss << " (" << actual.pixfmt << ")";
+  return oss.str();
+}
+
 bool OpenCudaTensorRtEnabledFromEnv() {
   const char *v = std::getenv("STUDIOCAST_OPEN_CUDA_TENSORRT");
   if (!v || !*v)
@@ -556,11 +586,15 @@ bool CameraPipeline::Start(const CameraPipelineConfig &cfg,
 }
 
 bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
-                                      int height, int fps, bool strict_fps,
+                                      int height, int fps,
+                                      PixelFormat output_format,
+                                      bool strict_fps,
                                       bool *out_opened_or_renegotiated,
                                       std::string *error) {
   if (out_opened_or_renegotiated)
     *out_opened_or_renegotiated = false;
+
+  std::string reopen_reason;
 
   // Try to reuse an existing open writer when possible.
   if (writer_.IsOpen() && writer_device_ == outDev) {
@@ -578,7 +612,7 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
 
     const auto &a = writer_.Actual();
 
-    // Idle keep-alive path (strict_fps=false): keep the existing producer FD
+    // Idle keep-alive path (strict_fps=false): keep a matching producer FD
     // alive.
     //
     // Some v4l2loopback configurations transiently report/accept different
@@ -587,15 +621,18 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
     // returns EINVAL, which manifests as start/stop flapping when the GUI
     // preview is restarted after the camera fully idles.
     //
-    // The *actual* output size/format will be enforced when the heavy pipeline
-    // starts (strict_fps=true) inside ThreadMain().
-    if (!strict_fps) {
+    // Still enforce the configured shared producer format while idle so browser
+    // consumers see the selected FourCC before opening the device.
+    if (!strict_fps &&
+        ActualMatchesOutputRequest(a, width, height, fps, output_format,
+                                   /*strict_fps=*/false)) {
       output_ = a;
       output_device_ = outDev;
       return true;
     }
 
-    if (a.width == width && a.height == height && a.fps == fps) {
+    if (ActualMatchesOutputRequest(a, width, height, fps, output_format,
+                                   strict_fps)) {
       output_ = a;
       output_device_ = outDev;
       return true;
@@ -606,12 +643,10 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
     // Closing/re-opening the writer FD is a known destabilizer for some
     // v4l2loopback configurations (especially around consumer disconnect
     // windows). Prefer applying VIDIOC_S_FMT/VIDIOC_S_PARM on the same FD.
-    std::string nerr1;
-    std::string nerr2;
-    if (writer_.Renegotiate(outDev, width, height, fps, PixelFormat::rgb24,
-                            &nerr1) ||
-        writer_.Renegotiate(outDev, width, height, fps, PixelFormat::yuyv,
-                            &nerr2)) {
+    std::string nerr;
+    if (writer_.Renegotiate(outDev, width, height, fps, output_format, &nerr) &&
+        ActualMatchesOutputRequest(writer_.Actual(), width, height, fps,
+                                   output_format, strict_fps)) {
       if (out_opened_or_renegotiated)
         *out_opened_or_renegotiated = true;
       output_ = writer_.Actual();
@@ -619,23 +654,23 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
       return true;
     }
 
-    // Non-fatal: keep the existing writer FD and proceed with whatever the
-    // loopback currently advertises. Consumers can renegotiate caps; the writer
-    // will refresh its cached format during streaming.
-    output_ = a;
-    output_device_ = outDev;
-    if (last_error_.empty()) {
-      last_error_ =
-          "Output renegotiation failed; continuing with existing format.";
+    if (nerr.empty() && writer_.IsOpen()) {
+      nerr = ActualOutputMismatchMessage(writer_.Actual(), width, height, fps,
+                                         output_format, strict_fps);
     }
-    return true;
+
+    reopen_reason = "Renegotiation failed for requested output_format=" +
+                    PixelFormatName(output_format) + ": " + nerr;
+    writer_.Close();
+    writer_device_.clear();
+    output_ = ActualFormat{};
+    output_device_.clear();
   } else if (writer_.IsOpen() && writer_device_ != outDev) {
     writer_.Close();
     writer_device_.clear();
   }
 
-  // Open writer: prefer RGB24 output (avoids RGB->YUYV conversion), fallback to
-  // YUYV.
+  // Open writer with the daemon-owned requested shared producer format.
   if (out_opened_or_renegotiated)
     *out_opened_or_renegotiated = true;
 
@@ -652,7 +687,6 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
   };
 
   std::string werr;
-  std::string werr2;
   bool opened = false;
   int attempts = 0;
 
@@ -670,22 +704,22 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
   for (int attempt = 0;; ++attempt) {
     attempts = attempt + 1;
     werr.clear();
-    werr2.clear();
 
     if (stop_.load())
       break;
 
-    if (writer_.Open(outDev, width, height, fps, PixelFormat::rgb24, &werr)) {
-      opened = true;
-      break;
-    }
-    if (writer_.Open(outDev, width, height, fps, PixelFormat::yuyv, &werr2)) {
-      opened = true;
-      break;
+    if (writer_.Open(outDev, width, height, fps, output_format, &werr)) {
+      if (ActualMatchesOutputRequest(writer_.Actual(), width, height, fps,
+                                     output_format, strict_fps)) {
+        opened = true;
+        break;
+      }
+      werr = ActualOutputMismatchMessage(writer_.Actual(), width, height, fps,
+                                         output_format, strict_fps);
+      writer_.Close();
     }
 
-    const bool maybe_transient =
-        contains_invalid_argument(werr) || contains_invalid_argument(werr2);
+    const bool maybe_transient = contains_invalid_argument(werr);
     if (!maybe_transient)
       break;
 
@@ -702,12 +736,16 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
           std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - t0)
               .count();
-      *error = "Failed to open v4l2loopback output " + outDev + ":\n" +
-               "Tried rgb24:\n" + werr + "\n\n" + "Tried yuyv:\n" + werr2 +
-               "\n\n" + "(open retries: " + std::to_string(attempts) +
-               ", elapsed=" + std::to_string(elapsed) + "ms)";
+      *error =
+          "Failed to open v4l2loopback output " + outDev +
+          " with requested output_format=" + PixelFormatName(output_format) +
+          ":\n";
+      if (!reopen_reason.empty())
+        *error += reopen_reason + "\n\n";
+      *error += werr + "\n\n" + "(open retries: " + std::to_string(attempts) +
+                ", elapsed=" + std::to_string(elapsed) + "ms)";
 
-      if (contains_invalid_argument(werr) || contains_invalid_argument(werr2)) {
+      if (contains_invalid_argument(werr)) {
         *error +=
             "\nHint: this can be a transient v4l2loopback restart window; "
             "if it persists, try waiting a few seconds or reloading the "
@@ -851,8 +889,9 @@ bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig &cfg,
 
   bool opened_or_renegotiated = false;
   std::string oerr;
-  if (!OpenOutputLocked(outDev, cfg.width, cfg.height, cfg.fps, false,
-                        &opened_or_renegotiated, &oerr)) {
+  if (!OpenOutputLocked(outDev, cfg.width, cfg.height, cfg.fps,
+                        cfg.output_format, false, &opened_or_renegotiated,
+                        &oerr)) {
     if (error)
       *error = oerr;
     return false;
@@ -1033,8 +1072,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     // we switch the loopback format to that smaller negotiated size while a
     // consumer still requests the configured size, the frame can display in the
     // top-left quadrant.
-    if (!OpenOutputLocked(outDev, out_w, out_h, cfg.fps, true,
-                          &opened_or_renegotiated, &oerr)) {
+    if (!OpenOutputLocked(outDev, out_w, out_h, cfg.fps, cfg.output_format,
+                          true, &opened_or_renegotiated, &oerr)) {
       last_error_ = oerr;
       running_ = false;
       start_notified_ = true;

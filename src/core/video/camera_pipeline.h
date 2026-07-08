@@ -41,6 +41,8 @@ struct CameraPipelineConfig {
   int height = 720;
   int fps = 30;
 
+  PixelFormat output_format = PixelFormat::rgb24;
+
   bool prefer_mjpeg = true;
 
   // Output scaling backend selection.
@@ -276,7 +278,7 @@ private:
   // actually performed an open/renegotiation (i.e. the output may have been
   // reset), and false when the existing writer was reused without changes.
   bool OpenOutputLocked(const std::string &outDev, int width, int height,
-                        int fps, bool strict_fps,
+                        int fps, PixelFormat output_format, bool strict_fps,
                         bool *out_opened_or_renegotiated, std::string *error);
 
   void ThreadMain(CameraPipelineConfig cfg);

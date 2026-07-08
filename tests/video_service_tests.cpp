@@ -81,6 +81,12 @@ public:
                                ? std::string("/dev/video-real")
                                : cfg.input_device;
     status_.output_device = cfg.output_device;
+    status_.output.width = cfg.width;
+    status_.output.height = cfg.height;
+    status_.output.fps = cfg.fps;
+    status_.output.fps_num = 1;
+    status_.output.fps_den = cfg.fps;
+    status_.output.format = cfg.output_format;
     status_.last_error.clear();
     return true;
   }
@@ -110,6 +116,7 @@ public:
     status_.output.fps = cfg.fps;
     status_.output.fps_num = 1;
     status_.output.fps_den = cfg.fps;
+    status_.output.format = cfg.output_format;
     return true;
   }
 
@@ -584,6 +591,50 @@ bool TestVideoConfigRestartTransitionNameIsStable() {
   return true;
 }
 
+bool TestVideoOutputFormatChangeRestartsPipeline() {
+  ServiceHarness h;
+  h.consumer_present.store(true, std::memory_order_relaxed);
+  VirtualCameraService service(h.Hooks(5ms));
+  auto cfg = TestConfig();
+  cfg.pipeline.output_format = studiocast::video::PixelFormat::rgb24;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil([&] { return service.Status().pipeline.running; }, 250ms)) {
+    std::cerr << "video pipeline did not start before format restart test\n";
+    service.Stop();
+    return false;
+  }
+
+  auto updated = cfg;
+  updated.pipeline.output_format = studiocast::video::PixelFormat::yuyv;
+  service.UpdateConfig(updated);
+
+  const bool restarted = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return status.pipeline_config_restarts >= 1 &&
+               h.pipeline->start_calls.load() >= 2 &&
+               status.pipeline.output.format ==
+                   studiocast::video::PixelFormat::yuyv;
+      },
+      750ms);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!restarted) {
+    std::cerr << "output format change did not restart pipeline; restarts="
+              << status.pipeline_config_restarts
+              << " starts=" << h.pipeline->start_calls.load() << "\n";
+    return false;
+  }
+  return true;
+}
+
 bool TestOptionalVideoEffectsFailOpenCooldownAndRetry() {
   namespace contract = studiocast::video::effects::contract;
 
@@ -881,6 +932,8 @@ int main() {
        &TestVideoStartFailureClearsAfterRecovery},
       {"video config restart transition name is stable",
        &TestVideoConfigRestartTransitionNameIsStable},
+      {"video output format change restarts pipeline",
+       &TestVideoOutputFormatChangeRestartsPipeline},
       {"optional video effects fail open with cooldown retry",
        &TestOptionalVideoEffectsFailOpenCooldownAndRetry},
       {"video pipeline exposes degraded effect status",
