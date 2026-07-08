@@ -33,14 +33,16 @@ bool TestV4l2ExplicitMjpegRequestDoesNotFallBackToYuyvInsideOpenOrder();
 bool TestV4l2FakeNegotiationUsesOrderedFallback();
 bool TestV4l2MjpegDecodeFailureFallsBackToRawOnce();
 bool TestRgb24ToYuyvMatchesBt601WithinChromaRounding();
+bool TestRgb24ToYuyvBackendsMatchScalarReference();
+bool TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants();
 } // namespace studiocast::tests
 
 namespace {
 
 using studiocast::video::CameraPipelineConfig;
-using studiocast::video::OptionalEffectBreaker;
 using studiocast::video::CameraPipelineRunner;
 using studiocast::video::CameraPipelineStatus;
+using studiocast::video::OptionalEffectBreaker;
 using studiocast::video::VideoConsumerSnapshot;
 using studiocast::video::VirtualCameraService;
 using studiocast::video::VirtualCameraServiceConfig;
@@ -651,8 +653,8 @@ bool TestOptionalVideoEffectsFailOpenCooldownAndRetry() {
        "Maxine video noise removal failed: synthetic denoise failure"},
       {"relight", contract::kEffectIdVirtualKeyLight, "maxine",
        "Maxine relighting failed: synthetic relight failure"},
-      {"virtual background", contract::kEffectIdVirtualBackgroundBlur,
-       "maxine", "Maxine virtual background failed: synthetic VB failure"},
+      {"virtual background", contract::kEffectIdVirtualBackgroundBlur, "maxine",
+       "Maxine virtual background failed: synthetic VB failure"},
       {"auto frame", contract::kEffectIdAutoFrame, "maxine_ar_cuda",
        "Maxine auto frame failed: synthetic auto-frame failure"},
   }};
@@ -691,8 +693,8 @@ bool TestOptionalVideoEffectsFailOpenCooldownAndRetry() {
 
       ++attempts;
       if (attempts <= 2) {
-        breaker.OnFailure(scenario.effect_id, scenario.backend,
-                          scenario.reason, frame, ++order);
+        breaker.OnFailure(scenario.effect_id, scenario.backend, scenario.reason,
+                          frame, ++order);
         const auto degraded = breaker.ToStatus(frame);
         if (!degraded.active || degraded.effect_id != scenario.effect_id ||
             degraded.backend != scenario.backend ||
@@ -961,7 +963,8 @@ int main() {
        &studiocast::tests::
            TestFrameArtifactCacheReusesCompatibleMaxineMatteWithinFrame},
       {"frame artifact cache separates incompatible matte keys",
-       &studiocast::tests::TestFrameArtifactCacheSeparatesIncompatibleMatteKeys},
+       &studiocast::tests::
+           TestFrameArtifactCacheSeparatesIncompatibleMatteKeys},
       {"frame artifact cache invalidates matte on new frame",
        &studiocast::tests::TestFrameArtifactCacheInvalidatesMatteOnNewFrame},
       {"frame artifact cache precomputed matte keys preserve compatibility",
@@ -970,8 +973,7 @@ int main() {
       {"V4L2 capture treats 720p as MJPEG-worthy",
        &studiocast::tests::TestV4l2CapturePreferenceTreats720pAsMjpegWorthy},
       {"V4L2 YUYV request tries MJPEG first at HD when preferred",
-       &studiocast::tests::
-           TestV4l2YuyvRequestTriesMjpegFirstAtHdWhenPreferred},
+       &studiocast::tests::TestV4l2YuyvRequestTriesMjpegFirstAtHdWhenPreferred},
       {"V4L2 YUYV request falls back to MJPEG after YUYV at low resolution",
        &studiocast::tests::
            TestV4l2YuyvRequestFallsBackToMjpegAfterYuyvAtLowResolution},
@@ -990,6 +992,11 @@ int main() {
        &studiocast::tests::TestV4l2MjpegDecodeFailureFallsBackToRawOnce},
       {"RGB24 to YUYV matches BT.601 within chroma rounding",
        &studiocast::tests::TestRgb24ToYuyvMatchesBt601WithinChromaRounding},
+      {"RGB24 to YUYV backends match scalar reference",
+       &studiocast::tests::TestRgb24ToYuyvBackendsMatchScalarReference},
+      {"RGB24 to YUYV public path matches scalar with scratch variants",
+       &studiocast::tests::
+           TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants},
   };
 
   int failed = 0;

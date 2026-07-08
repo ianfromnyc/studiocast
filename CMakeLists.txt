@@ -296,6 +296,9 @@ add_library(studiocast_core
         src/core/video/feed.cpp
         src/core/video/convert.h
         src/core/video/convert.cpp
+        src/core/video/convert_rgb_yuyv_internal.h
+        src/core/video/convert_rgb_yuyv_scalar.cpp
+        src/core/video/convert_rgb_yuyv_dispatch.cpp
         src/core/video/scaling_policy.h
         src/core/video/scaling_policy.cpp
         src/core/video/mjpeg_decode.h
@@ -349,10 +352,34 @@ set_target_properties(studiocast_core PROPERTIES
         AUTORCC OFF
 )
 
+set(_studiocast_x86_simd FALSE)
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND
+        CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|i[3-6]86)$")
+    set(_studiocast_x86_simd TRUE)
+endif()
+
+if (_studiocast_x86_simd)
+    target_sources(studiocast_core PRIVATE
+            src/core/video/convert_rgb_yuyv_ssse3.cpp
+            src/core/video/convert_rgb_yuyv_avx2.cpp
+    )
+    set_source_files_properties(src/core/video/convert_rgb_yuyv_ssse3.cpp
+            PROPERTIES COMPILE_OPTIONS "-O3;-mssse3")
+    set_source_files_properties(src/core/video/convert_rgb_yuyv_avx2.cpp
+            PROPERTIES COMPILE_OPTIONS "-O3;-mavx2")
+    target_compile_definitions(studiocast_core PRIVATE STUDIOCAST_HAVE_X86_SIMD=1)
+else()
+    target_compile_definitions(studiocast_core PRIVATE STUDIOCAST_HAVE_X86_SIMD=0)
+endif()
+
 # Video color conversion is extremely hot (runs every frame). In Debug builds the lack of
 # optimization can make the virtual camera feel laggy. Force optimization for this TU.
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        set_source_files_properties(src/core/video/convert.cpp PROPERTIES COMPILE_OPTIONS "-O3")
+        set_source_files_properties(
+                src/core/video/convert.cpp
+                src/core/video/convert_rgb_yuyv_scalar.cpp
+                src/core/video/convert_rgb_yuyv_dispatch.cpp
+                PROPERTIES COMPILE_OPTIONS "-O3")
 endif()
 
 target_include_directories(studiocast_core PUBLIC
@@ -615,6 +642,28 @@ set_target_properties(studiocast-video PROPERTIES
         AUTOUIC OFF
         AUTORCC OFF
 )
+
+if (STUDIOCAST_BUILD_BENCHMARKS)
+    add_executable(studiocast-rgb-yuyv-bench
+            src/tools/studiocast_rgb_yuyv_bench_main.cpp
+    )
+
+    target_link_libraries(studiocast-rgb-yuyv-bench PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-rgb-yuyv-bench PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-rgb-yuyv-bench)
+    studiocast_enable_sanitizers(studiocast-rgb-yuyv-bench)
+
+    set_target_properties(studiocast-rgb-yuyv-bench PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+endif()
 
 
 # -----------------------------
