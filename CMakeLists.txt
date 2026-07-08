@@ -957,6 +957,7 @@ if (BUILD_TESTING)
             tests/open_video_denoise_contract_tests.cpp
             tests/frame_artifact_cache_tests.cpp
             tests/v4l2_capture_negotiation_tests.cpp
+            tests/rgb_yuyv_convert_tests.cpp
     )
 
     target_link_libraries(studiocast-video-tests PRIVATE studiocast_core)

@@ -1,10 +1,35 @@
 #include "convert.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
 namespace studiocast::video {
 namespace {
+
+constexpr std::array<int, 256> MakeRgbTable(int coefficient) {
+  std::array<int, 256> out{};
+  for (int i = 0; i < 256; ++i)
+    out[static_cast<std::size_t>(i)] = coefficient * i;
+  return out;
+}
+
+constexpr std::array<int, 511> MakeRgbPairTable(int coefficient) {
+  std::array<int, 511> out{};
+  for (int i = 0; i < 511; ++i)
+    out[static_cast<std::size_t>(i)] = coefficient * i;
+  return out;
+}
+
+constexpr auto kYFromR = MakeRgbTable(66);
+constexpr auto kYFromG = MakeRgbTable(129);
+constexpr auto kYFromB = MakeRgbTable(25);
+constexpr auto kUFromRPair = MakeRgbPairTable(-38);
+constexpr auto kUFromGPair = MakeRgbPairTable(-74);
+constexpr auto kUFromBPair = MakeRgbPairTable(112);
+constexpr auto kVFromRPair = MakeRgbPairTable(112);
+constexpr auto kVFromGPair = MakeRgbPairTable(-94);
+constexpr auto kVFromBPair = MakeRgbPairTable(-18);
 
 inline std::uint8_t ClampByte(int v) {
   if (v < 0)
@@ -45,6 +70,33 @@ inline int RgbToU(int r, int g, int b) {
 inline int RgbToV(int r, int g, int b) {
   // V = ( 112 R -  94 G -  18 B + 128) >> 8 + 128
   return ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+}
+
+inline std::uint8_t RgbToYFast(int r, int g, int b) {
+  return static_cast<std::uint8_t>(
+      ((kYFromR[static_cast<std::size_t>(r)] +
+        kYFromG[static_cast<std::size_t>(g)] +
+        kYFromB[static_cast<std::size_t>(b)] + 128) >>
+       8) +
+      16);
+}
+
+inline std::uint8_t RgbPairSumToUFast(int r, int g, int b) {
+  return static_cast<std::uint8_t>(
+      ((kUFromRPair[static_cast<std::size_t>(r)] +
+        kUFromGPair[static_cast<std::size_t>(g)] +
+        kUFromBPair[static_cast<std::size_t>(b)] + 256) >>
+       9) +
+      128);
+}
+
+inline std::uint8_t RgbPairSumToVFast(int r, int g, int b) {
+  return static_cast<std::uint8_t>(
+      ((kVFromRPair[static_cast<std::size_t>(r)] +
+        kVFromGPair[static_cast<std::size_t>(g)] +
+        kVFromBPair[static_cast<std::size_t>(b)] + 256) >>
+       9) +
+      128);
 }
 
 } // namespace
@@ -96,36 +148,37 @@ void Rgb24ToYuyv(const std::uint8_t *src, int width, int height,
     const std::uint8_t *s = src + static_cast<std::size_t>(y) * src_stride;
     std::uint8_t *d = dst + static_cast<std::size_t>(y) * dst_stride;
 
-    for (int x = 0; x < width; x += 2) {
+    int x = 0;
+    for (; x + 1 < width; x += 2) {
       const int r0 = s[0];
       const int g0 = s[1];
       const int b0 = s[2];
-      s += 3;
+      const int r1 = s[3];
+      const int g1 = s[4];
+      const int b1 = s[5];
+      s += 6;
 
-      int r1 = r0, g1 = g0, b1 = b0;
-      if (x + 1 < width) {
-        r1 = s[0];
-        g1 = s[1];
-        b1 = s[2];
-        s += 3;
-      }
+      const int r_pair = r0 + r1;
+      const int g_pair = g0 + g1;
+      const int b_pair = b0 + b1;
 
-      const int y0 = RgbToY(r0, g0, b0);
-      const int y1 = RgbToY(r1, g1, b1);
-
-      const int u0 = RgbToU(r0, g0, b0);
-      const int v0 = RgbToV(r0, g0, b0);
-      const int u1 = RgbToU(r1, g1, b1);
-      const int v1 = RgbToV(r1, g1, b1);
-
-      const int u = (u0 + u1) / 2;
-      const int v = (v0 + v1) / 2;
-
-      d[0] = ClampByte(y0);
-      d[1] = ClampByte(u);
-      d[2] = ClampByte(y1);
-      d[3] = ClampByte(v);
+      d[0] = RgbToYFast(r0, g0, b0);
+      d[1] = RgbPairSumToUFast(r_pair, g_pair, b_pair);
+      d[2] = RgbToYFast(r1, g1, b1);
+      d[3] = RgbPairSumToVFast(r_pair, g_pair, b_pair);
       d += 4;
+    }
+
+    if (x < width) {
+      const int r0 = s[0];
+      const int g0 = s[1];
+      const int b0 = s[2];
+      const std::uint8_t y0 = RgbToYFast(r0, g0, b0);
+
+      d[0] = y0;
+      d[1] = static_cast<std::uint8_t>(RgbToU(r0, g0, b0));
+      d[2] = y0;
+      d[3] = static_cast<std::uint8_t>(RgbToV(r0, g0, b0));
     }
   }
 }

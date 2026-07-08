@@ -32,6 +32,7 @@ bool TestV4l2UnsupportedFormatsAreSkippedWithoutDuplicates();
 bool TestV4l2ExplicitMjpegRequestDoesNotFallBackToYuyvInsideOpenOrder();
 bool TestV4l2FakeNegotiationUsesOrderedFallback();
 bool TestV4l2MjpegDecodeFailureFallsBackToRawOnce();
+bool TestRgb24ToYuyvMatchesBt601WithinChromaRounding();
 } // namespace studiocast::tests
 
 namespace {
@@ -987,6 +988,8 @@ int main() {
        &studiocast::tests::TestV4l2FakeNegotiationUsesOrderedFallback},
       {"V4L2 MJPEG decode failure falls back to raw once",
        &studiocast::tests::TestV4l2MjpegDecodeFailureFallsBackToRawOnce},
+      {"RGB24 to YUYV matches BT.601 within chroma rounding",
+       &studiocast::tests::TestRgb24ToYuyvMatchesBt601WithinChromaRounding},
   };
 
   int failed = 0;
