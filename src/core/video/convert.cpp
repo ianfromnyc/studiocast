@@ -3,6 +3,16 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+
+#ifndef STUDIOCAST_HAVE_LIBYUV
+#define STUDIOCAST_HAVE_LIBYUV 0
+#endif
+
+#if STUDIOCAST_HAVE_LIBYUV
+#include <libyuv/convert_argb.h>
+#include <libyuv/convert_from_argb.h>
+#endif
 
 namespace studiocast::video {
 namespace {
@@ -99,6 +109,12 @@ inline std::uint8_t RgbPairSumToVFast(int r, int g, int b) {
       128);
 }
 
+#if STUDIOCAST_HAVE_LIBYUV
+bool FitsInt(std::size_t value) {
+  return value <= static_cast<std::size_t>(std::numeric_limits<int>::max());
+}
+#endif
+
 } // namespace
 
 void YuyvToRgb24(const std::uint8_t *src, int width, int height,
@@ -141,8 +157,50 @@ void YuyvToRgb24(const std::uint8_t *src, int width, int height,
 void Rgb24ToYuyv(const std::uint8_t *src, int width, int height,
                  std::size_t src_stride, std::uint8_t *dst,
                  std::size_t dst_stride) {
+  Rgb24ToYuyvWithScratch(src, width, height, src_stride, dst, dst_stride,
+                         nullptr, 0);
+}
+
+std::size_t Rgb24ToYuyvScratchBytes(int width, int height) {
+#if STUDIOCAST_HAVE_LIBYUV
+  if (width <= 0 || height <= 0)
+    return 0;
+  return static_cast<std::size_t>(width) * static_cast<std::size_t>(height) *
+         4u;
+#else
+  (void)width;
+  (void)height;
+  return 0;
+#endif
+}
+
+void Rgb24ToYuyvWithScratch(const std::uint8_t *src, int width, int height,
+                            std::size_t src_stride, std::uint8_t *dst,
+                            std::size_t dst_stride, std::uint8_t *scratch,
+                            std::size_t scratch_size) {
   if (!src || !dst || width <= 0 || height <= 0)
     return;
+
+#if STUDIOCAST_HAVE_LIBYUV
+  const std::size_t argb_stride = static_cast<std::size_t>(width) * 4u;
+  const std::size_t argb_bytes =
+      argb_stride * static_cast<std::size_t>(height);
+  if (scratch && scratch_size >= argb_bytes && FitsInt(src_stride) &&
+      FitsInt(dst_stride) && FitsInt(argb_stride)) {
+    const int src_stride_i = static_cast<int>(src_stride);
+    const int dst_stride_i = static_cast<int>(dst_stride);
+    const int argb_stride_i = static_cast<int>(argb_stride);
+    if (libyuv::RAWToARGB(src, src_stride_i, scratch, argb_stride_i, width,
+                          height) == 0 &&
+        libyuv::ARGBToYUY2(scratch, argb_stride_i, dst, dst_stride_i, width,
+                           height) == 0) {
+      return;
+    }
+  }
+#else
+  (void)scratch;
+  (void)scratch_size;
+#endif
 
   for (int y = 0; y < height; ++y) {
     const std::uint8_t *s = src + static_cast<std::size_t>(y) * src_stride;

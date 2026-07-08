@@ -21,6 +21,18 @@ void Rgb24ToYuyv(const std::uint8_t *src, int width, int height,
                  std::size_t src_stride, std::uint8_t *dst,
                  std::size_t dst_stride);
 
+// Scratch bytes needed by the optimized RGB24 -> YUYV path for the given
+// geometry. Returns 0 when the build only has the scalar converter.
+std::size_t Rgb24ToYuyvScratchBytes(int width, int height);
+
+// Convert RGB24 to YUYV using caller-owned scratch memory when an optimized
+// backend is available. Falls back to the built-in scalar converter if scratch
+// is absent or insufficient.
+void Rgb24ToYuyvWithScratch(const std::uint8_t *src, int width, int height,
+                            std::size_t src_stride, std::uint8_t *dst,
+                            std::size_t dst_stride, std::uint8_t *scratch,
+                            std::size_t scratch_size);
+
 // In-place horizontal mirror on RGB24 buffer.
 void MirrorRgb24InPlace(std::uint8_t *rgb, int width, int height,
                         std::size_t stride);

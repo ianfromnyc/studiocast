@@ -49,6 +49,34 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PULSE_SIMPLE QUIET IMPORTED_TARGET libpulse-simple)
 
+# libyuv (optional) for SIMD-optimized RGB/YUV conversions. Keep a scalar
+# fallback so StudioCast still builds on minimal systems.
+set(_studiocast_have_libyuv FALSE)
+set(_studiocast_libyuv_target "")
+pkg_check_modules(LIBYUV QUIET IMPORTED_TARGET libyuv)
+if (TARGET PkgConfig::LIBYUV)
+    set(_studiocast_have_libyuv TRUE)
+    set(_studiocast_libyuv_target PkgConfig::LIBYUV)
+else()
+    find_path(LIBYUV_INCLUDE_DIR NAMES libyuv/convert_argb.h)
+    find_library(LIBYUV_LIBRARY NAMES yuv libyuv)
+    if (LIBYUV_INCLUDE_DIR AND LIBYUV_LIBRARY)
+        add_library(studiocast_libyuv UNKNOWN IMPORTED)
+        set_target_properties(studiocast_libyuv PROPERTIES
+                IMPORTED_LOCATION "${LIBYUV_LIBRARY}"
+                INTERFACE_INCLUDE_DIRECTORIES "${LIBYUV_INCLUDE_DIR}"
+        )
+        set(_studiocast_have_libyuv TRUE)
+        set(_studiocast_libyuv_target studiocast_libyuv)
+    endif()
+endif()
+
+if (_studiocast_have_libyuv)
+    message(STATUS "libyuv found; optimized RGB/YUV conversion enabled.")
+else()
+    message(STATUS "libyuv not found; using built-in scalar RGB/YUV conversion.")
+endif()
+
 # MJPEG decode (libjpeg-turbo recommended; provided as `JPEG`).
 find_package(JPEG QUIET)
 if (NOT JPEG_FOUND)
@@ -333,6 +361,13 @@ target_include_directories(studiocast_core PUBLIC
 )
 
 target_link_libraries(studiocast_core PUBLIC ${CMAKE_DL_LIBS})
+
+if (_studiocast_have_libyuv)
+    target_link_libraries(studiocast_core PRIVATE "${_studiocast_libyuv_target}")
+    target_compile_definitions(studiocast_core PRIVATE STUDIOCAST_HAVE_LIBYUV=1)
+else()
+    target_compile_definitions(studiocast_core PRIVATE STUDIOCAST_HAVE_LIBYUV=0)
+endif()
 
 if (TARGET JPEG::JPEG)
     target_link_libraries(studiocast_core PUBLIC JPEG::JPEG)

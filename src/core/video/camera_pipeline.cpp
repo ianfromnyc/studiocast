@@ -1277,6 +1277,20 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   std::vector<std::uint8_t> rgbScaled;
 
   std::vector<std::uint8_t> outBuf(outA.size_image);
+  std::vector<std::uint8_t> yuyvConversionScratch;
+
+  auto ResizeYuyvConversionScratch = [&] {
+    const std::size_t need =
+        (outA.format == PixelFormat::yuyv)
+            ? Rgb24ToYuyvScratchBytes(outA.width, outA.height)
+            : 0u;
+    if (need > 0) {
+      yuyvConversionScratch.resize(need);
+    } else {
+      yuyvConversionScratch.clear();
+    }
+  };
+  ResizeYuyvConversionScratch();
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -7111,6 +7125,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
     if (need > 0)
       outBuf.resize(need);
+    ResizeYuyvConversionScratch();
 
     {
       std::lock_guard<std::mutex> lock(mu_);
@@ -9231,8 +9246,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
     } else {
       // Output is YUYV; convert RGB -> YUYV into outBuf with output stride.
-      Rgb24ToYuyv(rgbOut, outW, outH, rgbOutStride, outBuf.data(),
-                  outA.bytes_per_line);
+      Rgb24ToYuyvWithScratch(
+          rgbOut, outW, outH, rgbOutStride, outBuf.data(),
+          outA.bytes_per_line,
+          yuyvConversionScratch.empty() ? nullptr
+                                        : yuyvConversionScratch.data(),
+          yuyvConversionScratch.size());
 
       std::string werr;
       if (!writer_.WriteFrame(outBuf.data(), outBuf.size(), &werr)) {
