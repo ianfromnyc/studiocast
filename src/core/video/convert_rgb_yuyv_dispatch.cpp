@@ -26,20 +26,71 @@ bool FitsInt(std::size_t value) {
 }
 #endif
 
-Rgb24ToYuyvBackend DetectBackend() {
+struct Rgb24ToYuyvDispatchPlan {
+  Rgb24ToYuyvBackend backend;
+  Rgb24ToYuyvWithScratchFn convert;
+  bool needs_scratch;
+};
+
+void ConvertScalarWithScratch(const std::uint8_t *src, int width, int height,
+                              std::size_t src_stride, std::uint8_t *dst,
+                              std::size_t dst_stride, std::uint8_t *scratch,
+                              std::size_t scratch_size) {
+  (void)scratch;
+  (void)scratch_size;
+  Rgb24ToYuyvScalar(src, width, height, src_stride, dst, dst_stride);
+}
+
 #if STUDIOCAST_HAVE_X86_SIMD
-  if (Rgb24ToYuyvAvx2Available())
-    return Rgb24ToYuyvBackend::avx2;
-  if (Rgb24ToYuyvSsse3Available())
-    return Rgb24ToYuyvBackend::ssse3;
+void ConvertSsse3WithScratch(const std::uint8_t *src, int width, int height,
+                             std::size_t src_stride, std::uint8_t *dst,
+                             std::size_t dst_stride, std::uint8_t *scratch,
+                             std::size_t scratch_size) {
+  (void)scratch;
+  (void)scratch_size;
+  Rgb24ToYuyvSsse3(src, width, height, src_stride, dst, dst_stride);
+}
+
+void ConvertAvx2WithScratch(const std::uint8_t *src, int width, int height,
+                            std::size_t src_stride, std::uint8_t *dst,
+                            std::size_t dst_stride, std::uint8_t *scratch,
+                            std::size_t scratch_size) {
+  (void)scratch;
+  (void)scratch_size;
+  Rgb24ToYuyvAvx2(src, width, height, src_stride, dst, dst_stride);
+}
 #endif
 
 #if STUDIOCAST_HAVE_LIBYUV
-  return Rgb24ToYuyvBackend::libyuv;
+void ConvertLibyuvWithScratch(const std::uint8_t *src, int width, int height,
+                              std::size_t src_stride, std::uint8_t *dst,
+                              std::size_t dst_stride, std::uint8_t *scratch,
+                              std::size_t scratch_size) {
+  if (Rgb24ToYuyvLibyuv(src, width, height, src_stride, dst, dst_stride,
+                        scratch, scratch_size)) {
+    return;
+  }
+
+  Rgb24ToYuyvScalar(src, width, height, src_stride, dst, dst_stride);
+}
+#endif
+
+Rgb24ToYuyvDispatchPlan DetectDispatchPlan() {
+#if STUDIOCAST_HAVE_X86_SIMD
+  if (Rgb24ToYuyvAvx2Available())
+    return {Rgb24ToYuyvBackend::avx2, &ConvertAvx2WithScratch, false};
+  if (Rgb24ToYuyvSsse3Available())
+    return {Rgb24ToYuyvBackend::ssse3, &ConvertSsse3WithScratch, false};
+#endif
+
+#if STUDIOCAST_HAVE_LIBYUV
+  return {Rgb24ToYuyvBackend::libyuv, &ConvertLibyuvWithScratch, true};
 #else
-  return Rgb24ToYuyvBackend::scalar;
+  return {Rgb24ToYuyvBackend::scalar, &ConvertScalarWithScratch, false};
 #endif
 }
+
+const Rgb24ToYuyvDispatchPlan kDispatchPlan = DetectDispatchPlan();
 
 } // namespace
 
@@ -58,8 +109,7 @@ const char *Rgb24ToYuyvBackendName(Rgb24ToYuyvBackend backend) {
 }
 
 Rgb24ToYuyvBackend Rgb24ToYuyvSelectedBackend() {
-  static const Rgb24ToYuyvBackend backend = DetectBackend();
-  return backend;
+  return kDispatchPlan.backend;
 }
 
 bool Rgb24ToYuyvBackendAvailable(Rgb24ToYuyvBackend backend) {
@@ -77,7 +127,7 @@ bool Rgb24ToYuyvBackendAvailable(Rgb24ToYuyvBackend backend) {
 }
 
 std::size_t Rgb24ToYuyvDispatchScratchBytes(int width, int height) {
-  if (Rgb24ToYuyvSelectedBackend() == Rgb24ToYuyvBackend::libyuv)
+  if (kDispatchPlan.needs_scratch)
     return Rgb24ToYuyvLibyuvScratchBytes(width, height);
   return 0;
 }
@@ -90,24 +140,8 @@ void Rgb24ToYuyvDispatchWithScratch(const std::uint8_t *src, int width,
   if (!src || !dst || width <= 0 || height <= 0)
     return;
 
-  switch (Rgb24ToYuyvSelectedBackend()) {
-  case Rgb24ToYuyvBackend::avx2:
-    Rgb24ToYuyvAvx2(src, width, height, src_stride, dst, dst_stride);
-    return;
-  case Rgb24ToYuyvBackend::ssse3:
-    Rgb24ToYuyvSsse3(src, width, height, src_stride, dst, dst_stride);
-    return;
-  case Rgb24ToYuyvBackend::libyuv:
-    if (Rgb24ToYuyvLibyuv(src, width, height, src_stride, dst, dst_stride,
-                          scratch, scratch_size)) {
-      return;
-    }
-    break;
-  case Rgb24ToYuyvBackend::scalar:
-    break;
-  }
-
-  Rgb24ToYuyvScalar(src, width, height, src_stride, dst, dst_stride);
+  kDispatchPlan.convert(src, width, height, src_stride, dst, dst_stride,
+                        scratch, scratch_size);
 }
 
 bool Rgb24ToYuyvLibyuvAvailable() {
@@ -169,9 +203,10 @@ bool Rgb24ToYuyvLibyuv(const std::uint8_t *src, int width, int height,
 #if STUDIOCAST_HAVE_X86_SIMD
 bool Rgb24ToYuyvSsse3Available() {
 #if defined(__GNUC__) || defined(__clang__)
-  __builtin_cpu_init();
-  static const bool available =
-      static_cast<bool>(__builtin_cpu_supports("ssse3"));
+  static const bool available = [] {
+    __builtin_cpu_init();
+    return static_cast<bool>(__builtin_cpu_supports("ssse3"));
+  }();
   return available;
 #else
   return false;
@@ -180,10 +215,11 @@ bool Rgb24ToYuyvSsse3Available() {
 
 bool Rgb24ToYuyvAvx2Available() {
 #if defined(__GNUC__) || defined(__clang__)
-  __builtin_cpu_init();
-  static const bool available =
-      static_cast<bool>(__builtin_cpu_supports("avx")) &&
-      static_cast<bool>(__builtin_cpu_supports("avx2"));
+  static const bool available = [] {
+    __builtin_cpu_init();
+    return static_cast<bool>(__builtin_cpu_supports("avx")) &&
+           static_cast<bool>(__builtin_cpu_supports("avx2"));
+  }();
   return available;
 #else
   return false;

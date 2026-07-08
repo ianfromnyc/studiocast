@@ -12,9 +12,12 @@ enum class Rgb24ToYuyvBackend {
   avx2,
 };
 
-using Rgb24ToYuyvFn = void (*)(const std::uint8_t *src, int width, int height,
-                               std::size_t src_stride, std::uint8_t *dst,
-                               std::size_t dst_stride);
+using Rgb24ToYuyvWithScratchFn = void (*)(const std::uint8_t *src, int width,
+                                          int height, std::size_t src_stride,
+                                          std::uint8_t *dst,
+                                          std::size_t dst_stride,
+                                          std::uint8_t *scratch,
+                                          std::size_t scratch_size);
 
 const char *Rgb24ToYuyvBackendName(Rgb24ToYuyvBackend backend);
 Rgb24ToYuyvBackend Rgb24ToYuyvSelectedBackend();
