@@ -1,4 +1,5 @@
 #include "core/video/convert.h"
+#include "core/video/convert_rgb_bgr_internal.h"
 #include "core/video/convert_rgb_yuyv_internal.h"
 #include "core/video/convert_yuyv_rgb_internal.h"
 
@@ -28,6 +29,13 @@ enum class YuyvToRgbBenchBackend {
   original_scalar,
   current_scalar,
   sse41,
+  avx2,
+  selected,
+};
+
+enum class RgbBgrBenchBackend {
+  current_scalar,
+  ssse3,
   selected,
 };
 
@@ -222,7 +230,21 @@ const char *BackendName(YuyvToRgbBenchBackend backend) {
     return "current-scalar";
   case YuyvToRgbBenchBackend::sse41:
     return "sse4.1";
+  case YuyvToRgbBenchBackend::avx2:
+    return "avx2";
   case YuyvToRgbBenchBackend::selected:
+    return "selected";
+  }
+  return "unknown";
+}
+
+const char *BackendName(RgbBgrBenchBackend backend) {
+  switch (backend) {
+  case RgbBgrBenchBackend::current_scalar:
+    return "current-scalar";
+  case RgbBgrBenchBackend::ssse3:
+    return "ssse3";
+  case RgbBgrBenchBackend::selected:
     return "selected";
   }
   return "unknown";
@@ -239,6 +261,23 @@ bool BackendAvailable(YuyvToRgbBenchBackend backend) {
   case YuyvToRgbBenchBackend::sse41:
     return studiocast::video::internal::YuyvToRgbBackendAvailable(
         YuyvToRgbBackend::sse41);
+  case YuyvToRgbBenchBackend::avx2:
+    return studiocast::video::internal::YuyvToRgbBackendAvailable(
+        YuyvToRgbBackend::avx2);
+  }
+  return false;
+}
+
+bool BackendAvailable(RgbBgrBenchBackend backend) {
+  using studiocast::video::internal::Rgb24Bgr24Backend;
+
+  switch (backend) {
+  case RgbBgrBenchBackend::current_scalar:
+  case RgbBgrBenchBackend::selected:
+    return true;
+  case RgbBgrBenchBackend::ssse3:
+    return studiocast::video::internal::Rgb24Bgr24BackendAvailable(
+        Rgb24Bgr24Backend::ssse3);
   }
   return false;
 }
@@ -326,9 +365,33 @@ bool Convert(YuyvToRgbBenchBackend backend, const std::uint8_t *src, int width,
     studiocast::video::internal::YuyvToRgbSse41(src, width, height, src_stride,
                                                 dst, dst_stride);
     return true;
+  case YuyvToRgbBenchBackend::avx2:
+    studiocast::video::internal::YuyvToRgbAvx2(src, width, height, src_stride,
+                                               dst, dst_stride);
+    return true;
   case YuyvToRgbBenchBackend::selected:
     studiocast::video::YuyvToRgb24(src, width, height, src_stride, dst,
                                    dst_stride);
+    return true;
+  }
+  return false;
+}
+
+bool Convert(RgbBgrBenchBackend backend, const std::uint8_t *src, int width,
+             int height, std::size_t src_stride, std::uint8_t *dst,
+             std::size_t dst_stride) {
+  switch (backend) {
+  case RgbBgrBenchBackend::current_scalar:
+    studiocast::video::internal::Rgb24Bgr24Scalar(
+        src, dst, width, height, src_stride, dst_stride);
+    return true;
+  case RgbBgrBenchBackend::ssse3:
+    studiocast::video::internal::Rgb24Bgr24Ssse3(
+        src, dst, width, height, src_stride, dst_stride);
+    return true;
+  case RgbBgrBenchBackend::selected:
+    studiocast::video::Rgb24ToBgr24(src, dst, width, height, src_stride,
+                                    dst_stride);
     return true;
   }
   return false;
@@ -446,6 +509,60 @@ Stats RunYuyvToRgbBench(YuyvToRgbBenchBackend backend, const SizeCase &size,
   return stats;
 }
 
+Stats RunRgbBgrBench(RgbBgrBenchBackend backend, const SizeCase &size,
+                     int iterations, int warmup) {
+  const std::size_t src_stride = static_cast<std::size_t>(size.width) * 3u;
+  const std::size_t dst_stride = static_cast<std::size_t>(size.width) * 3u;
+  std::vector<std::uint8_t> src(src_stride *
+                                static_cast<std::size_t>(size.height));
+  std::vector<std::uint8_t> dst(dst_stride *
+                                static_cast<std::size_t>(size.height));
+  FillDeterministicRgb(&src, size.width, size.height, src_stride);
+
+  for (int i = 0; i < warmup; ++i) {
+    Convert(backend, src.data(), size.width, size.height, src_stride,
+            dst.data(), dst_stride);
+  }
+
+  std::vector<double> samples_ms;
+  samples_ms.reserve(static_cast<std::size_t>(iterations));
+  std::uint64_t checksum = 0;
+
+  for (int i = 0; i < iterations; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
+    Convert(backend, src.data(), size.width, size.height, src_stride,
+            dst.data(), dst_stride);
+    const auto t1 = std::chrono::steady_clock::now();
+
+    samples_ms.push_back(
+        std::chrono::duration<double, std::milli>(t1 - t0).count());
+    checksum +=
+        dst[(static_cast<std::size_t>(i) * 131u) %
+            std::max<std::size_t>(static_cast<std::size_t>(1), dst.size())];
+  }
+
+  std::sort(samples_ms.begin(), samples_ms.end());
+  const auto percentile = [&](double p) {
+    const double pos =
+        (p / 100.0) * static_cast<double>(samples_ms.size() - 1u);
+    const std::size_t idx = static_cast<std::size_t>(pos + 0.5);
+    return samples_ms[std::min(idx, samples_ms.size() - 1u)];
+  };
+
+  double sum = 0.0;
+  for (double sample : samples_ms)
+    sum += sample;
+
+  Stats stats{};
+  stats.avg_ms = sum / static_cast<double>(samples_ms.size());
+  stats.p95_ms = percentile(95.0);
+  stats.p99_ms = percentile(99.0);
+  stats.min_ms = samples_ms.front();
+  stats.max_ms = samples_ms.back();
+  stats.checksum = checksum;
+  return stats;
+}
+
 std::string GetArgValue(int argc, char **argv, std::string_view key) {
   for (int i = 1; i + 1 < argc; ++i) {
     if (argv[i] && std::string_view(argv[i]) == key)
@@ -476,7 +593,8 @@ void Usage(const char *argv0) {
             << "RGB24 -> YUYV backends: original-scalar, current-scalar, "
                "libyuv, ssse3, avx2, selected\n"
             << "YUYV -> RGB24 backends: original-scalar, current-scalar, "
-               "sse4.1, selected\n"
+               "sse4.1, avx2, selected\n"
+            << "RGB24 <-> BGR24 backends: current-scalar, ssse3, selected\n"
             << "Sizes:    640x480, 1280x720, 1920x1080\n";
 }
 
@@ -505,7 +623,13 @@ int main(int argc, char **argv) {
       YuyvToRgbBenchBackend::original_scalar,
       YuyvToRgbBenchBackend::current_scalar,
       YuyvToRgbBenchBackend::sse41,
+      YuyvToRgbBenchBackend::avx2,
       YuyvToRgbBenchBackend::selected,
+  };
+  const std::vector<RgbBgrBenchBackend> rgb_bgr_backends{
+      RgbBgrBenchBackend::current_scalar,
+      RgbBgrBenchBackend::ssse3,
+      RgbBgrBenchBackend::selected,
   };
 
   std::cout << "StudioCast RGB/YUYV Conversion Benchmark\n";
@@ -516,6 +640,10 @@ int main(int argc, char **argv) {
   std::cout << "Selected YUYV -> RGB24 backend: "
             << studiocast::video::internal::YuyvToRgbBackendName(
                    studiocast::video::internal::YuyvToRgbSelectedBackend())
+            << "\n";
+  std::cout << "Selected RGB24 <-> BGR24 backend: "
+            << studiocast::video::internal::Rgb24Bgr24BackendName(
+                   studiocast::video::internal::Rgb24Bgr24SelectedBackend())
             << "\n";
   std::cout << "Iterations: " << iterations << " measured, " << warmup
             << " warmup\n\n";
@@ -584,6 +712,45 @@ int main(int argc, char **argv) {
       const Stats stats = RunYuyvToRgbBench(backend, size, iterations, warmup);
       if (csv) {
         std::cout << "yuyv-to-rgb24," << BackendName(backend) << ","
+                  << size.width << "," << size.height << "," << stats.avg_ms
+                  << "," << stats.p95_ms << "," << stats.p99_ms << ","
+                  << stats.min_ms << "," << stats.max_ms << ","
+                  << stats.checksum << "\n";
+      } else {
+        std::cout << std::fixed << std::setprecision(3);
+        std::cout << std::left << std::setw(18) << BackendName(backend)
+                  << std::right << std::setw(7) << size.width << "x"
+                  << std::left << std::setw(4) << size.height << std::right
+                  << std::setw(12) << stats.avg_ms << std::setw(12)
+                  << stats.p95_ms << std::setw(12) << stats.p99_ms
+                  << std::setw(12) << stats.min_ms << std::setw(12)
+                  << stats.max_ms << "\n";
+      }
+    }
+  }
+
+  if (!csv) {
+    std::cout << "\nRGB24 <-> BGR24\n";
+    std::cout << std::left << std::setw(18) << "backend" << std::right
+              << std::setw(12) << "size" << std::setw(12) << "avg ms"
+              << std::setw(12) << "p95 ms" << std::setw(12) << "p99 ms"
+              << std::setw(12) << "min ms" << std::setw(12) << "max ms"
+              << "\n";
+  }
+
+  for (RgbBgrBenchBackend backend : rgb_bgr_backends) {
+    if (!BackendAvailable(backend)) {
+      if (!csv) {
+        std::cout << std::left << std::setw(18) << BackendName(backend)
+                  << "unavailable\n";
+      }
+      continue;
+    }
+
+    for (const SizeCase &size : sizes) {
+      const Stats stats = RunRgbBgrBench(backend, size, iterations, warmup);
+      if (csv) {
+        std::cout << "rgb24-to-bgr24," << BackendName(backend) << ","
                   << size.width << "," << size.height << "," << stats.avg_ms
                   << "," << stats.p95_ms << "," << stats.p99_ms << ","
                   << stats.min_ms << "," << stats.max_ms << ","

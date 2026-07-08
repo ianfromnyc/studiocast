@@ -1,4 +1,5 @@
 #include "core/video/convert.h"
+#include "core/video/convert_rgb_bgr_internal.h"
 #include "core/video/convert_rgb_yuyv_internal.h"
 #include "core/video/convert_yuyv_rgb_internal.h"
 
@@ -39,6 +40,10 @@ struct BackendCase {
 
 struct YuyvToRgbBackendCase {
   video::internal::YuyvToRgbBackend backend;
+};
+
+struct RgbBgrBackendCase {
+  video::internal::Rgb24Bgr24Backend backend;
 };
 
 constexpr std::size_t ActiveYuyvBytes(int width) {
@@ -138,6 +143,33 @@ bool ConvertWithBackend(video::internal::YuyvToRgbBackend backend,
   case YuyvToRgbBackend::sse41:
     video::internal::YuyvToRgbSse41(src, width, height, src_stride, dst,
                                     dst_stride);
+    return true;
+  case YuyvToRgbBackend::avx2:
+    video::internal::YuyvToRgbAvx2(src, width, height, src_stride, dst,
+                                   dst_stride);
+    return true;
+  }
+
+  return false;
+}
+
+bool ConvertRgbBgrWithBackend(video::internal::Rgb24Bgr24Backend backend,
+                              const std::uint8_t *src, int width, int height,
+                              std::size_t src_stride, std::uint8_t *dst,
+                              std::size_t dst_stride) {
+  using video::internal::Rgb24Bgr24Backend;
+
+  if (!video::internal::Rgb24Bgr24BackendAvailable(backend))
+    return false;
+
+  switch (backend) {
+  case Rgb24Bgr24Backend::scalar:
+    video::internal::Rgb24Bgr24Scalar(src, dst, width, height, src_stride,
+                                      dst_stride);
+    return true;
+  case Rgb24Bgr24Backend::ssse3:
+    video::internal::Rgb24Bgr24Ssse3(src, dst, width, height, src_stride,
+                                     dst_stride);
     return true;
   }
 
@@ -292,9 +324,10 @@ bool TestYuyvToRgb24BackendsMatchScalarReference() {
       {1920, 1080, 5, 64},
   }};
 
-  const std::array<YuyvToRgbBackendCase, 2> backends{{
+  const std::array<YuyvToRgbBackendCase, 3> backends{{
       {YuyvToRgbBackend::scalar},
       {YuyvToRgbBackend::sse41},
+      {YuyvToRgbBackend::avx2},
   }};
 
   for (const ConvertCase &c : cases) {
@@ -558,6 +591,132 @@ bool TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants() {
     if (!CompareYuyvToReference(actual, expected, width, height, dst_stride,
                                 chroma_tolerance, "public selected scratch")) {
       return false;
+    }
+  }
+
+  return true;
+}
+
+bool TestRgb24Bgr24BackendsMatchScalarAndPreservePadding() {
+  using video::internal::Rgb24Bgr24Backend;
+
+  const std::array<ConvertCase, 10> cases{{
+      {1, 3, 5, 8},
+      {2, 3, 4, 5},
+      {7, 5, 1, 7},
+      {15, 4, 5, 6},
+      {16, 4, 3, 9},
+      {17, 11, 5, 8},
+      {31, 9, 7, 13},
+      {640, 480, 13, 16},
+      {1280, 720, 7, 32},
+      {1920, 1080, 5, 64},
+  }};
+
+  const std::array<RgbBgrBackendCase, 2> backends{{
+      {Rgb24Bgr24Backend::scalar},
+      {Rgb24Bgr24Backend::ssse3},
+  }};
+
+  for (const ConvertCase &c : cases) {
+    const std::size_t src_stride = ActiveRgbBytes(c.width) + c.src_padding;
+    const std::size_t dst_stride = ActiveRgbBytes(c.width) + c.dst_padding;
+    std::vector<std::uint8_t> src(src_stride *
+                                  static_cast<std::size_t>(c.height));
+    FillDeterministicRgb(
+        &src, c.width, c.height, src_stride,
+        static_cast<std::uint32_t>(c.width * 331 + c.height * 29));
+
+    std::vector<std::uint8_t> expected(
+        dst_stride * static_cast<std::size_t>(c.height), 0xcd);
+    video::internal::Rgb24Bgr24Scalar(src.data(), expected.data(), c.width,
+                                      c.height, src_stride, dst_stride);
+
+    for (const RgbBgrBackendCase &backend : backends) {
+      if (!video::internal::Rgb24Bgr24BackendAvailable(backend.backend))
+        continue;
+
+      std::vector<std::uint8_t> actual(
+          dst_stride * static_cast<std::size_t>(c.height), 0xcd);
+      if (!ConvertRgbBgrWithBackend(backend.backend, src.data(), c.width,
+                                    c.height, src_stride, actual.data(),
+                                    dst_stride)) {
+        std::cerr << "RGB/BGR backend "
+                  << video::internal::Rgb24Bgr24BackendName(backend.backend)
+                  << " reported available but conversion failed\n";
+        return false;
+      }
+
+      for (int y = 0; y < c.height; ++y) {
+        const std::uint8_t *a =
+            actual.data() + static_cast<std::size_t>(y) * dst_stride;
+        const std::uint8_t *e =
+            expected.data() + static_cast<std::size_t>(y) * dst_stride;
+        for (std::size_t i = 0; i < ActiveRgbBytes(c.width); ++i) {
+          if (a[i] != e[i]) {
+            std::cerr << "RGB/BGR backend "
+                      << video::internal::Rgb24Bgr24BackendName(
+                             backend.backend)
+                      << " mismatch at row " << y << " byte " << i << " for "
+                      << c.width << "x" << c.height << ": got "
+                      << static_cast<int>(a[i]) << " expected "
+                      << static_cast<int>(e[i]) << "\n";
+            return false;
+          }
+        }
+        for (std::size_t i = ActiveRgbBytes(c.width); i < dst_stride; ++i) {
+          if (a[i] != 0xcdu) {
+            std::cerr << "RGB/BGR backend "
+                      << video::internal::Rgb24Bgr24BackendName(
+                             backend.backend)
+                      << " overwrote destination padding at row " << y
+                      << " byte " << i << " for " << c.width << "x"
+                      << c.height << "\n";
+            return false;
+          }
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
+bool TestRgb24Bgr24PublicPathMatchesScalarInPlace() {
+  constexpr int width = 31;
+  constexpr int height = 9;
+  constexpr std::size_t stride = ActiveRgbBytes(width) + 7;
+
+  std::vector<std::uint8_t> src(stride * height);
+  FillDeterministicRgb(&src, width, height, stride, 0x51de00bcu);
+
+  std::vector<std::uint8_t> expected(stride * height, 0xcd);
+  video::internal::Rgb24Bgr24Scalar(src.data(), expected.data(), width, height,
+                                    stride, stride);
+
+  std::vector<std::uint8_t> out(stride * height, 0xcd);
+  video::Rgb24ToBgr24(src.data(), out.data(), width, height, stride, stride);
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    if (out[i] != expected[i]) {
+      std::cerr << "public RGB/BGR conversion mismatch at byte " << i << "\n";
+      return false;
+    }
+  }
+
+  std::vector<std::uint8_t> in_place = src;
+  video::Rgb24ToBgr24(in_place.data(), in_place.data(), width, height, stride,
+                      stride);
+  for (int y = 0; y < height; ++y) {
+    const std::uint8_t *a =
+        in_place.data() + static_cast<std::size_t>(y) * stride;
+    const std::uint8_t *e =
+        expected.data() + static_cast<std::size_t>(y) * stride;
+    for (std::size_t i = 0; i < ActiveRgbBytes(width); ++i) {
+      if (a[i] != e[i]) {
+        std::cerr << "in-place RGB/BGR conversion mismatch at row " << y
+                  << " byte " << i << "\n";
+        return false;
+      }
     }
   }
 

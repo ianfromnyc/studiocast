@@ -8,6 +8,7 @@ namespace studiocast::video::internal {
 enum class YuyvToRgbBackend {
   scalar,
   sse41,
+  avx2,
 };
 
 using YuyvToRgbFn = void (*)(const std::uint8_t *src, int width, int height,
@@ -30,5 +31,10 @@ bool YuyvToRgbSse41Available();
 void YuyvToRgbSse41(const std::uint8_t *src, int width, int height,
                     std::size_t src_stride, std::uint8_t *dst,
                     std::size_t dst_stride);
+
+bool YuyvToRgbAvx2Available();
+void YuyvToRgbAvx2(const std::uint8_t *src, int width, int height,
+                   std::size_t src_stride, std::uint8_t *dst,
+                   std::size_t dst_stride);
 
 } // namespace studiocast::video::internal

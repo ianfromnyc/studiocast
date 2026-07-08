@@ -1,5 +1,6 @@
 #include "convert.h"
 
+#include "convert_rgb_bgr_internal.h"
 #include "convert_rgb_yuyv_internal.h"
 #include "convert_yuyv_rgb_internal.h"
 
@@ -62,20 +63,8 @@ void MirrorRgb24InPlace(std::uint8_t *rgb, int width, int height,
 
 void Rgb24ToBgr24(const std::uint8_t *src, std::uint8_t *dst, int width,
                   int height, std::size_t src_stride, std::size_t dst_stride) {
-  if (!src || !dst || width <= 0 || height <= 0)
-    return;
-
-  for (int y = 0; y < height; ++y) {
-    const std::uint8_t *s = src + static_cast<std::size_t>(y) * src_stride;
-    std::uint8_t *d = dst + static_cast<std::size_t>(y) * dst_stride;
-
-    for (int x = 0; x < width; ++x) {
-      const std::size_t i = static_cast<std::size_t>(x) * 3u;
-      d[i + 0] = s[i + 2];
-      d[i + 1] = s[i + 1];
-      d[i + 2] = s[i + 0];
-    }
-  }
+  internal::Rgb24Bgr24Dispatch(src, dst, width, height, src_stride,
+                               dst_stride);
 }
 
 } // namespace studiocast::video
