@@ -31,22 +31,31 @@ bool CheckOutputResizeAllowed(int src_w, int src_h, int out_w, int out_h,
   return false;
 }
 
+bool ShouldRunStandaloneGpuScaler(bool scaling_needed, bool gpu_backend_active,
+                                  bool have_deferred_gpu_out,
+                                  bool allow_cpu_resize,
+                                  bool same_backend_effects_ran) {
+  if (!scaling_needed)
+    return false;
+  if (!gpu_backend_active)
+    return false;
+
+  const bool should_skip_to_avoid_unnecessary_transfers =
+      !have_deferred_gpu_out && allow_cpu_resize && !same_backend_effects_ran;
+  if (should_skip_to_avoid_unnecessary_transfers)
+    return false;
+
+  return true;
+}
+
 bool ShouldRunStandaloneOpenCudaScaler(bool scaling_needed,
                                        bool gpu_backend_is_open_cuda_or_maxine,
                                        bool have_deferred_gpu_out,
                                        bool allow_cpu_resize,
                                        bool open_cuda_effects_ran) {
-  if (!scaling_needed)
-    return false;
-  if (!gpu_backend_is_open_cuda_or_maxine)
-    return false;
-
-  const bool should_skip_to_avoid_unnecessary_transfers =
-      !have_deferred_gpu_out && allow_cpu_resize && !open_cuda_effects_ran;
-  if (should_skip_to_avoid_unnecessary_transfers)
-    return false;
-
-  return true;
+  return ShouldRunStandaloneGpuScaler(
+      scaling_needed, gpu_backend_is_open_cuda_or_maxine,
+      have_deferred_gpu_out, allow_cpu_resize, open_cuda_effects_ran);
 }
 
 } // namespace studiocast::video

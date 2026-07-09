@@ -18,13 +18,15 @@ CudaDriverApi::CudaDriverApi(CudaDriverApi &&other) noexcept
     : initialized_(other.initialized_), lib_(std::move(other.lib_)),
       f_(other.f_), error_(std::move(other.error_)),
       retained_primary_ctx_(other.retained_primary_ctx_),
-      primary_dev_(other.primary_dev_), primary_ctx_(other.primary_ctx_) {
+      primary_dev_(other.primary_dev_), primary_ctx_(other.primary_ctx_),
+      primary_ctx_validated_(other.primary_ctx_validated_) {
   other.initialized_ = false;
   other.f_ = Functions{};
   other.error_.clear();
   other.retained_primary_ctx_ = false;
   other.primary_dev_ = 0;
   other.primary_ctx_ = nullptr;
+  other.primary_ctx_validated_ = false;
 }
 
 CudaDriverApi &CudaDriverApi::operator=(CudaDriverApi &&other) noexcept {
@@ -43,6 +45,7 @@ CudaDriverApi &CudaDriverApi::operator=(CudaDriverApi &&other) noexcept {
   retained_primary_ctx_ = other.retained_primary_ctx_;
   primary_dev_ = other.primary_dev_;
   primary_ctx_ = other.primary_ctx_;
+  primary_ctx_validated_ = other.primary_ctx_validated_;
 
   other.initialized_ = false;
   other.f_ = Functions{};
@@ -50,6 +53,7 @@ CudaDriverApi &CudaDriverApi::operator=(CudaDriverApi &&other) noexcept {
   other.retained_primary_ctx_ = false;
   other.primary_dev_ = 0;
   other.primary_ctx_ = nullptr;
+  other.primary_ctx_validated_ = false;
   return *this;
 }
 
@@ -210,6 +214,7 @@ bool CudaDriverApi::EnsureContext(std::string *error_out) {
     retained_primary_ctx_ = true;
     primary_dev_ = dev;
     primary_ctx_ = ctx;
+    primary_ctx_validated_ = false;
   }
 
   CUresult st = f_.cuCtxSetCurrent(primary_ctx_);
@@ -219,9 +224,12 @@ bool CudaDriverApi::EnsureContext(std::string *error_out) {
     return false;
   }
 
+  if (primary_ctx_validated_)
+    return true;
+
   CUcontext cur = nullptr;
   st = f_.cuCtxGetCurrent(&cur);
-  if (st != CUDA_SUCCESS || !cur) {
+  if (st != CUDA_SUCCESS || !cur || cur != primary_ctx_) {
     if (error_out)
       *error_out = "Failed to validate current CUDA context after set: " +
                    StatusToString(st);
@@ -241,6 +249,7 @@ bool CudaDriverApi::EnsureContext(std::string *error_out) {
     (void)f_.cuStreamDestroy(tmp);
   }
 
+  primary_ctx_validated_ = true;
   return true;
 }
 

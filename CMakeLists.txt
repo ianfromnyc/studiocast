@@ -687,6 +687,26 @@ if (STUDIOCAST_BUILD_BENCHMARKS)
             AUTOUIC OFF
             AUTORCC OFF
     )
+
+    add_executable(studiocast-cuda-transfer-bench
+            src/tools/studiocast_cuda_transfer_bench_main.cpp
+    )
+
+    target_link_libraries(studiocast-cuda-transfer-bench PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-cuda-transfer-bench PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-cuda-transfer-bench)
+    studiocast_enable_sanitizers(studiocast-cuda-transfer-bench)
+
+    set_target_properties(studiocast-cuda-transfer-bench PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
 endif()
 
 

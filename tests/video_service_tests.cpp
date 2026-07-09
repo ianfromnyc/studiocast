@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "core/video/effects/broadcast_effect_contract.h"
+#include "core/video/scaling_policy.h"
 #include "core/video/virtual_camera_service.h"
 
 namespace studiocast::tests {
@@ -919,6 +920,66 @@ bool TestVideoOutputRecoveryClearsUnavailableError() {
   return true;
 }
 
+bool TestStandaloneGpuScalerPolicySkipsInactiveBackendTransfers() {
+  using studiocast::video::ShouldRunStandaloneGpuScaler;
+
+  if (ShouldRunStandaloneGpuScaler(
+          /*scaling_needed=*/true,
+          /*gpu_backend_active=*/true,
+          /*have_deferred_gpu_out=*/false,
+          /*allow_cpu_resize=*/true,
+          /*same_backend_effects_ran=*/false)) {
+    std::cerr << "standalone GPU scaler should skip when CPU resize is "
+                 "allowed and no same-backend effect ran\n";
+    return false;
+  }
+
+  if (!ShouldRunStandaloneGpuScaler(
+          /*scaling_needed=*/true,
+          /*gpu_backend_active=*/true,
+          /*have_deferred_gpu_out=*/false,
+          /*allow_cpu_resize=*/true,
+          /*same_backend_effects_ran=*/true)) {
+    std::cerr << "standalone GPU scaler should run when a same-backend effect "
+                 "already ran\n";
+    return false;
+  }
+
+  if (!ShouldRunStandaloneGpuScaler(
+          /*scaling_needed=*/true,
+          /*gpu_backend_active=*/true,
+          /*have_deferred_gpu_out=*/false,
+          /*allow_cpu_resize=*/false,
+          /*same_backend_effects_ran=*/false)) {
+    std::cerr << "standalone GPU scaler should run when CPU resize is "
+                 "disabled\n";
+    return false;
+  }
+
+  if (!ShouldRunStandaloneGpuScaler(
+          /*scaling_needed=*/true,
+          /*gpu_backend_active=*/true,
+          /*have_deferred_gpu_out=*/true,
+          /*allow_cpu_resize=*/true,
+          /*same_backend_effects_ran=*/false)) {
+    std::cerr << "standalone GPU scaler should run when a deferred GPU output "
+                 "is available\n";
+    return false;
+  }
+
+  if (ShouldRunStandaloneGpuScaler(
+          /*scaling_needed=*/false,
+          /*gpu_backend_active=*/true,
+          /*have_deferred_gpu_out=*/true,
+          /*allow_cpu_resize=*/false,
+          /*same_backend_effects_ran=*/true)) {
+    std::cerr << "standalone GPU scaler should skip when no scaling is needed\n";
+    return false;
+  }
+
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -953,6 +1014,8 @@ int main() {
        &TestVideoOutputDisappearanceStopsPipelineAndMarksUnavailable},
       {"video output recovery clears unavailable error",
        &TestVideoOutputRecoveryClearsUnavailableError},
+      {"standalone GPU scaler skips inactive backend transfers",
+       &TestStandaloneGpuScalerPolicySkipsInactiveBackendTransfers},
       {"latest-frame worker overwrites pending blocked work",
        &studiocast::tests::
            TestLatestFrameWinsOverwritesPendingWithBlockedProcessor},

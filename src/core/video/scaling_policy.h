@@ -17,15 +17,22 @@ bool CheckOutputResizeAllowed(int src_w, int src_h, int out_w, int out_h,
                               bool gpu_resize_available, bool allow_cpu_resize,
                               std::string *error);
 
-// Returns whether the camera pipeline should run the standalone Open CUDA GPU
-// scaler (CPU RGB -> GPU upload, resize on GPU, GPU -> CPU download).
+// Returns whether the camera pipeline should run a standalone GPU scaler
+// (CPU RGB -> GPU upload, resize on GPU, GPU -> CPU download).
 //
 // The scaler must be skipped when:
 //   - there is no deferred GPU output to read back, AND
 //   - CPU resize is allowed, AND
-//   - no Open CUDA effects actually ran this frame
+//   - no effect from the same GPU backend actually ran this frame
 //
-// This avoids unnecessary GPU transfers when Open CUDA is otherwise inactive.
+// This avoids unnecessary GPU transfers when the chosen GPU backend is
+// otherwise inactive.
+bool ShouldRunStandaloneGpuScaler(bool scaling_needed, bool gpu_backend_active,
+                                  bool have_deferred_gpu_out,
+                                  bool allow_cpu_resize,
+                                  bool same_backend_effects_ran);
+
+// Backward-compatible name for the Open CUDA call sites/tests.
 bool ShouldRunStandaloneOpenCudaScaler(bool scaling_needed,
                                        bool gpu_backend_is_open_cuda_or_maxine,
                                        bool have_deferred_gpu_out,

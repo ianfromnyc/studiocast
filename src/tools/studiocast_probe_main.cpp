@@ -509,7 +509,24 @@ int RunSelfTest() {
   // Standalone Open CUDA scaler gating (pure logic; used by the camera
   // pipeline).
   {
+    using studiocast::video::ShouldRunStandaloneGpuScaler;
     using studiocast::video::ShouldRunStandaloneOpenCudaScaler;
+
+    expectTrue("ShouldRunStandaloneGpuScaler(skip when cpu allowed + no effects)",
+               !ShouldRunStandaloneGpuScaler(
+                   /*scaling_needed=*/true,
+                   /*gpu_backend_active=*/true,
+                   /*have_deferred_gpu_out=*/false,
+                   /*allow_cpu_resize=*/true,
+                   /*same_backend_effects_ran=*/false));
+
+    expectTrue("ShouldRunStandaloneGpuScaler(run when backend effect ran)",
+               ShouldRunStandaloneGpuScaler(
+                   /*scaling_needed=*/true,
+                   /*gpu_backend_active=*/true,
+                   /*have_deferred_gpu_out=*/false,
+                   /*allow_cpu_resize=*/true,
+                   /*same_backend_effects_ran=*/true));
 
     expectTrue("ShouldRunStandaloneOpenCudaScaler(no scaling) == false",
                !ShouldRunStandaloneOpenCudaScaler(
@@ -1801,8 +1818,8 @@ int RunSelfTest() {
     using studiocast::video::ShouldPreferMjpegForResolution;
     expectTrue("ShouldPreferMjpegForResolution(1920x1080)",
                ShouldPreferMjpegForResolution(1920, 1080));
-    expectTrue("ShouldPreferMjpegForResolution(1280x720) == false",
-               !ShouldPreferMjpegForResolution(1280, 720));
+    expectTrue("ShouldPreferMjpegForResolution(1280x720)",
+               ShouldPreferMjpegForResolution(1280, 720));
     expectTrue("ShouldPreferMjpegForResolution(invalid) == false",
                !ShouldPreferMjpegForResolution(0, 720));
   }

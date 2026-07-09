@@ -188,6 +188,7 @@ private:
   bool retained_primary_ctx_ = false;
   CUdevice primary_dev_ = 0;
   CUcontext primary_ctx_ = nullptr;
+  bool primary_ctx_validated_ = false;
 };
 
 } // namespace studiocast::maxine

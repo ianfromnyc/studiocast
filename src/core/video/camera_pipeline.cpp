@@ -8883,10 +8883,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
 
     // Standalone GPU scaling backend: upload CPU RGB->GPU BGR, resize on GPU,
-    // download and convert back. This is used when GPU scaling is selected but
-    // there is no deferred GPU stage to reuse.
-    if ((gpu_backend == GpuResizeBackend::maxine_nvcv) &&
-        (frameW != outW || frameH != outH)) {
+    // download and convert back. Skip it when CPU resize is allowed and no
+    // Maxine GPU stage ran, so resize-only/no-effect frames do not pay an
+    // avoidable upload/download/sync.
+    if (ShouldRunStandaloneGpuScaler(
+            /*scaling_needed=*/(frameW != outW || frameH != outH),
+            /*gpu_backend_active=*/
+            (gpu_backend == GpuResizeBackend::maxine_nvcv),
+            /*have_deferred_gpu_out=*/have_deferred_gpu_out,
+            /*allow_cpu_resize=*/cfg.allow_cpu_resize,
+            /*same_backend_effects_ran=*/maxine_active_this_frame)) {
       std::string gerr;
       bool ok = maxine_scaler.initialized;
       if (!ok) {
