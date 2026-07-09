@@ -28,6 +28,8 @@ struct DaemonConfig {
   int video_width = 1280;
   int video_height = 720;
   int video_fps = 30;
+  studiocast::video::PixelFormat video_output_format =
+      studiocast::video::PixelFormat::rgb24;
   bool video_prefer_mjpeg = true;
 
   // Output scaling backend preference: "cpu" | "gpu" | "auto".

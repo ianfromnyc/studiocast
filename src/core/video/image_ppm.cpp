@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -220,6 +221,14 @@ bool ReadPpmToken(std::istream &in, std::string *out) {
 
 int ClampInt(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
 
+inline std::uint8_t RoundClampByte(float v) {
+  if (v <= 0.0f)
+    return 0;
+  if (v >= 255.0f)
+    return 255;
+  return static_cast<std::uint8_t>(static_cast<int>(v + 0.5f));
+}
+
 } // namespace
 
 bool LoadImageRgb24(const std::filesystem::path &path, int *out_w, int *out_h,
@@ -333,69 +342,154 @@ bool LoadPpmP6Rgb24(const std::filesystem::path &path, int *out_w, int *out_h,
   return true;
 }
 
-bool ResizeRgb24Bilinear(const std::uint8_t *src_rgb, int src_w, int src_h,
-                         std::size_t src_stride, int dst_w, int dst_h,
-                         std::vector<std::uint8_t> *dst_rgb,
-                         std::size_t dst_stride, std::string *error) {
-  if (!dst_rgb)
-    return false;
-  dst_rgb->clear();
-
-  if (!src_rgb || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) {
+bool Rgb24BilinearResizePlan::Configure(int src_w, int src_h, int dst_w,
+                                        int dst_h, std::string *error) {
+  if (src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) {
+    Clear();
     if (error)
       *error = "Invalid resize dimensions";
     return false;
   }
-  if (src_stride < static_cast<std::size_t>(src_w) * 3u ||
-      dst_stride < static_cast<std::size_t>(dst_w) * 3u) {
+
+  if (src_w_ == src_w && src_h_ == src_h && dst_w_ == dst_w &&
+      dst_h_ == dst_h) {
+    return true;
+  }
+
+  std::vector<AxisSample> x_samples(static_cast<std::size_t>(dst_w));
+  std::vector<AxisSample> y_samples(static_cast<std::size_t>(dst_h));
+
+  const float scale_x = static_cast<float>(src_w) / static_cast<float>(dst_w);
+  const float scale_y = static_cast<float>(src_h) / static_cast<float>(dst_h);
+
+  for (int x = 0; x < dst_w; ++x) {
+    const float src_x = (static_cast<float>(x) + 0.5f) * scale_x - 0.5f;
+    const int x0 = ClampInt(static_cast<int>(std::floor(src_x)), 0, src_w - 1);
+    x_samples[static_cast<std::size_t>(x)] = AxisSample{
+        x0, ClampInt(x0 + 1, 0, src_w - 1), src_x - static_cast<float>(x0)};
+  }
+
+  for (int y = 0; y < dst_h; ++y) {
+    const float src_y = (static_cast<float>(y) + 0.5f) * scale_y - 0.5f;
+    const int y0 = ClampInt(static_cast<int>(std::floor(src_y)), 0, src_h - 1);
+    y_samples[static_cast<std::size_t>(y)] = AxisSample{
+        y0, ClampInt(y0 + 1, 0, src_h - 1), src_y - static_cast<float>(y0)};
+  }
+
+  src_w_ = src_w;
+  src_h_ = src_h;
+  dst_w_ = dst_w;
+  dst_h_ = dst_h;
+  x_samples_ = std::move(x_samples);
+  y_samples_ = std::move(y_samples);
+  return true;
+}
+
+void Rgb24BilinearResizePlan::Clear() {
+  src_w_ = 0;
+  src_h_ = 0;
+  dst_w_ = 0;
+  dst_h_ = 0;
+  x_samples_.clear();
+  y_samples_.clear();
+}
+
+bool Rgb24BilinearResizePlan::Apply(const std::uint8_t *src_rgb,
+                                    std::size_t src_stride,
+                                    std::vector<std::uint8_t> *dst_rgb,
+                                    std::size_t dst_stride,
+                                    std::string *error) const {
+  if (!dst_rgb)
+    return false;
+  if (src_w_ <= 0 || src_h_ <= 0 || dst_w_ <= 0 || dst_h_ <= 0 ||
+      x_samples_.size() != static_cast<std::size_t>(dst_w_) ||
+      y_samples_.size() != static_cast<std::size_t>(dst_h_)) {
+    dst_rgb->clear();
+    if (error)
+      *error = "Resize plan is not configured";
+    return false;
+  }
+
+  if (!src_rgb) {
+    dst_rgb->clear();
+    if (error)
+      *error = "Invalid resize source";
+    return false;
+  }
+  if (src_stride < static_cast<std::size_t>(src_w_) * 3u ||
+      dst_stride < static_cast<std::size_t>(dst_w_) * 3u) {
+    dst_rgb->clear();
     if (error)
       *error = "Invalid resize stride";
     return false;
   }
 
-  dst_rgb->resize(dst_stride * static_cast<std::size_t>(dst_h));
+  const std::size_t active_dst_stride = static_cast<std::size_t>(dst_w_) * 3u;
+  const std::size_t dst_size = dst_stride * static_cast<std::size_t>(dst_h_);
+  if (dst_rgb->size() != dst_size)
+    dst_rgb->resize(dst_size);
 
-  const float scale_x = static_cast<float>(src_w) / static_cast<float>(dst_w);
-  const float scale_y = static_cast<float>(src_h) / static_cast<float>(dst_h);
-
-  for (int y = 0; y < dst_h; ++y) {
-    const float src_y = (static_cast<float>(y) + 0.5f) * scale_y - 0.5f;
-    const int y0 = ClampInt(static_cast<int>(std::floor(src_y)), 0, src_h - 1);
-    const int y1 = ClampInt(y0 + 1, 0, src_h - 1);
-    const float fy = src_y - static_cast<float>(y0);
-
+  for (int y = 0; y < dst_h_; ++y) {
+    const AxisSample ys = y_samples_[static_cast<std::size_t>(y)];
     auto *dst_row = dst_rgb->data() + static_cast<std::size_t>(y) * dst_stride;
-    const auto *src_row0 = src_rgb + static_cast<std::size_t>(y0) * src_stride;
-    const auto *src_row1 = src_rgb + static_cast<std::size_t>(y1) * src_stride;
+    const auto *src_row0 =
+        src_rgb + static_cast<std::size_t>(ys.i0) * src_stride;
+    const auto *src_row1 =
+        src_rgb + static_cast<std::size_t>(ys.i1) * src_stride;
+    const float yf = ys.f;
 
-    for (int x = 0; x < dst_w; ++x) {
-      const float src_x = (static_cast<float>(x) + 0.5f) * scale_x - 0.5f;
-      const int x0 =
-          ClampInt(static_cast<int>(std::floor(src_x)), 0, src_w - 1);
-      const int x1 = ClampInt(x0 + 1, 0, src_w - 1);
-      const float fx = src_x - static_cast<float>(x0);
+    for (int x = 0; x < dst_w_; ++x) {
+      const AxisSample xs = x_samples_[static_cast<std::size_t>(x)];
+      const auto *p00 = src_row0 + static_cast<std::size_t>(xs.i0) * 3u;
+      const auto *p10 = src_row0 + static_cast<std::size_t>(xs.i1) * 3u;
+      const auto *p01 = src_row1 + static_cast<std::size_t>(xs.i0) * 3u;
+      const auto *p11 = src_row1 + static_cast<std::size_t>(xs.i1) * 3u;
+      const float xf = xs.f;
 
-      const auto *p00 = src_row0 + static_cast<std::size_t>(x0) * 3u;
-      const auto *p10 = src_row0 + static_cast<std::size_t>(x1) * 3u;
-      const auto *p01 = src_row1 + static_cast<std::size_t>(x0) * 3u;
-      const auto *p11 = src_row1 + static_cast<std::size_t>(x1) * 3u;
+      auto *d = dst_row + static_cast<std::size_t>(x) * 3u;
 
-      for (int c = 0; c < 3; ++c) {
-        const float v0 =
-            static_cast<float>(p00[c]) +
-            fx * (static_cast<float>(p10[c]) - static_cast<float>(p00[c]));
-        const float v1 =
-            static_cast<float>(p01[c]) +
-            fx * (static_cast<float>(p11[c]) - static_cast<float>(p01[c]));
-        const float v = v0 + fy * (v1 - v0);
-        const int iv = ClampInt(static_cast<int>(std::lround(v)), 0, 255);
-        dst_row[static_cast<std::size_t>(x) * 3u +
-                static_cast<std::size_t>(c)] = static_cast<std::uint8_t>(iv);
-      }
+      const float r0 =
+          static_cast<float>(p00[0]) +
+          xf * (static_cast<float>(p10[0]) - static_cast<float>(p00[0]));
+      const float r1 =
+          static_cast<float>(p01[0]) +
+          xf * (static_cast<float>(p11[0]) - static_cast<float>(p01[0]));
+      d[0] = RoundClampByte(r0 + yf * (r1 - r0));
+
+      const float g0 =
+          static_cast<float>(p00[1]) +
+          xf * (static_cast<float>(p10[1]) - static_cast<float>(p00[1]));
+      const float g1 =
+          static_cast<float>(p01[1]) +
+          xf * (static_cast<float>(p11[1]) - static_cast<float>(p01[1]));
+      d[1] = RoundClampByte(g0 + yf * (g1 - g0));
+
+      const float b0 =
+          static_cast<float>(p00[2]) +
+          xf * (static_cast<float>(p10[2]) - static_cast<float>(p00[2]));
+      const float b1 =
+          static_cast<float>(p01[2]) +
+          xf * (static_cast<float>(p11[2]) - static_cast<float>(p01[2]));
+      d[2] = RoundClampByte(b0 + yf * (b1 - b0));
+    }
+
+    if (dst_stride > active_dst_stride) {
+      std::memset(dst_row + active_dst_stride, 0,
+                  dst_stride - active_dst_stride);
     }
   }
 
   return true;
+}
+
+bool ResizeRgb24Bilinear(const std::uint8_t *src_rgb, int src_w, int src_h,
+                         std::size_t src_stride, int dst_w, int dst_h,
+                         std::vector<std::uint8_t> *dst_rgb,
+                         std::size_t dst_stride, std::string *error) {
+  Rgb24BilinearResizePlan plan;
+  if (!plan.Configure(src_w, src_h, dst_w, dst_h, error))
+    return false;
+  return plan.Apply(src_rgb, src_stride, dst_rgb, dst_stride, error);
 }
 
 } // namespace studiocast::video

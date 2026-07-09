@@ -246,9 +246,12 @@ struct DaemonVideoStatus {
   int width = 0;
   int height = 0;
   int fps = 0;
+  QString output_format_requested = QStringLiteral("rgb24");
 
   NegotiatedFormat capture_format;
   NegotiatedFormat output_format;
+  QString capture_fallback_state;
+  QString capture_fallback_reason;
 
   // Output scaling info (from daemon status).
   QString scaling_backend_active;
@@ -342,6 +345,8 @@ bool ParseDaemonStatusJson(const std::string &json, DaemonVideoStatus *out,
   out->width = video.value("width").toInt(0);
   out->height = video.value("height").toInt(0);
   out->fps = video.value("fps").toInt(0);
+  out->output_format_requested =
+      video.value("output_format_requested").toString(QStringLiteral("rgb24"));
 
   const auto parseFormat =
       [](const QJsonObject &fmt) -> DaemonVideoStatus::NegotiatedFormat {
@@ -363,6 +368,11 @@ bool ParseDaemonStatusJson(const std::string &json, DaemonVideoStatus *out,
 
   out->capture_format = parseFormat(video.value("capture_format").toObject());
   out->output_format = parseFormat(video.value("output_format").toObject());
+  const QJsonObject captureFallback =
+      video.value("capture_fallback").toObject();
+  out->capture_fallback_state =
+      captureFallback.value("state").toString(QStringLiteral("none"));
+  out->capture_fallback_reason = captureFallback.value("reason").toString();
 
   const QJsonObject scaling = video.value("scaling").toObject();
   if (!scaling.isEmpty()) {
@@ -1071,6 +1081,13 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   outputCombo_->setObjectName(QStringLiteral("videoOutputCombo"));
   setupGrid->addWidget(outputCombo_, 1, 1, 1, 2);
 
+  setupGrid->addWidget(new QLabel("Output format:", setupBox), 2, 0);
+  outputFormatCombo_ = new QComboBox(setupBox);
+  outputFormatCombo_->setObjectName(QStringLiteral("videoOutputFormatCombo"));
+  outputFormatCombo_->addItem("RGB24 / RGB3", "rgb24");
+  outputFormatCombo_->addItem("YUYV 4:2:2", "yuyv");
+  setupGrid->addWidget(outputFormatCombo_, 2, 1, 1, 2);
+
   auto *formatRow = new QHBoxLayout();
   formatRow->addWidget(new QLabel("Width:", setupBox));
   widthSpin_ = new QSpinBox(setupBox);
@@ -1092,7 +1109,7 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
   formatRow->addStretch(1);
   auto *formatWidget = new QWidget(setupBox);
   formatWidget->setLayout(formatRow);
-  setupGrid->addWidget(formatWidget, 2, 1, 1, 2);
+  setupGrid->addWidget(formatWidget, 3, 1, 1, 2);
   setupLayout->addLayout(setupGrid);
   root->addWidget(setupBox);
 
@@ -1403,6 +1420,9 @@ VideoPage::VideoPage(QWidget *parent) : QWidget(parent) {
           this, [this](int) { MarkSetupControlsEdited(); });
   connect(outputCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
           this, [this](int) { MarkSetupControlsEdited(); });
+  connect(outputFormatCombo_,
+          QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+          [this](int) { MarkSetupControlsEdited(); });
   connect(widthSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this,
           [this](int) { MarkSetupControlsEdited(); });
   connect(heightSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this,
@@ -1659,6 +1679,9 @@ bool VideoPage::SyncFromCachedDaemonStatus() {
   const int w = st.width;
   const int h = st.height;
   const int fps = st.fps;
+  const QString outputFormat = st.output_format_requested.isEmpty()
+                                   ? QStringLiteral("rgb24")
+                                   : st.output_format_requested;
   const bool applySetupControls = st.enabled || !setupControlsDirty_;
   effects_ = st.effects_valid
                  ? st.effects
@@ -1747,6 +1770,13 @@ bool VideoPage::SyncFromCachedDaemonStatus() {
     if (fps > 0) {
       const QSignalBlocker blockFps(fpsSpin_);
       fpsSpin_->setValue(fps);
+    }
+    if (outputFormatCombo_) {
+      const int fmtIdx = outputFormatCombo_->findData(outputFormat);
+      if (fmtIdx >= 0) {
+        const QSignalBlocker blockFmt(outputFormatCombo_);
+        outputFormatCombo_->setCurrentIndex(fmtIdx);
+      }
     }
 
     if (st.enabled)
@@ -2088,6 +2118,10 @@ bool VideoPage::SendDaemonVideoConfig() {
   req << " width=" << widthSpin_->value();
   req << " height=" << heightSpin_->value();
   req << " fps=" << fpsSpin_->value();
+  req << " output_format="
+      << (outputFormatCombo_
+              ? outputFormatCombo_->currentData().toString().toStdString()
+              : std::string("rgb24"));
 
   QString err;
   if (!DaemonRequest(req.str(), nullptr, &err)) {
@@ -2736,6 +2770,8 @@ void VideoPage::UpdateUiEnabled() {
   inputCombo_->setEnabled(!enabled);
   outputCombo_->setEnabled(!enabled && outSelectable);
 
+  if (outputFormatCombo_)
+    outputFormatCombo_->setEnabled(!enabled);
   widthSpin_->setEnabled(!enabled);
   heightSpin_->setEnabled(!enabled);
   fpsSpin_->setEnabled(!enabled);
@@ -3872,6 +3908,14 @@ void VideoPage::UpdateStatusText() {
   if (st.pipeline_running) {
     oss << "  Capture:    "
         << fmtLine(st.capture_format, /*withPixfmtFirst=*/true) << "\n";
+    if (!st.capture_fallback_state.isEmpty() &&
+        st.capture_fallback_state != QStringLiteral("none")) {
+      oss << "  Fallback:   " << st.capture_fallback_state.toStdString();
+      if (!st.capture_fallback_reason.isEmpty()) {
+        oss << " (" << st.capture_fallback_reason.toStdString() << ")";
+      }
+      oss << "\n";
+    }
     oss << "  Output:     "
         << fmtLine(st.output_format, /*withPixfmtFirst=*/false) << "\n";
 
@@ -3904,7 +3948,11 @@ void VideoPage::UpdateStatusText() {
   oss << "  input:      " << st.input_device.toStdString() << "\n";
   oss << "  output:     " << st.output_device.toStdString() << "\n";
   oss << "  requested:  " << st.width << "x" << st.height << " @ " << st.fps
-      << " fps\n";
+      << " fps, output_format="
+      << (st.output_format_requested.isEmpty()
+              ? std::string("rgb24")
+              : st.output_format_requested.toStdString())
+      << "\n";
   if (st.effects_valid) {
     oss << "  mirror:     " << (st.effects.mirror ? "on" : "off") << "\n";
 

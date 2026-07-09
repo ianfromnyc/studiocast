@@ -8,6 +8,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "core/audio/audio_backend_resolver.h"
 #include "core/audio/effects/broadcast_audio_effects.h"
@@ -138,7 +139,13 @@ struct VirtualAudioServiceStatus {
   std::uint64_t pipeline_pulse_latency_us_max = 0;
   std::uint64_t pipeline_resync_events = 0;
 
+  // Actual microphone source selected for capture after resolving config
+  // intent such as "auto". Empty means unresolved/auto.
   std::string selected_source;
+  // "unknown", "available", or "unavailable".
+  std::string source_availability = "unknown";
+  std::string source_error;
+  std::vector<std::string> source_warnings;
   std::string pipeline_sink = "studiocast_sink";
 
   // Active effects backend (selected by the runtime resolver).

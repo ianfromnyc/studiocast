@@ -41,6 +41,8 @@ struct CameraPipelineConfig {
   int height = 720;
   int fps = 30;
 
+  PixelFormat output_format = PixelFormat::rgb24;
+
   bool prefer_mjpeg = true;
 
   // Output scaling backend selection.
@@ -73,6 +75,11 @@ struct CameraPipelineStatus {
 
   CaptureFormat capture{};
   ActualFormat output{};
+
+  // Runtime capture fallback state. Common values: "none" or
+  // "raw_after_mjpeg_decode_failure".
+  std::string capture_fallback_state = "none";
+  std::string capture_fallback_reason;
 
   // Active output-scaling backend.
   // Common values: "cpu", "gpu:maxine", "gpu:open_cuda" (empty when idle)
@@ -271,7 +278,7 @@ private:
   // actually performed an open/renegotiation (i.e. the output may have been
   // reset), and false when the existing writer was reused without changes.
   bool OpenOutputLocked(const std::string &outDev, int width, int height,
-                        int fps, bool strict_fps,
+                        int fps, PixelFormat output_format, bool strict_fps,
                         bool *out_opened_or_renegotiated, std::string *error);
 
   void ThreadMain(CameraPipelineConfig cfg);
@@ -289,6 +296,8 @@ private:
   std::string output_device_;
   CaptureFormat capture_{};
   ActualFormat output_{};
+  std::string capture_fallback_state_ = "none";
+  std::string capture_fallback_reason_;
   std::string scaling_backend_active_;
   CaptureFormat scaling_from_{};
   ActualFormat scaling_to_{};

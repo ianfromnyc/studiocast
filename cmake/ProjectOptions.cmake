@@ -4,6 +4,7 @@ option(STUDIOCAST_ENABLE_WERROR "Treat warnings as errors" OFF)
 option(STUDIOCAST_ENABLE_SANITIZERS "Enable sanitizers (ASan/UBSan) on supported compilers" OFF)
 option(STUDIOCAST_ENABLE_LTO "Enable link-time optimization (IPO/LTO) if supported" OFF)
 option(STUDIOCAST_ENABLE_CUDA_KERNELS "Build optional CUDA .cu kernels (requires CUDA toolkit)" OFF)
+option(STUDIOCAST_BUILD_BENCHMARKS "Build developer benchmark tools" OFF)
 
 set(_studiocast_default_open_cuda OFF)
 if(UNIX AND NOT APPLE)

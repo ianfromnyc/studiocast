@@ -661,12 +661,14 @@ static int CmdAudioSelfTest(int argc, char **argv) {
 #if !STUDIOCAST_ENABLE_OPEN_AUDIO
   std::cerr << "ERROR: Open Audio backend is disabled in this build "
                "(STUDIOCAST_ENABLE_OPEN_AUDIO=0).\n";
+  (void)cpu_only;
   return 2;
 #elif !STUDIOCAST_HAVE_ONNXRUNTIME
   std::cerr << "ERROR: This build was compiled without ONNX Runtime "
                "(STUDIOCAST_HAVE_ONNXRUNTIME=0).\n";
   std::cerr << "Rebuild with ONNX Runtime available (set ONNXRUNTIME_ROOT or "
                "install onnxruntime dev package).\n";
+  (void)cpu_only;
   return 2;
 #else
   const auto ort = studiocast::onnx::OrtSession::QueryRuntimeInfo();
@@ -806,12 +808,16 @@ static int CmdAudioBench(int argc, char **argv) {
 #if !STUDIOCAST_ENABLE_OPEN_AUDIO
   std::cerr << "ERROR: Open Audio backend is disabled in this build "
                "(STUDIOCAST_ENABLE_OPEN_AUDIO=0).\n";
+  (void)cpu_only;
+  (void)csv;
   return 2;
 #elif !STUDIOCAST_HAVE_ONNXRUNTIME
   std::cerr << "ERROR: This build was compiled without ONNX Runtime "
                "(STUDIOCAST_HAVE_ONNXRUNTIME=0).\n";
   std::cerr << "Rebuild with ONNX Runtime available (set ONNXRUNTIME_ROOT or "
                "install onnxruntime dev package).\n";
+  (void)cpu_only;
+  (void)csv;
   return 2;
 #else
   std::string effect_kind = effect;

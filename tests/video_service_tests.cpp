@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "core/video/effects/broadcast_effect_contract.h"
+#include "core/video/scaling_policy.h"
 #include "core/video/virtual_camera_service.h"
 
 namespace studiocast::tests {
@@ -19,14 +20,38 @@ bool TestLatestFrameWinsStopWakesAndJoins();
 bool TestLatestFrameWinsGenerationRejectsStaleResults();
 bool TestLatestFrameWinsStatsCountersAndLastError();
 bool TestFastDvdnetDenoiseTensorContractIsDeclared();
+bool TestFrameArtifactCacheReusesCompatibleMatteWithinFrame();
+bool TestFrameArtifactCacheReusesCompatibleMaxineMatteWithinFrame();
+bool TestFrameArtifactCacheSeparatesIncompatibleMatteKeys();
+bool TestFrameArtifactCacheInvalidatesMatteOnNewFrame();
+bool TestFrameArtifactCachePrecomputedMatteKeysPreserveCompatibility();
+bool TestV4l2CapturePreferenceTreats720pAsMjpegWorthy();
+bool TestV4l2YuyvRequestTriesMjpegFirstAtHdWhenPreferred();
+bool TestV4l2YuyvRequestFallsBackToMjpegAfterYuyvAtLowResolution();
+bool TestV4l2YuyvRequestDoesNotAddMjpegFallbackWhenPreferenceDisabled();
+bool TestV4l2UnsupportedFormatsAreSkippedWithoutDuplicates();
+bool TestV4l2ExplicitMjpegRequestDoesNotFallBackToYuyvInsideOpenOrder();
+bool TestV4l2FakeNegotiationUsesOrderedFallback();
+bool TestV4l2MjpegDecodeFailureFallsBackToRawOnce();
+bool TestYuyvToRgb24MatchesBt601AndPreservesPadding();
+bool TestYuyvToRgb24BackendsMatchScalarReference();
+bool TestRgb24ToYuyvMatchesBt601WithinChromaRounding();
+bool TestRgb24ToYuyvBackendsMatchScalarReference();
+bool TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants();
+bool TestRgb24Bgr24BackendsMatchScalarAndPreservePadding();
+bool TestRgb24Bgr24PublicPathMatchesScalarInPlace();
+bool TestResizeRgb24BilinearPreservesActivePixelsAndZerosPadding();
+bool TestResizeRgb24BilinearHandlesDegenerateAxesAndPlanReuse();
+bool TestBackgroundRemoveCpuMatchesReferenceAndPreservesPadding();
+bool TestBackgroundBlurCpuMatchesReferenceAndPreservesPadding();
 } // namespace studiocast::tests
 
 namespace {
 
 using studiocast::video::CameraPipelineConfig;
-using studiocast::video::OptionalEffectBreaker;
 using studiocast::video::CameraPipelineRunner;
 using studiocast::video::CameraPipelineStatus;
+using studiocast::video::OptionalEffectBreaker;
 using studiocast::video::VideoConsumerSnapshot;
 using studiocast::video::VirtualCameraService;
 using studiocast::video::VirtualCameraServiceConfig;
@@ -68,6 +93,12 @@ public:
                                ? std::string("/dev/video-real")
                                : cfg.input_device;
     status_.output_device = cfg.output_device;
+    status_.output.width = cfg.width;
+    status_.output.height = cfg.height;
+    status_.output.fps = cfg.fps;
+    status_.output.fps_num = 1;
+    status_.output.fps_den = cfg.fps;
+    status_.output.format = cfg.output_format;
     status_.last_error.clear();
     return true;
   }
@@ -97,6 +128,7 @@ public:
     status_.output.fps = cfg.fps;
     status_.output.fps_num = 1;
     status_.output.fps_den = cfg.fps;
+    status_.output.format = cfg.output_format;
     return true;
   }
 
@@ -571,6 +603,50 @@ bool TestVideoConfigRestartTransitionNameIsStable() {
   return true;
 }
 
+bool TestVideoOutputFormatChangeRestartsPipeline() {
+  ServiceHarness h;
+  h.consumer_present.store(true, std::memory_order_relaxed);
+  VirtualCameraService service(h.Hooks(5ms));
+  auto cfg = TestConfig();
+  cfg.pipeline.output_format = studiocast::video::PixelFormat::rgb24;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil([&] { return service.Status().pipeline.running; }, 250ms)) {
+    std::cerr << "video pipeline did not start before format restart test\n";
+    service.Stop();
+    return false;
+  }
+
+  auto updated = cfg;
+  updated.pipeline.output_format = studiocast::video::PixelFormat::yuyv;
+  service.UpdateConfig(updated);
+
+  const bool restarted = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return status.pipeline_config_restarts >= 1 &&
+               h.pipeline->start_calls.load() >= 2 &&
+               status.pipeline.output.format ==
+                   studiocast::video::PixelFormat::yuyv;
+      },
+      750ms);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!restarted) {
+    std::cerr << "output format change did not restart pipeline; restarts="
+              << status.pipeline_config_restarts
+              << " starts=" << h.pipeline->start_calls.load() << "\n";
+    return false;
+  }
+  return true;
+}
+
 bool TestOptionalVideoEffectsFailOpenCooldownAndRetry() {
   namespace contract = studiocast::video::effects::contract;
 
@@ -586,8 +662,8 @@ bool TestOptionalVideoEffectsFailOpenCooldownAndRetry() {
        "Maxine video noise removal failed: synthetic denoise failure"},
       {"relight", contract::kEffectIdVirtualKeyLight, "maxine",
        "Maxine relighting failed: synthetic relight failure"},
-      {"virtual background", contract::kEffectIdVirtualBackgroundBlur,
-       "maxine", "Maxine virtual background failed: synthetic VB failure"},
+      {"virtual background", contract::kEffectIdVirtualBackgroundBlur, "maxine",
+       "Maxine virtual background failed: synthetic VB failure"},
       {"auto frame", contract::kEffectIdAutoFrame, "maxine_ar_cuda",
        "Maxine auto frame failed: synthetic auto-frame failure"},
   }};
@@ -626,8 +702,8 @@ bool TestOptionalVideoEffectsFailOpenCooldownAndRetry() {
 
       ++attempts;
       if (attempts <= 2) {
-        breaker.OnFailure(scenario.effect_id, scenario.backend,
-                          scenario.reason, frame, ++order);
+        breaker.OnFailure(scenario.effect_id, scenario.backend, scenario.reason,
+                          frame, ++order);
         const auto degraded = breaker.ToStatus(frame);
         if (!degraded.active || degraded.effect_id != scenario.effect_id ||
             degraded.backend != scenario.backend ||
@@ -844,6 +920,66 @@ bool TestVideoOutputRecoveryClearsUnavailableError() {
   return true;
 }
 
+bool TestStandaloneGpuScalerPolicySkipsInactiveBackendTransfers() {
+  using studiocast::video::ShouldRunStandaloneGpuScaler;
+
+  if (ShouldRunStandaloneGpuScaler(
+          /*scaling_needed=*/true,
+          /*gpu_backend_active=*/true,
+          /*have_deferred_gpu_out=*/false,
+          /*allow_cpu_resize=*/true,
+          /*same_backend_effects_ran=*/false)) {
+    std::cerr << "standalone GPU scaler should skip when CPU resize is "
+                 "allowed and no same-backend effect ran\n";
+    return false;
+  }
+
+  if (!ShouldRunStandaloneGpuScaler(
+          /*scaling_needed=*/true,
+          /*gpu_backend_active=*/true,
+          /*have_deferred_gpu_out=*/false,
+          /*allow_cpu_resize=*/true,
+          /*same_backend_effects_ran=*/true)) {
+    std::cerr << "standalone GPU scaler should run when a same-backend effect "
+                 "already ran\n";
+    return false;
+  }
+
+  if (!ShouldRunStandaloneGpuScaler(
+          /*scaling_needed=*/true,
+          /*gpu_backend_active=*/true,
+          /*have_deferred_gpu_out=*/false,
+          /*allow_cpu_resize=*/false,
+          /*same_backend_effects_ran=*/false)) {
+    std::cerr << "standalone GPU scaler should run when CPU resize is "
+                 "disabled\n";
+    return false;
+  }
+
+  if (!ShouldRunStandaloneGpuScaler(
+          /*scaling_needed=*/true,
+          /*gpu_backend_active=*/true,
+          /*have_deferred_gpu_out=*/true,
+          /*allow_cpu_resize=*/true,
+          /*same_backend_effects_ran=*/false)) {
+    std::cerr << "standalone GPU scaler should run when a deferred GPU output "
+                 "is available\n";
+    return false;
+  }
+
+  if (ShouldRunStandaloneGpuScaler(
+          /*scaling_needed=*/false,
+          /*gpu_backend_active=*/true,
+          /*have_deferred_gpu_out=*/true,
+          /*allow_cpu_resize=*/false,
+          /*same_backend_effects_ran=*/true)) {
+    std::cerr << "standalone GPU scaler should skip when no scaling is needed\n";
+    return false;
+  }
+
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -868,6 +1004,8 @@ int main() {
        &TestVideoStartFailureClearsAfterRecovery},
       {"video config restart transition name is stable",
        &TestVideoConfigRestartTransitionNameIsStable},
+      {"video output format change restarts pipeline",
+       &TestVideoOutputFormatChangeRestartsPipeline},
       {"optional video effects fail open with cooldown retry",
        &TestOptionalVideoEffectsFailOpenCooldownAndRetry},
       {"video pipeline exposes degraded effect status",
@@ -876,6 +1014,8 @@ int main() {
        &TestVideoOutputDisappearanceStopsPipelineAndMarksUnavailable},
       {"video output recovery clears unavailable error",
        &TestVideoOutputRecoveryClearsUnavailableError},
+      {"standalone GPU scaler skips inactive backend transfers",
+       &TestStandaloneGpuScalerPolicySkipsInactiveBackendTransfers},
       {"latest-frame worker overwrites pending blocked work",
        &studiocast::tests::
            TestLatestFrameWinsOverwritesPendingWithBlockedProcessor},
@@ -887,6 +1027,67 @@ int main() {
        &studiocast::tests::TestLatestFrameWinsStatsCountersAndLastError},
       {"FastDVDnet denoise tensor contract is declared",
        &studiocast::tests::TestFastDvdnetDenoiseTensorContractIsDeclared},
+      {"frame artifact cache reuses compatible matte within frame",
+       &studiocast::tests::
+           TestFrameArtifactCacheReusesCompatibleMatteWithinFrame},
+      {"frame artifact cache reuses compatible Maxine matte within frame",
+       &studiocast::tests::
+           TestFrameArtifactCacheReusesCompatibleMaxineMatteWithinFrame},
+      {"frame artifact cache separates incompatible matte keys",
+       &studiocast::tests::
+           TestFrameArtifactCacheSeparatesIncompatibleMatteKeys},
+      {"frame artifact cache invalidates matte on new frame",
+       &studiocast::tests::TestFrameArtifactCacheInvalidatesMatteOnNewFrame},
+      {"frame artifact cache precomputed matte keys preserve compatibility",
+       &studiocast::tests::
+           TestFrameArtifactCachePrecomputedMatteKeysPreserveCompatibility},
+      {"V4L2 capture treats 720p as MJPEG-worthy",
+       &studiocast::tests::TestV4l2CapturePreferenceTreats720pAsMjpegWorthy},
+      {"V4L2 YUYV request tries MJPEG first at HD when preferred",
+       &studiocast::tests::TestV4l2YuyvRequestTriesMjpegFirstAtHdWhenPreferred},
+      {"V4L2 YUYV request falls back to MJPEG after YUYV at low resolution",
+       &studiocast::tests::
+           TestV4l2YuyvRequestFallsBackToMjpegAfterYuyvAtLowResolution},
+      {"V4L2 YUYV request does not add MJPEG fallback when disabled",
+       &studiocast::tests::
+           TestV4l2YuyvRequestDoesNotAddMjpegFallbackWhenPreferenceDisabled},
+      {"V4L2 unsupported formats are skipped without duplicates",
+       &studiocast::tests::
+           TestV4l2UnsupportedFormatsAreSkippedWithoutDuplicates},
+      {"V4L2 explicit MJPEG request does not fall back inside Open order",
+       &studiocast::tests::
+           TestV4l2ExplicitMjpegRequestDoesNotFallBackToYuyvInsideOpenOrder},
+      {"V4L2 fake negotiation uses ordered fallback",
+       &studiocast::tests::TestV4l2FakeNegotiationUsesOrderedFallback},
+      {"V4L2 MJPEG decode failure falls back to raw once",
+       &studiocast::tests::TestV4l2MjpegDecodeFailureFallsBackToRawOnce},
+      {"YUYV to RGB24 matches BT.601 and preserves padding",
+       &studiocast::tests::TestYuyvToRgb24MatchesBt601AndPreservesPadding},
+      {"YUYV to RGB24 backends match scalar reference",
+       &studiocast::tests::TestYuyvToRgb24BackendsMatchScalarReference},
+      {"RGB24 to YUYV matches BT.601 within chroma rounding",
+       &studiocast::tests::TestRgb24ToYuyvMatchesBt601WithinChromaRounding},
+      {"RGB24 to YUYV backends match scalar reference",
+       &studiocast::tests::TestRgb24ToYuyvBackendsMatchScalarReference},
+      {"RGB24 to YUYV public path matches scalar with scratch variants",
+       &studiocast::tests::
+           TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants},
+      {"RGB24/BGR24 backends match scalar and preserve padding",
+       &studiocast::tests::TestRgb24Bgr24BackendsMatchScalarAndPreservePadding},
+      {"RGB24/BGR24 public path matches scalar in-place",
+       &studiocast::tests::TestRgb24Bgr24PublicPathMatchesScalarInPlace},
+      {"RGB24 bilinear resize preserves active pixels and zeros padding",
+       &studiocast::tests::
+           TestResizeRgb24BilinearPreservesActivePixelsAndZerosPadding},
+      {"RGB24 bilinear resize handles degenerate axes and plan reuse",
+       &studiocast::tests::
+           TestResizeRgb24BilinearHandlesDegenerateAxesAndPlanReuse},
+      {"Background remove CPU matches reference and preserves padding",
+       &studiocast::tests::
+           TestBackgroundRemoveCpuMatchesReferenceAndPreservesPadding},
+      {"Background blur CPU matches reference and preserves padding",
+       &studiocast::tests::
+           TestBackgroundBlurCpuMatchesReferenceAndPreservesPadding},
   };
 
   int failed = 0;

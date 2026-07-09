@@ -58,6 +58,19 @@ struct SpeakerAvailabilityCacheKey {
   BroadcastSpeakerEffects speaker{};
 };
 
+struct MicrophoneSourceStatus {
+  std::string selected_source;
+  std::string availability = "unknown";
+  std::string error;
+  std::vector<std::string> warnings;
+};
+
+struct CachedMicrophoneSourceStatus {
+  std::string configured_source;
+  bool resolve_auto = false;
+  MicrophoneSourceStatus status;
+};
+
 bool operator==(const MicrophoneAvailabilityCacheKey &a,
                 const MicrophoneAvailabilityCacheKey &b) {
   return a.schema_version == b.schema_version && a.engine == b.engine &&
@@ -206,6 +219,73 @@ std::optional<std::string>
 ChooseSpeakerTargetSinkName(const std::string &configured_target,
                             std::string *error) {
   return ChooseSafeSpeakerTargetSinkName(configured_target, error);
+}
+
+bool PulseSourceListContains(const std::vector<pulse::PactlSource> &sources,
+                             const std::string &name) {
+  return std::any_of(sources.begin(), sources.end(), [&](const auto &source) {
+    return source.name == name;
+  });
+}
+
+MicrophoneSourceStatus
+ResolveMicrophoneSourceStatus(const VirtualAudioServiceConfig &cfg,
+                              bool resolve_auto) {
+  MicrophoneSourceStatus out;
+
+  std::string configured = cfg.source_name;
+  if (configured == "auto")
+    configured.clear();
+
+  if (!configured.empty()) {
+    out.selected_source = configured;
+
+    std::string unsafeReason;
+    if (IsUnsafeInputSourceName(configured, &unsafeReason)) {
+      out.availability = "unavailable";
+      out.error = unsafeReason;
+      return out;
+    }
+
+    std::string listErr;
+    const auto sources = pulse::ListSources(&listErr);
+    if (!listErr.empty()) {
+      out.warnings.push_back(
+          "Pulse source list could not confirm configured source "
+          "availability: " +
+          listErr);
+      out.availability = "unknown";
+      return out;
+    }
+
+    if (!PulseSourceListContains(sources, configured)) {
+      out.availability = "unavailable";
+      out.error = "Configured Pulse source '" + configured +
+                  "' is not currently available. Reconnect it or choose "
+                  "another physical microphone/input source.";
+      return out;
+    }
+
+    out.availability = "available";
+    return out;
+  }
+
+  if (!resolve_auto)
+    return out;
+
+  const auto resolved = ResolveSafeInputSourceName(cfg.source_name);
+  out.warnings = resolved.warnings;
+  if (!resolved.ok) {
+    out.availability = "unavailable";
+    out.error = resolved.error.empty()
+                    ? "Failed to resolve a safe Pulse microphone source."
+                    : resolved.error;
+    return out;
+  }
+
+  out.selected_source = resolved.source_name;
+  out.availability = "available";
+  return out;
 }
 
 void FillMaxineAvailability(AudioBackendAvailability *out) {
@@ -575,6 +655,11 @@ void VirtualAudioService::ThreadMain() {
   steady_clock::time_point openAudioCooldownUntil{};
   std::string openAudioCooldownReason;
 
+  // If microphone Maxine setup fails after availability selection, keep the
+  // mic route alive in pass-through and avoid retry churn for a short cooldown.
+  steady_clock::time_point maxineCooldownUntil{};
+  std::string maxineCooldownReason;
+
   // Separate cooldown for speaker processing, so a failure in one direction
   // doesn't permanently disable the other.
   steady_clock::time_point speakerOpenAudioCooldownUntil{};
@@ -584,6 +669,9 @@ void VirtualAudioService::ThreadMain() {
   steady_clock::time_point lastSpeakerConsumerSeen{};
 
   constexpr auto availabilityProbeTtl = seconds(2);
+  std::optional<CachedMicrophoneSourceStatus> cachedMicSourceStatus;
+  steady_clock::time_point nextMicSourceStatusProbe{};
+
   std::optional<AudioBackendAvailability> cachedMicAvailability;
   std::optional<MicrophoneAvailabilityCacheKey> cachedMicAvailabilityKey;
   steady_clock::time_point nextMicAvailabilityProbe{};
@@ -654,6 +742,36 @@ void VirtualAudioService::ThreadMain() {
     }
 
     const int pollMs = std::max(25, cfg.poll_ms);
+
+    const bool resolveAutoMicSource = cfg.enabled;
+    const bool shouldProbeMicSource = cfg.enabled || !cfg.source_name.empty();
+    MicrophoneSourceStatus micSourceStatus;
+    if (shouldProbeMicSource) {
+      const auto sourceNow = steady_clock::now();
+      const bool sourceStatusExpired =
+          !cachedMicSourceStatus ||
+          cachedMicSourceStatus->configured_source != cfg.source_name ||
+          cachedMicSourceStatus->resolve_auto != resolveAutoMicSource ||
+          sourceNow >= nextMicSourceStatusProbe;
+      if (sourceStatusExpired) {
+        cachedMicSourceStatus = CachedMicrophoneSourceStatus{
+            cfg.source_name, resolveAutoMicSource,
+            ResolveMicrophoneSourceStatus(cfg, resolveAutoMicSource)};
+        nextMicSourceStatusProbe = sourceNow + availabilityProbeTtl;
+      }
+      micSourceStatus = cachedMicSourceStatus->status;
+    } else {
+      cachedMicSourceStatus.reset();
+      nextMicSourceStatusProbe = steady_clock::time_point{};
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      st_.selected_source = micSourceStatus.selected_source;
+      st_.source_availability = micSourceStatus.availability;
+      st_.source_error = micSourceStatus.error;
+      st_.source_warnings = micSourceStatus.warnings;
+    }
 
     using Pref = studiocast::audio::effects::AudioEffectsEnginePreference;
     const bool speakerEffectsRequested = AnySpeakerEffectRequested(cfg.effects);
@@ -1036,10 +1154,6 @@ void VirtualAudioService::ThreadMain() {
       }
     }
 
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      st_.selected_source = cfg.source_name;
-    }
     (void)speakerLoopbackStopError;
 
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
@@ -1688,6 +1802,51 @@ void VirtualAudioService::ThreadMain() {
       continue;
     }
 
+    if (!micSourceStatus.error.empty()) {
+#if STUDIOCAST_HAVE_PULSE_SIMPLE
+      if (pipeline) {
+        pipeline->Stop();
+        pipeline.reset();
+      }
+      processor.reset();
+      if (fx) {
+        fx->Destroy();
+        fx.reset();
+      }
+      api.reset();
+      lastFx.reset();
+      lastSource.clear();
+      lastBackend.clear();
+      lastAfxLib.clear();
+      micRestartingAfterTerminalFailure = false;
+#endif
+      SetLastError(micSourceStatus.error);
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        st_.pipeline_running = false;
+        st_.pipeline_starting = false;
+        st_.pipeline_state = "failed";
+        st_.pipeline_idle_reason.clear();
+        st_.pipeline_frames_processed = 0;
+        st_.pipeline_process_time_us_sum = 0;
+        st_.pipeline_process_time_us_max = 0;
+        st_.pipeline_process_time_us_last = 0;
+        st_.pipeline_process_overruns = 0;
+        st_.pipeline_pulse_capture_latency_us_last = 0;
+        st_.pipeline_pulse_playback_latency_us_last = 0;
+        st_.pipeline_pulse_latency_us_max = 0;
+        st_.pipeline_resync_events = 0;
+        st_.effect_selector.clear();
+        st_.feature_id.clear();
+        st_.intensity = 0.0f;
+        st_.effects_backend_active.clear();
+        st_.effects_note.clear();
+        st_.open_audio_runtime = {};
+      }
+      SleepFor(milliseconds(pollMs));
+      continue;
+    }
+
     auto plan = studiocast::maxine::afx::PlanBroadcastMicrophoneEffect(
         cfg.effects.microphone.studio_voice_enabled,
         cfg.effects.microphone.noise_removal_enabled,
@@ -1731,6 +1890,13 @@ void VirtualAudioService::ThreadMain() {
                                        ? "Open Audio backend is temporarily "
                                          "disabled due to a previous failure."
                                        : openAudioCooldownReason;
+      }
+      if (now2 < maxineCooldownUntil) {
+        avail.maxine_ok = false;
+        avail.maxine_reason = maxineCooldownReason.empty()
+                                  ? "Maxine backend is temporarily disabled "
+                                    "due to a previous failure."
+                                  : maxineCooldownReason;
       }
     }
     const auto decision = ResolveAudioBackend(cfg.effects, avail);
@@ -1870,8 +2036,9 @@ void VirtualAudioService::ThreadMain() {
       continue;
     }
 
+    const std::string micPipelineSource = micSourceStatus.selected_source;
     const bool needRestart = (!pipeline) || (lastBackend != desiredBackend) ||
-                             (lastSource != cfg.source_name) ||
+                             (lastSource != micPipelineSource) ||
                              ((wantMaxine || wantOpenAudio) && effectsChanged);
 
     if (needRestart) {
@@ -1891,6 +2058,88 @@ void VirtualAudioService::ThreadMain() {
         lastFx.reset();
       }
     }
+
+    auto startMicPassthroughFallback =
+        [&](const std::string &note,
+            const std::string &failure_reason) -> bool {
+      maxineCooldownUntil = steady_clock::now() + StartFailureRetryDelay(cfg);
+      maxineCooldownReason = failure_reason;
+      SetLastError(failure_reason);
+
+      if (pipeline) {
+        pipeline->Stop();
+        pipeline.reset();
+      }
+      processor.reset();
+      if (fx) {
+        fx->Destroy();
+        fx.reset();
+      }
+      api.reset();
+      lastAfxLib.clear();
+      lastFx.reset();
+      lastSource.clear();
+      lastBackend.clear();
+
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        st_.pipeline_starting = true;
+        st_.pipeline_running = false;
+        st_.pipeline_state = "starting";
+        st_.pipeline_idle_reason.clear();
+        st_.effects_backend_active = "passthrough";
+        st_.effects_note = note;
+        st_.open_audio_runtime = {};
+        clearMicPipelineStatsLocked();
+      }
+
+      processor = std::make_unique<PassthroughAudioProcessor>();
+      pipeline = CreatePipeline(processor.get());
+
+      studiocast::audio::AudioPipelineConfig pcfg;
+      pcfg.source_name = micPipelineSource;
+      pcfg.sink_name = "studiocast_sink";
+
+      std::string perr;
+      bool pipelineStartOk = false;
+      if (!pipeline) {
+        perr = "audio pipeline factory returned null";
+      } else {
+        pipelineStartOk = pipeline->Start(pcfg, &perr);
+      }
+      if (!pipelineStartOk) {
+        if (perr.empty()) {
+          perr = "audio pipeline failed to start";
+        }
+        SetLastError("Failed to start audio pipeline: " + perr);
+        pipeline.reset();
+        processor.reset();
+        nextStartRetry = steady_clock::now() + StartFailureRetryDelay(cfg);
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          st_.pipeline_starting = false;
+          st_.pipeline_running = false;
+          st_.pipeline_state = "failed";
+          st_.pipeline_idle_reason.clear();
+          clearMicPipelineStatsLocked();
+        }
+        return false;
+      }
+
+      lastBackend = "passthrough";
+      lastSource = micPipelineSource;
+      lastFx = cfg.effects;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        st_.pipeline_starting = false;
+        st_.pipeline_running = true;
+        st_.pipeline_state = "running";
+        st_.pipeline_idle_reason.clear();
+        st_.last_error.clear();
+      }
+      micRestartingAfterTerminalFailure = false;
+      return true;
+    };
 
     if (wantOpenAudio) {
       // Open-source backend (Phase 4 stub): validate model selection and keep
@@ -1947,7 +2196,7 @@ void VirtualAudioService::ThreadMain() {
         pipeline = CreatePipeline(processor.get());
 
         studiocast::audio::AudioPipelineConfig pcfg;
-        pcfg.source_name = cfg.source_name;
+        pcfg.source_name = micPipelineSource;
         pcfg.sink_name = "studiocast_sink";
 
         std::string perr;
@@ -1980,7 +2229,7 @@ void VirtualAudioService::ThreadMain() {
         }
 
         lastBackend = desiredBackend;
-        lastSource = cfg.source_name;
+        lastSource = micPipelineSource;
         lastFx = cfg.effects;
 
         {
@@ -2052,7 +2301,7 @@ void VirtualAudioService::ThreadMain() {
         pipeline = CreatePipeline(processor.get());
 
         studiocast::audio::AudioPipelineConfig pcfg;
-        pcfg.source_name = cfg.source_name;
+        pcfg.source_name = micPipelineSource;
         pcfg.sink_name = "studiocast_sink";
 
         std::string perr;
@@ -2083,7 +2332,7 @@ void VirtualAudioService::ThreadMain() {
         }
 
         lastBackend = desiredBackend;
-        lastSource = cfg.source_name;
+        lastSource = micPipelineSource;
 
         {
           std::lock_guard<std::mutex> lock(mu_);
@@ -2139,15 +2388,13 @@ void VirtualAudioService::ThreadMain() {
                                 : std::string();
     }
     if (!sel.selected || !sel.selected->compute_capability) {
-      SetLastError("Failed to select a supported NVIDIA GPU: " + sel.error);
-      nextStartRetry = now + StartFailureRetryDelay(cfg);
-      {
-        std::lock_guard<std::mutex> lock(mu_);
-        st_.pipeline_running = false;
-        st_.pipeline_starting = false;
-        st_.pipeline_state = "failed";
-        st_.pipeline_idle_reason.clear();
-      }
+      const std::string reason =
+          "Failed to select a supported NVIDIA GPU: " + sel.error;
+      (void)startMicPassthroughFallback(
+          "Failed to select a supported NVIDIA GPU for microphone effects; "
+          "using pass-through.\n" +
+              sel.error,
+          reason);
       SleepFor(milliseconds(pollMs));
       continue;
     }
@@ -2159,15 +2406,11 @@ void VirtualAudioService::ThreadMain() {
         msg += ": ";
         msg += paths.afx.problems.front();
       }
-      SetLastError(msg);
-      nextStartRetry = now + StartFailureRetryDelay(cfg);
-      {
-        std::lock_guard<std::mutex> lock(mu_);
-        st_.pipeline_running = false;
-        st_.pipeline_starting = false;
-        st_.pipeline_state = "failed";
-        st_.pipeline_idle_reason.clear();
-      }
+      (void)startMicPassthroughFallback(
+          "AFX SDK not available for microphone effects; using "
+          "pass-through.\n" +
+              msg,
+          msg);
       SleepFor(milliseconds(pollMs));
       continue;
     }
@@ -2176,16 +2419,11 @@ void VirtualAudioService::ThreadMain() {
       api = std::make_unique<studiocast::maxine::afx::AfxApi>();
       std::string aerr;
       if (!api->InitializeFromLibraryPath(paths.afx.library, &aerr)) {
-        SetLastError("Failed to initialize AFX runtime: " + aerr);
-        api.reset();
-        nextStartRetry = now + StartFailureRetryDelay(cfg);
-        {
-          std::lock_guard<std::mutex> lock(mu_);
-          st_.pipeline_running = false;
-          st_.pipeline_starting = false;
-          st_.pipeline_state = "failed";
-          st_.pipeline_idle_reason.clear();
-        }
+        (void)startMicPassthroughFallback(
+            "Failed to initialize AFX runtime for microphone effects; using "
+            "pass-through.\n" +
+                aerr,
+            "Failed to initialize AFX runtime: " + aerr);
         SleepFor(milliseconds(pollMs));
         continue;
       }
@@ -2220,34 +2458,19 @@ void VirtualAudioService::ThreadMain() {
 
       std::string ferr;
       if (!fx->Configure(e, &ferr)) {
-        SetLastError("Failed to configure AFX effect: " + ferr);
-        fx->Destroy();
-        fx.reset();
-        nextStartRetry = now + StartFailureRetryDelay(cfg);
-        {
-          std::lock_guard<std::mutex> lock(mu_);
-          st_.pipeline_starting = false;
-          st_.pipeline_running = false;
-          st_.pipeline_state = "failed";
-          st_.pipeline_idle_reason.clear();
-          clearMicPipelineStatsLocked();
-        }
+        (void)startMicPassthroughFallback(
+            "Failed to configure AFX microphone effect; using "
+            "pass-through.\n" +
+                ferr,
+            "Failed to configure AFX effect: " + ferr);
         SleepFor(milliseconds(pollMs));
         continue;
       }
       if (!fx->Load(&ferr)) {
-        SetLastError("Failed to load AFX effect: " + ferr);
-        fx->Destroy();
-        fx.reset();
-        nextStartRetry = now + StartFailureRetryDelay(cfg);
-        {
-          std::lock_guard<std::mutex> lock(mu_);
-          st_.pipeline_starting = false;
-          st_.pipeline_running = false;
-          st_.pipeline_state = "failed";
-          st_.pipeline_idle_reason.clear();
-          clearMicPipelineStatsLocked();
-        }
+        (void)startMicPassthroughFallback(
+            "Failed to load AFX microphone effect; using pass-through.\n" +
+                ferr,
+            "Failed to load AFX effect: " + ferr);
         SleepFor(milliseconds(pollMs));
         continue;
       }
@@ -2256,7 +2479,7 @@ void VirtualAudioService::ThreadMain() {
           fx.get());
       pipeline = CreatePipeline(processor.get());
       studiocast::audio::AudioPipelineConfig pcfg;
-      pcfg.source_name = cfg.source_name;
+      pcfg.source_name = micPipelineSource;
       pcfg.sink_name = "studiocast_sink";
 
       std::string perr;
@@ -2287,7 +2510,7 @@ void VirtualAudioService::ThreadMain() {
       }
 
       lastFx = cfg.effects;
-      lastSource = cfg.source_name;
+      lastSource = micPipelineSource;
       lastBackend = desiredBackend;
       {
         std::lock_guard<std::mutex> lock(mu_);

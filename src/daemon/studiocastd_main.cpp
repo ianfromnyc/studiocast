@@ -80,6 +80,8 @@ void Usage(const char *argv0) {
       << "  --width N                Requested width (default: 1280)\n"
       << "  --height N               Requested height (default: 720)\n"
       << "  --fps N                  Requested fps (default: 30)\n"
+      << "  --output-format F        Virtual camera output: rgb24|yuyv "
+         "(default: rgb24)\n"
       << "  --mirror                 Enable mirror (horizontal flip)\n"
       << "  --background MODE         Background effect: "
          "none|blur|remove|replace|auto_frame (default: none)\n"
@@ -1111,11 +1113,22 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
     oss << "\"open_audio\":" << openAudioJson << ",";
   }
 
+  const std::string effectiveInputDevice =
+      st.pipeline.input_device.empty() ? cfg.pipeline.input_device
+                                       : st.pipeline.input_device;
+  const std::string effectiveOutputDevice =
+      st.pipeline.output_device.empty() ? cfg.pipeline.output_device
+                                        : st.pipeline.output_device;
+
   oss << "\"video\":{";
   oss << "\"enabled\":" << BoolJson(cfg.enabled) << ",";
   oss << "\"always_on\":" << BoolJson(cfg.always_on) << ",";
   oss << "\"allow_cpu_resize\":" << BoolJson(cfg.pipeline.allow_cpu_resize)
       << ",";
+  oss << "\"output_format_requested\":\""
+      << JsonEscape(
+             studiocast::video::PixelFormatName(cfg.pipeline.output_format))
+      << "\",";
   oss << "\"virtual_device_present\":" << BoolJson(st.virtual_device_present)
       << ",";
   oss << "\"virtual_device_available\":"
@@ -1145,8 +1158,8 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"next_start_retry_ms\":" << st.next_start_retry_ms;
   oss << "},";
 
-  oss << "\"input_device\":\"" << JsonEscape(st.pipeline.input_device) << "\",";
-  oss << "\"output_device\":\"" << JsonEscape(st.pipeline.output_device)
+  oss << "\"input_device\":\"" << JsonEscape(effectiveInputDevice) << "\",";
+  oss << "\"output_device\":\"" << JsonEscape(effectiveOutputDevice)
       << "\",";
   if (!loopbackJson.empty()) {
     oss << "\"virtual_device_diagnostics\":" << loopbackJson << ",";
@@ -1155,6 +1168,15 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   // Negotiated formats (what the driver actually gave us / accepted).
   oss << "\"capture_format\":" << CaptureFormatToJson(st.pipeline.capture)
       << ",";
+  oss << "\"capture_fallback\":{";
+  oss << "\"state\":\""
+      << JsonEscape(st.pipeline.capture_fallback_state.empty()
+                        ? std::string("none")
+                        : st.pipeline.capture_fallback_state)
+      << "\",";
+  oss << "\"reason\":\""
+      << JsonEscape(st.pipeline.capture_fallback_reason) << "\"";
+  oss << "},";
   oss << "\"output_format\":" << ActualFormatToJson(st.pipeline.output) << ",";
 
   // Scaling status (active backend + from/to formats).
@@ -1415,11 +1437,12 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
 
   std::string audioSourceResolved =
       ast.selected_source.empty() ? acfg.source_name : ast.selected_source;
-  std::string audioSourceError;
-  std::vector<std::string> audioSourceWarnings;
+  std::string audioSourceError = ast.source_error;
+  std::vector<std::string> audioSourceWarnings = ast.source_warnings;
   {
     std::string reason;
-    if (studiocast::audio::IsUnsafeInputSourceName(acfg.source_name, &reason)) {
+    if (audioSourceError.empty() &&
+        studiocast::audio::IsUnsafeInputSourceName(acfg.source_name, &reason)) {
       audioSourceError = reason;
     }
   }
@@ -1449,6 +1472,10 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"source_resolved\":\""
       << JsonEscape(audioSourceResolved.empty() ? std::string("auto")
                                                 : audioSourceResolved)
+      << "\",";
+  oss << "\"source_availability\":\""
+      << JsonEscape(ast.source_availability.empty() ? std::string("unknown")
+                                                    : ast.source_availability)
       << "\",";
   oss << "\"source_error\":\"" << JsonEscape(audioSourceError) << "\",";
   oss << "\"source_warnings\":[";
@@ -1658,6 +1685,10 @@ ConfigToJson(const studiocast::video::VirtualCameraServiceConfig &cfg) {
   oss << "\"width\":" << cfg.pipeline.width << ",";
   oss << "\"height\":" << cfg.pipeline.height << ",";
   oss << "\"fps\":" << cfg.pipeline.fps << ",";
+  oss << "\"output_format_requested\":\""
+      << JsonEscape(
+             studiocast::video::PixelFormatName(cfg.pipeline.output_format))
+      << "\",";
   oss << "\"allow_cpu_resize\":" << BoolJson(cfg.pipeline.allow_cpu_resize)
       << ",";
   oss << "\"mirror\":" << BoolJson(cfg.pipeline.effects.mirror) << ",";
@@ -2045,6 +2076,14 @@ int main(int argc, char **argv) {
   cfg.pipeline.width = GetArgInt(argc, argv, "--width", cfg.pipeline.width);
   cfg.pipeline.height = GetArgInt(argc, argv, "--height", cfg.pipeline.height);
   cfg.pipeline.fps = GetArgInt(argc, argv, "--fps", cfg.pipeline.fps);
+  if (const auto v = GetArgValue(argc, argv, "--output-format"); !v.empty()) {
+    if (const auto parsed = studiocast::video::ParsePixelFormat(v)) {
+      cfg.pipeline.output_format = *parsed;
+    } else {
+      std::cerr << "WARN: unknown --output-format value: " << v
+                << " (expected rgb24|yuyv)\n";
+    }
+  }
 
   // Convenience: if the user sets a sentinel width/height and didn't explicitly
   // set a capture mode, treat it as capture auto.
@@ -2352,6 +2391,15 @@ int main(int argc, char **argv) {
               }
               if (auto it = pc.kv.find("fps"); it != pc.kv.end()) {
                 newCfg.pipeline.fps = std::atoi(it->second.c_str());
+              }
+              if (auto it = pc.kv.find("output_format"); it != pc.kv.end()) {
+                const auto parsed =
+                    studiocast::video::ParsePixelFormat(it->second);
+                if (!parsed) {
+                  return std::string("ERR ") +
+                         ErrorJson("output_format must be rgb24|yuyv");
+                }
+                newCfg.pipeline.output_format = *parsed;
               }
               if (auto it = pc.kv.find("always_on"); it != pc.kv.end()) {
                 bool v = false;

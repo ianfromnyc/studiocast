@@ -82,6 +82,36 @@ std::string ToLowerAscii(std::string s) {
   return s;
 }
 
+bool ActualMatchesOutputRequest(const ActualFormat &actual, int width,
+                                int height, int fps,
+                                PixelFormat requested_format, bool strict_fps) {
+  if (actual.width != width || actual.height != height)
+    return false;
+  if (actual.format != requested_format)
+    return false;
+  if (strict_fps && actual.fps != fps)
+    return false;
+  return true;
+}
+
+std::string ActualOutputMismatchMessage(const ActualFormat &actual, int width,
+                                        int height, int fps,
+                                        PixelFormat requested_format,
+                                        bool strict_fps) {
+  std::ostringstream oss;
+  oss << "requested output_format=" << PixelFormatName(requested_format) << " "
+      << width << "x" << height;
+  if (strict_fps)
+    oss << "@" << fps;
+  oss << ", negotiated output_format=" << PixelFormatName(actual.format) << " "
+      << actual.width << "x" << actual.height;
+  if (actual.fps > 0)
+    oss << "@" << actual.fps;
+  if (!actual.pixfmt.empty())
+    oss << " (" << actual.pixfmt << ")";
+  return oss.str();
+}
+
 bool OpenCudaTensorRtEnabledFromEnv() {
   const char *v = std::getenv("STUDIOCAST_OPEN_CUDA_TENSORRT");
   if (!v || !*v)
@@ -424,6 +454,8 @@ CameraPipelineStatus CameraPipeline::Status() const {
   if (running_ || starting_) {
     s.capture = capture_;
     s.output = output_;
+    s.capture_fallback_state = capture_fallback_state_;
+    s.capture_fallback_reason = capture_fallback_reason_;
     s.scaling_backend_active = scaling_backend_active_;
     s.scaling_from = scaling_from_;
     s.scaling_to = scaling_to_;
@@ -442,6 +474,8 @@ CameraPipelineStatus CameraPipeline::Status() const {
     // attempting to renegotiate caps.
     s.capture = CaptureFormat{};
     s.output = writer_.IsOpen() ? writer_.Actual() : ActualFormat{};
+    s.capture_fallback_state = "none";
+    s.capture_fallback_reason.clear();
     s.scaling_backend_active.clear();
     s.scaling_from = CaptureFormat{};
     s.scaling_to = ActualFormat{};
@@ -511,6 +545,8 @@ bool CameraPipeline::Start(const CameraPipelineConfig &cfg,
   output_device_.clear();
   capture_ = CaptureFormat{};
   output_ = ActualFormat{};
+  capture_fallback_state_ = "none";
+  capture_fallback_reason_.clear();
   scaling_backend_active_.clear();
   scaling_from_ = CaptureFormat{};
   scaling_to_ = ActualFormat{};
@@ -550,11 +586,15 @@ bool CameraPipeline::Start(const CameraPipelineConfig &cfg,
 }
 
 bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
-                                      int height, int fps, bool strict_fps,
+                                      int height, int fps,
+                                      PixelFormat output_format,
+                                      bool strict_fps,
                                       bool *out_opened_or_renegotiated,
                                       std::string *error) {
   if (out_opened_or_renegotiated)
     *out_opened_or_renegotiated = false;
+
+  std::string reopen_reason;
 
   // Try to reuse an existing open writer when possible.
   if (writer_.IsOpen() && writer_device_ == outDev) {
@@ -572,7 +612,7 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
 
     const auto &a = writer_.Actual();
 
-    // Idle keep-alive path (strict_fps=false): keep the existing producer FD
+    // Idle keep-alive path (strict_fps=false): keep a matching producer FD
     // alive.
     //
     // Some v4l2loopback configurations transiently report/accept different
@@ -581,15 +621,18 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
     // returns EINVAL, which manifests as start/stop flapping when the GUI
     // preview is restarted after the camera fully idles.
     //
-    // The *actual* output size/format will be enforced when the heavy pipeline
-    // starts (strict_fps=true) inside ThreadMain().
-    if (!strict_fps) {
+    // Still enforce the configured shared producer format while idle so browser
+    // consumers see the selected FourCC before opening the device.
+    if (!strict_fps &&
+        ActualMatchesOutputRequest(a, width, height, fps, output_format,
+                                   /*strict_fps=*/false)) {
       output_ = a;
       output_device_ = outDev;
       return true;
     }
 
-    if (a.width == width && a.height == height && a.fps == fps) {
+    if (ActualMatchesOutputRequest(a, width, height, fps, output_format,
+                                   strict_fps)) {
       output_ = a;
       output_device_ = outDev;
       return true;
@@ -600,12 +643,10 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
     // Closing/re-opening the writer FD is a known destabilizer for some
     // v4l2loopback configurations (especially around consumer disconnect
     // windows). Prefer applying VIDIOC_S_FMT/VIDIOC_S_PARM on the same FD.
-    std::string nerr1;
-    std::string nerr2;
-    if (writer_.Renegotiate(outDev, width, height, fps, PixelFormat::rgb24,
-                            &nerr1) ||
-        writer_.Renegotiate(outDev, width, height, fps, PixelFormat::yuyv,
-                            &nerr2)) {
+    std::string nerr;
+    if (writer_.Renegotiate(outDev, width, height, fps, output_format, &nerr) &&
+        ActualMatchesOutputRequest(writer_.Actual(), width, height, fps,
+                                   output_format, strict_fps)) {
       if (out_opened_or_renegotiated)
         *out_opened_or_renegotiated = true;
       output_ = writer_.Actual();
@@ -613,23 +654,23 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
       return true;
     }
 
-    // Non-fatal: keep the existing writer FD and proceed with whatever the
-    // loopback currently advertises. Consumers can renegotiate caps; the writer
-    // will refresh its cached format during streaming.
-    output_ = a;
-    output_device_ = outDev;
-    if (last_error_.empty()) {
-      last_error_ =
-          "Output renegotiation failed; continuing with existing format.";
+    if (nerr.empty() && writer_.IsOpen()) {
+      nerr = ActualOutputMismatchMessage(writer_.Actual(), width, height, fps,
+                                         output_format, strict_fps);
     }
-    return true;
+
+    reopen_reason = "Renegotiation failed for requested output_format=" +
+                    PixelFormatName(output_format) + ": " + nerr;
+    writer_.Close();
+    writer_device_.clear();
+    output_ = ActualFormat{};
+    output_device_.clear();
   } else if (writer_.IsOpen() && writer_device_ != outDev) {
     writer_.Close();
     writer_device_.clear();
   }
 
-  // Open writer: prefer RGB24 output (avoids RGB->YUYV conversion), fallback to
-  // YUYV.
+  // Open writer with the daemon-owned requested shared producer format.
   if (out_opened_or_renegotiated)
     *out_opened_or_renegotiated = true;
 
@@ -646,7 +687,6 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
   };
 
   std::string werr;
-  std::string werr2;
   bool opened = false;
   int attempts = 0;
 
@@ -664,22 +704,22 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
   for (int attempt = 0;; ++attempt) {
     attempts = attempt + 1;
     werr.clear();
-    werr2.clear();
 
     if (stop_.load())
       break;
 
-    if (writer_.Open(outDev, width, height, fps, PixelFormat::rgb24, &werr)) {
-      opened = true;
-      break;
-    }
-    if (writer_.Open(outDev, width, height, fps, PixelFormat::yuyv, &werr2)) {
-      opened = true;
-      break;
+    if (writer_.Open(outDev, width, height, fps, output_format, &werr)) {
+      if (ActualMatchesOutputRequest(writer_.Actual(), width, height, fps,
+                                     output_format, strict_fps)) {
+        opened = true;
+        break;
+      }
+      werr = ActualOutputMismatchMessage(writer_.Actual(), width, height, fps,
+                                         output_format, strict_fps);
+      writer_.Close();
     }
 
-    const bool maybe_transient =
-        contains_invalid_argument(werr) || contains_invalid_argument(werr2);
+    const bool maybe_transient = contains_invalid_argument(werr);
     if (!maybe_transient)
       break;
 
@@ -696,12 +736,16 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
           std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - t0)
               .count();
-      *error = "Failed to open v4l2loopback output " + outDev + ":\n" +
-               "Tried rgb24:\n" + werr + "\n\n" + "Tried yuyv:\n" + werr2 +
-               "\n\n" + "(open retries: " + std::to_string(attempts) +
-               ", elapsed=" + std::to_string(elapsed) + "ms)";
+      *error =
+          "Failed to open v4l2loopback output " + outDev +
+          " with requested output_format=" + PixelFormatName(output_format) +
+          ":\n";
+      if (!reopen_reason.empty())
+        *error += reopen_reason + "\n\n";
+      *error += werr + "\n\n" + "(open retries: " + std::to_string(attempts) +
+                ", elapsed=" + std::to_string(elapsed) + "ms)";
 
-      if (contains_invalid_argument(werr) || contains_invalid_argument(werr2)) {
+      if (contains_invalid_argument(werr)) {
         *error +=
             "\nHint: this can be a transient v4l2loopback restart window; "
             "if it persists, try waiting a few seconds or reloading the "
@@ -845,8 +889,9 @@ bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig &cfg,
 
   bool opened_or_renegotiated = false;
   std::string oerr;
-  if (!OpenOutputLocked(outDev, cfg.width, cfg.height, cfg.fps, false,
-                        &opened_or_renegotiated, &oerr)) {
+  if (!OpenOutputLocked(outDev, cfg.width, cfg.height, cfg.fps,
+                        cfg.output_format, false, &opened_or_renegotiated,
+                        &oerr)) {
     if (error)
       *error = oerr;
     return false;
@@ -892,6 +937,8 @@ void CameraPipeline::Stop() {
       starting_ = false;
       capture_ = CaptureFormat{};
       output_ = ActualFormat{};
+      capture_fallback_state_ = "none";
+      capture_fallback_reason_.clear();
       scaling_backend_active_.clear();
       scaling_from_ = CaptureFormat{};
       scaling_to_ = ActualFormat{};
@@ -906,6 +953,8 @@ void CameraPipeline::Stop() {
   starting_ = false;
   capture_ = CaptureFormat{};
   output_ = ActualFormat{};
+  capture_fallback_state_ = "none";
+  capture_fallback_reason_.clear();
   scaling_backend_active_.clear();
   scaling_from_ = CaptureFormat{};
   scaling_to_ = ActualFormat{};
@@ -1001,7 +1050,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   }
 
-  const auto capA = cap.Actual();
+  auto capA = cap.Actual();
 
   // Open (or reuse) writer to v4l2loopback output.
   {
@@ -1023,8 +1072,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     // we switch the loopback format to that smaller negotiated size while a
     // consumer still requests the configured size, the frame can display in the
     // top-left quadrant.
-    if (!OpenOutputLocked(outDev, out_w, out_h, cfg.fps, true,
-                          &opened_or_renegotiated, &oerr)) {
+    if (!OpenOutputLocked(outDev, out_w, out_h, cfg.fps, cfg.output_format,
+                          true, &opened_or_renegotiated, &oerr)) {
       last_error_ = oerr;
       running_ = false;
       start_notified_ = true;
@@ -1226,8 +1275,42 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   std::size_t rgbStride = rgb.stride_bytes;
 
   std::vector<std::uint8_t> rgbScaled;
+  Rgb24BilinearResizePlan cpuResizePlan;
 
   std::vector<std::uint8_t> outBuf(outA.size_image);
+  std::vector<std::uint8_t> yuyvConversionScratch;
+
+  auto ResizeYuyvConversionScratch = [&] {
+    const std::size_t need =
+        (outA.format == PixelFormat::yuyv)
+            ? Rgb24ToYuyvScratchBytes(outA.width, outA.height)
+            : 0u;
+    if (need > 0) {
+      yuyvConversionScratch.resize(need);
+    } else {
+      yuyvConversionScratch.clear();
+    }
+  };
+  ResizeYuyvConversionScratch();
+
+  auto ZeroRgbOutputPadding = [&] {
+    if (outA.format != PixelFormat::rgb24 || outA.width <= 0 ||
+        outA.height <= 0)
+      return;
+    const std::size_t active_row = static_cast<std::size_t>(outA.width) * 3u;
+    if (outA.bytes_per_line <= active_row)
+      return;
+    const std::size_t required =
+        outA.bytes_per_line * static_cast<std::size_t>(outA.height);
+    if (outBuf.size() < required)
+      return;
+    for (int y = 0; y < outA.height; ++y) {
+      std::uint8_t *row =
+          outBuf.data() + static_cast<std::size_t>(y) * outA.bytes_per_line;
+      std::memset(row + active_row, 0, outA.bytes_per_line - active_row);
+    }
+  };
+  ZeroRgbOutputPadding();
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -2134,6 +2217,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
     std::optional<studiocast::open_video::ModelPack> pack;
     std::unique_ptr<studiocast::open_cuda::OpenCudaMattingSession> session;
+    studiocast::open_video::FrameArtifactCache matte_artifacts;
+    studiocast::open_video::FrameMatteArtifactKey cuda_matte_artifact_key;
+    studiocast::open_video::FrameMatteArtifactKey cpu_matte_artifact_key;
+    bool matte_artifact_keys_valid = false;
 
     // GPU buffers.
     studiocast::cuda::CudaImage frame_rgb; // rgb_u8, WxH
@@ -2225,6 +2312,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       cached_alpha_cpu_sequence = 0;
       cached_alpha_cpu_valid = false;
       alpha_cpu.clear();
+      matte_artifacts.ClearArtifacts();
+      ClearMatteArtifactKeys();
 
       cached_bg_src_path.clear();
       cached_bg_src_mtime = {};
@@ -2242,6 +2331,69 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       initialized = false;
       enabled = false;
       last_error.clear();
+    }
+
+    void ClearMatteArtifactKeys() {
+      cuda_matte_artifact_key = {};
+      cpu_matte_artifact_key = {};
+      matte_artifact_keys_valid = false;
+    }
+
+    void RefreshMatteArtifactKeys(int frame_w, int frame_h) {
+      if (!pack.has_value() || !pack->matting.has_value()) {
+        ClearMatteArtifactKeys();
+        return;
+      }
+
+      const int matte_w = pack->matting->input.width;
+      const int matte_h = pack->matting->input.height;
+      const auto stream_handle = reinterpret_cast<std::uintptr_t>(vb_stream);
+      if (matte_artifact_keys_valid &&
+          cuda_matte_artifact_key.frame_width == frame_w &&
+          cuda_matte_artifact_key.frame_height == frame_h &&
+          cuda_matte_artifact_key.matte_width == matte_w &&
+          cuda_matte_artifact_key.matte_height == matte_h &&
+          cuda_matte_artifact_key.stream == stream_handle) {
+        return;
+      }
+
+      if (matte_artifact_keys_valid) {
+        InvalidateMatteCache();
+      }
+
+      studiocast::open_video::FrameMatteArtifactKey base_key;
+      base_key.provider_id = "open_cuda";
+      base_key.model_id = active_model_id;
+      base_key.frame_width = frame_w;
+      base_key.frame_height = frame_h;
+      base_key.matte_width = matte_w;
+      base_key.matte_height = matte_h;
+      base_key.stream = stream_handle;
+
+      cpu_matte_artifact_key = base_key;
+      cpu_matte_artifact_key.storage =
+          studiocast::open_video::FrameMatteStorage::cpu_f32_alpha;
+      cuda_matte_artifact_key = std::move(base_key);
+      cuda_matte_artifact_key.storage =
+          studiocast::open_video::FrameMatteStorage::cuda_f32_alpha;
+      matte_artifact_keys_valid = true;
+    }
+
+    const studiocast::open_video::FrameMatteArtifactKey *
+    MatteArtifactKeyForStorage(
+        studiocast::open_video::FrameMatteStorage storage) const {
+      if (!matte_artifact_keys_valid) {
+        return nullptr;
+      }
+      switch (storage) {
+      case studiocast::open_video::FrameMatteStorage::cpu_f32_alpha:
+        return &cpu_matte_artifact_key;
+      case studiocast::open_video::FrameMatteStorage::cuda_f32_alpha:
+        return &cuda_matte_artifact_key;
+      case studiocast::open_video::FrameMatteStorage::maxine_gpu_alpha:
+        return nullptr;
+      }
+      return nullptr;
     }
 
     bool EnsureInitialized(
@@ -2344,6 +2496,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           cached_alpha_cpu_sequence = 0;
           cached_alpha_cpu_valid = false;
           alpha_cpu.clear();
+          matte_artifacts.ClearArtifacts();
+          ClearMatteArtifactKeys();
         }
 
         const auto p = reg.Find("matting", requested_model_id);
@@ -2458,6 +2612,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       // Strength is the canonical knob; clamp once for deterministic behavior.
       (void)fx;
 
+      RefreshMatteArtifactKeys(frame_w, frame_h);
+
       initialized = true;
       enabled = true;
       return true;
@@ -2559,12 +2715,24 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       return true;
     }
 
+    void PublishMatteArtifact(
+        std::uint64_t capture_sequence,
+        const studiocast::open_video::FrameMatteArtifactKey &key,
+        std::uintptr_t handle, std::uintptr_t aux_handle = 0) {
+      studiocast::open_video::FrameMatteArtifact artifact;
+      artifact.key = key;
+      artifact.handle = handle;
+      artifact.aux_handle = aux_handle;
+      (void)matte_artifacts.StoreMatte(capture_sequence, std::move(artifact));
+    }
+
     void InvalidateMatteCache() {
       cached_matte_sequence = 0;
       cached_matte_valid = false;
       cached_alpha_cpu_sequence = 0;
       cached_alpha_cpu_valid = false;
       alpha_cpu.clear();
+      matte_artifacts.ClearArtifacts();
     }
 
     // Ensure matting inference has been run for this frame, using a GPU input
@@ -2586,7 +2754,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      if (cached_matte_valid && cached_matte_sequence == capture_sequence) {
+      const auto *matte_key = MatteArtifactKeyForStorage(
+          studiocast::open_video::FrameMatteStorage::cuda_f32_alpha);
+      if (!matte_key) {
+        if (error)
+          *error = "Open CUDA: matte artifact key not initialized.";
+        return false;
+      }
+      if (cached_matte_valid && cached_matte_sequence == capture_sequence &&
+          matte_artifacts.FindMatte(capture_sequence, *matte_key)) {
         return true;
       }
 
@@ -2600,6 +2776,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       cached_matte_valid = true;
       cached_matte_sequence = capture_sequence;
       cached_alpha_cpu_valid = false;
+      PublishMatteArtifact(capture_sequence, *matte_key,
+                           static_cast<std::uintptr_t>(alpha_tensor.ptr),
+                           static_cast<std::uintptr_t>(alpha_model_view.ptr));
       return true;
     }
 
@@ -2627,7 +2806,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         return false;
       }
 
-      if (cached_matte_valid && cached_matte_sequence == capture_sequence) {
+      const auto *matte_key = MatteArtifactKeyForStorage(
+          studiocast::open_video::FrameMatteStorage::cuda_f32_alpha);
+      if (!matte_key) {
+        if (error)
+          *error = "Open CUDA: matte artifact key not initialized.";
+        return false;
+      }
+      if (cached_matte_valid && cached_matte_sequence == capture_sequence &&
+          matte_artifacts.FindMatte(capture_sequence, *matte_key)) {
         return true;
       }
 
@@ -2650,6 +2837,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       cached_matte_valid = true;
       cached_matte_sequence = capture_sequence;
       cached_alpha_cpu_valid = false;
+      PublishMatteArtifact(capture_sequence, *matte_key,
+                           static_cast<std::uintptr_t>(alpha_tensor.ptr),
+                           static_cast<std::uintptr_t>(alpha_model_view.ptr));
       return true;
     }
 
@@ -2670,8 +2860,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (out_alpha_h)
         *out_alpha_h = 0;
 
-      if (cached_alpha_cpu_valid &&
-          cached_alpha_cpu_sequence == capture_sequence) {
+      if (width > 0 && height > 0) {
+        RefreshMatteArtifactKeys(width, height);
+      }
+      const auto *cached_cpu_matte_key = MatteArtifactKeyForStorage(
+          studiocast::open_video::FrameMatteStorage::cpu_f32_alpha);
+      if (width > 0 && height > 0 && cached_cpu_matte_key &&
+          cached_alpha_cpu_valid &&
+          cached_alpha_cpu_sequence == capture_sequence &&
+          matte_artifacts.FindMatte(capture_sequence,
+                                    *cached_cpu_matte_key)) {
         if (out_alpha)
           *out_alpha = &alpha_cpu;
         if (pack.has_value()) {
@@ -2717,6 +2915,17 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       cached_alpha_cpu_valid = true;
       cached_alpha_cpu_sequence = capture_sequence;
+      const auto *cpu_matte_key = MatteArtifactKeyForStorage(
+          studiocast::open_video::FrameMatteStorage::cpu_f32_alpha);
+      if (!cpu_matte_key) {
+        if (error)
+          *error = "Open CUDA: matte artifact key not initialized.";
+        return false;
+      }
+      PublishMatteArtifact(
+          capture_sequence, *cpu_matte_key,
+          reinterpret_cast<std::uintptr_t>(alpha_cpu.data()),
+          static_cast<std::uintptr_t>(alpha_cpu.size()));
       if (out_alpha)
         *out_alpha = &alpha_cpu;
       if (out_alpha_w)
@@ -3710,7 +3919,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       const float intensity01 =
-          std::clamp(fx.virtual_key_light.intensity / 100.0f, 0.0f, 1.0f);
+          Clamp01FromPercent(fx.virtual_key_light.intensity);
       if (intensity01 <= 0.0001f) {
         return true;
       }
@@ -3846,7 +4055,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
 
       const float intensity01 =
-          std::clamp(fx.virtual_key_light.intensity / 100.0f, 0.0f, 1.0f);
+          Clamp01FromPercent(fx.virtual_key_light.intensity);
       if (intensity01 <= 0.0001f) {
         return true;
       }
@@ -6812,6 +7021,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   int output_format_changes = 0;
   int output_refresh_failures = 0;
   int output_write_recoveries = 0;
+  bool raw_capture_fallback_attempted = false;
 
   auto ActualFormatToString = [](const ActualFormat &a) {
     std::ostringstream oss;
@@ -6829,6 +7039,61 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
   constexpr int kOutputRefreshEveryFrames = 30;
   int frames_until_output_refresh = kOutputRefreshEveryFrames;
+
+  auto TryRawCaptureFallbackAfterMjpegFailure =
+      [&](const std::string &reason, std::string *error) -> bool {
+    if (error)
+      error->clear();
+    if (!ShouldFallbackToRawAfterMjpegDecodeFailure(
+            capA, raw_capture_fallback_attempted)) {
+      if (error)
+        *error = reason;
+      return false;
+    }
+
+    raw_capture_fallback_attempted = true;
+    const int old_w = capA.width;
+    const int old_h = capA.height;
+    const int fallback_fps = capA.fps > 0 ? capA.fps : cfg.fps;
+
+    std::string open_err;
+    if (!cap.Open(inDev, old_w, old_h, fallback_fps, CapturePixelFormat::yuyv,
+                  /*prefer_mjpeg=*/false, &open_err)) {
+      if (error)
+        *error = reason + " Raw YUYV fallback failed: " + open_err;
+      return false;
+    }
+
+    CaptureFormat fallback = cap.Actual();
+    if (fallback.format != CapturePixelFormat::yuyv || fallback.width != old_w ||
+        fallback.height != old_h) {
+      if (error) {
+        std::ostringstream oss;
+        oss << reason << " Raw YUYV fallback negotiated "
+            << fallback.width << "x" << fallback.height << " "
+            << fallback.pixfmt << ", expected " << old_w << "x" << old_h
+            << " YUYV.";
+        *error = oss.str();
+      }
+      return false;
+    }
+
+    capA = fallback;
+    rgbStride = rgb.stride_bytes;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      capture_ = capA;
+      scaling_from_ = capA;
+      capture_fallback_state_ = "raw_after_mjpeg_decode_failure";
+      capture_fallback_reason_ = reason;
+    }
+
+    if (debug_v4l2_neg) {
+      std::fprintf(stderr, "capture fallback: %s; reopened %s as %s\n",
+                   reason.c_str(), inDev.c_str(), capA.pixfmt.c_str());
+    }
+    return true;
+  };
 
   auto RefreshOutputActual = [&](const char *reason, bool force) -> bool {
     if (!writer_.IsOpen())
@@ -6880,6 +7145,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
     if (need > 0)
       outBuf.resize(need);
+    ResizeYuyvConversionScratch();
+    ZeroRgbOutputPadding();
 
     {
       std::lock_guard<std::mutex> lock(mu_);
@@ -6962,8 +7229,15 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (f.bytes == 0) {
         std::string rerr;
         (void)cap.ReleaseFrame(f, &rerr);
+        std::string fallback_err;
+        if (TryRawCaptureFallbackAfterMjpegFailure(
+                "MJPEG frame was empty (bytesused=0).", &fallback_err)) {
+          continue;
+        }
         std::lock_guard<std::mutex> lock(mu_);
-        last_error_ = "MJPEG frame was empty (bytesused=0).";
+        last_error_ = fallback_err.empty()
+                          ? "MJPEG frame was empty (bytesused=0)."
+                          : fallback_err;
         break;
       }
       int decW = 0;
@@ -6972,22 +7246,32 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       if (!DecodeMjpegToRgb24(f.data, f.bytes, rgb, decW, decH, &decErr)) {
         std::string rerr;
         (void)cap.ReleaseFrame(f, &rerr);
-        std::lock_guard<std::mutex> lock(mu_);
-        last_error_ = "MJPEG decode failed";
+        std::string reason = "MJPEG decode failed";
         if (!decErr.empty())
-          last_error_ += ": " + decErr;
-        last_error_ += ".";
+          reason += ": " + decErr;
+        reason += ".";
+        std::string fallback_err;
+        if (TryRawCaptureFallbackAfterMjpegFailure(reason, &fallback_err)) {
+          continue;
+        }
+        std::lock_guard<std::mutex> lock(mu_);
+        last_error_ = fallback_err.empty() ? reason : fallback_err;
         break;
       }
 
       if (decW != capA.width || decH != capA.height) {
         std::string rerr;
         (void)cap.ReleaseFrame(f, &rerr);
-        std::lock_guard<std::mutex> lock(mu_);
         std::ostringstream oss;
         oss << "MJPEG decode size mismatch: got " << decW << "x" << decH
             << ", expected " << capA.width << "x" << capA.height << ".";
-        last_error_ = oss.str();
+        const std::string reason = oss.str();
+        std::string fallback_err;
+        if (TryRawCaptureFallbackAfterMjpegFailure(reason, &fallback_err)) {
+          continue;
+        }
+        std::lock_guard<std::mutex> lock(mu_);
+        last_error_ = fallback_err.empty() ? reason : fallback_err;
         break;
       }
 
@@ -8599,10 +8883,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
 
     // Standalone GPU scaling backend: upload CPU RGB->GPU BGR, resize on GPU,
-    // download and convert back. This is used when GPU scaling is selected but
-    // there is no deferred GPU stage to reuse.
-    if ((gpu_backend == GpuResizeBackend::maxine_nvcv) &&
-        (frameW != outW || frameH != outH)) {
+    // download and convert back. Skip it when CPU resize is allowed and no
+    // Maxine GPU stage ran, so resize-only/no-effect frames do not pay an
+    // avoidable upload/download/sync.
+    if (ShouldRunStandaloneGpuScaler(
+            /*scaling_needed=*/(frameW != outW || frameH != outH),
+            /*gpu_backend_active=*/
+            (gpu_backend == GpuResizeBackend::maxine_nvcv),
+            /*have_deferred_gpu_out=*/have_deferred_gpu_out,
+            /*allow_cpu_resize=*/cfg.allow_cpu_resize,
+            /*same_backend_effects_ran=*/maxine_active_this_frame)) {
       std::string gerr;
       bool ok = maxine_scaler.initialized;
       if (!ok) {
@@ -8886,8 +9176,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
       std::string resizeErr;
       const std::size_t tightDstStride = static_cast<std::size_t>(outW) * 3u;
-      if (!ResizeRgb24Bilinear(rgbOut, frameW, frameH, rgbOutStride, outW, outH,
-                               &rgbScaled, tightDstStride, &resizeErr)) {
+      if (!cpuResizePlan.Configure(frameW, frameH, outW, outH, &resizeErr) ||
+          !cpuResizePlan.Apply(rgbOut, rgbOutStride, &rgbScaled, tightDstStride,
+                               &resizeErr)) {
         std::lock_guard<std::mutex> lock(mu_);
         last_error_ = "Resize failed: " + resizeErr;
         break;
@@ -8963,9 +9254,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
           for (std::size_t i = 0; i < wantRow; ++i)
             dstRow[i] = srcRow[i];
-          // zero any padding
-          for (std::size_t i = wantRow; i < outA.bytes_per_line; ++i)
-            dstRow[i] = 0;
         }
 
         std::string werr;
@@ -8983,8 +9271,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
     } else {
       // Output is YUYV; convert RGB -> YUYV into outBuf with output stride.
-      Rgb24ToYuyv(rgbOut, outW, outH, rgbOutStride, outBuf.data(),
-                  outA.bytes_per_line);
+      Rgb24ToYuyvWithScratch(
+          rgbOut, outW, outH, rgbOutStride, outBuf.data(),
+          outA.bytes_per_line,
+          yuyvConversionScratch.empty() ? nullptr
+                                        : yuyvConversionScratch.data(),
+          yuyvConversionScratch.size());
 
       std::string werr;
       if (!writer_.WriteFrame(outBuf.data(), outBuf.size(), &werr)) {

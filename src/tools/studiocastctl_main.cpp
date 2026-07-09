@@ -14,10 +14,9 @@
 #include <string_view>
 #include <vector>
 
-#include <sys/wait.h>
-
 #include "core/ipc/daemon_client.h"
 #include "core/maxine/reason_codes.h"
+#include "core/util/exec.h"
 #include "core/util/fs.h"
 #include "core/util/json.h"
 #include "core/video/effects/broadcast_effect_contract.h"
@@ -61,11 +60,15 @@ std::string BuildShellCommand(const std::vector<std::string> &argv) {
 
 struct CommandCaptureResult {
   int exit_code = -1;
+  bool timed_out = false;
   std::string output;
   std::string error;
 };
 
-CommandCaptureResult RunCommandCapture(const std::vector<std::string> &argv) {
+CommandCaptureResult RunCommandCapture(const std::vector<std::string> &argv,
+                                       int timeout_ms = 5000,
+                                       std::size_t max_output_bytes =
+                                           1024 * 1024) {
   CommandCaptureResult out;
   if (argv.empty()) {
     out.error = "empty argv";
@@ -73,23 +76,15 @@ CommandCaptureResult RunCommandCapture(const std::vector<std::string> &argv) {
   }
 
   const std::string cmd = BuildShellCommand(argv) + " 2>&1";
-  FILE *f = ::popen(cmd.c_str(), "r");
-  if (!f) {
-    out.error = "popen failed";
-    return out;
-  }
-
-  char buf[4096];
-  while (std::fgets(buf, static_cast<int>(sizeof(buf)), f)) {
-    out.output.append(buf);
-  }
-
-  const int status = ::pclose(f);
-  if (WIFEXITED(status)) {
-    out.exit_code = WEXITSTATUS(status);
-  } else {
-    out.exit_code = -1;
-  }
+  studiocast::util::ExecCaptureOptions options;
+  options.timeout_ms = timeout_ms;
+  options.max_output_bytes = max_output_bytes;
+  const auto result = studiocast::util::ExecCapture(cmd, options);
+  out.exit_code = result.exit_code;
+  out.timed_out = result.timed_out;
+  out.output = result.stdout_str;
+  if (result.timed_out)
+    out.error = "command timed out after " + std::to_string(timeout_ms) + "ms";
   return out;
 }
 
@@ -291,6 +286,10 @@ void PrintMaxinePrettyFromStatusJson(const std::string &statusJson) {
       outDev = "(auto)";
     std::cout << "  source_device: " << inDev << "\n";
     std::cout << "  loopback_device: " << outDev << "\n";
+    const std::string requestedFmt =
+        getString(video, "output_format_requested");
+    if (!requestedFmt.empty())
+      std::cout << "  output_format_requested: " << requestedFmt << "\n";
   }
 
   auto printFmt = [&](const char *label, const char *key) {
@@ -747,7 +746,7 @@ void Usage(const char *argv0) {
       << "  " << argv0
       << " video set [input=/dev/videoX|auto] [output=/dev/videoY|auto] "
          "[width=N] [height=N] [fps=N] [always_on=0|1] "
-         "[allow_cpu_resize=0|1]\n"
+         "[allow_cpu_resize=0|1] [output_format=rgb24|yuyv]\n"
       << "  " << argv0
       << " video vb --model <id> [--mode blur|remove|replace] [--engine "
          "auto|maxine|open_cuda]\n"
@@ -765,7 +764,7 @@ void Usage(const char *argv0) {
       << "  " << argv0 << " enable 1\n"
       << "  " << argv0
       << " video set input=/dev/video0 output=/dev/video10 width=1280 "
-         "height=720 fps=30 allow_cpu_resize=1\n"
+         "height=720 fps=30 allow_cpu_resize=1 output_format=rgb24\n"
       << "  " << argv0 << " video vb --list-models\n"
       << "  " << argv0
       << " video vb --model modnet-webnn-256-fp32 --mode remove\n"
@@ -968,6 +967,27 @@ int main(int argc, char **argv) {
         out << res.json << "\n";
       }
     }
+
+    auto pulseSnapshot = [&](const std::vector<std::string> &cmdArgv) {
+      section(std::string("Exec: ") + BuildShellCommand(cmdArgv));
+      const auto r = RunCommandCapture(cmdArgv, /*timeout_ms=*/1500,
+                                       /*max_output_bytes=*/64 * 1024);
+      out << "exit_code: " << r.exit_code << "\n";
+      if (r.timed_out)
+        out << "timed_out: true\n";
+      if (!r.error.empty())
+        out << "note: " << r.error << "\n";
+      out << r.output;
+      if (!r.output.empty() && r.output.back() != '\n')
+        out << "\n";
+    };
+
+    pulseSnapshot({"pactl", "info"});
+    pulseSnapshot({"pactl", "get-default-source"});
+    pulseSnapshot({"pactl", "get-default-sink"});
+    pulseSnapshot({"pactl", "list", "short", "sources"});
+    pulseSnapshot({"pactl", "list", "short", "sinks"});
+    pulseSnapshot({"pactl", "list", "short", "modules"});
 
     const std::string probePath =
         ResolveSiblingToolPath(argv[0], "studiocast-probe");

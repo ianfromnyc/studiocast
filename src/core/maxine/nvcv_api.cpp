@@ -132,14 +132,8 @@ FindLibWithSymbol(const std::vector<fs::path> &lib_dirs,
     return res;
   };
 
-  // 0) Try bare names via the system loader path.
-  for (const auto &name : preferred_names) {
-    if (auto r = try_file(fs::path(name))) {
-      return r;
-    }
-  }
-
-  // 1) Try preferred names under candidate directories.
+  // 0) Try preferred names under candidate directories. Explicit SDK roots
+  // must win over unrelated libraries found through the process loader path.
   for (const auto &dir : lib_dirs) {
     if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
       continue;
@@ -154,7 +148,7 @@ FindLibWithSymbol(const std::vector<fs::path> &lib_dirs,
     }
   }
 
-  // 2) Scan for likely matches (versioned .so names).
+  // 1) Scan for likely matches (versioned .so names).
   for (const auto &dir : lib_dirs) {
     if (!fs::exists(dir, ec) || !fs::is_directory(dir, ec)) {
       continue;
@@ -173,6 +167,14 @@ FindLibWithSymbol(const std::vector<fs::path> &lib_dirs,
       if (auto r = try_file(p)) {
         return r;
       }
+    }
+  }
+
+  // 2) Fall back to bare names via the system loader path for users who
+  // intentionally expose Maxine through ldconfig / LD_LIBRARY_PATH.
+  for (const auto &name : preferred_names) {
+    if (auto r = try_file(fs::path(name))) {
+      return r;
     }
   }
 

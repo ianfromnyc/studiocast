@@ -62,6 +62,33 @@ public:
   ScopedPactlExecHook &operator=(const ScopedPactlExecHook &) = delete;
 };
 
+class EnvGuard final {
+public:
+  EnvGuard(const char *name, const std::string &value) : name_(name) {
+    if (const char *old = std::getenv(name)) {
+      had_old_ = true;
+      old_ = old;
+    }
+    ::setenv(name, value.c_str(), 1);
+  }
+
+  ~EnvGuard() {
+    if (had_old_) {
+      ::setenv(name_, old_.c_str(), 1);
+    } else {
+      ::unsetenv(name_);
+    }
+  }
+
+  EnvGuard(const EnvGuard &) = delete;
+  EnvGuard &operator=(const EnvGuard &) = delete;
+
+private:
+  const char *name_;
+  bool had_old_ = false;
+  std::string old_;
+};
+
 class ScopedXdgStateHome final {
 public:
   ScopedXdgStateHome() {
@@ -1203,6 +1230,181 @@ bool TestAudioSourceAutoFailsWhenNoSafeSourceExists() {
     std::cerr << "auto source without safe fallback did not fail clearly; ok="
               << resolved.ok << " source='" << resolved.source_name
               << "' error='" << resolved.error << "'\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestVirtualAudioServiceReportsResolvedAutoSourceAndWarnings() {
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl get-default-source 2>&1")
+      return ExecResult(0, "studiocast_speakers.monitor\n");
+    if (command == "pactl list short sources 2>&1") {
+      return ExecResult(0,
+                        "0\tstudiocast_speakers.monitor\tmodule-null-sink.c\t"
+                        "s16le 2ch 48000Hz\tIDLE\n"
+                        "1\talsa_input.usb_service_mic\tmodule-alsa-card.c\t"
+                        "s16le 1ch 48000Hz\tRUNNING\n");
+    }
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  std::atomic<bool> mic_consumer_present{true};
+  std::atomic<int> pipeline_creates{0};
+  std::string pipeline_source;
+
+  VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
+  hooks.create_pipeline =
+      [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    ++pipeline_creates;
+    class CapturingPipeline final : public AudioPipelineRunner {
+    public:
+      explicit CapturingPipeline(std::string *source) : source_(source) {}
+
+      bool Start(const AudioPipelineConfig &cfg, std::string *error) override {
+        if (source_)
+          *source_ = cfg.source_name;
+        if (error)
+          error->clear();
+        return true;
+      }
+
+      void Stop() override {}
+
+      AudioPipelineStats GetStats() const override {
+        AudioPipelineStats stats;
+        stats.running = true;
+        return stats;
+      }
+
+    private:
+      std::string *source_ = nullptr;
+    };
+    return std::make_unique<CapturingPipeline>(&pipeline_source);
+  };
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.source_name.clear(); // auto
+  cfg.poll_ms = 1;
+  cfg.consumer_grace_ms = 0;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool resolved = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return pipeline_creates.load(std::memory_order_relaxed) == 1 &&
+               pipeline_source == "alsa_input.usb_service_mic" &&
+               status.selected_source == "alsa_input.usb_service_mic" &&
+               status.source_error.empty() && !status.source_warnings.empty();
+      },
+      250ms);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!resolved) {
+    std::cerr << "service did not report/pass resolved auto source; "
+              << "creates=" << pipeline_creates.load()
+              << " pipeline_source='" << pipeline_source
+              << "' selected_source='" << status.selected_source
+              << "' source_error='" << status.source_error
+              << "' warnings=" << status.source_warnings.size() << "\n";
+    return false;
+  }
+
+  const std::vector<std::string> expected = {
+      "pactl get-default-source 2>&1",
+      "pactl list short sources 2>&1",
+  };
+  if (commands.size() < expected.size() ||
+      !std::equal(expected.begin(), expected.end(), commands.begin())) {
+    std::cerr << "unexpected source resolution command prefix\n";
+    for (const auto &command : commands)
+      std::cerr << "  " << command << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+bool TestVirtualAudioServicePreservesUnavailableConfiguredSource() {
+  std::vector<std::string> commands;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl list short sources 2>&1") {
+      return ExecResult(0,
+                        "0\talsa_input.other_mic\tmodule-alsa-card.c\t"
+                        "s16le 1ch 48000Hz\tRUNNING\n");
+    }
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  VirtualAudioServiceHooks hooks;
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = false;
+  cfg.create_virtual_mic = false;
+  cfg.source_name = "alsa_input.disconnected_mic";
+  cfg.poll_ms = 1;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool reported = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return status.selected_source == "alsa_input.disconnected_mic" &&
+               status.source_availability == "unavailable" &&
+               status.source_error.find("not currently available") !=
+                   std::string::npos;
+      },
+      250ms);
+  const auto status = service.Status();
+  const auto preservedConfig = service.Config();
+  service.Stop();
+
+  if (!reported) {
+    std::cerr << "unavailable configured source was not reported; selected='"
+              << status.selected_source << "' availability='"
+              << status.source_availability << "' error='"
+              << status.source_error << "'\n";
+    return false;
+  }
+  if (preservedConfig.source_name != "alsa_input.disconnected_mic") {
+    std::cerr << "configured source was mutated; got '"
+              << preservedConfig.source_name << "'\n";
+    return false;
+  }
+
+  const std::vector<std::string> expected = {
+      "pactl list short sources 2>&1",
+  };
+  if (commands.size() < expected.size() ||
+      !std::equal(expected.begin(), expected.end(), commands.begin())) {
+    std::cerr << "unexpected unavailable-source command prefix\n";
+    for (const auto &command : commands)
+      std::cerr << "  " << command << "\n";
     return false;
   }
 
@@ -2888,6 +3090,84 @@ bool TestOpenAudioFailureCooldownAvoidsRestartChurn() {
   return true;
 }
 
+bool TestForcedMaxineMicrophoneFailureFallsBackToPassthrough() {
+  EnvGuard afx_env("STUDIOCAST_AFX_SDK_ROOT",
+                   "/tmp/studiocast-definitely-missing-afx-sdk");
+
+  std::atomic<int> pipeline_creates{0};
+  std::atomic<bool> mic_consumer_present{true};
+
+  VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
+  hooks.probe_microphone_backend_availability =
+      [](const VirtualAudioServiceConfig &) {
+        AudioBackendAvailability avail;
+        avail.maxine_ok = true;
+        avail.open_source_ok = false;
+        avail.open_source_reason = "synthetic open audio unavailable";
+        return avail;
+      };
+  hooks.create_pipeline =
+      [&](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    pipeline_creates.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<FixedStatsPipeline>(true, "");
+  };
+  hooks.sleep_for = [](std::chrono::milliseconds) {
+    std::this_thread::sleep_for(1ms);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.effects.engine =
+      studiocast::audio::effects::AudioEffectsEnginePreference::kMaxine;
+  cfg.effects.microphone.noise_removal_enabled = true;
+  cfg.poll_ms = 1;
+  cfg.start_retry_ms = 500;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool started_fallback = WaitUntil(
+      [&] {
+        const auto status = service.Status();
+        return pipeline_creates.load(std::memory_order_relaxed) >= 1 &&
+               status.pipeline_running && status.pipeline_state == "running" &&
+               status.effects_backend_active == "passthrough" &&
+               status.effects_note.find("using pass-through") !=
+                   std::string::npos;
+      },
+      300ms);
+  std::this_thread::sleep_for(75ms);
+  const int creates_after_settle =
+      pipeline_creates.load(std::memory_order_relaxed);
+  const auto status = service.Status();
+  service.Stop();
+
+  if (!started_fallback) {
+    std::cerr << "forced Maxine microphone failure did not fall back to "
+                 "pass-through; creates="
+              << pipeline_creates.load() << " state='" << status.pipeline_state
+              << "' backend='" << status.effects_backend_active << "' note='"
+              << status.effects_note << "' error='" << status.last_error
+              << "'\n";
+    return false;
+  }
+
+  if (creates_after_settle != 1) {
+    std::cerr << "forced Maxine microphone fallback churned restarts; creates="
+              << creates_after_settle << "\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestMicrophoneAvailabilityCacheIgnoresSpeakerOnlyChanges() {
   std::atomic<int> mic_probes{0};
   std::atomic<bool> mic_consumer_present{true};
@@ -4367,6 +4647,10 @@ int main() {
        &TestAudioSourceAutoFallsBackFromUnsafeDefaultSource},
       {"audio source auto fails when no safe source exists",
        &TestAudioSourceAutoFailsWhenNoSafeSourceExists},
+      {"virtual audio service reports resolved auto source and warnings",
+       &TestVirtualAudioServiceReportsResolvedAutoSourceAndWarnings},
+      {"virtual audio service preserves unavailable configured source",
+       &TestVirtualAudioServicePreservesUnavailableConfiguredSource},
       {"speaker target safety rejects virtual and monitor endpoints",
        &TestSpeakerTargetSafetyRejectsVirtualAndMonitorEndpoints},
       {"speaker target auto falls back from unsafe default sink",
@@ -4419,6 +4703,8 @@ int main() {
        &TestSpeakerPipelineStartFailureClearsRouteState},
       {"open audio failure cooldown avoids restart churn",
        &TestOpenAudioFailureCooldownAvoidsRestartChurn},
+      {"forced Maxine mic failure falls back to pass-through",
+       &TestForcedMaxineMicrophoneFailureFallsBackToPassthrough},
       {"mic availability cache ignores speaker-only changes",
        &TestMicrophoneAvailabilityCacheIgnoresSpeakerOnlyChanges},
       {"speaker availability cache ignores microphone-only changes",

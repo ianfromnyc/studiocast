@@ -49,6 +49,34 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PULSE_SIMPLE QUIET IMPORTED_TARGET libpulse-simple)
 
+# libyuv (optional) for SIMD-optimized RGB/YUV conversions. Keep a scalar
+# fallback so StudioCast still builds on minimal systems.
+set(_studiocast_have_libyuv FALSE)
+set(_studiocast_libyuv_target "")
+pkg_check_modules(LIBYUV QUIET IMPORTED_TARGET libyuv)
+if (TARGET PkgConfig::LIBYUV)
+    set(_studiocast_have_libyuv TRUE)
+    set(_studiocast_libyuv_target PkgConfig::LIBYUV)
+else()
+    find_path(LIBYUV_INCLUDE_DIR NAMES libyuv/convert_argb.h)
+    find_library(LIBYUV_LIBRARY NAMES yuv libyuv)
+    if (LIBYUV_INCLUDE_DIR AND LIBYUV_LIBRARY)
+        add_library(studiocast_libyuv UNKNOWN IMPORTED)
+        set_target_properties(studiocast_libyuv PROPERTIES
+                IMPORTED_LOCATION "${LIBYUV_LIBRARY}"
+                INTERFACE_INCLUDE_DIRECTORIES "${LIBYUV_INCLUDE_DIR}"
+        )
+        set(_studiocast_have_libyuv TRUE)
+        set(_studiocast_libyuv_target studiocast_libyuv)
+    endif()
+endif()
+
+if (_studiocast_have_libyuv)
+    message(STATUS "libyuv found; optimized RGB/YUV conversion enabled.")
+else()
+    message(STATUS "libyuv not found; using built-in scalar RGB/YUV conversion.")
+endif()
+
 # MJPEG decode (libjpeg-turbo recommended; provided as `JPEG`).
 find_package(JPEG QUIET)
 if (NOT JPEG_FOUND)
@@ -268,6 +296,15 @@ add_library(studiocast_core
         src/core/video/feed.cpp
         src/core/video/convert.h
         src/core/video/convert.cpp
+        src/core/video/convert_yuyv_rgb_internal.h
+        src/core/video/convert_yuyv_rgb_scalar.cpp
+        src/core/video/convert_yuyv_rgb_dispatch.cpp
+        src/core/video/convert_rgb_yuyv_internal.h
+        src/core/video/convert_rgb_yuyv_scalar.cpp
+        src/core/video/convert_rgb_yuyv_dispatch.cpp
+        src/core/video/convert_rgb_bgr_internal.h
+        src/core/video/convert_rgb_bgr_scalar.cpp
+        src/core/video/convert_rgb_bgr_dispatch.cpp
         src/core/video/scaling_policy.h
         src/core/video/scaling_policy.cpp
         src/core/video/mjpeg_decode.h
@@ -289,6 +326,8 @@ add_library(studiocast_core
         src/core/video/effects/effect_descriptors.cpp
         src/core/video/effects/mirror_effect.h
         src/core/video/effects/mirror_effect.cpp
+        src/core/video/effects/focus_mask_plan.h
+        src/core/video/effects/focus_mask_plan.cpp
         src/core/video/effects/box_blur.h
         src/core/video/effects/box_blur.cpp
         src/core/video/effects/background_blur_cpu.h
@@ -321,10 +360,50 @@ set_target_properties(studiocast_core PROPERTIES
         AUTORCC OFF
 )
 
+set(_studiocast_x86_simd FALSE)
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND
+        CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|i[3-6]86)$")
+    set(_studiocast_x86_simd TRUE)
+endif()
+
+if (_studiocast_x86_simd)
+    target_sources(studiocast_core PRIVATE
+            src/core/video/convert_rgb_yuyv_ssse3.cpp
+            src/core/video/convert_rgb_yuyv_avx2.cpp
+            src/core/video/convert_yuyv_rgb_sse41.cpp
+            src/core/video/convert_yuyv_rgb_avx2.cpp
+            src/core/video/convert_rgb_bgr_ssse3.cpp
+            src/core/video/convert_rgb_bgr_avx2.cpp
+    )
+    set_source_files_properties(src/core/video/convert_rgb_yuyv_ssse3.cpp
+            PROPERTIES COMPILE_OPTIONS "-O3;-mssse3")
+    set_source_files_properties(src/core/video/convert_rgb_yuyv_avx2.cpp
+            PROPERTIES COMPILE_OPTIONS "-O3;-mavx2")
+    set_source_files_properties(src/core/video/convert_yuyv_rgb_sse41.cpp
+            PROPERTIES COMPILE_OPTIONS "-O3;-msse4.1")
+    set_source_files_properties(src/core/video/convert_yuyv_rgb_avx2.cpp
+            PROPERTIES COMPILE_OPTIONS "-O3;-mavx2")
+    set_source_files_properties(src/core/video/convert_rgb_bgr_ssse3.cpp
+            PROPERTIES COMPILE_OPTIONS "-O3;-mssse3")
+    set_source_files_properties(src/core/video/convert_rgb_bgr_avx2.cpp
+            PROPERTIES COMPILE_OPTIONS "-O3;-mavx2")
+    target_compile_definitions(studiocast_core PRIVATE STUDIOCAST_HAVE_X86_SIMD=1)
+else()
+    target_compile_definitions(studiocast_core PRIVATE STUDIOCAST_HAVE_X86_SIMD=0)
+endif()
+
 # Video color conversion is extremely hot (runs every frame). In Debug builds the lack of
 # optimization can make the virtual camera feel laggy. Force optimization for this TU.
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        set_source_files_properties(src/core/video/convert.cpp PROPERTIES COMPILE_OPTIONS "-O3")
+        set_source_files_properties(
+                src/core/video/convert.cpp
+                src/core/video/convert_yuyv_rgb_scalar.cpp
+                src/core/video/convert_yuyv_rgb_dispatch.cpp
+                src/core/video/convert_rgb_yuyv_scalar.cpp
+                src/core/video/convert_rgb_yuyv_dispatch.cpp
+                src/core/video/convert_rgb_bgr_scalar.cpp
+                src/core/video/convert_rgb_bgr_dispatch.cpp
+                PROPERTIES COMPILE_OPTIONS "-O3")
 endif()
 
 target_include_directories(studiocast_core PUBLIC
@@ -333,6 +412,13 @@ target_include_directories(studiocast_core PUBLIC
 )
 
 target_link_libraries(studiocast_core PUBLIC ${CMAKE_DL_LIBS})
+
+if (_studiocast_have_libyuv)
+    target_link_libraries(studiocast_core PRIVATE "${_studiocast_libyuv_target}")
+    target_compile_definitions(studiocast_core PRIVATE STUDIOCAST_HAVE_LIBYUV=1)
+else()
+    target_compile_definitions(studiocast_core PRIVATE STUDIOCAST_HAVE_LIBYUV=0)
+endif()
 
 if (TARGET JPEG::JPEG)
     target_link_libraries(studiocast_core PUBLIC JPEG::JPEG)
@@ -581,6 +667,48 @@ set_target_properties(studiocast-video PROPERTIES
         AUTORCC OFF
 )
 
+if (STUDIOCAST_BUILD_BENCHMARKS)
+    add_executable(studiocast-rgb-yuyv-bench
+            src/tools/studiocast_rgb_yuyv_bench_main.cpp
+    )
+
+    target_link_libraries(studiocast-rgb-yuyv-bench PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-rgb-yuyv-bench PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-rgb-yuyv-bench)
+    studiocast_enable_sanitizers(studiocast-rgb-yuyv-bench)
+
+    set_target_properties(studiocast-rgb-yuyv-bench PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_executable(studiocast-cuda-transfer-bench
+            src/tools/studiocast_cuda_transfer_bench_main.cpp
+    )
+
+    target_link_libraries(studiocast-cuda-transfer-bench PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-cuda-transfer-bench PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-cuda-transfer-bench)
+    studiocast_enable_sanitizers(studiocast-cuda-transfer-bench)
+
+    set_target_properties(studiocast-cuda-transfer-bench PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+endif()
+
 
 # -----------------------------
 # Daemon control CLI (studiocastctl)
@@ -692,6 +820,10 @@ if (BUILD_TESTING)
     target_include_directories(studiocast-maxine-paths-tests PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/src"
             "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    target_compile_definitions(studiocast-maxine-paths-tests PRIVATE
+            STUDIOCAST_CXX_COMPILER="${CMAKE_CXX_COMPILER}"
     )
 
     studiocast_set_project_warnings(studiocast-maxine-paths-tests)
@@ -951,6 +1083,10 @@ if (BUILD_TESTING)
             tests/video_service_tests.cpp
             tests/latest_frame_wins_worker_tests.cpp
             tests/open_video_denoise_contract_tests.cpp
+            tests/frame_artifact_cache_tests.cpp
+            tests/v4l2_capture_negotiation_tests.cpp
+            tests/video_effect_cpu_tests.cpp
+            tests/rgb_yuyv_convert_tests.cpp
     )
 
     target_link_libraries(studiocast-video-tests PRIVATE studiocast_core)

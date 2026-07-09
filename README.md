@@ -4,6 +4,20 @@ StudioCast is an open-source Linux application that provides a virtual camera,
 virtual microphone, and virtual speakers with real-time effects for video calls,
 streaming, and recording.
 
+## It's Pretty Awesome NGL
+
+Most Linux broadcast-effect projects prove one cool trick or half bake the broader idea. StudioCast is on another level and constantly improving!
+
+- Broadcast-style virtual camera, virtual mic, and virtual speakers in one app.
+- Daemon-first design keeps devices available while heavy processing wakes only when real apps start using them. Also this allows us to run headless... SPOOKY!
+- Open backends first, optional Maxine power when you bring your own SDK.
+- GPU-conscious pipelines built around efficiency, reuse, fewer transfers, and low-latency real-time calls with CPU fallback!
+- Written in C++ with speed in mind!
+- Don't like the ML models provided? First off, ouch. Secondly, we made StudioCast bring-your-own-model friendly so feel free to try almost any model you like.
+- Safety-minded audio routing that avoids feeding StudioCast back into itself.
+- Desktop GUI, CLI tools, diagnostics, installer flow, and service integration instead of a pile of one-off scripts.
+- Built for OBS, Zoom, Teams, Discord, and browser calls, with the architecture to grow from hobby setup to daily-driver streaming rig.
+
 <p align="center">
   <img src="docs/assets/studiocast-ui-preview.gif" alt="StudioCast UI preview" width="760">
 </p>

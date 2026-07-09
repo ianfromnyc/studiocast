@@ -620,14 +620,63 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
 } // namespace
 
 bool ShouldPreferMjpegForResolution(int width, int height) {
-  // Heuristic: uncompressed YUYV at >720p tends to be unsupported or unstable
-  // on many UVC webcams, while MJPEG often supports 1080p+.
+  // Heuristic: uncompressed YUYV at 720p+ tends to be unsupported, unstable,
+  // or bandwidth-limited on many UVC webcams, while MJPEG often supports HD+.
   if (width <= 0 || height <= 0)
     return false;
   const std::int64_t pixels =
       static_cast<std::int64_t>(width) * static_cast<std::int64_t>(height);
   const std::int64_t yuyvLikelyMax = 1280LL * 720LL;
-  return pixels > yuyvLikelyMax;
+  return pixels >= yuyvLikelyMax;
+}
+
+std::vector<CapturePixelFormat>
+CaptureFormatTryOrderForRequest(CapturePixelFormat requested,
+                                bool prefer_mjpeg, int width, int height,
+                                CaptureFormatSupport support) {
+  std::vector<CapturePixelFormat> out;
+
+  auto supported = [&](CapturePixelFormat fmt) {
+    switch (fmt) {
+    case CapturePixelFormat::yuyv:
+      return support.yuyv;
+    case CapturePixelFormat::mjpeg:
+      return support.mjpeg;
+    case CapturePixelFormat::rgb24:
+      // RGB24 is used for v4l2loopback preview. Preserve the previous behavior
+      // of trying it directly even when the driver enumeration is incomplete.
+      return true;
+    }
+    return false;
+  };
+
+  auto append = [&](CapturePixelFormat fmt) {
+    if (!supported(fmt))
+      return;
+    for (const auto existing : out) {
+      if (existing == fmt)
+        return;
+    }
+    out.push_back(fmt);
+  };
+
+  // Only apply MJPEG preference when the caller requested the normal
+  // uncompressed YUYV path. Other callers can explicitly request other formats.
+  const bool mjpegFirst = (requested == CapturePixelFormat::yuyv) &&
+                          prefer_mjpeg && support.mjpeg &&
+                          ShouldPreferMjpegForResolution(width, height);
+
+  if (mjpegFirst) {
+    append(CapturePixelFormat::mjpeg);
+    append(CapturePixelFormat::yuyv);
+    return out;
+  }
+
+  append(requested);
+  if (requested == CapturePixelFormat::yuyv && prefer_mjpeg)
+    append(CapturePixelFormat::mjpeg);
+
+  return out;
 }
 
 V4l2Capture::~V4l2Capture() { Close(); }
@@ -690,25 +739,11 @@ bool V4l2Capture::Open(const std::string &device, int width, int height,
                                SupportsFourcc(supported, V4L2_PIX_FMT_JPEG);
     const bool supportsYuyv = SupportsFourcc(supported, V4L2_PIX_FMT_YUYV);
 
-    // Only apply MJPEG preference when the caller requested the normal
-    // uncompressed YUYV path. (Other callers can explicitly request other
-    // formats.)
-    const bool mjpegFirst = (fmt == CapturePixelFormat::yuyv) && prefer_mjpeg &&
-                            supportsMjpeg &&
-                            ShouldPreferMjpegForResolution(width, height);
-
-    std::vector<CapturePixelFormat> tryOrder;
-    if (mjpegFirst) {
-      tryOrder.push_back(CapturePixelFormat::mjpeg);
-      tryOrder.push_back(CapturePixelFormat::yuyv);
-    } else {
-      tryOrder.push_back(fmt);
-      // Fallback: if we asked for YUYV first and it fails, try MJPEG if enabled
-      // and supported.
-      if (fmt == CapturePixelFormat::yuyv && prefer_mjpeg && supportsMjpeg) {
-        tryOrder.push_back(CapturePixelFormat::mjpeg);
-      }
-    }
+    CaptureFormatSupport support;
+    support.yuyv = supportsYuyv;
+    support.mjpeg = supportsMjpeg;
+    const auto tryOrder = CaptureFormatTryOrderForRequest(
+        fmt, prefer_mjpeg, width, height, support);
 
     for (const auto fTry : tryOrder) {
       if (fTry == CapturePixelFormat::mjpeg && !supportsMjpeg)
