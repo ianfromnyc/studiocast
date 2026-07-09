@@ -11,6 +11,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -167,6 +168,22 @@ AudioConsumerSnapshot ConsumerSnapshot(bool present, int count = 1) {
   out.present = present;
   out.count = present ? count : 0;
   return out;
+}
+
+studiocast::audio::pulse::PactlExecCaptureHook
+SafeMicrophoneSourcePactlHook() {
+  return [](const std::string &command) {
+    if (command == "pactl get-default-source 2>&1")
+      return ExecResult(0, "physical_test_mic\n");
+    if (command == "pactl list short sources 2>&1") {
+      return ExecResult(0,
+                        "1\tstudiocast_sink.monitor\tmodule-null-sink.c\t"
+                        "s16le 2ch 48000Hz\n"
+                        "2\tphysical_test_mic\tmodule-alsa-card.c\t"
+                        "s16le 2ch 48000Hz\n");
+    }
+    return ExecResult(99, "unexpected command: " + command);
+  };
 }
 
 void HookMicrophoneConsumerFlag(VirtualAudioServiceHooks *hooks,
@@ -4630,6 +4647,7 @@ int main() {
   const struct {
     const char *name;
     bool (*fn)();
+    bool mock_safe_mic_source = false;
   } tests[] = {
       {"pactl load-module quotes vector arguments",
        &TestPactlLoadModuleQuotesVectorArguments},
@@ -4676,15 +4694,15 @@ int main() {
       {"destroy virtual mic preserves remaining state on null unload failure",
        &TestDestroyVirtualMicPreservesRemainingStateOnNullUnloadFailure},
       {"mic pipeline does not start without consumer",
-       &TestMicrophonePipelineDoesNotStartWithoutConsumer},
+       &TestMicrophonePipelineDoesNotStartWithoutConsumer, true},
       {"mic pipeline starts when consumer appears",
-       &TestMicrophonePipelineStartsWhenConsumerAppears},
+       &TestMicrophonePipelineStartsWhenConsumerAppears, true},
       {"mic pipeline stops when consumer disappears",
-       &TestMicrophonePipelineStopsWhenConsumerDisappears},
+       &TestMicrophonePipelineStopsWhenConsumerDisappears, true},
       {"mic grace window absorbs consumer flapping",
-       &TestMicrophoneGraceWindowAbsorbsConsumerFlapping},
+       &TestMicrophoneGraceWindowAbsorbsConsumerFlapping, true},
       {"mic consumer detection recovers after errors",
-       &TestMicrophoneConsumerDetectionRecoversAfterErrors},
+       &TestMicrophoneConsumerDetectionRecoversAfterErrors, true},
       {"speaker pipeline follows consumer gate",
        &TestSpeakerPipelineFollowsConsumerGate},
       {"speaker grace window absorbs consumer flapping",
@@ -4692,25 +4710,25 @@ int main() {
       {"speaker loopback pass-through status is not consumer-gated",
        &TestSpeakerLoopbackPassThroughStatusIsNotConsumerGated},
       {"mic pipeline restarts after worker death",
-       &TestMicrophonePipelineRestartsWhenWorkerDies},
+       &TestMicrophonePipelineRestartsWhenWorkerDies, true},
       {"mic pipeline preserves worker death error",
-       &TestMicrophonePipelinePreservesWorkerDeathError},
+       &TestMicrophonePipelinePreservesWorkerDeathError, true},
       {"status remains responsive during retry sleep",
-       &TestStatusDoesNotBlockDuringRetrySleep},
+       &TestStatusDoesNotBlockDuringRetrySleep, true},
       {"mic null pipeline factory fails without crash",
-       &TestMicrophoneNullPipelineFactoryFailsWithoutCrash},
+       &TestMicrophoneNullPipelineFactoryFailsWithoutCrash, true},
       {"speaker pipeline start failure clears route state",
        &TestSpeakerPipelineStartFailureClearsRouteState},
       {"open audio failure cooldown avoids restart churn",
-       &TestOpenAudioFailureCooldownAvoidsRestartChurn},
+       &TestOpenAudioFailureCooldownAvoidsRestartChurn, true},
       {"forced Maxine mic failure falls back to pass-through",
-       &TestForcedMaxineMicrophoneFailureFallsBackToPassthrough},
+       &TestForcedMaxineMicrophoneFailureFallsBackToPassthrough, true},
       {"mic availability cache ignores speaker-only changes",
-       &TestMicrophoneAvailabilityCacheIgnoresSpeakerOnlyChanges},
+       &TestMicrophoneAvailabilityCacheIgnoresSpeakerOnlyChanges, true},
       {"speaker availability cache ignores microphone-only changes",
        &TestSpeakerAvailabilityCacheIgnoresMicrophoneOnlyChanges},
       {"mic dead worker backs off before restart",
-       &TestMicrophoneDeadWorkerBacksOffBeforeRestart},
+       &TestMicrophoneDeadWorkerBacksOffBeforeRestart, true},
       {"speaker dead worker backs off and clears route",
        &TestSpeakerDeadWorkerBacksOffAndClearsRoute},
       {"speaker pipeline stats clear when processing disabled",
@@ -4746,6 +4764,9 @@ int main() {
 
   int failed = 0;
   for (const auto &test : tests) {
+    std::optional<ScopedPactlExecHook> safe_mic_source;
+    if (test.mock_safe_mic_source)
+      safe_mic_source.emplace(SafeMicrophoneSourcePactlHook());
     const bool ok = test.fn();
     std::cout << (ok ? "[PASS] " : "[FAIL] ") << test.name << "\n";
     if (!ok)
