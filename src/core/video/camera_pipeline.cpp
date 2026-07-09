@@ -1275,6 +1275,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   std::size_t rgbStride = rgb.stride_bytes;
 
   std::vector<std::uint8_t> rgbScaled;
+  Rgb24BilinearResizePlan cpuResizePlan;
 
   std::vector<std::uint8_t> outBuf(outA.size_image);
   std::vector<std::uint8_t> yuyvConversionScratch;
@@ -1291,6 +1292,25 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
   };
   ResizeYuyvConversionScratch();
+
+  auto ZeroRgbOutputPadding = [&] {
+    if (outA.format != PixelFormat::rgb24 || outA.width <= 0 ||
+        outA.height <= 0)
+      return;
+    const std::size_t active_row = static_cast<std::size_t>(outA.width) * 3u;
+    if (outA.bytes_per_line <= active_row)
+      return;
+    const std::size_t required =
+        outA.bytes_per_line * static_cast<std::size_t>(outA.height);
+    if (outBuf.size() < required)
+      return;
+    for (int y = 0; y < outA.height; ++y) {
+      std::uint8_t *row =
+          outBuf.data() + static_cast<std::size_t>(y) * outA.bytes_per_line;
+      std::memset(row + active_row, 0, outA.bytes_per_line - active_row);
+    }
+  };
+  ZeroRgbOutputPadding();
 
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -7126,6 +7146,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     if (need > 0)
       outBuf.resize(need);
     ResizeYuyvConversionScratch();
+    ZeroRgbOutputPadding();
 
     {
       std::lock_guard<std::mutex> lock(mu_);
@@ -9149,8 +9170,9 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       }
       std::string resizeErr;
       const std::size_t tightDstStride = static_cast<std::size_t>(outW) * 3u;
-      if (!ResizeRgb24Bilinear(rgbOut, frameW, frameH, rgbOutStride, outW, outH,
-                               &rgbScaled, tightDstStride, &resizeErr)) {
+      if (!cpuResizePlan.Configure(frameW, frameH, outW, outH, &resizeErr) ||
+          !cpuResizePlan.Apply(rgbOut, rgbOutStride, &rgbScaled, tightDstStride,
+                               &resizeErr)) {
         std::lock_guard<std::mutex> lock(mu_);
         last_error_ = "Resize failed: " + resizeErr;
         break;
@@ -9226,9 +9248,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
           for (std::size_t i = 0; i < wantRow; ++i)
             dstRow[i] = srcRow[i];
-          // zero any padding
-          for (std::size_t i = wantRow; i < outA.bytes_per_line; ++i)
-            dstRow[i] = 0;
         }
 
         std::string werr;

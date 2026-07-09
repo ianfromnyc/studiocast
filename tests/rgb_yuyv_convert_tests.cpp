@@ -2,9 +2,11 @@
 #include "core/video/convert_rgb_bgr_internal.h"
 #include "core/video/convert_rgb_yuyv_internal.h"
 #include "core/video/convert_yuyv_rgb_internal.h"
+#include "core/video/image_ppm.h"
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -62,8 +64,8 @@ inline std::uint8_t ClampReferenceByte(int v) {
   return static_cast<std::uint8_t>(v);
 }
 
-void YuvToRgbReference(int y, int u, int v, std::uint8_t *r,
-                       std::uint8_t *g, std::uint8_t *b) {
+void YuvToRgbReference(int y, int u, int v, std::uint8_t *r, std::uint8_t *g,
+                       std::uint8_t *b) {
   int c = y - 16;
   if (c < 0)
     c = 0;
@@ -246,8 +248,7 @@ bool TestYuyvToRgb24MatchesBt601AndPreservesPadding() {
         dst_stride * static_cast<std::size_t>(c.height), 0xcd);
 
     std::uint32_t state = static_cast<std::uint32_t>(c.width) * 131u +
-                          static_cast<std::uint32_t>(c.height) * 17u +
-                          0x9e37u;
+                          static_cast<std::uint32_t>(c.height) * 17u + 0x9e37u;
     const std::size_t active_src = ActiveYuyvBytes(c.width);
     for (int y = 0; y < c.height; ++y) {
       std::uint8_t *row = src.data() + static_cast<std::size_t>(y) * src_stride;
@@ -337,8 +338,7 @@ bool TestYuyvToRgb24BackendsMatchScalarReference() {
                                   static_cast<std::size_t>(c.height));
 
     std::uint32_t state = static_cast<std::uint32_t>(c.width) * 971u +
-                          static_cast<std::uint32_t>(c.height) * 37u +
-                          0x1234u;
+                          static_cast<std::uint32_t>(c.height) * 37u + 0x1234u;
     const std::size_t active_src = ActiveYuyvBytes(c.width);
     for (int y = 0; y < c.height; ++y) {
       std::uint8_t *row = src.data() + static_cast<std::size_t>(y) * src_stride;
@@ -390,8 +390,8 @@ bool TestYuyvToRgb24BackendsMatchScalarReference() {
             std::cerr << "YUYV->RGB backend "
                       << video::internal::YuyvToRgbBackendName(backend.backend)
                       << " overwrote destination padding at row " << y
-                      << " byte " << i << " for " << c.width << "x"
-                      << c.height << "\n";
+                      << " byte " << i << " for " << c.width << "x" << c.height
+                      << "\n";
             return false;
           }
         }
@@ -655,8 +655,7 @@ bool TestRgb24Bgr24BackendsMatchScalarAndPreservePadding() {
         for (std::size_t i = 0; i < ActiveRgbBytes(c.width); ++i) {
           if (a[i] != e[i]) {
             std::cerr << "RGB/BGR backend "
-                      << video::internal::Rgb24Bgr24BackendName(
-                             backend.backend)
+                      << video::internal::Rgb24Bgr24BackendName(backend.backend)
                       << " mismatch at row " << y << " byte " << i << " for "
                       << c.width << "x" << c.height << ": got "
                       << static_cast<int>(a[i]) << " expected "
@@ -667,11 +666,10 @@ bool TestRgb24Bgr24BackendsMatchScalarAndPreservePadding() {
         for (std::size_t i = ActiveRgbBytes(c.width); i < dst_stride; ++i) {
           if (a[i] != 0xcdu) {
             std::cerr << "RGB/BGR backend "
-                      << video::internal::Rgb24Bgr24BackendName(
-                             backend.backend)
+                      << video::internal::Rgb24Bgr24BackendName(backend.backend)
                       << " overwrote destination padding at row " << y
-                      << " byte " << i << " for " << c.width << "x"
-                      << c.height << "\n";
+                      << " byte " << i << " for " << c.width << "x" << c.height
+                      << "\n";
             return false;
           }
         }
@@ -717,6 +715,126 @@ bool TestRgb24Bgr24PublicPathMatchesScalarInPlace() {
                   << " byte " << i << "\n";
         return false;
       }
+    }
+  }
+
+  return true;
+}
+
+bool TestResizeRgb24BilinearPreservesActivePixelsAndZerosPadding() {
+  constexpr int src_width = 3;
+  constexpr int src_height = 2;
+  constexpr std::size_t src_stride = ActiveRgbBytes(src_width) + 5u;
+  constexpr int dst_width = 5;
+  constexpr int dst_height = 4;
+  constexpr std::size_t dst_stride = ActiveRgbBytes(dst_width) + 7u;
+
+  std::vector<std::uint8_t> src(src_stride * src_height, 0xa5u);
+  FillDeterministicRgb(&src, src_width, src_height, src_stride, 0x12345678u);
+
+  std::vector<std::uint8_t> expected(dst_stride * dst_height, 0xeeu);
+  for (int y = 0; y < dst_height; ++y) {
+    const float src_y =
+        (static_cast<float>(y) + 0.5f) *
+            (static_cast<float>(src_height) / static_cast<float>(dst_height)) -
+        0.5f;
+    const int y0 =
+        std::clamp(static_cast<int>(std::floor(src_y)), 0, src_height - 1);
+    const int y1 = std::clamp(y0 + 1, 0, src_height - 1);
+    const float fy = src_y - static_cast<float>(y0);
+
+    const auto *src_row0 =
+        src.data() + static_cast<std::size_t>(y0) * src_stride;
+    const auto *src_row1 =
+        src.data() + static_cast<std::size_t>(y1) * src_stride;
+    auto *dst_row = expected.data() + static_cast<std::size_t>(y) * dst_stride;
+
+    for (int x = 0; x < dst_width; ++x) {
+      const float src_x =
+          (static_cast<float>(x) + 0.5f) *
+              (static_cast<float>(src_width) / static_cast<float>(dst_width)) -
+          0.5f;
+      const int x0 =
+          std::clamp(static_cast<int>(std::floor(src_x)), 0, src_width - 1);
+      const int x1 = std::clamp(x0 + 1, 0, src_width - 1);
+      const float fx = src_x - static_cast<float>(x0);
+
+      const auto *p00 = src_row0 + static_cast<std::size_t>(x0) * 3u;
+      const auto *p10 = src_row0 + static_cast<std::size_t>(x1) * 3u;
+      const auto *p01 = src_row1 + static_cast<std::size_t>(x0) * 3u;
+      const auto *p11 = src_row1 + static_cast<std::size_t>(x1) * 3u;
+
+      for (int c = 0; c < 3; ++c) {
+        const float v0 =
+            static_cast<float>(p00[c]) +
+            fx * (static_cast<float>(p10[c]) - static_cast<float>(p00[c]));
+        const float v1 =
+            static_cast<float>(p01[c]) +
+            fx * (static_cast<float>(p11[c]) - static_cast<float>(p01[c]));
+        const float v = v0 + fy * (v1 - v0);
+        const int iv = std::clamp(static_cast<int>(std::lround(v)), 0, 255);
+        dst_row[static_cast<std::size_t>(x) * 3u +
+                static_cast<std::size_t>(c)] = static_cast<std::uint8_t>(iv);
+      }
+    }
+
+    std::fill(dst_row + ActiveRgbBytes(dst_width), dst_row + dst_stride,
+              std::uint8_t{0});
+  }
+
+  std::vector<std::uint8_t> actual(dst_stride * dst_height, 0xeeu);
+  std::string err;
+  if (!video::ResizeRgb24Bilinear(src.data(), src_width, src_height, src_stride,
+                                  dst_width, dst_height, &actual, dst_stride,
+                                  &err)) {
+    std::cerr << "ResizeRgb24Bilinear failed: " << err << "\n";
+    return false;
+  }
+
+  if (actual.size() != expected.size()) {
+    std::cerr << "ResizeRgb24Bilinear unexpected output size: " << actual.size()
+              << " expected " << expected.size() << "\n";
+    return false;
+  }
+
+  for (std::size_t i = 0; i < actual.size(); ++i) {
+    if (actual[i] != expected[i]) {
+      std::cerr << "ResizeRgb24Bilinear mismatch at byte " << i << ": got "
+                << static_cast<int>(actual[i]) << " expected "
+                << static_cast<int>(expected[i]) << "\n";
+      return false;
+    }
+  }
+
+  std::fill(actual.begin(), actual.end(), 0xeeu);
+  if (!video::ResizeRgb24Bilinear(src.data(), src_width, src_height, src_stride,
+                                  dst_width, dst_height, &actual, dst_stride,
+                                  &err)) {
+    std::cerr << "ResizeRgb24Bilinear reuse failed: " << err << "\n";
+    return false;
+  }
+
+  for (std::size_t i = 0; i < actual.size(); ++i) {
+    if (actual[i] != expected[i]) {
+      std::cerr << "ResizeRgb24Bilinear reuse mismatch at byte " << i << "\n";
+      return false;
+    }
+  }
+
+  video::Rgb24BilinearResizePlan plan;
+  if (!plan.Configure(src_width, src_height, dst_width, dst_height, &err)) {
+    std::cerr << "Rgb24BilinearResizePlan configure failed: " << err << "\n";
+    return false;
+  }
+  std::fill(actual.begin(), actual.end(), 0xeeu);
+  if (!plan.Apply(src.data(), src_stride, &actual, dst_stride, &err)) {
+    std::cerr << "Rgb24BilinearResizePlan apply failed: " << err << "\n";
+    return false;
+  }
+  for (std::size_t i = 0; i < actual.size(); ++i) {
+    if (actual[i] != expected[i]) {
+      std::cerr << "Rgb24BilinearResizePlan mismatch at byte " << i << "\n";
+      return false;
     }
   }
 

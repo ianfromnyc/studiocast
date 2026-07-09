@@ -39,6 +39,7 @@ bool TestRgb24ToYuyvBackendsMatchScalarReference();
 bool TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants();
 bool TestRgb24Bgr24BackendsMatchScalarAndPreservePadding();
 bool TestRgb24Bgr24PublicPathMatchesScalarInPlace();
+bool TestResizeRgb24BilinearPreservesActivePixelsAndZerosPadding();
 } // namespace studiocast::tests
 
 namespace {
@@ -1006,10 +1007,12 @@ int main() {
        &studiocast::tests::
            TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants},
       {"RGB24/BGR24 backends match scalar and preserve padding",
-       &studiocast::tests::
-           TestRgb24Bgr24BackendsMatchScalarAndPreservePadding},
+       &studiocast::tests::TestRgb24Bgr24BackendsMatchScalarAndPreservePadding},
       {"RGB24/BGR24 public path matches scalar in-place",
        &studiocast::tests::TestRgb24Bgr24PublicPathMatchesScalarInPlace},
+      {"RGB24 bilinear resize preserves active pixels and zeros padding",
+       &studiocast::tests::
+           TestResizeRgb24BilinearPreservesActivePixelsAndZerosPadding},
   };
 
   int failed = 0;

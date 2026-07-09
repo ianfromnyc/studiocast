@@ -2,12 +2,15 @@
 #include "core/video/convert_rgb_bgr_internal.h"
 #include "core/video/convert_rgb_yuyv_internal.h"
 #include "core/video/convert_yuyv_rgb_internal.h"
+#include "core/video/image_ppm.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <string>
@@ -42,6 +45,13 @@ enum class RgbBgrBenchBackend {
 struct SizeCase {
   int width;
   int height;
+};
+
+struct ResizeCase {
+  int src_width;
+  int src_height;
+  int dst_width;
+  int dst_height;
 };
 
 struct Stats {
@@ -177,6 +187,73 @@ void YuyvToRgb24OriginalScalar(const std::uint8_t *src, int width, int height,
   }
 }
 
+int ClampInt(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
+
+bool ResizeRgb24BilinearOriginal(const std::uint8_t *src_rgb, int src_w,
+                                 int src_h, std::size_t src_stride, int dst_w,
+                                 int dst_h, std::vector<std::uint8_t> *dst_rgb,
+                                 std::size_t dst_stride, std::string *error) {
+  if (!dst_rgb)
+    return false;
+  dst_rgb->clear();
+
+  if (!src_rgb || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) {
+    if (error)
+      *error = "Invalid resize dimensions";
+    return false;
+  }
+  if (src_stride < static_cast<std::size_t>(src_w) * 3u ||
+      dst_stride < static_cast<std::size_t>(dst_w) * 3u) {
+    if (error)
+      *error = "Invalid resize stride";
+    return false;
+  }
+
+  dst_rgb->resize(dst_stride * static_cast<std::size_t>(dst_h));
+
+  const float scale_x = static_cast<float>(src_w) / static_cast<float>(dst_w);
+  const float scale_y = static_cast<float>(src_h) / static_cast<float>(dst_h);
+
+  for (int y = 0; y < dst_h; ++y) {
+    const float src_y = (static_cast<float>(y) + 0.5f) * scale_y - 0.5f;
+    const int y0 = ClampInt(static_cast<int>(std::floor(src_y)), 0, src_h - 1);
+    const int y1 = ClampInt(y0 + 1, 0, src_h - 1);
+    const float fy = src_y - static_cast<float>(y0);
+
+    auto *dst_row = dst_rgb->data() + static_cast<std::size_t>(y) * dst_stride;
+    const auto *src_row0 = src_rgb + static_cast<std::size_t>(y0) * src_stride;
+    const auto *src_row1 = src_rgb + static_cast<std::size_t>(y1) * src_stride;
+
+    for (int x = 0; x < dst_w; ++x) {
+      const float src_x = (static_cast<float>(x) + 0.5f) * scale_x - 0.5f;
+      const int x0 =
+          ClampInt(static_cast<int>(std::floor(src_x)), 0, src_w - 1);
+      const int x1 = ClampInt(x0 + 1, 0, src_w - 1);
+      const float fx = src_x - static_cast<float>(x0);
+
+      const auto *p00 = src_row0 + static_cast<std::size_t>(x0) * 3u;
+      const auto *p10 = src_row0 + static_cast<std::size_t>(x1) * 3u;
+      const auto *p01 = src_row1 + static_cast<std::size_t>(x0) * 3u;
+      const auto *p11 = src_row1 + static_cast<std::size_t>(x1) * 3u;
+
+      for (int c = 0; c < 3; ++c) {
+        const float v0 =
+            static_cast<float>(p00[c]) +
+            fx * (static_cast<float>(p10[c]) - static_cast<float>(p00[c]));
+        const float v1 =
+            static_cast<float>(p01[c]) +
+            fx * (static_cast<float>(p11[c]) - static_cast<float>(p01[c]));
+        const float v = v0 + fy * (v1 - v0);
+        const int iv = ClampInt(static_cast<int>(std::lround(v)), 0, 255);
+        dst_row[static_cast<std::size_t>(x) * 3u +
+                static_cast<std::size_t>(c)] = static_cast<std::uint8_t>(iv);
+      }
+    }
+  }
+
+  return true;
+}
+
 void FillDeterministicRgb(std::vector<std::uint8_t> *src, int width, int height,
                           std::size_t stride) {
   std::uint32_t state =
@@ -187,6 +264,34 @@ void FillDeterministicRgb(std::vector<std::uint8_t> *src, int width, int height,
       state = state * 1664525u + 1013904223u;
       row[x] = static_cast<std::uint8_t>((state >> 24) & 0xffu);
     }
+  }
+}
+
+void CopyRgbToPaddedOriginal(const std::uint8_t *src, int width, int height,
+                             std::size_t src_stride, std::uint8_t *dst,
+                             std::size_t dst_stride) {
+  const std::size_t active = static_cast<std::size_t>(width) * 3u;
+  for (int y = 0; y < height; ++y) {
+    const std::uint8_t *src_row =
+        src + static_cast<std::size_t>(y) * src_stride;
+    std::uint8_t *dst_row = dst + static_cast<std::size_t>(y) * dst_stride;
+    for (std::size_t i = 0; i < active; ++i)
+      dst_row[i] = src_row[i];
+    for (std::size_t i = active; i < dst_stride; ++i)
+      dst_row[i] = 0;
+  }
+}
+
+void CopyRgbToPaddedCurrent(const std::uint8_t *src, int width, int height,
+                            std::size_t src_stride, std::uint8_t *dst,
+                            std::size_t dst_stride) {
+  const std::size_t active = static_cast<std::size_t>(width) * 3u;
+  for (int y = 0; y < height; ++y) {
+    const std::uint8_t *src_row =
+        src + static_cast<std::size_t>(y) * src_stride;
+    std::uint8_t *dst_row = dst + static_cast<std::size_t>(y) * dst_stride;
+    for (std::size_t i = 0; i < active; ++i)
+      dst_row[i] = src_row[i];
   }
 }
 
@@ -382,12 +487,12 @@ bool Convert(RgbBgrBenchBackend backend, const std::uint8_t *src, int width,
              std::size_t dst_stride) {
   switch (backend) {
   case RgbBgrBenchBackend::current_scalar:
-    studiocast::video::internal::Rgb24Bgr24Scalar(
-        src, dst, width, height, src_stride, dst_stride);
+    studiocast::video::internal::Rgb24Bgr24Scalar(src, dst, width, height,
+                                                  src_stride, dst_stride);
     return true;
   case RgbBgrBenchBackend::ssse3:
-    studiocast::video::internal::Rgb24Bgr24Ssse3(
-        src, dst, width, height, src_stride, dst_stride);
+    studiocast::video::internal::Rgb24Bgr24Ssse3(src, dst, width, height,
+                                                 src_stride, dst_stride);
     return true;
   case RgbBgrBenchBackend::selected:
     studiocast::video::Rgb24ToBgr24(src, dst, width, height, src_stride,
@@ -563,6 +668,143 @@ Stats RunRgbBgrBench(RgbBgrBenchBackend backend, const SizeCase &size,
   return stats;
 }
 
+Stats RunResizeBench(bool original, const ResizeCase &size, int iterations,
+                     int warmup) {
+  const std::size_t src_stride =
+      static_cast<std::size_t>(size.src_width) * 3u + 32u;
+  const std::size_t dst_stride =
+      static_cast<std::size_t>(size.dst_width) * 3u + 32u;
+  std::vector<std::uint8_t> src(src_stride *
+                                static_cast<std::size_t>(size.src_height));
+  std::vector<std::uint8_t> dst;
+  dst.reserve(dst_stride * static_cast<std::size_t>(size.dst_height));
+  FillDeterministicRgb(&src, size.src_width, size.src_height, src_stride);
+
+  std::string err;
+  studiocast::video::Rgb24BilinearResizePlan plan;
+  if (!original) {
+    (void)plan.Configure(size.src_width, size.src_height, size.dst_width,
+                         size.dst_height, &err);
+  }
+  for (int i = 0; i < warmup; ++i) {
+    if (original) {
+      (void)ResizeRgb24BilinearOriginal(
+          src.data(), size.src_width, size.src_height, src_stride,
+          size.dst_width, size.dst_height, &dst, dst_stride, &err);
+    } else {
+      (void)plan.Apply(src.data(), src_stride, &dst, dst_stride, &err);
+    }
+  }
+
+  std::vector<double> samples_ms;
+  samples_ms.reserve(static_cast<std::size_t>(iterations));
+  std::uint64_t checksum = 0;
+
+  for (int i = 0; i < iterations; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
+    if (original) {
+      (void)ResizeRgb24BilinearOriginal(
+          src.data(), size.src_width, size.src_height, src_stride,
+          size.dst_width, size.dst_height, &dst, dst_stride, &err);
+    } else {
+      (void)plan.Apply(src.data(), src_stride, &dst, dst_stride, &err);
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+
+    samples_ms.push_back(
+        std::chrono::duration<double, std::milli>(t1 - t0).count());
+    checksum +=
+        dst[(static_cast<std::size_t>(i) * 131u) %
+            std::max<std::size_t>(static_cast<std::size_t>(1), dst.size())];
+  }
+
+  std::sort(samples_ms.begin(), samples_ms.end());
+  const auto percentile = [&](double p) {
+    const double pos =
+        (p / 100.0) * static_cast<double>(samples_ms.size() - 1u);
+    const std::size_t idx = static_cast<std::size_t>(pos + 0.5);
+    return samples_ms[std::min(idx, samples_ms.size() - 1u)];
+  };
+
+  double sum = 0.0;
+  for (double sample : samples_ms)
+    sum += sample;
+
+  Stats stats{};
+  stats.avg_ms = sum / static_cast<double>(samples_ms.size());
+  stats.p95_ms = percentile(95.0);
+  stats.p99_ms = percentile(99.0);
+  stats.min_ms = samples_ms.front();
+  stats.max_ms = samples_ms.back();
+  stats.checksum = checksum;
+  return stats;
+}
+
+Stats RunPaddedRgbCopyBench(bool original, const SizeCase &size, int iterations,
+                            int warmup) {
+  const std::size_t src_stride = static_cast<std::size_t>(size.width) * 3u;
+  const std::size_t dst_stride =
+      static_cast<std::size_t>(size.width) * 3u + 128u;
+  std::vector<std::uint8_t> src(src_stride *
+                                static_cast<std::size_t>(size.height));
+  std::vector<std::uint8_t> dst(dst_stride *
+                                static_cast<std::size_t>(size.height));
+  FillDeterministicRgb(&src, size.width, size.height, src_stride);
+
+  for (int i = 0; i < warmup; ++i) {
+    if (original) {
+      CopyRgbToPaddedOriginal(src.data(), size.width, size.height, src_stride,
+                              dst.data(), dst_stride);
+    } else {
+      CopyRgbToPaddedCurrent(src.data(), size.width, size.height, src_stride,
+                             dst.data(), dst_stride);
+    }
+  }
+
+  std::vector<double> samples_ms;
+  samples_ms.reserve(static_cast<std::size_t>(iterations));
+  std::uint64_t checksum = 0;
+
+  for (int i = 0; i < iterations; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
+    if (original) {
+      CopyRgbToPaddedOriginal(src.data(), size.width, size.height, src_stride,
+                              dst.data(), dst_stride);
+    } else {
+      CopyRgbToPaddedCurrent(src.data(), size.width, size.height, src_stride,
+                             dst.data(), dst_stride);
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+
+    samples_ms.push_back(
+        std::chrono::duration<double, std::milli>(t1 - t0).count());
+    checksum +=
+        dst[(static_cast<std::size_t>(i) * 131u) %
+            std::max<std::size_t>(static_cast<std::size_t>(1), dst.size())];
+  }
+
+  std::sort(samples_ms.begin(), samples_ms.end());
+  const auto percentile = [&](double p) {
+    const double pos =
+        (p / 100.0) * static_cast<double>(samples_ms.size() - 1u);
+    const std::size_t idx = static_cast<std::size_t>(pos + 0.5);
+    return samples_ms[std::min(idx, samples_ms.size() - 1u)];
+  };
+
+  double sum = 0.0;
+  for (double sample : samples_ms)
+    sum += sample;
+
+  Stats stats{};
+  stats.avg_ms = sum / static_cast<double>(samples_ms.size());
+  stats.p95_ms = percentile(95.0);
+  stats.p99_ms = percentile(99.0);
+  stats.min_ms = samples_ms.front();
+  stats.max_ms = samples_ms.back();
+  stats.checksum = checksum;
+  return stats;
+}
+
 std::string GetArgValue(int argc, char **argv, std::string_view key) {
   for (int i = 1; i + 1 < argc; ++i) {
     if (argv[i] && std::string_view(argv[i]) == key)
@@ -589,12 +831,15 @@ bool HasArg(int argc, char **argv, std::string_view key) {
 void Usage(const char *argv0) {
   std::cout << "StudioCast RGB/YUYV Conversion Benchmark\n\n"
             << "Usage:\n"
-            << "  " << argv0 << " [--iterations N] [--warmup N] [--csv]\n\n"
+            << "  " << argv0
+            << " [--iterations N] [--warmup N] [--csv] "
+               "[--only all|convert|resize|copy|prep]\n\n"
             << "RGB24 -> YUYV backends: original-scalar, current-scalar, "
                "libyuv, ssse3, avx2, selected\n"
             << "YUYV -> RGB24 backends: original-scalar, current-scalar, "
                "sse4.1, avx2, selected\n"
             << "RGB24 <-> BGR24 backends: current-scalar, ssse3, selected\n"
+            << "Resize/write prep: previous-loop, current\n"
             << "Sizes:    640x480, 1280x720, 1920x1080\n";
 }
 
@@ -609,8 +854,20 @@ int main(int argc, char **argv) {
   const int iterations = GetArgInt(argc, argv, "--iterations", 120);
   const int warmup = GetArgInt(argc, argv, "--warmup", 10);
   const bool csv = HasArg(argc, argv, "--csv");
+  const std::string only = GetArgValue(argc, argv, "--only");
+  const bool run_conversions =
+      only.empty() || only == "all" || only == "convert";
+  const bool run_resize =
+      only.empty() || only == "all" || only == "resize" || only == "prep";
+  const bool run_copy =
+      only.empty() || only == "all" || only == "copy" || only == "prep";
 
   const std::vector<SizeCase> sizes{{640, 480}, {1280, 720}, {1920, 1080}};
+  const std::vector<ResizeCase> resize_sizes{
+      {640, 480, 1280, 720},
+      {1280, 720, 1920, 1080},
+      {1920, 1080, 1280, 720},
+  };
   const std::vector<BenchBackend> backends{
       BenchBackend::original_scalar,
       BenchBackend::current_scalar,
@@ -651,7 +908,7 @@ int main(int argc, char **argv) {
   if (csv) {
     std::cout << "direction,backend,width,height,avg_ms,p95_ms,p99_ms,min_ms,"
                  "max_ms,checksum\n";
-  } else {
+  } else if (run_conversions) {
     std::cout << "RGB24 -> YUYV\n";
     std::cout << std::left << std::setw(18) << "backend" << std::right
               << std::setw(12) << "size" << std::setw(12) << "avg ms"
@@ -660,38 +917,157 @@ int main(int argc, char **argv) {
               << "\n";
   }
 
-  for (BenchBackend backend : backends) {
-    if (!BackendAvailable(backend)) {
-      if (!csv) {
-        std::cout << std::left << std::setw(18) << BackendName(backend)
-                  << "unavailable\n";
+  if (run_conversions) {
+    for (BenchBackend backend : backends) {
+      if (!BackendAvailable(backend)) {
+        if (!csv) {
+          std::cout << std::left << std::setw(18) << BackendName(backend)
+                    << "unavailable\n";
+        }
+        continue;
       }
-      continue;
+
+      for (const SizeCase &size : sizes) {
+        const Stats stats = RunBench(backend, size, iterations, warmup);
+        if (csv) {
+          std::cout << "rgb24-to-yuyv," << BackendName(backend) << ","
+                    << size.width << "," << size.height << "," << stats.avg_ms
+                    << "," << stats.p95_ms << "," << stats.p99_ms << ","
+                    << stats.min_ms << "," << stats.max_ms << ","
+                    << stats.checksum << "\n";
+        } else {
+          std::cout << std::fixed << std::setprecision(3);
+          std::cout << std::left << std::setw(18) << BackendName(backend)
+                    << std::right << std::setw(7) << size.width << "x"
+                    << std::left << std::setw(4) << size.height << std::right
+                    << std::setw(12) << stats.avg_ms << std::setw(12)
+                    << stats.p95_ms << std::setw(12) << stats.p99_ms
+                    << std::setw(12) << stats.min_ms << std::setw(12)
+                    << stats.max_ms << "\n";
+        }
+      }
     }
 
-    for (const SizeCase &size : sizes) {
-      const Stats stats = RunBench(backend, size, iterations, warmup);
-      if (csv) {
-        std::cout << "rgb24-to-yuyv," << BackendName(backend) << ","
-                  << size.width << "," << size.height << "," << stats.avg_ms
-                  << "," << stats.p95_ms << "," << stats.p99_ms << ","
-                  << stats.min_ms << "," << stats.max_ms << ","
-                  << stats.checksum << "\n";
-      } else {
-        std::cout << std::fixed << std::setprecision(3);
-        std::cout << std::left << std::setw(18) << BackendName(backend)
-                  << std::right << std::setw(7) << size.width << "x"
-                  << std::left << std::setw(4) << size.height << std::right
-                  << std::setw(12) << stats.avg_ms << std::setw(12)
-                  << stats.p95_ms << std::setw(12) << stats.p99_ms
-                  << std::setw(12) << stats.min_ms << std::setw(12)
-                  << stats.max_ms << "\n";
+    if (!csv) {
+      std::cout << "\nYUYV -> RGB24\n";
+      std::cout << std::left << std::setw(18) << "backend" << std::right
+                << std::setw(12) << "size" << std::setw(12) << "avg ms"
+                << std::setw(12) << "p95 ms" << std::setw(12) << "p99 ms"
+                << std::setw(12) << "min ms" << std::setw(12) << "max ms"
+                << "\n";
+    }
+
+    for (YuyvToRgbBenchBackend backend : yuyv_to_rgb_backends) {
+      if (!BackendAvailable(backend)) {
+        if (!csv) {
+          std::cout << std::left << std::setw(18) << BackendName(backend)
+                    << "unavailable\n";
+        }
+        continue;
+      }
+
+      for (const SizeCase &size : sizes) {
+        const Stats stats =
+            RunYuyvToRgbBench(backend, size, iterations, warmup);
+        if (csv) {
+          std::cout << "yuyv-to-rgb24," << BackendName(backend) << ","
+                    << size.width << "," << size.height << "," << stats.avg_ms
+                    << "," << stats.p95_ms << "," << stats.p99_ms << ","
+                    << stats.min_ms << "," << stats.max_ms << ","
+                    << stats.checksum << "\n";
+        } else {
+          std::cout << std::fixed << std::setprecision(3);
+          std::cout << std::left << std::setw(18) << BackendName(backend)
+                    << std::right << std::setw(7) << size.width << "x"
+                    << std::left << std::setw(4) << size.height << std::right
+                    << std::setw(12) << stats.avg_ms << std::setw(12)
+                    << stats.p95_ms << std::setw(12) << stats.p99_ms
+                    << std::setw(12) << stats.min_ms << std::setw(12)
+                    << stats.max_ms << "\n";
+        }
+      }
+    }
+
+    if (!csv) {
+      std::cout << "\nRGB24 <-> BGR24\n";
+      std::cout << std::left << std::setw(18) << "backend" << std::right
+                << std::setw(12) << "size" << std::setw(12) << "avg ms"
+                << std::setw(12) << "p95 ms" << std::setw(12) << "p99 ms"
+                << std::setw(12) << "min ms" << std::setw(12) << "max ms"
+                << "\n";
+    }
+
+    for (RgbBgrBenchBackend backend : rgb_bgr_backends) {
+      if (!BackendAvailable(backend)) {
+        if (!csv) {
+          std::cout << std::left << std::setw(18) << BackendName(backend)
+                    << "unavailable\n";
+        }
+        continue;
+      }
+
+      for (const SizeCase &size : sizes) {
+        const Stats stats = RunRgbBgrBench(backend, size, iterations, warmup);
+        if (csv) {
+          std::cout << "rgb24-to-bgr24," << BackendName(backend) << ","
+                    << size.width << "," << size.height << "," << stats.avg_ms
+                    << "," << stats.p95_ms << "," << stats.p99_ms << ","
+                    << stats.min_ms << "," << stats.max_ms << ","
+                    << stats.checksum << "\n";
+        } else {
+          std::cout << std::fixed << std::setprecision(3);
+          std::cout << std::left << std::setw(18) << BackendName(backend)
+                    << std::right << std::setw(7) << size.width << "x"
+                    << std::left << std::setw(4) << size.height << std::right
+                    << std::setw(12) << stats.avg_ms << std::setw(12)
+                    << stats.p95_ms << std::setw(12) << stats.p99_ms
+                    << std::setw(12) << stats.min_ms << std::setw(12)
+                    << stats.max_ms << "\n";
+        }
       }
     }
   }
 
-  if (!csv) {
-    std::cout << "\nYUYV -> RGB24\n";
+  if (run_resize && !csv) {
+    std::cout << "\nRGB24 CPU resize\n";
+    std::cout << std::left << std::setw(18) << "backend" << std::right
+              << std::setw(21) << "size" << std::setw(12) << "avg ms"
+              << std::setw(12) << "p95 ms" << std::setw(12) << "p99 ms"
+              << std::setw(12) << "min ms" << std::setw(12) << "max ms"
+              << "\n";
+  }
+
+  if (run_resize) {
+    for (bool original : {true, false}) {
+      const char *name = original ? "previous-loop" : "current";
+      for (const ResizeCase &size : resize_sizes) {
+        const Stats stats = RunResizeBench(original, size, iterations, warmup);
+        if (csv) {
+          std::cout << "rgb24-resize-" << size.src_width << "x"
+                    << size.src_height << "-to-" << size.dst_width << "x"
+                    << size.dst_height << "," << name << "," << size.dst_width
+                    << "," << size.dst_height << "," << stats.avg_ms << ","
+                    << stats.p95_ms << "," << stats.p99_ms << ","
+                    << stats.min_ms << "," << stats.max_ms << ","
+                    << stats.checksum << "\n";
+        } else {
+          std::cout << std::fixed << std::setprecision(3);
+          std::cout << std::left << std::setw(18) << name << std::right
+                    << std::setw(7) << size.src_width << "x" << std::left
+                    << std::setw(4) << size.src_height << "->" << std::right
+                    << std::setw(5) << size.dst_width << "x" << std::left
+                    << std::setw(4) << size.dst_height << std::right
+                    << std::setw(12) << stats.avg_ms << std::setw(12)
+                    << stats.p95_ms << std::setw(12) << stats.p99_ms
+                    << std::setw(12) << stats.min_ms << std::setw(12)
+                    << stats.max_ms << "\n";
+        }
+      }
+    }
+  }
+
+  if (run_copy && !csv) {
+    std::cout << "\nRGB24 padded output copy\n";
     std::cout << std::left << std::setw(18) << "backend" << std::right
               << std::setw(12) << "size" << std::setw(12) << "avg ms"
               << std::setw(12) << "p95 ms" << std::setw(12) << "p99 ms"
@@ -699,71 +1075,27 @@ int main(int argc, char **argv) {
               << "\n";
   }
 
-  for (YuyvToRgbBenchBackend backend : yuyv_to_rgb_backends) {
-    if (!BackendAvailable(backend)) {
-      if (!csv) {
-        std::cout << std::left << std::setw(18) << BackendName(backend)
-                  << "unavailable\n";
-      }
-      continue;
-    }
-
-    for (const SizeCase &size : sizes) {
-      const Stats stats = RunYuyvToRgbBench(backend, size, iterations, warmup);
-      if (csv) {
-        std::cout << "yuyv-to-rgb24," << BackendName(backend) << ","
-                  << size.width << "," << size.height << "," << stats.avg_ms
-                  << "," << stats.p95_ms << "," << stats.p99_ms << ","
-                  << stats.min_ms << "," << stats.max_ms << ","
-                  << stats.checksum << "\n";
-      } else {
-        std::cout << std::fixed << std::setprecision(3);
-        std::cout << std::left << std::setw(18) << BackendName(backend)
-                  << std::right << std::setw(7) << size.width << "x"
-                  << std::left << std::setw(4) << size.height << std::right
-                  << std::setw(12) << stats.avg_ms << std::setw(12)
-                  << stats.p95_ms << std::setw(12) << stats.p99_ms
-                  << std::setw(12) << stats.min_ms << std::setw(12)
-                  << stats.max_ms << "\n";
-      }
-    }
-  }
-
-  if (!csv) {
-    std::cout << "\nRGB24 <-> BGR24\n";
-    std::cout << std::left << std::setw(18) << "backend" << std::right
-              << std::setw(12) << "size" << std::setw(12) << "avg ms"
-              << std::setw(12) << "p95 ms" << std::setw(12) << "p99 ms"
-              << std::setw(12) << "min ms" << std::setw(12) << "max ms"
-              << "\n";
-  }
-
-  for (RgbBgrBenchBackend backend : rgb_bgr_backends) {
-    if (!BackendAvailable(backend)) {
-      if (!csv) {
-        std::cout << std::left << std::setw(18) << BackendName(backend)
-                  << "unavailable\n";
-      }
-      continue;
-    }
-
-    for (const SizeCase &size : sizes) {
-      const Stats stats = RunRgbBgrBench(backend, size, iterations, warmup);
-      if (csv) {
-        std::cout << "rgb24-to-bgr24," << BackendName(backend) << ","
-                  << size.width << "," << size.height << "," << stats.avg_ms
-                  << "," << stats.p95_ms << "," << stats.p99_ms << ","
-                  << stats.min_ms << "," << stats.max_ms << ","
-                  << stats.checksum << "\n";
-      } else {
-        std::cout << std::fixed << std::setprecision(3);
-        std::cout << std::left << std::setw(18) << BackendName(backend)
-                  << std::right << std::setw(7) << size.width << "x"
-                  << std::left << std::setw(4) << size.height << std::right
-                  << std::setw(12) << stats.avg_ms << std::setw(12)
-                  << stats.p95_ms << std::setw(12) << stats.p99_ms
-                  << std::setw(12) << stats.min_ms << std::setw(12)
-                  << stats.max_ms << "\n";
+  if (run_copy) {
+    for (bool original : {true, false}) {
+      const char *name = original ? "previous-loop" : "current";
+      for (const SizeCase &size : sizes) {
+        const Stats stats =
+            RunPaddedRgbCopyBench(original, size, iterations, warmup);
+        if (csv) {
+          std::cout << "rgb24-padded-copy," << name << "," << size.width << ","
+                    << size.height << "," << stats.avg_ms << "," << stats.p95_ms
+                    << "," << stats.p99_ms << "," << stats.min_ms << ","
+                    << stats.max_ms << "," << stats.checksum << "\n";
+        } else {
+          std::cout << std::fixed << std::setprecision(3);
+          std::cout << std::left << std::setw(18) << name << std::right
+                    << std::setw(7) << size.width << "x" << std::left
+                    << std::setw(4) << size.height << std::right
+                    << std::setw(12) << stats.avg_ms << std::setw(12)
+                    << stats.p95_ms << std::setw(12) << stats.p99_ms
+                    << std::setw(12) << stats.min_ms << std::setw(12)
+                    << stats.max_ms << "\n";
+        }
       }
     }
   }
