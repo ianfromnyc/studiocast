@@ -2,6 +2,7 @@
 #include "core/video/convert_rgb_bgr_internal.h"
 #include "core/video/convert_rgb_yuyv_internal.h"
 #include "core/video/convert_yuyv_rgb_internal.h"
+#include "core/video/effects/background_remove_cpu.h"
 #include "core/video/image_ppm.h"
 
 #include <algorithm>
@@ -306,6 +307,53 @@ void FillDeterministicYuyv(std::vector<std::uint8_t> *src, int width,
     for (std::size_t x = 0; x < active; ++x) {
       state = state * 1664525u + 1013904223u;
       row[x] = static_cast<std::uint8_t>((state >> 24) & 0xffu);
+    }
+  }
+}
+
+void ApplyBackgroundRemovePrevious(std::uint8_t *rgb, int width, int height,
+                                   std::size_t stride) {
+  const int left = static_cast<int>(width * 0.25);
+  const int right = static_cast<int>(width * 0.75);
+  const int top = static_cast<int>(height * 0.15);
+  const int bottom = static_cast<int>(height * 0.95);
+  const int feather = std::max(8, std::min(width, height) / 20);
+
+  for (int y = 0; y < height; ++y) {
+    std::uint8_t *row = rgb + static_cast<std::size_t>(y) * stride;
+
+    int dy = 0;
+    if (y < top)
+      dy = top - y;
+    else if (y > bottom)
+      dy = y - bottom;
+
+    for (int x = 0; x < width; ++x) {
+      int dx = 0;
+      if (x < left)
+        dx = left - x;
+      else if (x > right)
+        dx = x - right;
+
+      const int d = std::max(dx, dy);
+      if (d <= 0)
+        continue;
+
+      std::uint8_t *p = row + static_cast<std::size_t>(x) * 3u;
+      if (d >= feather) {
+        p[0] = 0;
+        p[1] = 255;
+        p[2] = 0;
+      } else {
+        const int a = d;
+        const int ia = feather - d;
+        p[0] =
+            static_cast<std::uint8_t>((static_cast<int>(p[0]) * ia) / feather);
+        p[1] = static_cast<std::uint8_t>(
+            (static_cast<int>(p[1]) * ia + 255 * a) / feather);
+        p[2] =
+            static_cast<std::uint8_t>((static_cast<int>(p[2]) * ia) / feather);
+      }
     }
   }
 }
@@ -815,6 +863,76 @@ Stats RunPaddedRgbCopyBench(bool original, const SizeCase &size, int iterations,
   return stats;
 }
 
+Stats RunBackgroundRemoveBench(bool original, const SizeCase &size,
+                               int iterations, int warmup) {
+  const std::size_t stride = static_cast<std::size_t>(size.width) * 3u + 32u;
+  std::vector<std::uint8_t> src(stride *
+                                static_cast<std::size_t>(size.height));
+  std::vector<std::uint8_t> frame(src.size());
+  FillDeterministicRgb(&src, size.width, size.height, stride);
+
+  studiocast::video::effects::BackgroundRemoveCpuEffect effect;
+  studiocast::video::effects::EffectContext ctx;
+  studiocast::video::effects::Rgb24FrameView view;
+  view.data = frame.data();
+  view.width = size.width;
+  view.height = size.height;
+  view.stride_bytes = stride;
+
+  for (int i = 0; i < warmup; ++i) {
+    std::memcpy(frame.data(), src.data(), frame.size());
+    if (original) {
+      ApplyBackgroundRemovePrevious(frame.data(), size.width, size.height,
+                                    stride);
+    } else {
+      effect.Apply(view, &ctx);
+    }
+  }
+
+  std::vector<double> samples_ms;
+  samples_ms.reserve(static_cast<std::size_t>(iterations));
+  std::uint64_t checksum = 0;
+
+  for (int i = 0; i < iterations; ++i) {
+    std::memcpy(frame.data(), src.data(), frame.size());
+    const auto t0 = std::chrono::steady_clock::now();
+    if (original) {
+      ApplyBackgroundRemovePrevious(frame.data(), size.width, size.height,
+                                    stride);
+    } else {
+      effect.Apply(view, &ctx);
+    }
+    const auto t1 = std::chrono::steady_clock::now();
+
+    samples_ms.push_back(
+        std::chrono::duration<double, std::milli>(t1 - t0).count());
+    checksum +=
+        frame[(static_cast<std::size_t>(i) * 131u) %
+              std::max<std::size_t>(static_cast<std::size_t>(1), frame.size())];
+  }
+
+  std::sort(samples_ms.begin(), samples_ms.end());
+  const auto percentile = [&](double p) {
+    const double pos =
+        (p / 100.0) * static_cast<double>(samples_ms.size() - 1u);
+    const std::size_t idx = static_cast<std::size_t>(pos + 0.5);
+    return samples_ms[std::min(idx, samples_ms.size() - 1u)];
+  };
+
+  double sum = 0.0;
+  for (double sample : samples_ms)
+    sum += sample;
+
+  Stats stats{};
+  stats.avg_ms = sum / static_cast<double>(samples_ms.size());
+  stats.p95_ms = percentile(95.0);
+  stats.p99_ms = percentile(99.0);
+  stats.min_ms = samples_ms.front();
+  stats.max_ms = samples_ms.back();
+  stats.checksum = checksum;
+  return stats;
+}
+
 std::string GetArgValue(int argc, char **argv, std::string_view key) {
   for (int i = 1; i + 1 < argc; ++i) {
     if (argv[i] && std::string_view(argv[i]) == key)
@@ -882,7 +1000,7 @@ void Usage(const char *argv0) {
             << "Usage:\n"
             << "  " << argv0
             << " [--iterations N] [--warmup N] [--csv] "
-               "[--only all|convert|resize|copy|prep]\n"
+               "[--only all|convert|resize|copy|prep|effects]\n"
             << "      [--rgb-yuyv-backend NAME] [--yuyv-rgb-backend NAME]\n"
             << "      [--rgb-bgr-backend NAME]\n\n"
             << "RGB24 -> YUYV backends: original-scalar, current-scalar, "
@@ -891,7 +1009,7 @@ void Usage(const char *argv0) {
                "sse4.1, avx2, selected\n"
             << "RGB24 <-> BGR24 backends: current-scalar, ssse3, avx2, "
                "selected\n"
-            << "Resize/write prep: previous-loop, current\n"
+            << "Resize/write prep/effects: previous-loop, current\n"
             << "Sizes:    640x480, 1280x720, 1920x1080\n";
 }
 
@@ -913,6 +1031,8 @@ int main(int argc, char **argv) {
       only.empty() || only == "all" || only == "resize" || only == "prep";
   const bool run_copy =
       only.empty() || only == "all" || only == "copy" || only == "prep";
+  const bool run_effects =
+      only.empty() || only == "all" || only == "effects";
 
   const std::vector<SizeCase> sizes{{640, 480}, {1280, 720}, {1920, 1080}};
   const std::vector<ResizeCase> resize_sizes{
@@ -1167,6 +1287,42 @@ int main(int argc, char **argv) {
         } else {
           std::cout << std::fixed << std::setprecision(3);
           std::cout << std::left << std::setw(18) << name << std::right
+                    << std::setw(7) << size.width << "x" << std::left
+                    << std::setw(4) << size.height << std::right
+                    << std::setw(12) << stats.avg_ms << std::setw(12)
+                    << stats.p95_ms << std::setw(12) << stats.p99_ms
+                    << std::setw(12) << stats.min_ms << std::setw(12)
+                    << stats.max_ms << "\n";
+        }
+      }
+    }
+  }
+
+  if (run_effects && !csv) {
+    std::cout << "\nCPU virtual background remove\n";
+    std::cout << std::left << std::setw(28) << "effect/backend" << std::right
+              << std::setw(12) << "size" << std::setw(12) << "avg ms"
+              << std::setw(12) << "p95 ms" << std::setw(12) << "p99 ms"
+              << std::setw(12) << "min ms" << std::setw(12) << "max ms"
+              << "\n";
+  }
+
+  if (run_effects) {
+    for (bool original : {true, false}) {
+      const char *name = original ? "previous-loop" : "current";
+      for (const SizeCase &size : sizes) {
+        const Stats stats =
+            RunBackgroundRemoveBench(original, size, iterations, warmup);
+        if (csv) {
+          std::cout << "background-remove-cpu," << name << "," << size.width
+                    << "," << size.height << "," << stats.avg_ms << ","
+                    << stats.p95_ms << "," << stats.p99_ms << ","
+                    << stats.min_ms << "," << stats.max_ms << ","
+                    << stats.checksum << "\n";
+        } else {
+          std::cout << std::fixed << std::setprecision(3);
+          std::cout << std::left << std::setw(28)
+                    << (std::string("remove/") + name) << std::right
                     << std::setw(7) << size.width << "x" << std::left
                     << std::setw(4) << size.height << std::right
                     << std::setw(12) << stats.avg_ms << std::setw(12)

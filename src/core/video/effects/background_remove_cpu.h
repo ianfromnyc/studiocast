@@ -3,6 +3,7 @@
 #include <cstdint>
 
 #include "core/video/effects/effect.h"
+#include "core/video/effects/focus_mask_plan.h"
 
 namespace studiocast::video::effects {
 
@@ -21,6 +22,9 @@ public:
   const char *Backend() const override { return "cpu"; }
 
   void Apply(const Rgb24FrameView &frame, EffectContext *ctx) override;
+
+private:
+  FocusMaskPlan mask_plan_;
 };
 
 } // namespace studiocast::video::effects

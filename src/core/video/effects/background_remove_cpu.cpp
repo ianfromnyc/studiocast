@@ -10,17 +10,19 @@ void BackgroundRemoveCpuEffect::Apply(const Rgb24FrameView &frame,
                                       EffectContext * /*ctx*/) {
   if (!frame.Valid())
     return;
+  if (!mask_plan_.Configure(frame.width, frame.height))
+    return;
 
   const int w = frame.width;
   const int h = frame.height;
   const std::size_t stride = frame.stride_bytes;
 
-  // Center-focus mask parameters.
-  const int left = static_cast<int>(w * 0.25);
-  const int right = static_cast<int>(w * 0.75);
-  const int top = static_cast<int>(h * 0.15);
-  const int bottom = static_cast<int>(h * 0.95);
-  const int feather = std::max(8, std::min(w, h) / 20);
+  const auto &xDistances = mask_plan_.x_distances();
+  const auto &yDistances = mask_plan_.y_distances();
+  const int feather = mask_plan_.feather();
+  const int focusLeft = std::clamp(mask_plan_.focus_left(), 0, w);
+  const int focusRightExclusive =
+      std::clamp(mask_plan_.focus_right() + 1, 0, w);
 
   // "Chroma key" green background (RGB).
   const int bgR = 0;
@@ -29,35 +31,69 @@ void BackgroundRemoveCpuEffect::Apply(const Rgb24FrameView &frame,
 
   for (int y = 0; y < h; ++y) {
     std::uint8_t *row = frame.data + static_cast<std::size_t>(y) * stride;
+    const int yDistance = yDistances[static_cast<std::size_t>(y)];
 
-    int dy = 0;
-    if (y < top)
-      dy = top - y;
-    else if (y > bottom)
-      dy = y - bottom;
+    if (yDistance >= feather) {
+      for (int x = 0; x < w; ++x) {
+        std::uint8_t *p = row + static_cast<std::size_t>(x) * 3u;
+        p[0] = static_cast<std::uint8_t>(bgR);
+        p[1] = static_cast<std::uint8_t>(bgG);
+        p[2] = static_cast<std::uint8_t>(bgB);
+      }
+      continue;
+    }
 
-    for (int x = 0; x < w; ++x) {
-      int dx = 0;
-      if (x < left)
-        dx = left - x;
-      else if (x > right)
-        dx = x - right;
+    if (yDistance > 0) {
+      for (int x = 0; x < w; ++x) {
+        const int d =
+            std::max(xDistances[static_cast<std::size_t>(x)], yDistance);
+        auto *p = row + static_cast<std::size_t>(x) * 3u;
+        if (d >= feather) {
+          p[0] = static_cast<std::uint8_t>(bgR);
+          p[1] = static_cast<std::uint8_t>(bgG);
+          p[2] = static_cast<std::uint8_t>(bgB);
+        } else {
+          const int a = d;
+          const int ia = feather - d;
+          p[0] = static_cast<std::uint8_t>(
+              (static_cast<int>(p[0]) * ia + bgR * a) / feather);
+          p[1] = static_cast<std::uint8_t>(
+              (static_cast<int>(p[1]) * ia + bgG * a) / feather);
+          p[2] = static_cast<std::uint8_t>(
+              (static_cast<int>(p[2]) * ia + bgB * a) / feather);
+        }
+      }
+      continue;
+    }
 
-      const int d = std::max(dx, dy);
-      if (d <= 0)
-        continue;
-
-      std::uint8_t *p = row + static_cast<std::size_t>(x) * 3u;
-
+    for (int x = 0; x < focusLeft; ++x) {
+      const int d = xDistances[static_cast<std::size_t>(x)];
+      auto *p = row + static_cast<std::size_t>(x) * 3u;
       if (d >= feather) {
         p[0] = static_cast<std::uint8_t>(bgR);
         p[1] = static_cast<std::uint8_t>(bgG);
         p[2] = static_cast<std::uint8_t>(bgB);
       } else {
-        // Blend toward background across the feather edge.
         const int a = d;
         const int ia = feather - d;
-
+        p[0] = static_cast<std::uint8_t>(
+            (static_cast<int>(p[0]) * ia + bgR * a) / feather);
+        p[1] = static_cast<std::uint8_t>(
+            (static_cast<int>(p[1]) * ia + bgG * a) / feather);
+        p[2] = static_cast<std::uint8_t>(
+            (static_cast<int>(p[2]) * ia + bgB * a) / feather);
+      }
+    }
+    for (int x = focusRightExclusive; x < w; ++x) {
+      const int d = xDistances[static_cast<std::size_t>(x)];
+      auto *p = row + static_cast<std::size_t>(x) * 3u;
+      if (d >= feather) {
+        p[0] = static_cast<std::uint8_t>(bgR);
+        p[1] = static_cast<std::uint8_t>(bgG);
+        p[2] = static_cast<std::uint8_t>(bgB);
+      } else {
+        const int a = d;
+        const int ia = feather - d;
         p[0] = static_cast<std::uint8_t>(
             (static_cast<int>(p[0]) * ia + bgR * a) / feather);
         p[1] = static_cast<std::uint8_t>(

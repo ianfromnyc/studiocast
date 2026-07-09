@@ -326,6 +326,8 @@ add_library(studiocast_core
         src/core/video/effects/effect_descriptors.cpp
         src/core/video/effects/mirror_effect.h
         src/core/video/effects/mirror_effect.cpp
+        src/core/video/effects/focus_mask_plan.h
+        src/core/video/effects/focus_mask_plan.cpp
         src/core/video/effects/box_blur.h
         src/core/video/effects/box_blur.cpp
         src/core/video/effects/background_blur_cpu.h
@@ -1063,6 +1065,7 @@ if (BUILD_TESTING)
             tests/open_video_denoise_contract_tests.cpp
             tests/frame_artifact_cache_tests.cpp
             tests/v4l2_capture_negotiation_tests.cpp
+            tests/video_effect_cpu_tests.cpp
             tests/rgb_yuyv_convert_tests.cpp
     )
 
