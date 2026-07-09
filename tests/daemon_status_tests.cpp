@@ -282,6 +282,57 @@ bool TestVideoStatusReportsCaptureFallbackState() {
                 "status should report capture fallback reason");
 }
 
+bool TestVideoStatusReportsConfiguredDevicesWhenPipelineIdle() {
+  studiocast::video::VirtualCameraServiceStatus videoStatus;
+  videoStatus.service_running = true;
+  videoStatus.virtual_device_present = true;
+  videoStatus.virtual_device_available = true;
+
+  studiocast::video::VirtualCameraServiceConfig videoConfig;
+  videoConfig.enabled = true;
+  videoConfig.pipeline.input_device = "/dev/video0";
+  videoConfig.pipeline.output_device = "/dev/video10";
+
+  studiocast::audio::VirtualAudioServiceStatus audioStatus;
+  audioStatus.service_running = true;
+  audioStatus.mic_present = true;
+
+  studiocast::audio::VirtualAudioServiceConfig audioConfig;
+
+  studiocast::util::json::Value rootValue;
+  std::string error;
+  if (!studiocast::util::json::Parse(
+          StatusToJson(videoStatus, videoConfig, audioStatus, audioConfig,
+                       std::filesystem::path("/tmp/studiocastd-test.sock"),
+                       /*maxineJson=*/"", /*openCudaJson=*/"",
+                       /*openAudioJson=*/"", /*loopbackJson=*/""),
+          &rootValue, &error)) {
+    std::cerr << "status JSON should parse: " << error << "\n";
+    return false;
+  }
+
+  const JsonObject *root = rootValue.AsObject();
+  if (!root) {
+    std::cerr << "status root should be an object\n";
+    return false;
+  }
+  const JsonObject *video = ObjectAt(*root, "video", "video should exist");
+  if (!video)
+    return false;
+
+  const std::string *input =
+      StringAt(*video, "input_device", "input_device should exist");
+  const std::string *output =
+      StringAt(*video, "output_device", "output_device should exist");
+  if (!input || !output)
+    return false;
+
+  return Expect(*input == "/dev/video0",
+                "idle video status should keep configured input device") &&
+         Expect(*output == "/dev/video10",
+                "idle video status should keep resolved output device");
+}
+
 bool TestExplicitOpenCudaEffectUnknownWithoutDiagnostics() {
   studiocast::video::effects::BroadcastCameraEffects effects;
   effects.engine =
@@ -434,6 +485,7 @@ int main() {
   ok = TestVideoStatusReportsAllowCpuResize() && ok;
   ok = TestVideoStatusReportsRequestedOutputFormat() && ok;
   ok = TestVideoStatusReportsCaptureFallbackState() && ok;
+  ok = TestVideoStatusReportsConfiguredDevicesWhenPipelineIdle() && ok;
   ok = TestExplicitOpenCudaEffectUnknownWithoutDiagnostics() && ok;
   ok = TestBuiltinEffectReadyWithoutDiagnostics() && ok;
   ok = TestAudioStatusReportsResolvedSourceAndWarnings() && ok;

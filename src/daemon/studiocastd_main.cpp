@@ -1113,6 +1113,13 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
     oss << "\"open_audio\":" << openAudioJson << ",";
   }
 
+  const std::string effectiveInputDevice =
+      st.pipeline.input_device.empty() ? cfg.pipeline.input_device
+                                       : st.pipeline.input_device;
+  const std::string effectiveOutputDevice =
+      st.pipeline.output_device.empty() ? cfg.pipeline.output_device
+                                        : st.pipeline.output_device;
+
   oss << "\"video\":{";
   oss << "\"enabled\":" << BoolJson(cfg.enabled) << ",";
   oss << "\"always_on\":" << BoolJson(cfg.always_on) << ",";
@@ -1151,8 +1158,8 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"next_start_retry_ms\":" << st.next_start_retry_ms;
   oss << "},";
 
-  oss << "\"input_device\":\"" << JsonEscape(st.pipeline.input_device) << "\",";
-  oss << "\"output_device\":\"" << JsonEscape(st.pipeline.output_device)
+  oss << "\"input_device\":\"" << JsonEscape(effectiveInputDevice) << "\",";
+  oss << "\"output_device\":\"" << JsonEscape(effectiveOutputDevice)
       << "\",";
   if (!loopbackJson.empty()) {
     oss << "\"virtual_device_diagnostics\":" << loopbackJson << ",";
