@@ -40,6 +40,7 @@ bool TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants();
 bool TestRgb24Bgr24BackendsMatchScalarAndPreservePadding();
 bool TestRgb24Bgr24PublicPathMatchesScalarInPlace();
 bool TestResizeRgb24BilinearPreservesActivePixelsAndZerosPadding();
+bool TestResizeRgb24BilinearHandlesDegenerateAxesAndPlanReuse();
 } // namespace studiocast::tests
 
 namespace {
@@ -1013,6 +1014,9 @@ int main() {
       {"RGB24 bilinear resize preserves active pixels and zeros padding",
        &studiocast::tests::
            TestResizeRgb24BilinearPreservesActivePixelsAndZerosPadding},
+      {"RGB24 bilinear resize handles degenerate axes and plan reuse",
+       &studiocast::tests::
+           TestResizeRgb24BilinearHandlesDegenerateAxesAndPlanReuse},
   };
 
   int failed = 0;

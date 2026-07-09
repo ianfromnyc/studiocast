@@ -221,6 +221,14 @@ bool ReadPpmToken(std::istream &in, std::string *out) {
 
 int ClampInt(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
 
+inline std::uint8_t RoundClampByte(float v) {
+  if (v <= 0.0f)
+    return 0;
+  if (v >= 255.0f)
+    return 255;
+  return static_cast<std::uint8_t>(static_cast<int>(v + 0.5f));
+}
+
 } // namespace
 
 bool LoadImageRgb24(const std::filesystem::path &path, int *out_w, int *out_h,
@@ -428,6 +436,7 @@ bool Rgb24BilinearResizePlan::Apply(const std::uint8_t *src_rgb,
         src_rgb + static_cast<std::size_t>(ys.i0) * src_stride;
     const auto *src_row1 =
         src_rgb + static_cast<std::size_t>(ys.i1) * src_stride;
+    const float yf = ys.f;
 
     for (int x = 0; x < dst_w_; ++x) {
       const AxisSample xs = x_samples_[static_cast<std::size_t>(x)];
@@ -435,19 +444,33 @@ bool Rgb24BilinearResizePlan::Apply(const std::uint8_t *src_rgb,
       const auto *p10 = src_row0 + static_cast<std::size_t>(xs.i1) * 3u;
       const auto *p01 = src_row1 + static_cast<std::size_t>(xs.i0) * 3u;
       const auto *p11 = src_row1 + static_cast<std::size_t>(xs.i1) * 3u;
+      const float xf = xs.f;
 
-      for (int c = 0; c < 3; ++c) {
-        const float v0 =
-            static_cast<float>(p00[c]) +
-            xs.f * (static_cast<float>(p10[c]) - static_cast<float>(p00[c]));
-        const float v1 =
-            static_cast<float>(p01[c]) +
-            xs.f * (static_cast<float>(p11[c]) - static_cast<float>(p01[c]));
-        const float v = v0 + ys.f * (v1 - v0);
-        const int iv = ClampInt(static_cast<int>(std::lround(v)), 0, 255);
-        dst_row[static_cast<std::size_t>(x) * 3u +
-                static_cast<std::size_t>(c)] = static_cast<std::uint8_t>(iv);
-      }
+      auto *d = dst_row + static_cast<std::size_t>(x) * 3u;
+
+      const float r0 =
+          static_cast<float>(p00[0]) +
+          xf * (static_cast<float>(p10[0]) - static_cast<float>(p00[0]));
+      const float r1 =
+          static_cast<float>(p01[0]) +
+          xf * (static_cast<float>(p11[0]) - static_cast<float>(p01[0]));
+      d[0] = RoundClampByte(r0 + yf * (r1 - r0));
+
+      const float g0 =
+          static_cast<float>(p00[1]) +
+          xf * (static_cast<float>(p10[1]) - static_cast<float>(p00[1]));
+      const float g1 =
+          static_cast<float>(p01[1]) +
+          xf * (static_cast<float>(p11[1]) - static_cast<float>(p01[1]));
+      d[1] = RoundClampByte(g0 + yf * (g1 - g0));
+
+      const float b0 =
+          static_cast<float>(p00[2]) +
+          xf * (static_cast<float>(p10[2]) - static_cast<float>(p00[2]));
+      const float b1 =
+          static_cast<float>(p01[2]) +
+          xf * (static_cast<float>(p11[2]) - static_cast<float>(p01[2]));
+      d[2] = RoundClampByte(b0 + yf * (b1 - b0));
     }
 
     if (dst_stride > active_dst_stride) {

@@ -846,4 +846,116 @@ bool TestResizeRgb24BilinearPreservesActivePixelsAndZerosPadding() {
   return true;
 }
 
+bool TestResizeRgb24BilinearHandlesDegenerateAxesAndPlanReuse() {
+  struct ResizeCase {
+    int src_width;
+    int src_height;
+    int dst_width;
+    int dst_height;
+  };
+
+  const std::array<ResizeCase, 3> cases{{
+      {1, 1, 5, 3},
+      {1, 5, 3, 2},
+      {7, 1, 2, 4},
+  }};
+
+  video::Rgb24BilinearResizePlan plan;
+  std::string err;
+
+  for (const ResizeCase &tc : cases) {
+    const std::size_t src_stride = ActiveRgbBytes(tc.src_width) + 5u;
+    const std::size_t dst_stride = ActiveRgbBytes(tc.dst_width) + 7u;
+    std::vector<std::uint8_t> src(src_stride *
+                                      static_cast<std::size_t>(tc.src_height),
+                                  0xa5u);
+    FillDeterministicRgb(&src, tc.src_width, tc.src_height, src_stride,
+                         0x2468ace0u + static_cast<std::uint32_t>(
+                                            tc.src_width * 31 +
+                                            tc.src_height * 17));
+
+    std::vector<std::uint8_t> expected(
+        dst_stride * static_cast<std::size_t>(tc.dst_height), 0xeeu);
+    for (int y = 0; y < tc.dst_height; ++y) {
+      const float src_y =
+          (static_cast<float>(y) + 0.5f) *
+              (static_cast<float>(tc.src_height) /
+               static_cast<float>(tc.dst_height)) -
+          0.5f;
+      const int y0 =
+          std::clamp(static_cast<int>(std::floor(src_y)), 0,
+                     tc.src_height - 1);
+      const int y1 = std::clamp(y0 + 1, 0, tc.src_height - 1);
+      const float fy = src_y - static_cast<float>(y0);
+
+      const auto *src_row0 =
+          src.data() + static_cast<std::size_t>(y0) * src_stride;
+      const auto *src_row1 =
+          src.data() + static_cast<std::size_t>(y1) * src_stride;
+      auto *dst_row =
+          expected.data() + static_cast<std::size_t>(y) * dst_stride;
+
+      for (int x = 0; x < tc.dst_width; ++x) {
+        const float src_x =
+            (static_cast<float>(x) + 0.5f) *
+                (static_cast<float>(tc.src_width) /
+                 static_cast<float>(tc.dst_width)) -
+            0.5f;
+        const int x0 =
+            std::clamp(static_cast<int>(std::floor(src_x)), 0,
+                       tc.src_width - 1);
+        const int x1 = std::clamp(x0 + 1, 0, tc.src_width - 1);
+        const float fx = src_x - static_cast<float>(x0);
+
+        const auto *p00 = src_row0 + static_cast<std::size_t>(x0) * 3u;
+        const auto *p10 = src_row0 + static_cast<std::size_t>(x1) * 3u;
+        const auto *p01 = src_row1 + static_cast<std::size_t>(x0) * 3u;
+        const auto *p11 = src_row1 + static_cast<std::size_t>(x1) * 3u;
+
+        for (int c = 0; c < 3; ++c) {
+          const float v0 =
+              static_cast<float>(p00[c]) +
+              fx * (static_cast<float>(p10[c]) -
+                    static_cast<float>(p00[c]));
+          const float v1 =
+              static_cast<float>(p01[c]) +
+              fx * (static_cast<float>(p11[c]) -
+                    static_cast<float>(p01[c]));
+          const float v = v0 + fy * (v1 - v0);
+          const int iv = std::clamp(static_cast<int>(std::lround(v)), 0, 255);
+          dst_row[static_cast<std::size_t>(x) * 3u +
+                  static_cast<std::size_t>(c)] =
+              static_cast<std::uint8_t>(iv);
+        }
+      }
+
+      std::fill(dst_row + ActiveRgbBytes(tc.dst_width), dst_row + dst_stride,
+                std::uint8_t{0});
+    }
+
+    std::vector<std::uint8_t> actual(
+        dst_stride * static_cast<std::size_t>(tc.dst_height), 0xeeu);
+    if (!plan.Configure(tc.src_width, tc.src_height, tc.dst_width,
+                        tc.dst_height, &err)) {
+      std::cerr << "Rgb24BilinearResizePlan degenerate configure failed: "
+                << err << "\n";
+      return false;
+    }
+    if (!plan.Apply(src.data(), src_stride, &actual, dst_stride, &err)) {
+      std::cerr << "Rgb24BilinearResizePlan degenerate apply failed: " << err
+                << "\n";
+      return false;
+    }
+
+    if (actual != expected) {
+      std::cerr << "Rgb24BilinearResizePlan degenerate mismatch for "
+                << tc.src_width << "x" << tc.src_height << " -> "
+                << tc.dst_width << "x" << tc.dst_height << "\n";
+      return false;
+    }
+  }
+
+  return true;
+}
+
 } // namespace studiocast::tests
