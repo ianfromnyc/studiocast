@@ -39,6 +39,7 @@ enum class YuyvToRgbBenchBackend {
 enum class RgbBgrBenchBackend {
   current_scalar,
   ssse3,
+  avx2,
   selected,
 };
 
@@ -349,6 +350,8 @@ const char *BackendName(RgbBgrBenchBackend backend) {
     return "current-scalar";
   case RgbBgrBenchBackend::ssse3:
     return "ssse3";
+  case RgbBgrBenchBackend::avx2:
+    return "avx2";
   case RgbBgrBenchBackend::selected:
     return "selected";
   }
@@ -383,6 +386,9 @@ bool BackendAvailable(RgbBgrBenchBackend backend) {
   case RgbBgrBenchBackend::ssse3:
     return studiocast::video::internal::Rgb24Bgr24BackendAvailable(
         Rgb24Bgr24Backend::ssse3);
+  case RgbBgrBenchBackend::avx2:
+    return studiocast::video::internal::Rgb24Bgr24BackendAvailable(
+        Rgb24Bgr24Backend::avx2);
   }
   return false;
 }
@@ -493,6 +499,10 @@ bool Convert(RgbBgrBenchBackend backend, const std::uint8_t *src, int width,
   case RgbBgrBenchBackend::ssse3:
     studiocast::video::internal::Rgb24Bgr24Ssse3(src, dst, width, height,
                                                  src_stride, dst_stride);
+    return true;
+  case RgbBgrBenchBackend::avx2:
+    studiocast::video::internal::Rgb24Bgr24Avx2(src, dst, width, height,
+                                                src_stride, dst_stride);
     return true;
   case RgbBgrBenchBackend::selected:
     studiocast::video::Rgb24ToBgr24(src, dst, width, height, src_stride,
@@ -828,17 +838,59 @@ bool HasArg(int argc, char **argv, std::string_view key) {
   return false;
 }
 
+bool ApplyBackendFilter(std::vector<BenchBackend> *backends,
+                        std::string_view filter) {
+  if (filter.empty())
+    return true;
+  for (BenchBackend backend : *backends) {
+    if (filter == BackendName(backend)) {
+      *backends = {backend};
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ApplyBackendFilter(std::vector<YuyvToRgbBenchBackend> *backends,
+                        std::string_view filter) {
+  if (filter.empty())
+    return true;
+  for (YuyvToRgbBenchBackend backend : *backends) {
+    if (filter == BackendName(backend)) {
+      *backends = {backend};
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ApplyBackendFilter(std::vector<RgbBgrBenchBackend> *backends,
+                        std::string_view filter) {
+  if (filter.empty())
+    return true;
+  for (RgbBgrBenchBackend backend : *backends) {
+    if (filter == BackendName(backend)) {
+      *backends = {backend};
+      return true;
+    }
+  }
+  return false;
+}
+
 void Usage(const char *argv0) {
   std::cout << "StudioCast RGB/YUYV Conversion Benchmark\n\n"
             << "Usage:\n"
             << "  " << argv0
             << " [--iterations N] [--warmup N] [--csv] "
-               "[--only all|convert|resize|copy|prep]\n\n"
+               "[--only all|convert|resize|copy|prep]\n"
+            << "      [--rgb-yuyv-backend NAME] [--yuyv-rgb-backend NAME]\n"
+            << "      [--rgb-bgr-backend NAME]\n\n"
             << "RGB24 -> YUYV backends: original-scalar, current-scalar, "
                "libyuv, ssse3, avx2, selected\n"
             << "YUYV -> RGB24 backends: original-scalar, current-scalar, "
                "sse4.1, avx2, selected\n"
-            << "RGB24 <-> BGR24 backends: current-scalar, ssse3, selected\n"
+            << "RGB24 <-> BGR24 backends: current-scalar, ssse3, avx2, "
+               "selected\n"
             << "Resize/write prep: previous-loop, current\n"
             << "Sizes:    640x480, 1280x720, 1920x1080\n";
 }
@@ -868,7 +920,7 @@ int main(int argc, char **argv) {
       {1280, 720, 1920, 1080},
       {1920, 1080, 1280, 720},
   };
-  const std::vector<BenchBackend> backends{
+  std::vector<BenchBackend> backends{
       BenchBackend::original_scalar,
       BenchBackend::current_scalar,
       BenchBackend::libyuv,
@@ -876,18 +928,44 @@ int main(int argc, char **argv) {
       BenchBackend::avx2,
       BenchBackend::selected,
   };
-  const std::vector<YuyvToRgbBenchBackend> yuyv_to_rgb_backends{
+  std::vector<YuyvToRgbBenchBackend> yuyv_to_rgb_backends{
       YuyvToRgbBenchBackend::original_scalar,
       YuyvToRgbBenchBackend::current_scalar,
       YuyvToRgbBenchBackend::sse41,
       YuyvToRgbBenchBackend::avx2,
       YuyvToRgbBenchBackend::selected,
   };
-  const std::vector<RgbBgrBenchBackend> rgb_bgr_backends{
+  std::vector<RgbBgrBenchBackend> rgb_bgr_backends{
       RgbBgrBenchBackend::current_scalar,
       RgbBgrBenchBackend::ssse3,
+      RgbBgrBenchBackend::avx2,
       RgbBgrBenchBackend::selected,
   };
+
+  const std::string rgb_yuyv_backend =
+      GetArgValue(argc, argv, "--rgb-yuyv-backend");
+  const std::string yuyv_rgb_backend =
+      GetArgValue(argc, argv, "--yuyv-rgb-backend");
+  const std::string rgb_bgr_backend =
+      GetArgValue(argc, argv, "--rgb-bgr-backend");
+  if (!ApplyBackendFilter(&backends, rgb_yuyv_backend)) {
+    std::cerr << "Unknown RGB24 -> YUYV backend: " << rgb_yuyv_backend
+              << "\n\n";
+    Usage(argv[0]);
+    return 2;
+  }
+  if (!ApplyBackendFilter(&yuyv_to_rgb_backends, yuyv_rgb_backend)) {
+    std::cerr << "Unknown YUYV -> RGB24 backend: " << yuyv_rgb_backend
+              << "\n\n";
+    Usage(argv[0]);
+    return 2;
+  }
+  if (!ApplyBackendFilter(&rgb_bgr_backends, rgb_bgr_backend)) {
+    std::cerr << "Unknown RGB24 <-> BGR24 backend: " << rgb_bgr_backend
+              << "\n\n";
+    Usage(argv[0]);
+    return 2;
+  }
 
   std::cout << "StudioCast RGB/YUYV Conversion Benchmark\n";
   std::cout << "Selected RGB24 -> YUYV backend: "

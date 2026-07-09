@@ -371,6 +371,7 @@ if (_studiocast_x86_simd)
             src/core/video/convert_yuyv_rgb_sse41.cpp
             src/core/video/convert_yuyv_rgb_avx2.cpp
             src/core/video/convert_rgb_bgr_ssse3.cpp
+            src/core/video/convert_rgb_bgr_avx2.cpp
     )
     set_source_files_properties(src/core/video/convert_rgb_yuyv_ssse3.cpp
             PROPERTIES COMPILE_OPTIONS "-O3;-mssse3")
@@ -382,6 +383,8 @@ if (_studiocast_x86_simd)
             PROPERTIES COMPILE_OPTIONS "-O3;-mavx2")
     set_source_files_properties(src/core/video/convert_rgb_bgr_ssse3.cpp
             PROPERTIES COMPILE_OPTIONS "-O3;-mssse3")
+    set_source_files_properties(src/core/video/convert_rgb_bgr_avx2.cpp
+            PROPERTIES COMPILE_OPTIONS "-O3;-mavx2")
     target_compile_definitions(studiocast_core PRIVATE STUDIOCAST_HAVE_X86_SIMD=1)
 else()
     target_compile_definitions(studiocast_core PRIVATE STUDIOCAST_HAVE_X86_SIMD=0)

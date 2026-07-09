@@ -173,6 +173,10 @@ bool ConvertRgbBgrWithBackend(video::internal::Rgb24Bgr24Backend backend,
     video::internal::Rgb24Bgr24Ssse3(src, dst, width, height, src_stride,
                                      dst_stride);
     return true;
+  case Rgb24Bgr24Backend::avx2:
+    video::internal::Rgb24Bgr24Avx2(src, dst, width, height, src_stride,
+                                    dst_stride);
+    return true;
   }
 
   return false;
@@ -613,9 +617,10 @@ bool TestRgb24Bgr24BackendsMatchScalarAndPreservePadding() {
       {1920, 1080, 5, 64},
   }};
 
-  const std::array<RgbBgrBackendCase, 2> backends{{
+  const std::array<RgbBgrBackendCase, 3> backends{{
       {Rgb24Bgr24Backend::scalar},
       {Rgb24Bgr24Backend::ssse3},
+      {Rgb24Bgr24Backend::avx2},
   }};
 
   for (const ConvertCase &c : cases) {
@@ -681,7 +686,7 @@ bool TestRgb24Bgr24BackendsMatchScalarAndPreservePadding() {
 }
 
 bool TestRgb24Bgr24PublicPathMatchesScalarInPlace() {
-  constexpr int width = 31;
+  constexpr int width = 63;
   constexpr int height = 9;
   constexpr std::size_t stride = ActiveRgbBytes(width) + 7;
 

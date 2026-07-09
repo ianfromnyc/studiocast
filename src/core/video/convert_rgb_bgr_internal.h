@@ -8,6 +8,7 @@ namespace studiocast::video::internal {
 enum class Rgb24Bgr24Backend {
   scalar,
   ssse3,
+  avx2,
 };
 
 using Rgb24Bgr24Fn = void (*)(const std::uint8_t *src, std::uint8_t *dst,
@@ -31,5 +32,10 @@ bool Rgb24Bgr24Ssse3Available();
 void Rgb24Bgr24Ssse3(const std::uint8_t *src, std::uint8_t *dst, int width,
                      int height, std::size_t src_stride,
                      std::size_t dst_stride);
+
+bool Rgb24Bgr24Avx2Available();
+void Rgb24Bgr24Avx2(const std::uint8_t *src, std::uint8_t *dst, int width,
+                    int height, std::size_t src_stride,
+                    std::size_t dst_stride);
 
 } // namespace studiocast::video::internal
