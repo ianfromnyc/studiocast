@@ -144,6 +144,11 @@ public:
 
   std::string StatusToString(CUresult code) const;
   const std::string &error() const { return error_; }
+  int device_ordinal() const { return device_ordinal_; }
+
+  // Configure the CUDA device ordinal used when retaining a primary context.
+  // This must be set before context-dependent work starts for this instance.
+  bool SetDeviceOrdinal(int device_ordinal, std::string *error_out);
 
   struct PitchAllocation {
     CUdeviceptr ptr = 0;
@@ -173,9 +178,13 @@ public:
 
   // Ensures there is a current CUDA context for subsequent Driver API calls.
   //
-  // If a context is already current on the calling thread, this is a no-op.
-  // Otherwise, we retain and set the primary context for device 0.
+  // We retain and set the primary context for the configured device ordinal.
   bool EnsureContext(std::string *error_out);
+
+  // Configure the device ordinal and ensure its primary context is current.
+  // This is intended for startup/session setup where a higher-level runtime
+  // such as ONNX Runtime is also configured with a CUDA device id.
+  bool EnsureContextForDevice(int device_ordinal, std::string *error_out);
 
 private:
   bool LoadSymbols(std::string *error_out);
@@ -186,6 +195,7 @@ private:
   std::string error_;
 
   bool retained_primary_ctx_ = false;
+  int device_ordinal_ = 0;
   CUdevice primary_dev_ = 0;
   CUcontext primary_ctx_ = nullptr;
   bool primary_ctx_validated_ = false;

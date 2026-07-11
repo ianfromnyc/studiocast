@@ -1,8 +1,9 @@
 #include "core/cuda/kernels/preprocess_to_nchw.h"
 
+#include "core/cuda/kernels/cuda_driver_cache.h"
+#include "core/cuda/kernels/ptx_pitch_contract.h"
+
 #include <cstdint>
-#include <limits>
-#include <mutex>
 
 namespace studiocast::cuda::kernels {
 namespace {
@@ -20,6 +21,12 @@ namespace {
 //   mean0, mean1, mean2,
 //   invStd0, invStd1, invStd2,
 //   dstIsBgr, srcIsBgr
+//
+// PTX_SOURCE: src/core/cuda/kernels/preprocess_to_nchw.cu
+// PTX_GENERATE: nvcc -ptx -O3 -arch=compute_52 -I src src/core/cuda/kernels/preprocess_to_nchw.cu -o preprocess_to_nchw.ptx
+// The embedded body remains hand-authored PTX 6.0 for broad driver JIT
+// compatibility; the freshness validator compiles the source and checks the
+// preprocess_to_nchw_f32 entry ABI.
 static constexpr const char *kPreprocessPtx = R"ptx(
 .version 6.0
 .target sm_30
@@ -269,48 +276,14 @@ DONE:
 }
 )ptx";
 
-struct GlobalCuda {
-  std::once_flag once;
-  studiocast::maxine::CudaDriverApi cuda;
-  bool ok = false;
-  std::string err;
-};
-
-GlobalCuda &g() {
-  static GlobalCuda s;
-  return s;
-}
-
 bool EnsureCudaReady(studiocast::maxine::CudaDriverApi **out_cuda,
                      std::string *error_out) {
-  if (error_out)
-    error_out->clear();
-  GlobalCuda &st = g();
-  std::call_once(st.once, [&]() {
-    std::string e;
-    if (!st.cuda.Initialize(&e)) {
-      st.err = e;
-      st.ok = false;
-      return;
-    }
-    st.ok = true;
-  });
-  if (!st.ok) {
-    if (error_out)
-      *error_out = st.err.empty() ? "CUDA unavailable" : st.err;
-    return false;
-  }
-  std::string e;
-  if (!st.cuda.EnsureContext(&e)) {
-    if (error_out)
-      *error_out = e;
-    return false;
-  }
-  *out_cuda = &st.cuda;
-  return true;
+  return detail::EnsureCudaReady(out_cuda, error_out);
 }
 
 struct KernelState {
+  // CUDA module/function handles are context-bound; keep this cache thread-local
+  // with the thread-local driver/context owner in cuda_driver_cache.h.
   bool loaded = false;
   studiocast::maxine::CUmodule module = nullptr;
   studiocast::maxine::CUfunction fn = nullptr;
@@ -318,42 +291,35 @@ struct KernelState {
 };
 
 KernelState &kernel() {
-  static KernelState s;
+  thread_local KernelState s;
   return s;
 }
 
 bool EnsureKernelLoaded(studiocast::maxine::CudaDriverApi *cuda,
+                        studiocast::maxine::CUfunction *out_fn,
                         std::string *error_out) {
   if (error_out)
     error_out->clear();
+  if (out_fn)
+    *out_fn = nullptr;
+
+  studiocast::maxine::CUcontext cur = nullptr;
+  if (!detail::GetCurrentContext(cuda, &cur, error_out))
+    return false;
+
   KernelState &k = kernel();
   const auto &f = cuda->f();
 
-  // The CUDA driver ties CUmodule/CUfunction handles to the current context.
-  // If the current context changes (e.g. due to other CUDA users in-process),
-  // cached handles become invalid and can yield "invalid resource handle" at
-  // cuLaunchKernel.
-  studiocast::maxine::CUcontext cur = nullptr;
-  if (f.cuCtxGetCurrent) {
-    const auto st_ctx = f.cuCtxGetCurrent(&cur);
-    if (st_ctx != studiocast::maxine::CUDA_SUCCESS || !cur) {
-      if (error_out)
-        *error_out = "cuCtxGetCurrent failed: " + cuda->StatusToString(st_ctx);
-      return false;
-    }
+  if (k.loaded && k.loaded_ctx == cur) {
+    if (out_fn)
+      *out_fn = k.fn;
+    return true;
   }
 
-  if (k.loaded && k.loaded_ctx == cur)
-    return true;
-
-  // Context changed: drop cached handles (we don't have cuModuleUnload in our
-  // minimal ABI surface, so we just stop using the old handle).
-  k.loaded = false;
-  k.module = nullptr;
-  k.fn = nullptr;
-  k.loaded_ctx = nullptr;
   studiocast::maxine::CUresult st = studiocast::maxine::CUDA_SUCCESS;
   std::string jit_log;
+  studiocast::maxine::CUmodule module = nullptr;
+  studiocast::maxine::CUfunction fn = nullptr;
   if (f.cuModuleLoadDataEx) {
     char info[8192] = {0};
     char err[8192] = {0};
@@ -373,13 +339,14 @@ bool EnsureKernelLoaded(studiocast::maxine::CudaDriverApi *cuda,
         reinterpret_cast<void *>(static_cast<std::size_t>(1)),
     };
 
-    st = f.cuModuleLoadDataEx(
-        &k.module, kPreprocessPtx,
-        static_cast<unsigned int>(sizeof(opts) / sizeof(opts[0])), opts, vals);
+    st = f.cuModuleLoadDataEx(&module, kPreprocessPtx,
+                              static_cast<unsigned int>(sizeof(opts) /
+                                                        sizeof(opts[0])),
+                              opts, vals);
     jit_log = std::string("PTX JIT info log:\n") + info +
               "\nPTX JIT error log:\n" + err;
   } else {
-    st = f.cuModuleLoadData(&k.module, kPreprocessPtx);
+    st = f.cuModuleLoadData(&module, kPreprocessPtx);
   }
   if (st != studiocast::maxine::CUDA_SUCCESS) {
     if (error_out) {
@@ -390,15 +357,19 @@ bool EnsureKernelLoaded(studiocast::maxine::CudaDriverApi *cuda,
     }
     return false;
   }
-  st = f.cuModuleGetFunction(&k.fn, k.module, "preprocess_to_nchw_f32");
+  st = f.cuModuleGetFunction(&fn, module, "preprocess_to_nchw_f32");
   if (st != studiocast::maxine::CUDA_SUCCESS) {
     if (error_out)
       *error_out = "cuModuleGetFunction(preprocess_to_nchw_f32) failed: " +
                    cuda->StatusToString(st);
     return false;
   }
+  k.module = module;
+  k.fn = fn;
   k.loaded = true;
   k.loaded_ctx = cur;
+  if (out_fn)
+    *out_fn = k.fn;
   return true;
 }
 
@@ -433,12 +404,9 @@ bool PreprocessToTensor(const CudaImage &src, const CudaTensor &dst,
                    "N=1,C=3,H=spec.dst_h,W=spec.dst_w).";
     return false;
   }
-  if (src.pitch > std::numeric_limits<std::uint32_t>::max()) {
-    if (error_out)
-      *error_out =
-          "PreprocessToTensor: src pitch too large for PTX kernel ABI.";
+  if (!detail::CheckSignedInt32PtxPitch(
+          src.pitch, src.RowBytes(), "PreprocessToTensor(src)", error_out))
     return false;
-  }
   if (spec.std[0] == 0.0f || spec.std[1] == 0.0f || spec.std[2] == 0.0f) {
     if (error_out)
       *error_out = "PreprocessToTensor: std contains zero.";
@@ -458,10 +426,10 @@ bool PreprocessToTensor(const CudaImage &src, const CudaTensor &dst,
   studiocast::maxine::CudaDriverApi *cuda = nullptr;
   if (!EnsureCudaReady(&cuda, error_out))
     return false;
-  if (!EnsureKernelLoaded(cuda, error_out))
+  studiocast::maxine::CUfunction fn = nullptr;
+  if (!EnsureKernelLoaded(cuda, &fn, error_out))
     return false;
 
-  KernelState &k = kernel();
   const auto &f = cuda->f();
 
   const std::uint32_t src_pitch = static_cast<std::uint32_t>(src.pitch);
@@ -508,7 +476,7 @@ bool PreprocessToTensor(const CudaImage &src, const CudaTensor &dst,
       (static_cast<unsigned int>(spec.dst_h) + block_y - 1u) / block_y;
 
   const studiocast::maxine::CUresult st = f.cuLaunchKernel(
-      k.fn, grid_x, grid_y, 1, block_x, block_y, 1, 0, stream, args, nullptr);
+      fn, grid_x, grid_y, 1, block_x, block_y, 1, 0, stream, args, nullptr);
   if (st != studiocast::maxine::CUDA_SUCCESS) {
     if (error_out)
       *error_out = "cuLaunchKernel(preprocess_to_nchw_f32) failed: " +

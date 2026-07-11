@@ -2301,7 +2301,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
       }
 
-      alpha_model_view = studiocast::cuda::CudaImage{};
+      alpha_model_view.ClearMetadata();
       session.reset();
       pack.reset();
       active_model_id.clear();
@@ -2489,7 +2489,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           session.reset();
           pack.reset();
           (void)alpha_tensor.Free(&cuda, nullptr);
-          alpha_model_view = studiocast::cuda::CudaImage{};
+          alpha_model_view.ClearMetadata();
 
           cached_matte_sequence = 0;
           cached_matte_valid = false;
@@ -2530,7 +2530,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       if (!session) {
         studiocast::open_cuda::OpenCudaMattingSession::Options session_opts;
-        session_opts.device_id = 0;
+        session_opts.device_id = cuda.device_ordinal();
         session_opts.enable_tensorrt = OpenCudaTensorRtEnabledFromEnv();
         session =
             std::make_unique<studiocast::open_cuda::OpenCudaMattingSession>(
@@ -9494,7 +9494,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     std::string derr;
     (void)gpu_rgb_scaled.Free(&open_cuda_vb.cuda, &derr);
   }
-  gpu_rgb_scaled = studiocast::cuda::CudaImage{};
+  gpu_rgb_scaled.ClearMetadata();
   gpu_rgb_scaled_allocated = false;
 
   // Cleanup Open CUDA ping-pong frame buffers.
@@ -9508,8 +9508,8 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       (void)open_cuda_frame_b.Free(&open_cuda_vb.cuda, &derr);
     }
   }
-  open_cuda_frame_a = studiocast::cuda::CudaImage{};
-  open_cuda_frame_b = studiocast::cuda::CudaImage{};
+  open_cuda_frame_a.ClearMetadata();
+  open_cuda_frame_b.ClearMetadata();
   open_cuda_curr = nullptr;
   open_cuda_next = nullptr;
   open_cuda_uploaded_this_frame = false;

@@ -25,6 +25,13 @@ bool TestFrameArtifactCacheReusesCompatibleMaxineMatteWithinFrame();
 bool TestFrameArtifactCacheSeparatesIncompatibleMatteKeys();
 bool TestFrameArtifactCacheInvalidatesMatteOnNewFrame();
 bool TestFrameArtifactCachePrecomputedMatteKeysPreserveCompatibility();
+bool TestCudaContextClassifierPrefersCurrentContext();
+bool TestSignedInt32PtxPitchContractIsNoGpuSafe();
+bool TestOpenCudaBoxBlurRadiusBoundsAreNoGpuSafe();
+bool TestOpenCudaF32ResizeBorderContractIsReplicateNoGpuSafe();
+bool TestOpenCudaAlphaClampAndSolidBgrContractNoGpuSafe();
+bool TestCudaU8ResizeRoundingContractIsNoGpuSafe();
+bool TestCudaResizeAvailabilityProbeIsThreadSafe();
 bool TestV4l2CapturePreferenceTreats720pAsMjpegWorthy();
 bool TestV4l2YuyvRequestTriesMjpegFirstAtHdWhenPreferred();
 bool TestV4l2YuyvRequestFallsBackToMjpegAfterYuyvAtLowResolution();
@@ -1041,6 +1048,22 @@ int main() {
       {"frame artifact cache precomputed matte keys preserve compatibility",
        &studiocast::tests::
            TestFrameArtifactCachePrecomputedMatteKeysPreserveCompatibility},
+      {"CUDA context classifier prefers current context",
+       &studiocast::tests::TestCudaContextClassifierPrefersCurrentContext},
+      {"signed int32 PTX pitch contract is no-GPU safe",
+       &studiocast::tests::TestSignedInt32PtxPitchContractIsNoGpuSafe},
+      {"Open CUDA box blur radius bounds are no-GPU safe",
+       &studiocast::tests::TestOpenCudaBoxBlurRadiusBoundsAreNoGpuSafe},
+      {"Open CUDA f32 resize border contract is replicate",
+       &studiocast::tests::
+           TestOpenCudaF32ResizeBorderContractIsReplicateNoGpuSafe},
+      {"Open CUDA alpha clamp and solid BGR contract are no-GPU safe",
+       &studiocast::tests::
+           TestOpenCudaAlphaClampAndSolidBgrContractNoGpuSafe},
+      {"CUDA u8 resize rounding contract is no-GPU safe",
+       &studiocast::tests::TestCudaU8ResizeRoundingContractIsNoGpuSafe},
+      {"CUDA resize availability probe is thread-safe",
+       &studiocast::tests::TestCudaResizeAvailabilityProbeIsThreadSafe},
       {"V4L2 capture treats 720p as MJPEG-worthy",
        &studiocast::tests::TestV4l2CapturePreferenceTreats720pAsMjpegWorthy},
       {"V4L2 YUYV request tries MJPEG first at HD when preferred",

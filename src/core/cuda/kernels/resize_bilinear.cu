@@ -6,6 +6,13 @@
 
 #include <cuda_runtime.h>
 
+// Reference CUDA C source for the embedded Driver API PTX module in
+// resize_bilinear_ptx.cpp. The CMake freshness test compiles this file to PTX
+// and checks the resize_bilinear_u8x3 entry ABI; StudioCast's normal build does
+// not compile this .cu file into the application.
+//
+// PTX_GENERATE: nvcc -ptx -O3 -arch=compute_52 -I src src/core/cuda/kernels/resize_bilinear.cu -o resize_bilinear.ptx
+
 namespace studiocast::cuda::kernels {
 namespace {
 
@@ -73,6 +80,55 @@ __global__ void CropResizeBilinearU8InterleavedKernel(
 }
 
 } // namespace
+
+extern "C" __global__ void resize_bilinear_u8x3(
+    const unsigned char *src, unsigned int src_pitch, unsigned int src_w,
+    unsigned int src_h, unsigned char *dst, unsigned int dst_pitch,
+    unsigned int dst_w, unsigned int dst_h, float crop_x, float crop_y,
+    float crop_w, float crop_h) {
+  const int x = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
+  if (x >= static_cast<int>(dst_w) || y >= static_cast<int>(dst_h))
+    return;
+
+  const float scale_x = crop_w / static_cast<float>(dst_w);
+  const float scale_y = crop_h / static_cast<float>(dst_h);
+
+  const float src_x = crop_x + (static_cast<float>(x) + 0.5f) * scale_x - 0.5f;
+  const float src_y = crop_y + (static_cast<float>(y) + 0.5f) * scale_y - 0.5f;
+
+  const int src_w_max = static_cast<int>(src_w) - 1;
+  const int src_h_max = static_cast<int>(src_h) - 1;
+  const int x0 = ClampInt(static_cast<int>(src_x), 0, src_w_max);
+  const int y0 = ClampInt(static_cast<int>(src_y), 0, src_h_max);
+  const int x1 = ClampInt(x0 + 1, 0, src_w_max);
+  const int y1 = ClampInt(y0 + 1, 0, src_h_max);
+
+  const float fx = src_x - static_cast<float>(x0);
+  const float fy = src_y - static_cast<float>(y0);
+
+  const auto *row0 = src + static_cast<unsigned int>(y0) * src_pitch;
+  const auto *row1 = src + static_cast<unsigned int>(y1) * src_pitch;
+  const auto *p00 = row0 + static_cast<unsigned int>(x0) * 3u;
+  const auto *p10 = row0 + static_cast<unsigned int>(x1) * 3u;
+  const auto *p01 = row1 + static_cast<unsigned int>(x0) * 3u;
+  const auto *p11 = row1 + static_cast<unsigned int>(x1) * 3u;
+
+  auto *dst_row = dst + static_cast<unsigned int>(y) * dst_pitch;
+  auto *out_px = dst_row + static_cast<unsigned int>(x) * 3u;
+
+  for (int c = 0; c < 3; ++c) {
+    const float p00f = static_cast<float>(p00[c]);
+    const float p10f = static_cast<float>(p10[c]);
+    const float p01f = static_cast<float>(p01[c]);
+    const float p11f = static_cast<float>(p11[c]);
+    const float v0 = p00f + fx * (p10f - p00f);
+    const float v1 = p01f + fx * (p11f - p01f);
+    const float v = v0 + fy * (v1 - v0);
+    out_px[c] = static_cast<unsigned char>(
+        ClampInt(static_cast<int>(v + 0.5f), 0, 255));
+  }
+}
 
 bool IsResizeBilinearAvailable(std::string *error_out) {
   if (error_out)

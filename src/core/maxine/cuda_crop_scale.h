@@ -1,11 +1,26 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 #include "core/maxine/cuda_driver_api.h"
 #include "core/maxine/nvcv_types.h"
 
 namespace studiocast::maxine {
+
+namespace detail {
+
+// BGR resize byte rounding matches the Open CUDA resize contract: clamp to byte
+// range, then round non-negative interpolated values half-up.
+inline std::uint8_t RoundClampBgrResizeBilinearU8(float v) {
+  if (v <= 0.0f)
+    return 0;
+  if (v >= 255.0f)
+    return 255;
+  return static_cast<std::uint8_t>(static_cast<int>(v + 0.5f));
+}
+
+} // namespace detail
 
 // Crop+scale for chunky BGR U8 GPU images using a tiny CUDA kernel.
 //

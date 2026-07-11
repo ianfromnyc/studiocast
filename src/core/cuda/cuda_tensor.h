@@ -8,6 +8,15 @@
 
 namespace studiocast::cuda {
 
+struct CudaTensorSize {
+  std::size_t elements = 0;
+  std::size_t bytes = 0;
+};
+
+bool CheckedNchwF32Size(int n, int c, int h, int w,
+                        CudaTensorSize *size_out,
+                        std::string *error_out);
+
 // Minimal CUDA tensor buffer for model inputs/outputs.
 //
 // - Maxine-independent.
@@ -15,6 +24,12 @@ namespace studiocast::cuda {
 // - Allocation uses cuMemAllocPitch with Height=1, so the tensor is contiguous
 //   for `bytes` active bytes, but may have extra trailing capacity.
 struct CudaTensor {
+  CudaTensor() = default;
+  CudaTensor(const CudaTensor &) = delete;
+  CudaTensor &operator=(const CudaTensor &) = delete;
+  CudaTensor(CudaTensor &&other) noexcept;
+  CudaTensor &operator=(CudaTensor &&other) = delete;
+
   studiocast::maxine::CUdeviceptr ptr = 0;
   std::size_t pitch =
       0; // bytes between rows in the underlying allocation (Height=1)
@@ -48,6 +63,10 @@ struct CudaTensor {
                         std::vector<float> *out,
                         studiocast::maxine::CUstream stream,
                         std::string *error_out) const;
+
+private:
+  void MoveFrom(CudaTensor &other) noexcept;
+  void ResetMetadata() noexcept;
 };
 
 } // namespace studiocast::cuda
