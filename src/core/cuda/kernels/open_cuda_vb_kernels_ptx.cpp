@@ -1,17 +1,19 @@
 #include "core/cuda/kernels/open_cuda_vb_kernels.h"
 
+#include "core/cuda/kernels/cuda_driver_cache.h"
+#include "core/cuda/kernels/ptx_pitch_contract.h"
+
 #include <algorithm>
 #include <cstdint>
-#include <limits>
-#include <mutex>
 #include <string>
 
 namespace studiocast::cuda::kernels {
 namespace {
 
 // Embedded PTX for kernels in open_cuda_vb_kernels.cu.
+// PTX_SOURCE: src/core/cuda/kernels/open_cuda_vb_kernels.cu
 // Generated with:
-//   nvcc -ptx -O3 --use_fast_math -arch=compute_52 open_cuda_vb_kernels.cu
+// PTX_GENERATE: nvcc -ptx -O3 --use_fast_math -arch=compute_52 -I src src/core/cuda/kernels/open_cuda_vb_kernels.cu -o open_cuda_vb_kernels.ptx
 // Keep the generated PTX unchanged here. EnsureKernelsLoaded() falls back to a
 // compatibility PTX ISA declaration for older driver JITs when needed.
 static constexpr const char *kOpenCudaVbPtx = R"ptx(
@@ -40,9 +42,9 @@ static constexpr const char *kOpenCudaVbPtx = R"ptx(
 	.param .u32 resize_bilinear_f32_1_param_7
 )
 {
-	.reg .pred 	%p<8>;
-	.reg .f32 	%f<29>;
-	.reg .b32 	%r<29>;
+	.reg .pred 	%p<10>;
+	.reg .f32 	%f<35>;
+	.reg .b32 	%r<25>;
 	.reg .b64 	%rd<24>;
 
 
@@ -78,63 +80,67 @@ static constexpr const char *kOpenCudaVbPtx = R"ptx(
 	cvt.rn.f32.s32 	%f7, %r1;
 	add.ftz.f32 	%f8, %f7, 0f3F000000;
 	fma.rn.ftz.f32 	%f9, %f8, %f3, 0fBF000000;
-	cvt.rn.f32.s32 	%f10, %r2;
-	add.ftz.f32 	%f11, %f10, 0f3F000000;
-	fma.rn.ftz.f32 	%f12, %f11, %f6, 0fBF000000;
-	cvt.rmi.ftz.f32.f32 	%f13, %f9;
-	cvt.rzi.ftz.s32.f32 	%r15, %f13;
-	cvt.rmi.ftz.f32.f32 	%f14, %f12;
-	cvt.rzi.ftz.s32.f32 	%r16, %f14;
-	cvt.rn.f32.s32 	%f15, %r15;
-	sub.ftz.f32 	%f16, %f9, %f15;
-	cvt.rn.f32.s32 	%f17, %r16;
-	sub.ftz.f32 	%f18, %f12, %f17;
-	setp.lt.s32 	%p4, %r15, 0;
-	add.s32 	%r17, %r4, -1;
-	min.s32 	%r18, %r15, %r17;
-	selp.b32 	%r19, 0, %r18, %p4;
-	setp.lt.s32 	%p5, %r16, 0;
-	add.s32 	%r20, %r5, -1;
-	min.s32 	%r21, %r16, %r20;
-	selp.b32 	%r22, 0, %r21, %p5;
-	add.s32 	%r23, %r19, 1;
-	setp.lt.s32 	%p6, %r19, -1;
-	min.s32 	%r24, %r23, %r17;
-	selp.b32 	%r25, 0, %r24, %p6;
-	add.s32 	%r26, %r22, 1;
-	setp.lt.s32 	%p7, %r22, -1;
-	min.s32 	%r27, %r26, %r20;
-	selp.b32 	%r28, 0, %r27, %p7;
-	cvt.s64.s32 	%rd5, %r22;
+	add.ftz.f32 	%f10, %f2, 0fBF800000;
+	setp.lt.ftz.f32 	%p4, %f9, 0f00000000;
+	setp.gt.ftz.f32 	%p5, %f9, %f10;
+	selp.f32 	%f11, %f10, %f9, %p5;
+	selp.f32 	%f12, 0f00000000, %f11, %p4;
+	cvt.rn.f32.s32 	%f13, %r2;
+	add.ftz.f32 	%f14, %f13, 0f3F000000;
+	fma.rn.ftz.f32 	%f15, %f14, %f6, 0fBF000000;
+	add.ftz.f32 	%f16, %f5, 0fBF800000;
+	setp.lt.ftz.f32 	%p6, %f15, 0f00000000;
+	setp.gt.ftz.f32 	%p7, %f15, %f16;
+	selp.f32 	%f17, %f16, %f15, %p7;
+	selp.f32 	%f18, 0f00000000, %f17, %p6;
+	cvt.rmi.ftz.f32.f32 	%f19, %f12;
+	cvt.rzi.ftz.s32.f32 	%r15, %f19;
+	cvt.rmi.ftz.f32.f32 	%f20, %f18;
+	cvt.rzi.ftz.s32.f32 	%r16, %f20;
+	cvt.rn.f32.s32 	%f21, %r15;
+	sub.ftz.f32 	%f22, %f12, %f21;
+	cvt.rn.f32.s32 	%f23, %r16;
+	sub.ftz.f32 	%f24, %f18, %f23;
+	add.s32 	%r17, %r15, 1;
+	setp.lt.s32 	%p8, %r15, -1;
+	add.s32 	%r18, %r4, -1;
+	min.s32 	%r19, %r17, %r18;
+	selp.b32 	%r20, 0, %r19, %p8;
+	add.s32 	%r21, %r16, 1;
+	setp.lt.s32 	%p9, %r16, -1;
+	add.s32 	%r22, %r5, -1;
+	min.s32 	%r23, %r21, %r22;
+	selp.b32 	%r24, 0, %r23, %p9;
+	cvt.s64.s32 	%rd5, %r16;
 	cvt.u64.u32 	%rd6, %r3;
 	mul.lo.s64 	%rd7, %rd5, %rd6;
 	add.s64 	%rd8, %rd3, %rd7;
-	cvt.s64.s32 	%rd9, %r28;
+	cvt.s64.s32 	%rd9, %r24;
 	mul.lo.s64 	%rd10, %rd9, %rd6;
 	add.s64 	%rd11, %rd3, %rd10;
-	mul.wide.s32 	%rd12, %r19, 4;
+	mul.wide.s32 	%rd12, %r15, 4;
 	add.s64 	%rd13, %rd8, %rd12;
-	mul.wide.s32 	%rd14, %r25, 4;
+	mul.wide.s32 	%rd14, %r20, 4;
 	add.s64 	%rd15, %rd8, %rd14;
 	add.s64 	%rd16, %rd11, %rd12;
 	add.s64 	%rd17, %rd11, %rd14;
-	ld.global.f32 	%f19, [%rd15];
-	ld.global.f32 	%f20, [%rd13];
-	sub.ftz.f32 	%f21, %f19, %f20;
-	fma.rn.ftz.f32 	%f22, %f16, %f21, %f20;
-	ld.global.f32 	%f23, [%rd17];
-	ld.global.f32 	%f24, [%rd16];
-	sub.ftz.f32 	%f25, %f23, %f24;
-	fma.rn.ftz.f32 	%f26, %f16, %f25, %f24;
-	sub.ftz.f32 	%f27, %f26, %f22;
-	fma.rn.ftz.f32 	%f28, %f18, %f27, %f22;
+	ld.global.f32 	%f25, [%rd15];
+	ld.global.f32 	%f26, [%rd13];
+	sub.ftz.f32 	%f27, %f25, %f26;
+	fma.rn.ftz.f32 	%f28, %f22, %f27, %f26;
+	ld.global.f32 	%f29, [%rd17];
+	ld.global.f32 	%f30, [%rd16];
+	sub.ftz.f32 	%f31, %f29, %f30;
+	fma.rn.ftz.f32 	%f32, %f22, %f31, %f30;
+	sub.ftz.f32 	%f33, %f32, %f28;
+	fma.rn.ftz.f32 	%f34, %f24, %f33, %f28;
 	cvt.u64.u32 	%rd18, %r6;
 	cvt.s64.s32 	%rd19, %r2;
 	mul.lo.s64 	%rd20, %rd18, %rd19;
 	add.s64 	%rd21, %rd4, %rd20;
 	mul.wide.s32 	%rd22, %r1, 4;
 	add.s64 	%rd23, %rd21, %rd22;
-	st.global.f32 	[%rd23], %f28;
+	st.global.f32 	[%rd23], %f34;
 
 $L__BB0_2:
 	ret;
@@ -814,9 +820,9 @@ $L__BB4_9:
 	.param .u32 composite_alpha_u8x3_bg_param_9
 )
 {
-	.reg .pred 	%p<12>;
+	.reg .pred 	%p<14>;
 	.reg .b16 	%rs<7>;
-	.reg .f32 	%f<27>;
+	.reg .f32 	%f<28>;
 	.reg .b32 	%r<19>;
 	.reg .b64 	%rd<28>;
 
@@ -859,12 +865,15 @@ $L__BB4_9:
 	mul.wide.s32 	%rd17, %r1, 4;
 	add.s64 	%rd18, %rd16, %rd17;
 	ld.global.f32 	%f1, [%rd18];
-	setp.lt.ftz.f32 	%p4, %f1, 0f00000000;
-	setp.gt.ftz.f32 	%p5, %f1, 0f3F800000;
-	mov.f32 	%f2, 0f3F800000;
-	selp.f32 	%f3, 0f3F800000, %f1, %p5;
-	selp.f32 	%f4, 0f00000000, %f3, %p4;
-	sub.ftz.f32 	%f5, %f2, %f4;
+	abs.ftz.f32 	%f2, %f1;
+	setp.geu.ftz.f32 	%p4, %f2, 0f7F800000;
+	setp.lt.ftz.f32 	%p5, %f1, 0f00000000;
+	setp.gt.ftz.f32 	%p6, %f1, 0f3F800000;
+	mov.f32 	%f3, 0f3F800000;
+	selp.f32 	%f4, 0f3F800000, %f1, %p6;
+	or.pred  	%p7, %p5, %p4;
+	selp.f32 	%f5, 0f00000000, %f4, %p7;
+	sub.ftz.f32 	%f6, %f3, %f5;
 	cvt.u64.u32 	%rd19, %r6;
 	mul.lo.s64 	%rd20, %rd19, %rd10;
 	mul.lo.s32 	%r15, %r1, 3;
@@ -872,47 +881,47 @@ $L__BB4_9:
 	add.s64 	%rd22, %rd11, %rd21;
 	add.s64 	%rd23, %rd7, %rd22;
 	ld.global.u8 	%rs1, [%rd23];
-	cvt.rn.f32.u16 	%f6, %rs1;
+	cvt.rn.f32.u16 	%f7, %rs1;
 	add.s64 	%rd24, %rd13, %rd21;
 	add.s64 	%rd25, %rd6, %rd24;
 	ld.global.u8 	%rs2, [%rd25];
-	cvt.rn.f32.u16 	%f7, %rs2;
-	mul.ftz.f32 	%f8, %f5, %f7;
-	fma.rn.ftz.f32 	%f9, %f4, %f6, %f8;
-	setp.lt.ftz.f32 	%p6, %f9, 0f00000000;
-	setp.gt.ftz.f32 	%p7, %f9, 0f437F0000;
-	selp.f32 	%f10, 0f437F0000, %f9, %p7;
-	add.ftz.f32 	%f11, %f10, 0f3F000000;
-	selp.f32 	%f12, 0f3F000000, %f11, %p6;
-	cvt.rzi.ftz.u32.f32 	%r16, %f12;
+	cvt.rn.f32.u16 	%f8, %rs2;
+	mul.ftz.f32 	%f9, %f6, %f8;
+	fma.rn.ftz.f32 	%f10, %f5, %f7, %f9;
+	setp.lt.ftz.f32 	%p8, %f10, 0f00000000;
+	setp.gt.ftz.f32 	%p9, %f10, 0f437F0000;
+	selp.f32 	%f11, 0f437F0000, %f10, %p9;
+	add.ftz.f32 	%f12, %f11, 0f3F000000;
+	selp.f32 	%f13, 0f3F000000, %f12, %p8;
+	cvt.rzi.ftz.u32.f32 	%r16, %f13;
 	add.s64 	%rd26, %rd20, %rd21;
 	add.s64 	%rd27, %rd5, %rd26;
 	st.global.u8 	[%rd27], %r16;
 	ld.global.u8 	%rs3, [%rd23+1];
-	cvt.rn.f32.u16 	%f13, %rs3;
+	cvt.rn.f32.u16 	%f14, %rs3;
 	ld.global.u8 	%rs4, [%rd25+1];
-	cvt.rn.f32.u16 	%f14, %rs4;
-	mul.ftz.f32 	%f15, %f5, %f14;
-	fma.rn.ftz.f32 	%f16, %f4, %f13, %f15;
-	setp.lt.ftz.f32 	%p8, %f16, 0f00000000;
-	setp.gt.ftz.f32 	%p9, %f16, 0f437F0000;
-	selp.f32 	%f17, 0f437F0000, %f16, %p9;
-	add.ftz.f32 	%f18, %f17, 0f3F000000;
-	selp.f32 	%f19, 0f3F000000, %f18, %p8;
-	cvt.rzi.ftz.u32.f32 	%r17, %f19;
+	cvt.rn.f32.u16 	%f15, %rs4;
+	mul.ftz.f32 	%f16, %f6, %f15;
+	fma.rn.ftz.f32 	%f17, %f5, %f14, %f16;
+	setp.lt.ftz.f32 	%p10, %f17, 0f00000000;
+	setp.gt.ftz.f32 	%p11, %f17, 0f437F0000;
+	selp.f32 	%f18, 0f437F0000, %f17, %p11;
+	add.ftz.f32 	%f19, %f18, 0f3F000000;
+	selp.f32 	%f20, 0f3F000000, %f19, %p10;
+	cvt.rzi.ftz.u32.f32 	%r17, %f20;
 	st.global.u8 	[%rd27+1], %r17;
 	ld.global.u8 	%rs5, [%rd23+2];
-	cvt.rn.f32.u16 	%f20, %rs5;
+	cvt.rn.f32.u16 	%f21, %rs5;
 	ld.global.u8 	%rs6, [%rd25+2];
-	cvt.rn.f32.u16 	%f21, %rs6;
-	mul.ftz.f32 	%f22, %f5, %f21;
-	fma.rn.ftz.f32 	%f23, %f4, %f20, %f22;
-	setp.lt.ftz.f32 	%p10, %f23, 0f00000000;
-	setp.gt.ftz.f32 	%p11, %f23, 0f437F0000;
-	selp.f32 	%f24, 0f437F0000, %f23, %p11;
-	add.ftz.f32 	%f25, %f24, 0f3F000000;
-	selp.f32 	%f26, 0f3F000000, %f25, %p10;
-	cvt.rzi.ftz.u32.f32 	%r18, %f26;
+	cvt.rn.f32.u16 	%f22, %rs6;
+	mul.ftz.f32 	%f23, %f6, %f22;
+	fma.rn.ftz.f32 	%f24, %f5, %f21, %f23;
+	setp.lt.ftz.f32 	%p12, %f24, 0f00000000;
+	setp.gt.ftz.f32 	%p13, %f24, 0f437F0000;
+	selp.f32 	%f25, 0f437F0000, %f24, %p13;
+	add.ftz.f32 	%f26, %f25, 0f3F000000;
+	selp.f32 	%f27, 0f3F000000, %f26, %p12;
+	cvt.rzi.ftz.u32.f32 	%r18, %f27;
 	st.global.u8 	[%rd27+2], %r18;
 
 $L__BB5_2:
@@ -934,9 +943,9 @@ $L__BB5_2:
 	.param .u32 composite_alpha_u8x3_solid_param_10
 )
 {
-	.reg .pred 	%p<12>;
+	.reg .pred 	%p<14>;
 	.reg .b16 	%rs<7>;
-	.reg .f32 	%f<27>;
+	.reg .f32 	%f<28>;
 	.reg .b32 	%r<18>;
 	.reg .b64 	%rd<22>;
 
@@ -977,12 +986,15 @@ $L__BB5_2:
 	mul.wide.s32 	%rd13, %r1, 4;
 	add.s64 	%rd14, %rd12, %rd13;
 	ld.global.f32 	%f1, [%rd14];
-	setp.lt.ftz.f32 	%p4, %f1, 0f00000000;
-	setp.gt.ftz.f32 	%p5, %f1, 0f3F800000;
-	mov.f32 	%f2, 0f3F800000;
-	selp.f32 	%f3, 0f3F800000, %f1, %p5;
-	selp.f32 	%f4, 0f00000000, %f3, %p4;
-	sub.ftz.f32 	%f5, %f2, %f4;
+	abs.ftz.f32 	%f2, %f1;
+	setp.geu.ftz.f32 	%p4, %f2, 0f7F800000;
+	setp.lt.ftz.f32 	%p5, %f1, 0f00000000;
+	setp.gt.ftz.f32 	%p6, %f1, 0f3F800000;
+	mov.f32 	%f3, 0f3F800000;
+	selp.f32 	%f4, 0f3F800000, %f1, %p6;
+	or.pred  	%p7, %p5, %p4;
+	selp.f32 	%f5, 0f00000000, %f4, %p7;
+	sub.ftz.f32 	%f6, %f3, %f5;
 	cvt.u64.u32 	%rd15, %r5;
 	mul.lo.s64 	%rd16, %rd15, %rd8;
 	mul.lo.s32 	%r14, %r1, 3;
@@ -990,42 +1002,42 @@ $L__BB5_2:
 	add.s64 	%rd18, %rd9, %rd17;
 	add.s64 	%rd19, %rd5, %rd18;
 	ld.global.u8 	%rs4, [%rd19];
-	cvt.rn.f32.u16 	%f6, %rs4;
-	cvt.rn.f32.u16 	%f7, %rs1;
-	mul.ftz.f32 	%f8, %f5, %f7;
-	fma.rn.ftz.f32 	%f9, %f4, %f6, %f8;
-	setp.lt.ftz.f32 	%p6, %f9, 0f00000000;
-	setp.gt.ftz.f32 	%p7, %f9, 0f437F0000;
-	selp.f32 	%f10, 0f437F0000, %f9, %p7;
-	add.ftz.f32 	%f11, %f10, 0f3F000000;
-	selp.f32 	%f12, 0f3F000000, %f11, %p6;
-	cvt.rzi.ftz.u32.f32 	%r15, %f12;
+	cvt.rn.f32.u16 	%f7, %rs4;
+	cvt.rn.f32.u16 	%f8, %rs1;
+	mul.ftz.f32 	%f9, %f6, %f8;
+	fma.rn.ftz.f32 	%f10, %f5, %f7, %f9;
+	setp.lt.ftz.f32 	%p8, %f10, 0f00000000;
+	setp.gt.ftz.f32 	%p9, %f10, 0f437F0000;
+	selp.f32 	%f11, 0f437F0000, %f10, %p9;
+	add.ftz.f32 	%f12, %f11, 0f3F000000;
+	selp.f32 	%f13, 0f3F000000, %f12, %p8;
+	cvt.rzi.ftz.u32.f32 	%r15, %f13;
 	add.s64 	%rd20, %rd16, %rd17;
 	add.s64 	%rd21, %rd4, %rd20;
 	st.global.u8 	[%rd21], %r15;
 	ld.global.u8 	%rs5, [%rd19+1];
-	cvt.rn.f32.u16 	%f13, %rs5;
-	cvt.rn.f32.u16 	%f14, %rs2;
-	mul.ftz.f32 	%f15, %f5, %f14;
-	fma.rn.ftz.f32 	%f16, %f4, %f13, %f15;
-	setp.lt.ftz.f32 	%p8, %f16, 0f00000000;
-	setp.gt.ftz.f32 	%p9, %f16, 0f437F0000;
-	selp.f32 	%f17, 0f437F0000, %f16, %p9;
-	add.ftz.f32 	%f18, %f17, 0f3F000000;
-	selp.f32 	%f19, 0f3F000000, %f18, %p8;
-	cvt.rzi.ftz.u32.f32 	%r16, %f19;
+	cvt.rn.f32.u16 	%f14, %rs5;
+	cvt.rn.f32.u16 	%f15, %rs2;
+	mul.ftz.f32 	%f16, %f6, %f15;
+	fma.rn.ftz.f32 	%f17, %f5, %f14, %f16;
+	setp.lt.ftz.f32 	%p10, %f17, 0f00000000;
+	setp.gt.ftz.f32 	%p11, %f17, 0f437F0000;
+	selp.f32 	%f18, 0f437F0000, %f17, %p11;
+	add.ftz.f32 	%f19, %f18, 0f3F000000;
+	selp.f32 	%f20, 0f3F000000, %f19, %p10;
+	cvt.rzi.ftz.u32.f32 	%r16, %f20;
 	st.global.u8 	[%rd21+1], %r16;
 	ld.global.u8 	%rs6, [%rd19+2];
-	cvt.rn.f32.u16 	%f20, %rs6;
-	cvt.rn.f32.u16 	%f21, %rs3;
-	mul.ftz.f32 	%f22, %f5, %f21;
-	fma.rn.ftz.f32 	%f23, %f4, %f20, %f22;
-	setp.lt.ftz.f32 	%p10, %f23, 0f00000000;
-	setp.gt.ftz.f32 	%p11, %f23, 0f437F0000;
-	selp.f32 	%f24, 0f437F0000, %f23, %p11;
-	add.ftz.f32 	%f25, %f24, 0f3F000000;
-	selp.f32 	%f26, 0f3F000000, %f25, %p10;
-	cvt.rzi.ftz.u32.f32 	%r17, %f26;
+	cvt.rn.f32.u16 	%f21, %rs6;
+	cvt.rn.f32.u16 	%f22, %rs3;
+	mul.ftz.f32 	%f23, %f6, %f22;
+	fma.rn.ftz.f32 	%f24, %f5, %f21, %f23;
+	setp.lt.ftz.f32 	%p12, %f24, 0f00000000;
+	setp.gt.ftz.f32 	%p13, %f24, 0f437F0000;
+	selp.f32 	%f25, 0f437F0000, %f24, %p13;
+	add.ftz.f32 	%f26, %f25, 0f3F000000;
+	selp.f32 	%f27, 0f3F000000, %f26, %p12;
+	cvt.rzi.ftz.u32.f32 	%r17, %f27;
 	st.global.u8 	[%rd21+2], %r17;
 
 $L__BB6_2:
@@ -1049,9 +1061,9 @@ $L__BB6_2:
 	.param .u32 key_light_u8x3_param_12
 )
 {
-	.reg .pred 	%p<20>;
+	.reg .pred 	%p<22>;
 	.reg .b16 	%rs<7>;
-	.reg .f32 	%f<44>;
+	.reg .f32 	%f<45>;
 	.reg .b32 	%r<18>;
 	.reg .b64 	%rd<22>;
 
@@ -1094,13 +1106,16 @@ $L__BB6_2:
 	mul.wide.s32 	%rd15, %r1, 4;
 	add.s64 	%rd16, %rd14, %rd15;
 	ld.global.f32 	%f10, [%rd16];
-	setp.lt.ftz.f32 	%p4, %f10, 0f00000000;
-	setp.gt.ftz.f32 	%p5, %f10, 0f3F800000;
-	selp.f32 	%f11, 0f3F800000, %f10, %p5;
-	selp.f32 	%f1, 0f00000000, %f11, %p4;
-	setp.le.ftz.f32 	%p6, %f1, 0f3CA3D70A;
-	setp.le.ftz.f32 	%p7, %f8, 0f38D1B717;
-	or.pred  	%p8, %p7, %p6;
+	abs.ftz.f32 	%f11, %f10;
+	setp.geu.ftz.f32 	%p4, %f11, 0f7F800000;
+	setp.lt.ftz.f32 	%p5, %f10, 0f00000000;
+	setp.gt.ftz.f32 	%p6, %f10, 0f3F800000;
+	selp.f32 	%f12, 0f3F800000, %f10, %p6;
+	or.pred  	%p7, %p5, %p4;
+	selp.f32 	%f1, 0f00000000, %f12, %p7;
+	setp.le.ftz.f32 	%p8, %f1, 0f3CA3D70A;
+	setp.le.ftz.f32 	%p9, %f8, 0f38D1B717;
+	or.pred  	%p10, %p9, %p8;
 	mul.lo.s32 	%r14, %r1, 3;
 	cvt.s64.s32 	%rd17, %r14;
 	add.s64 	%rd18, %rd9, %rd17;
@@ -1109,7 +1124,7 @@ $L__BB6_2:
 	add.s64 	%rd20, %rd11, %rd17;
 	cvta.to.global.u64 	%rd21, %rd5;
 	add.s64 	%rd2, %rd21, %rd20;
-	@%p8 bra 	$L__BB7_5;
+	@%p10 bra 	$L__BB7_5;
 	bra.uni 	$L__BB7_2;
 
 $L__BB7_5:
@@ -1122,62 +1137,62 @@ $L__BB7_5:
 	bra.uni 	$L__BB7_6;
 
 $L__BB7_2:
-	cvt.rn.f32.u32 	%f13, %r5;
-	mul.ftz.f32 	%f2, %f13, 0f3F000000;
-	setp.leu.ftz.f32 	%p9, %f2, 0f3F800000;
-	mov.f32 	%f43, 0f00000000;
-	@%p9 bra 	$L__BB7_4;
+	cvt.rn.f32.u32 	%f14, %r5;
+	mul.ftz.f32 	%f2, %f14, 0f3F000000;
+	setp.leu.ftz.f32 	%p11, %f2, 0f3F800000;
+	mov.f32 	%f44, 0f00000000;
+	@%p11 bra 	$L__BB7_4;
 
-	rcp.approx.ftz.f32 	%f43, %f2;
+	rcp.approx.ftz.f32 	%f44, %f2;
 
 $L__BB7_4:
-	cvt.rn.f32.s32 	%f14, %r1;
-	sub.ftz.f32 	%f15, %f14, %f2;
-	mul.ftz.f32 	%f16, %f15, %f43;
-	mul.ftz.f32 	%f17, %f16, %f9;
-	fma.rn.ftz.f32 	%f18, %f17, 0f3EB33333, 0f3F800000;
-	setp.lt.ftz.f32 	%p10, %f18, 0f3F266666;
-	setp.gt.ftz.f32 	%p11, %f18, 0f3FACCCCD;
-	selp.f32 	%f19, 0f3FACCCCD, %f18, %p11;
-	selp.f32 	%f20, 0f3F266666, %f19, %p10;
-	mul.ftz.f32 	%f21, %f1, %f8;
-	mul.ftz.f32 	%f22, %f21, %f20;
-	setp.lt.ftz.f32 	%p12, %f22, 0f00000000;
-	setp.gt.ftz.f32 	%p13, %f22, 0f3F800000;
-	selp.f32 	%f23, 0f3F800000, %f22, %p13;
-	selp.f32 	%f24, 0f00000000, %f23, %p12;
+	cvt.rn.f32.s32 	%f15, %r1;
+	sub.ftz.f32 	%f16, %f15, %f2;
+	mul.ftz.f32 	%f17, %f16, %f44;
+	mul.ftz.f32 	%f18, %f17, %f9;
+	fma.rn.ftz.f32 	%f19, %f18, 0f3EB33333, 0f3F800000;
+	setp.lt.ftz.f32 	%p12, %f19, 0f3F266666;
+	setp.gt.ftz.f32 	%p13, %f19, 0f3FACCCCD;
+	selp.f32 	%f20, 0f3FACCCCD, %f19, %p13;
+	selp.f32 	%f21, 0f3F266666, %f20, %p12;
+	mul.ftz.f32 	%f22, %f1, %f8;
+	mul.ftz.f32 	%f23, %f22, %f21;
+	setp.lt.ftz.f32 	%p14, %f23, 0f00000000;
+	setp.gt.ftz.f32 	%p15, %f23, 0f3F800000;
+	selp.f32 	%f24, 0f3F800000, %f23, %p15;
+	selp.f32 	%f25, 0f00000000, %f24, %p14;
 	ld.global.u8 	%rs1, [%rd1];
-	cvt.rn.f32.u16 	%f25, %rs1;
-	sub.ftz.f32 	%f26, %f5, %f25;
-	fma.rn.ftz.f32 	%f27, %f24, %f26, %f25;
-	setp.lt.ftz.f32 	%p14, %f27, 0f00000000;
-	setp.gt.ftz.f32 	%p15, %f27, 0f437F0000;
-	selp.f32 	%f28, 0f437F0000, %f27, %p15;
-	add.ftz.f32 	%f29, %f28, 0f3F000000;
-	selp.f32 	%f30, 0f3F000000, %f29, %p14;
-	cvt.rzi.ftz.u32.f32 	%r15, %f30;
+	cvt.rn.f32.u16 	%f26, %rs1;
+	sub.ftz.f32 	%f27, %f5, %f26;
+	fma.rn.ftz.f32 	%f28, %f25, %f27, %f26;
+	setp.lt.ftz.f32 	%p16, %f28, 0f00000000;
+	setp.gt.ftz.f32 	%p17, %f28, 0f437F0000;
+	selp.f32 	%f29, 0f437F0000, %f28, %p17;
+	add.ftz.f32 	%f30, %f29, 0f3F000000;
+	selp.f32 	%f31, 0f3F000000, %f30, %p16;
+	cvt.rzi.ftz.u32.f32 	%r15, %f31;
 	st.global.u8 	[%rd2], %r15;
 	ld.global.u8 	%rs2, [%rd1+1];
-	cvt.rn.f32.u16 	%f31, %rs2;
-	sub.ftz.f32 	%f32, %f6, %f31;
-	fma.rn.ftz.f32 	%f33, %f24, %f32, %f31;
-	setp.lt.ftz.f32 	%p16, %f33, 0f00000000;
-	setp.gt.ftz.f32 	%p17, %f33, 0f437F0000;
-	selp.f32 	%f34, 0f437F0000, %f33, %p17;
-	add.ftz.f32 	%f35, %f34, 0f3F000000;
-	selp.f32 	%f36, 0f3F000000, %f35, %p16;
-	cvt.rzi.ftz.u32.f32 	%r16, %f36;
+	cvt.rn.f32.u16 	%f32, %rs2;
+	sub.ftz.f32 	%f33, %f6, %f32;
+	fma.rn.ftz.f32 	%f34, %f25, %f33, %f32;
+	setp.lt.ftz.f32 	%p18, %f34, 0f00000000;
+	setp.gt.ftz.f32 	%p19, %f34, 0f437F0000;
+	selp.f32 	%f35, 0f437F0000, %f34, %p19;
+	add.ftz.f32 	%f36, %f35, 0f3F000000;
+	selp.f32 	%f37, 0f3F000000, %f36, %p18;
+	cvt.rzi.ftz.u32.f32 	%r16, %f37;
 	st.global.u8 	[%rd2+1], %r16;
 	ld.global.u8 	%rs3, [%rd1+2];
-	cvt.rn.f32.u16 	%f37, %rs3;
-	sub.ftz.f32 	%f38, %f7, %f37;
-	fma.rn.ftz.f32 	%f39, %f24, %f38, %f37;
-	setp.lt.ftz.f32 	%p18, %f39, 0f00000000;
-	setp.gt.ftz.f32 	%p19, %f39, 0f437F0000;
-	selp.f32 	%f40, 0f437F0000, %f39, %p19;
-	add.ftz.f32 	%f41, %f40, 0f3F000000;
-	selp.f32 	%f42, 0f3F000000, %f41, %p18;
-	cvt.rzi.ftz.u32.f32 	%r17, %f42;
+	cvt.rn.f32.u16 	%f38, %rs3;
+	sub.ftz.f32 	%f39, %f7, %f38;
+	fma.rn.ftz.f32 	%f40, %f25, %f39, %f38;
+	setp.lt.ftz.f32 	%p20, %f40, 0f00000000;
+	setp.gt.ftz.f32 	%p21, %f40, 0f437F0000;
+	selp.f32 	%f41, 0f437F0000, %f40, %p21;
+	add.ftz.f32 	%f42, %f41, 0f3F000000;
+	selp.f32 	%f43, 0f3F000000, %f42, %p20;
+	cvt.rzi.ftz.u32.f32 	%r17, %f43;
 	st.global.u8 	[%rd2+2], %r17;
 
 $L__BB7_6:
@@ -1185,53 +1200,14 @@ $L__BB7_6:
 
 }
 
-
 )ptx";
-
-struct GlobalCuda {
-  std::once_flag once;
-  studiocast::maxine::CudaDriverApi cuda;
-  bool ok = false;
-  std::string err;
-};
-
-GlobalCuda &g() {
-  static GlobalCuda s;
-  return s;
-}
 
 bool EnsureCudaReady(studiocast::maxine::CudaDriverApi **out_cuda,
                      std::string *error_out) {
-  if (error_out)
-    error_out->clear();
-  GlobalCuda &st = g();
-  std::call_once(st.once, [&]() {
-    std::string e;
-    if (!st.cuda.Initialize(&e)) {
-      st.err = e;
-      st.ok = false;
-      return;
-    }
-    st.ok = true;
-  });
-  if (!st.ok) {
-    if (error_out)
-      *error_out = st.err.empty() ? "CUDA unavailable" : st.err;
-    return false;
-  }
-  std::string e;
-  if (!st.cuda.EnsureContext(&e)) {
-    if (error_out)
-      *error_out = e;
-    return false;
-  }
-  *out_cuda = &st.cuda;
-  return true;
+  return detail::EnsureCudaReady(out_cuda, error_out);
 }
 
-struct KernelState {
-  bool loaded = false;
-  studiocast::maxine::CUmodule module = nullptr;
+struct KernelFunctions {
   studiocast::maxine::CUfunction resize_f32 = nullptr;
   studiocast::maxine::CUfunction blur_h_u8x3 = nullptr;
   studiocast::maxine::CUfunction blur_v_u8x3 = nullptr;
@@ -1242,8 +1218,17 @@ struct KernelState {
   studiocast::maxine::CUfunction key_light = nullptr;
 };
 
+struct KernelState {
+  // CUDA module/function handles are context-bound; keep this cache thread-local
+  // with the thread-local driver/context owner in cuda_driver_cache.h.
+  bool loaded = false;
+  studiocast::maxine::CUcontext loaded_ctx = nullptr;
+  studiocast::maxine::CUmodule module = nullptr;
+  KernelFunctions functions;
+};
+
 KernelState &k() {
-  static KernelState s;
+  thread_local KernelState s;
   return s;
 }
 
@@ -1300,16 +1285,29 @@ std::string OpenCudaVbPtxCompat82() {
 }
 
 bool EnsureKernelsLoaded(studiocast::maxine::CudaDriverApi *cuda,
+                         KernelFunctions *out,
                          std::string *error_out) {
   if (error_out)
     error_out->clear();
+  if (out)
+    *out = {};
+
+  studiocast::maxine::CUcontext cur = nullptr;
+  if (!detail::GetCurrentContext(cuda, &cur, error_out))
+    return false;
+
   KernelState &st = k();
-  if (st.loaded)
+  if (st.loaded && st.loaded_ctx == cur) {
+    if (out)
+      *out = st.functions;
     return true;
+  }
 
   const auto &f = cuda->f();
+  studiocast::maxine::CUmodule module = nullptr;
+  KernelFunctions functions;
   std::string jit_log;
-  auto rc = LoadPtxModule(cuda, kOpenCudaVbPtx, &st.module, &jit_log);
+  auto rc = LoadPtxModule(cuda, kOpenCudaVbPtx, &module, &jit_log);
   if (rc != studiocast::maxine::CUDA_SUCCESS) {
     const std::string primary_error =
         "primary PTX 8.5 load failed: " + cuda->StatusToString(rc) +
@@ -1319,7 +1317,7 @@ bool EnsureKernelsLoaded(studiocast::maxine::CudaDriverApi *cuda,
     if (!compat_ptx.empty()) {
       std::string compat_jit_log;
       const auto compat_rc =
-          LoadPtxModule(cuda, compat_ptx.c_str(), &st.module, &compat_jit_log);
+          LoadPtxModule(cuda, compat_ptx.c_str(), &module, &compat_jit_log);
       if (compat_rc == studiocast::maxine::CUDA_SUCCESS) {
         rc = compat_rc;
       } else if (error_out) {
@@ -1345,9 +1343,10 @@ bool EnsureKernelsLoaded(studiocast::maxine::CudaDriverApi *cuda,
     return false;
   }
 
-  auto get_fn = [&](studiocast::maxine::CUfunction *out, const char *name) {
+  auto get_fn = [&](studiocast::maxine::CUfunction *fn_out,
+                    const char *name) {
     const studiocast::maxine::CUresult st_rc =
-        f.cuModuleGetFunction(out, st.module, name);
+        f.cuModuleGetFunction(fn_out, module, name);
     if (st_rc != studiocast::maxine::CUDA_SUCCESS) {
       if (error_out)
         *error_out = std::string("cuModuleGetFunction(") + name +
@@ -1357,35 +1356,36 @@ bool EnsureKernelsLoaded(studiocast::maxine::CudaDriverApi *cuda,
     return true;
   };
 
-  if (!get_fn(&st.resize_f32, "resize_bilinear_f32_1"))
+  if (!get_fn(&functions.resize_f32, "resize_bilinear_f32_1"))
     return false;
-  if (!get_fn(&st.blur_h_u8x3, "box_blur_h_u8x3"))
+  if (!get_fn(&functions.blur_h_u8x3, "box_blur_h_u8x3"))
     return false;
-  if (!get_fn(&st.blur_v_u8x3, "box_blur_v_u8x3"))
+  if (!get_fn(&functions.blur_v_u8x3, "box_blur_v_u8x3"))
     return false;
-  if (!get_fn(&st.blur_h_f32, "box_blur_h_f32_1"))
+  if (!get_fn(&functions.blur_h_f32, "box_blur_h_f32_1"))
     return false;
-  if (!get_fn(&st.blur_v_f32, "box_blur_v_f32_1"))
+  if (!get_fn(&functions.blur_v_f32, "box_blur_v_f32_1"))
     return false;
-  if (!get_fn(&st.comp_bg, "composite_alpha_u8x3_bg"))
+  if (!get_fn(&functions.comp_bg, "composite_alpha_u8x3_bg"))
     return false;
-  if (!get_fn(&st.comp_solid, "composite_alpha_u8x3_solid"))
+  if (!get_fn(&functions.comp_solid, "composite_alpha_u8x3_solid"))
     return false;
-  if (!get_fn(&st.key_light, "key_light_u8x3"))
+  if (!get_fn(&functions.key_light, "key_light_u8x3"))
     return false;
 
+  st.module = module;
+  st.functions = functions;
+  st.loaded_ctx = cur;
   st.loaded = true;
+  if (out)
+    *out = st.functions;
   return true;
 }
 
-bool CheckPitchU32(std::size_t pitch, const char *what,
-                   std::string *error_out) {
-  if (pitch > std::numeric_limits<std::uint32_t>::max()) {
-    if (error_out)
-      *error_out = std::string(what) + ": pitch too large for kernel ABI.";
-    return false;
-  }
-  return true;
+bool CheckSignedPtxPitch(const CudaImage &image, const char *what,
+                         std::string *error_out) {
+  return detail::CheckSignedInt32PtxPitch(image.pitch, image.RowBytes(), what,
+                                          error_out);
 }
 
 constexpr unsigned int kBlockX = 16;
@@ -1409,18 +1409,18 @@ bool ResizeBilinearF32_1(const CudaImage &src, const CudaImage &dst,
       *error_out = "ResizeBilinearF32_1: src/dst must be f32_1.";
     return false;
   }
-  if (!CheckPitchU32(src.pitch, "ResizeBilinearF32_1(src)", error_out))
+  if (!CheckSignedPtxPitch(src, "ResizeBilinearF32_1(src)", error_out))
     return false;
-  if (!CheckPitchU32(dst.pitch, "ResizeBilinearF32_1(dst)", error_out))
+  if (!CheckSignedPtxPitch(dst, "ResizeBilinearF32_1(dst)", error_out))
     return false;
 
   studiocast::maxine::CudaDriverApi *cuda = nullptr;
   if (!EnsureCudaReady(&cuda, error_out))
     return false;
-  if (!EnsureKernelsLoaded(cuda, error_out))
+  KernelFunctions kernels;
+  if (!EnsureKernelsLoaded(cuda, &kernels, error_out))
     return false;
 
-  KernelState &st = k();
   const auto &f = cuda->f();
 
   const std::uint32_t src_pitch = static_cast<std::uint32_t>(src.pitch);
@@ -1449,8 +1449,8 @@ bool ResizeBilinearF32_1(const CudaImage &src, const CudaImage &dst,
       (static_cast<unsigned int>(dst.h) + kBlockY - 1u) / kBlockY;
 
   const studiocast::maxine::CUresult rc =
-      f.cuLaunchKernel(st.resize_f32, grid_x, grid_y, 1, kBlockX, kBlockY, 1, 0,
-                       stream, args, nullptr);
+      f.cuLaunchKernel(kernels.resize_f32, grid_x, grid_y, 1, kBlockX, kBlockY,
+                       1, 0, stream, args, nullptr);
   if (rc != studiocast::maxine::CUDA_SUCCESS) {
     if (error_out)
       *error_out = "cuLaunchKernel(resize_bilinear_f32_1) failed: " +
@@ -1488,14 +1488,17 @@ bool BoxBlurSeparableU8x3(const CudaImage &src, const CudaImage &tmp,
                    "or bgr_u8).";
     return false;
   }
-  if (!CheckPitchU32(src.pitch, "BoxBlurSeparableU8x3(src)", error_out))
+  if (!CheckSignedPtxPitch(src, "BoxBlurSeparableU8x3(src)", error_out))
     return false;
-  if (!CheckPitchU32(tmp.pitch, "BoxBlurSeparableU8x3(tmp)", error_out))
+  if (!CheckSignedPtxPitch(tmp, "BoxBlurSeparableU8x3(tmp)", error_out))
     return false;
-  if (!CheckPitchU32(dst.pitch, "BoxBlurSeparableU8x3(dst)", error_out))
+  if (!CheckSignedPtxPitch(dst, "BoxBlurSeparableU8x3(dst)", error_out))
     return false;
 
-  radius = radius < 0 ? 0 : radius;
+  if (!detail::CheckBoxBlurRadiusForKernel(radius, "BoxBlurSeparableU8x3",
+                                           error_out))
+    return false;
+  radius = detail::NormalizeBoxBlurRadius(radius);
 
   studiocast::maxine::CudaDriverApi *cuda = nullptr;
   if (!EnsureCudaReady(&cuda, error_out))
@@ -1524,10 +1527,10 @@ bool BoxBlurSeparableU8x3(const CudaImage &src, const CudaImage &tmp,
     return true;
   }
 
-  if (!EnsureKernelsLoaded(cuda, error_out))
+  KernelFunctions kernels;
+  if (!EnsureKernelsLoaded(cuda, &kernels, error_out))
     return false;
 
-  KernelState &st = k();
   const auto &f = cuda->f();
 
   const std::uint32_t w = static_cast<std::uint32_t>(src.w);
@@ -1555,8 +1558,9 @@ bool BoxBlurSeparableU8x3(const CudaImage &src, const CudaImage &tmp,
         const_cast<std::uint32_t *>(&tmp_pitch),
         &rad,
     };
-    const auto rc = f.cuLaunchKernel(st.blur_h_u8x3, grid_x, grid_y, 1, kBlockX,
-                                     kBlockY, 1, 0, stream, args, nullptr);
+    const auto rc = f.cuLaunchKernel(kernels.blur_h_u8x3, grid_x, grid_y, 1,
+                                     kBlockX, kBlockY, 1, 0, stream, args,
+                                     nullptr);
     if (rc != studiocast::maxine::CUDA_SUCCESS) {
       if (error_out)
         *error_out = "cuLaunchKernel(box_blur_h_u8x3) failed: " +
@@ -1574,8 +1578,9 @@ bool BoxBlurSeparableU8x3(const CudaImage &src, const CudaImage &tmp,
         const_cast<std::uint32_t *>(&dst_pitch),
         &rad,
     };
-    const auto rc = f.cuLaunchKernel(st.blur_v_u8x3, grid_x, grid_y, 1, kBlockX,
-                                     kBlockY, 1, 0, stream, args, nullptr);
+    const auto rc = f.cuLaunchKernel(kernels.blur_v_u8x3, grid_x, grid_y, 1,
+                                     kBlockX, kBlockY, 1, 0, stream, args,
+                                     nullptr);
     if (rc != studiocast::maxine::CUDA_SUCCESS) {
       if (error_out)
         *error_out = "cuLaunchKernel(box_blur_v_u8x3) failed: " +
@@ -1609,14 +1614,17 @@ bool BoxBlurSeparableF32_1(const CudaImage &src, const CudaImage &tmp,
       *error_out = "BoxBlurSeparableF32_1: src/tmp/dst must be f32_1.";
     return false;
   }
-  if (!CheckPitchU32(src.pitch, "BoxBlurSeparableF32_1(src)", error_out))
+  if (!CheckSignedPtxPitch(src, "BoxBlurSeparableF32_1(src)", error_out))
     return false;
-  if (!CheckPitchU32(tmp.pitch, "BoxBlurSeparableF32_1(tmp)", error_out))
+  if (!CheckSignedPtxPitch(tmp, "BoxBlurSeparableF32_1(tmp)", error_out))
     return false;
-  if (!CheckPitchU32(dst.pitch, "BoxBlurSeparableF32_1(dst)", error_out))
+  if (!CheckSignedPtxPitch(dst, "BoxBlurSeparableF32_1(dst)", error_out))
     return false;
 
-  radius = radius < 0 ? 0 : radius;
+  if (!detail::CheckBoxBlurRadiusForKernel(radius, "BoxBlurSeparableF32_1",
+                                           error_out))
+    return false;
+  radius = detail::NormalizeBoxBlurRadius(radius);
 
   studiocast::maxine::CudaDriverApi *cuda = nullptr;
   if (!EnsureCudaReady(&cuda, error_out))
@@ -1645,10 +1653,10 @@ bool BoxBlurSeparableF32_1(const CudaImage &src, const CudaImage &tmp,
     return true;
   }
 
-  if (!EnsureKernelsLoaded(cuda, error_out))
+  KernelFunctions kernels;
+  if (!EnsureKernelsLoaded(cuda, &kernels, error_out))
     return false;
 
-  KernelState &st = k();
   const auto &f = cuda->f();
 
   const std::uint32_t w = static_cast<std::uint32_t>(src.w);
@@ -1676,8 +1684,9 @@ bool BoxBlurSeparableF32_1(const CudaImage &src, const CudaImage &tmp,
         const_cast<std::uint32_t *>(&tmp_pitch),
         &rad,
     };
-    const auto rc = f.cuLaunchKernel(st.blur_h_f32, grid_x, grid_y, 1, kBlockX,
-                                     kBlockY, 1, 0, stream, args, nullptr);
+    const auto rc = f.cuLaunchKernel(kernels.blur_h_f32, grid_x, grid_y, 1,
+                                     kBlockX, kBlockY, 1, 0, stream, args,
+                                     nullptr);
     if (rc != studiocast::maxine::CUDA_SUCCESS) {
       if (error_out)
         *error_out = "cuLaunchKernel(box_blur_h_f32_1) failed: " +
@@ -1695,8 +1704,9 @@ bool BoxBlurSeparableF32_1(const CudaImage &src, const CudaImage &tmp,
         const_cast<std::uint32_t *>(&dst_pitch),
         &rad,
     };
-    const auto rc = f.cuLaunchKernel(st.blur_v_f32, grid_x, grid_y, 1, kBlockX,
-                                     kBlockY, 1, 0, stream, args, nullptr);
+    const auto rc = f.cuLaunchKernel(kernels.blur_v_f32, grid_x, grid_y, 1,
+                                     kBlockX, kBlockY, 1, 0, stream, args,
+                                     nullptr);
     if (rc != studiocast::maxine::CUDA_SUCCESS) {
       if (error_out)
         *error_out = "cuLaunchKernel(box_blur_v_f32_1) failed: " +
@@ -1740,22 +1750,22 @@ bool CompositeAlphaU8x3(const CudaImage &fg, const CudaImage &bg,
       *error_out = "CompositeAlphaU8x3: alpha must be f32_1.";
     return false;
   }
-  if (!CheckPitchU32(fg.pitch, "CompositeAlphaU8x3(fg)", error_out))
+  if (!CheckSignedPtxPitch(fg, "CompositeAlphaU8x3(fg)", error_out))
     return false;
-  if (!CheckPitchU32(bg.pitch, "CompositeAlphaU8x3(bg)", error_out))
+  if (!CheckSignedPtxPitch(bg, "CompositeAlphaU8x3(bg)", error_out))
     return false;
-  if (!CheckPitchU32(alpha.pitch, "CompositeAlphaU8x3(alpha)", error_out))
+  if (!CheckSignedPtxPitch(alpha, "CompositeAlphaU8x3(alpha)", error_out))
     return false;
-  if (!CheckPitchU32(out.pitch, "CompositeAlphaU8x3(out)", error_out))
+  if (!CheckSignedPtxPitch(out, "CompositeAlphaU8x3(out)", error_out))
     return false;
 
   studiocast::maxine::CudaDriverApi *cuda = nullptr;
   if (!EnsureCudaReady(&cuda, error_out))
     return false;
-  if (!EnsureKernelsLoaded(cuda, error_out))
+  KernelFunctions kernels;
+  if (!EnsureKernelsLoaded(cuda, &kernels, error_out))
     return false;
 
-  KernelState &st = k();
   const auto &f = cuda->f();
 
   const std::uint32_t w = static_cast<std::uint32_t>(fg.w);
@@ -1787,7 +1797,7 @@ bool CompositeAlphaU8x3(const CudaImage &fg, const CudaImage &bg,
   const unsigned int grid_y =
       (static_cast<unsigned int>(fg.h) + kBlockY - 1u) / kBlockY;
 
-  const auto rc = f.cuLaunchKernel(st.comp_bg, grid_x, grid_y, 1, kBlockX,
+  const auto rc = f.cuLaunchKernel(kernels.comp_bg, grid_x, grid_y, 1, kBlockX,
                                    kBlockY, 1, 0, stream, args, nullptr);
   if (rc != studiocast::maxine::CUDA_SUCCESS) {
     if (error_out)
@@ -1831,20 +1841,20 @@ bool CompositeAlphaSolidU8x3(const CudaImage &fg, const CudaImage &alpha,
       *error_out = "CompositeAlphaSolidU8x3: alpha must be f32_1.";
     return false;
   }
-  if (!CheckPitchU32(fg.pitch, "CompositeAlphaSolidU8x3(fg)", error_out))
+  if (!CheckSignedPtxPitch(fg, "CompositeAlphaSolidU8x3(fg)", error_out))
     return false;
-  if (!CheckPitchU32(alpha.pitch, "CompositeAlphaSolidU8x3(alpha)", error_out))
+  if (!CheckSignedPtxPitch(alpha, "CompositeAlphaSolidU8x3(alpha)", error_out))
     return false;
-  if (!CheckPitchU32(out.pitch, "CompositeAlphaSolidU8x3(out)", error_out))
+  if (!CheckSignedPtxPitch(out, "CompositeAlphaSolidU8x3(out)", error_out))
     return false;
 
   studiocast::maxine::CudaDriverApi *cuda = nullptr;
   if (!EnsureCudaReady(&cuda, error_out))
     return false;
-  if (!EnsureKernelsLoaded(cuda, error_out))
+  KernelFunctions kernels;
+  if (!EnsureKernelsLoaded(cuda, &kernels, error_out))
     return false;
 
-  KernelState &st = k();
   const auto &f = cuda->f();
 
   const std::uint32_t w = static_cast<std::uint32_t>(fg.w);
@@ -1855,9 +1865,11 @@ bool CompositeAlphaSolidU8x3(const CudaImage &fg, const CudaImage &alpha,
   const unsigned long long fg_ptr = fg.ptr;
   const unsigned long long a_ptr = alpha.ptr;
   const unsigned long long out_ptr = out.ptr;
-  const std::uint8_t r = bg_r;
-  const std::uint8_t g = bg_g;
-  const std::uint8_t b = bg_b;
+  const auto bg_channels =
+      detail::SolidBackgroundMemoryChannels(fg.format, bg_r, bg_g, bg_b);
+  const std::uint8_t bg0 = bg_channels[0];
+  const std::uint8_t bg1 = bg_channels[1];
+  const std::uint8_t bg2 = bg_channels[2];
 
   void *args[] = {
       const_cast<unsigned long long *>(&fg_ptr),
@@ -1866,9 +1878,9 @@ bool CompositeAlphaSolidU8x3(const CudaImage &fg, const CudaImage &alpha,
       const_cast<std::uint32_t *>(&a_pitch),
       const_cast<std::uint32_t *>(&w),
       const_cast<std::uint32_t *>(&h),
-      const_cast<std::uint8_t *>(&r),
-      const_cast<std::uint8_t *>(&g),
-      const_cast<std::uint8_t *>(&b),
+      const_cast<std::uint8_t *>(&bg0),
+      const_cast<std::uint8_t *>(&bg1),
+      const_cast<std::uint8_t *>(&bg2),
       const_cast<unsigned long long *>(&out_ptr),
       const_cast<std::uint32_t *>(&out_pitch),
   };
@@ -1878,8 +1890,9 @@ bool CompositeAlphaSolidU8x3(const CudaImage &fg, const CudaImage &alpha,
   const unsigned int grid_y =
       (static_cast<unsigned int>(fg.h) + kBlockY - 1u) / kBlockY;
 
-  const auto rc = f.cuLaunchKernel(st.comp_solid, grid_x, grid_y, 1, kBlockX,
-                                   kBlockY, 1, 0, stream, args, nullptr);
+  const auto rc = f.cuLaunchKernel(kernels.comp_solid, grid_x, grid_y, 1,
+                                   kBlockX, kBlockY, 1, 0, stream, args,
+                                   nullptr);
   if (rc != studiocast::maxine::CUDA_SUCCESS) {
     if (error_out)
       *error_out = "cuLaunchKernel(composite_alpha_u8x3_solid) failed: " +
@@ -1918,20 +1931,20 @@ bool ApplyKeyLightU8x3(const CudaImage &src, const CudaImage &alpha,
       *error_out = "ApplyKeyLightU8x3: alpha must be f32_1.";
     return false;
   }
-  if (!CheckPitchU32(src.pitch, "ApplyKeyLightU8x3(src)", error_out))
+  if (!CheckSignedPtxPitch(src, "ApplyKeyLightU8x3(src)", error_out))
     return false;
-  if (!CheckPitchU32(alpha.pitch, "ApplyKeyLightU8x3(alpha)", error_out))
+  if (!CheckSignedPtxPitch(alpha, "ApplyKeyLightU8x3(alpha)", error_out))
     return false;
-  if (!CheckPitchU32(out.pitch, "ApplyKeyLightU8x3(out)", error_out))
+  if (!CheckSignedPtxPitch(out, "ApplyKeyLightU8x3(out)", error_out))
     return false;
 
   studiocast::maxine::CudaDriverApi *cuda = nullptr;
   if (!EnsureCudaReady(&cuda, error_out))
     return false;
-  if (!EnsureKernelsLoaded(cuda, error_out))
+  KernelFunctions kernels;
+  if (!EnsureKernelsLoaded(cuda, &kernels, error_out))
     return false;
 
-  KernelState &st = k();
   const auto &f = cuda->f();
 
   const std::uint32_t w = static_cast<std::uint32_t>(src.w);
@@ -1969,8 +1982,9 @@ bool ApplyKeyLightU8x3(const CudaImage &src, const CudaImage &alpha,
   const unsigned int grid_y =
       (static_cast<unsigned int>(src.h) + kBlockY - 1u) / kBlockY;
 
-  const auto rc = f.cuLaunchKernel(st.key_light, grid_x, grid_y, 1, kBlockX,
-                                   kBlockY, 1, 0, stream, args, nullptr);
+  const auto rc = f.cuLaunchKernel(kernels.key_light, grid_x, grid_y, 1,
+                                   kBlockX, kBlockY, 1, 0, stream, args,
+                                   nullptr);
   if (rc != studiocast::maxine::CUDA_SUCCESS) {
     if (error_out)
       *error_out =

@@ -4,6 +4,13 @@
 
 #include <cuda_runtime.h>
 
+// Reference CUDA C source for the embedded Driver API PTX module in
+// preprocess_to_nchw_ptx.cpp. The CMake freshness test compiles this file to
+// PTX and checks the preprocess_to_nchw_f32 entry ABI; StudioCast's normal
+// build does not compile this .cu file into the application.
+//
+// PTX_GENERATE: nvcc -ptx -O3 -arch=compute_52 -I src src/core/cuda/kernels/preprocess_to_nchw.cu -o preprocess_to_nchw.ptx
+
 namespace studiocast::cuda::kernels {
 namespace {
 
@@ -89,6 +96,79 @@ __global__ void PreprocessToNchwKernel(const std::uint8_t* src,
 }
 
 }  // namespace
+
+extern "C" __global__ void preprocess_to_nchw_f32(
+    const unsigned char *src, unsigned int src_pitch, unsigned int src_w,
+    unsigned int src_h, float *dst, unsigned int dst_w, unsigned int dst_h,
+    float mean0, float mean1, float mean2, float inv_std0, float inv_std1,
+    float inv_std2, unsigned int dst_is_bgr, unsigned int src_is_bgr) {
+  const int x = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
+  if (x >= static_cast<int>(dst_w) || y >= static_cast<int>(dst_h))
+    return;
+
+  const float scale_x = static_cast<float>(src_w) / static_cast<float>(dst_w);
+  const float scale_y = static_cast<float>(src_h) / static_cast<float>(dst_h);
+  const float src_x = (static_cast<float>(x) + 0.5f) * scale_x - 0.5f;
+  const float src_y = (static_cast<float>(y) + 0.5f) * scale_y - 0.5f;
+
+  const int src_w_max = static_cast<int>(src_w) - 1;
+  const int src_h_max = static_cast<int>(src_h) - 1;
+  const int x0 = ClampInt(static_cast<int>(src_x), 0, src_w_max);
+  const int y0 = ClampInt(static_cast<int>(src_y), 0, src_h_max);
+  const int x1 = ClampInt(x0 + 1, 0, src_w_max);
+  const int y1 = ClampInt(y0 + 1, 0, src_h_max);
+
+  const float fx = src_x - static_cast<float>(x0);
+  const float fy = src_y - static_cast<float>(y0);
+
+  const auto *row0 = src + static_cast<unsigned int>(y0) * src_pitch;
+  const auto *row1 = src + static_cast<unsigned int>(y1) * src_pitch;
+  const auto *p00 = row0 + static_cast<unsigned int>(x0) * 3u;
+  const auto *p10 = row0 + static_cast<unsigned int>(x1) * 3u;
+  const auto *p01 = row1 + static_cast<unsigned int>(x0) * 3u;
+  const auto *p11 = row1 + static_cast<unsigned int>(x1) * 3u;
+
+  const int r_i = src_is_bgr ? 2 : 0;
+  const int g_i = 1;
+  const int b_i = src_is_bgr ? 0 : 2;
+
+  const float r00 = static_cast<float>(p00[r_i]);
+  const float g00 = static_cast<float>(p00[g_i]);
+  const float b00 = static_cast<float>(p00[b_i]);
+  const float r10 = static_cast<float>(p10[r_i]);
+  const float g10 = static_cast<float>(p10[g_i]);
+  const float b10 = static_cast<float>(p10[b_i]);
+  const float r01 = static_cast<float>(p01[r_i]);
+  const float g01 = static_cast<float>(p01[g_i]);
+  const float b01 = static_cast<float>(p01[b_i]);
+  const float r11 = static_cast<float>(p11[r_i]);
+  const float g11 = static_cast<float>(p11[g_i]);
+  const float b11 = static_cast<float>(p11[b_i]);
+
+  const float r0 = r00 + fx * (r10 - r00);
+  const float g0 = g00 + fx * (g10 - g00);
+  const float b0 = b00 + fx * (b10 - b00);
+  const float r1 = r01 + fx * (r11 - r01);
+  const float g1 = g01 + fx * (g11 - g01);
+  const float b1 = b01 + fx * (b11 - b01);
+
+  const float inv255 = 1.0f / 255.0f;
+  const float r = (r0 + fy * (r1 - r0)) * inv255;
+  const float g = (g0 + fy * (g1 - g0)) * inv255;
+  const float b = (b0 + fy * (b1 - b0)) * inv255;
+
+  const float out0 = dst_is_bgr ? b : r;
+  const float out1 = g;
+  const float out2 = dst_is_bgr ? r : b;
+  const unsigned int hw = dst_w * dst_h;
+  const unsigned int base = static_cast<unsigned int>(y) * dst_w +
+                            static_cast<unsigned int>(x);
+
+  dst[base] = (out0 - mean0) * inv_std0;
+  dst[hw + base] = (out1 - mean1) * inv_std1;
+  dst[hw + hw + base] = (out2 - mean2) * inv_std2;
+}
 
 bool PreprocessToTensor(const CudaImage& src,
                         const CudaTensor& dst,

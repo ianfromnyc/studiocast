@@ -6,12 +6,32 @@
 namespace studiocast::maxine {
 namespace {
 
+bool ValidateBgrU8CudaImageForVignette(const NvCVImage &image,
+                                       std::string *error_out) {
+  const auto status =
+      ValidateBgrU8CudaNvCVImage(image, /*allow_zero_dimensions=*/true);
+  if (status == NvCVImageValidationStatus::ok)
+    return true;
+
+  if (error_out) {
+    *error_out = std::string("ApplyInPlace NvCVImage is invalid: ") +
+                 NvCVImageValidationStatusToString(status) + ".";
+  }
+  return false;
+}
+
 // In-place vignette (BGR interleaved, U8).
 // Parameters:
 //   ptr, pitch, w, h,
 //   intensity,
 //   centerX, centerY,
 //   invHalfW, invHalfH
+//
+// PTX_SOURCE: src/core/maxine/cuda_vignette_kernel.cu
+// PTX_GENERATE: nvcc -ptx -O3 -arch=compute_52 -I src src/core/maxine/cuda_vignette_kernel.cu -o cuda_vignette_kernel.ptx
+// The embedded body remains hand-authored PTX 6.0 for broad driver JIT
+// compatibility; the freshness validator compiles the source and checks the
+// vignette_bgr_u8 entry ABI.
 static constexpr const char *kVignettePtx = R"ptx(
 .version 6.0
 .target sm_30
@@ -181,6 +201,13 @@ bool CudaBgrVignette::ApplyInPlace(NvCVImage *bgr_gpu, float intensity,
       *error_out = "ApplyInPlace called with null image.";
     return false;
   }
+  if (!ValidateBgrU8CudaImageForVignette(*bgr_gpu, error_out))
+    return false;
+
+  const uint32_t w = bgr_gpu->width;
+  const uint32_t h = bgr_gpu->height;
+  if (w == 0 || h == 0)
+    return true;
 
   intensity = std::max(0.0f, std::min(1.0f, intensity));
   if (intensity <= 0.0f)
@@ -189,26 +216,9 @@ bool CudaBgrVignette::ApplyInPlace(NvCVImage *bgr_gpu, float intensity,
   if (!EnsureKernelLoaded(error_out))
     return false;
 
-  if (bgr_gpu->gpuMem != NVCV_GPU) {
-    if (error_out)
-      *error_out = "ApplyInPlace requires a GPU NvCVImage.";
-    return false;
-  }
-  if (bgr_gpu->pixelFormat != NVCV_BGR || bgr_gpu->componentType != NVCV_U8 ||
-      bgr_gpu->planar != NVCV_INTERLEAVED) {
-    if (error_out)
-      *error_out = "ApplyInPlace expects chunky BGR/U8 NvCVImage.";
-    return false;
-  }
-
-  const uint32_t w = bgr_gpu->width;
-  const uint32_t h = bgr_gpu->height;
-  if (w == 0 || h == 0)
-    return true;
-
   const uint64_t ptr =
       static_cast<uint64_t>(reinterpret_cast<uintptr_t>(bgr_gpu->pixels));
-  const uint32_t pitch = static_cast<uint32_t>(std::max(0, bgr_gpu->pitch));
+  const uint32_t pitch = static_cast<uint32_t>(bgr_gpu->pitch);
 
   const float inv_half_w = 2.0f / static_cast<float>(w);
   const float inv_half_h = 2.0f / static_cast<float>(h);

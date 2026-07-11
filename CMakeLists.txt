@@ -230,6 +230,8 @@ add_library(studiocast_core
         src/core/cuda/cuda_image.cpp
         src/core/cuda/cuda_tensor.h
         src/core/cuda/cuda_tensor.cpp
+        src/core/cuda/kernels/cuda_driver_cache.h
+        src/core/cuda/kernels/ptx_pitch_contract.h
         src/core/cuda/kernels/resize_bilinear.h
         src/core/cuda/kernels/resize_bilinear_ptx.cpp
         src/core/cuda/kernels/preprocess_to_nchw.h
@@ -811,6 +813,19 @@ elseif (BUILD_TESTING)
 endif()
 
 if (BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if (Python3_Interpreter_FOUND)
+        add_test(NAME studiocast-embedded-ptx-freshness
+                COMMAND "${Python3_EXECUTABLE}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/scripts/dev/validate_embedded_ptx.py"
+                        --source-root "${CMAKE_CURRENT_SOURCE_DIR}")
+        set_tests_properties(studiocast-embedded-ptx-freshness PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+    else()
+        message(STATUS "Skipping studiocast-embedded-ptx-freshness because Python3 was not found.")
+    endif()
+
     add_executable(studiocast-maxine-paths-tests
             tests/maxine_paths_tests.cpp
     )
@@ -837,6 +852,31 @@ if (BUILD_TESTING)
 
     add_test(NAME studiocast-maxine-paths-tests COMMAND studiocast-maxine-paths-tests)
 
+    add_executable(studiocast-nvcv-validation-tests
+            tests/nvcv_validation_tests.cpp
+    )
+
+    target_link_libraries(studiocast-nvcv-validation-tests PRIVATE
+            studiocast_core
+    )
+
+    target_include_directories(studiocast-nvcv-validation-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-nvcv-validation-tests)
+    studiocast_enable_sanitizers(studiocast-nvcv-validation-tests)
+
+    set_target_properties(studiocast-nvcv-validation-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-nvcv-validation-tests
+            COMMAND studiocast-nvcv-validation-tests)
+
     add_executable(studiocast-model-registry-tests
             tests/model_pack_registry_tests.cpp
     )
@@ -861,6 +901,31 @@ if (BUILD_TESTING)
     set_tests_properties(studiocast-model-registry-tests PROPERTIES
             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     )
+
+    add_executable(studiocast-cuda-driver-api-tests
+            tests/cuda_driver_api_tests.cpp
+    )
+
+    target_link_libraries(studiocast-cuda-driver-api-tests PRIVATE
+            studiocast_core
+    )
+
+    target_include_directories(studiocast-cuda-driver-api-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-cuda-driver-api-tests)
+    studiocast_enable_sanitizers(studiocast-cuda-driver-api-tests)
+
+    set_target_properties(studiocast-cuda-driver-api-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-cuda-driver-api-tests
+            COMMAND studiocast-cuda-driver-api-tests)
 
     add_executable(studiocast-ipc-tests
             tests/ipc_client_tests.cpp
@@ -1084,6 +1149,7 @@ if (BUILD_TESTING)
             tests/latest_frame_wins_worker_tests.cpp
             tests/open_video_denoise_contract_tests.cpp
             tests/frame_artifact_cache_tests.cpp
+            tests/cuda_kernel_cache_tests.cpp
             tests/v4l2_capture_negotiation_tests.cpp
             tests/video_effect_cpu_tests.cpp
             tests/rgb_yuyv_convert_tests.cpp

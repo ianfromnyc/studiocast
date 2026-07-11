@@ -26,6 +26,12 @@ std::size_t BytesPerPixel(PixelFormatGpu fmt);
 // - Does not require NvCVImage/NVCV.
 // - Memory is pitched device allocation (cuMemAllocPitch).
 struct CudaImage {
+  CudaImage() = default;
+  CudaImage(const CudaImage &) = delete;
+  CudaImage &operator=(const CudaImage &) = delete;
+  CudaImage(CudaImage &&other) noexcept;
+  CudaImage &operator=(CudaImage &&other) = delete;
+
   studiocast::maxine::CUdeviceptr ptr = 0;
   std::size_t pitch = 0;
   int w = 0;
@@ -57,6 +63,13 @@ struct CudaImage {
                           std::uint8_t *dst, std::size_t dst_stride_bytes,
                           studiocast::maxine::CUstream stream,
                           std::string *error_out) const;
+
+  // Clears only this wrapper's metadata. It does not free device memory; call
+  // Free(cuda, ...) first for owned allocations.
+  void ClearMetadata() noexcept;
+
+private:
+  void MoveFrom(CudaImage &other) noexcept;
 };
 
 } // namespace studiocast::cuda

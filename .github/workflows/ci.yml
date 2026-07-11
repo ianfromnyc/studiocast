@@ -3,6 +3,17 @@ name: ci
 on:
   push:
   workflow_dispatch:
+    inputs:
+      require_cuda_runtime:
+        description: "Run the opt-in CUDA runtime self-test that fails on CUDA smoke skips."
+        required: false
+        type: boolean
+        default: false
+      cuda_runtime_runner_labels:
+        description: "JSON runs-on labels for the opt-in CUDA runtime job."
+        required: false
+        type: string
+        default: '["self-hosted","linux","x64","gpu"]'
 
 permissions:
   contents: read
@@ -225,6 +236,48 @@ jobs:
       - name: Self-test
         run: |
           ./build/studiocast-probe --self-test
+
+  # Push CI intentionally keeps CUDA smoke skips portable on no-GPU runners.
+  # Enable this only on a GPU runner when CUDA runtime failures should fail CI.
+  cuda-runtime-smoke:
+    name: CUDA runtime self-test (opt-in)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.require_cuda_runtime }}
+    runs-on: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.cuda_runtime_runner_labels || '["ubuntu-24.04"]') }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies + GPU ONNX Runtime
+        run: |
+          ./scripts/setup.sh --deps --onnxruntime-flavor gpu -y
+
+      - name: Toolchain versions
+        run: |
+          cmake --version
+          ninja --version
+          g++ --version
+          pkg-config --modversion onnxruntime
+          nvidia-smi
+
+      - name: Configure (Open CUDA runtime validation)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON \
+            -DSTUDIOCAST_ENABLE_OPEN_AUDIO=OFF \
+            -DSTUDIOCAST_ENABLE_DLIB=OFF
+
+      - name: Build probe
+        run: |
+          cmake --build build --target studiocast-probe
+
+      - name: Portable self-test
+        run: |
+          ./build/studiocast-probe --self-test
+
+      - name: Required CUDA runtime self-test
+        run: |
+          ./build/studiocast-probe --self-test --require-cuda-runtime
 
   package-smoke:
     name: package smoke (ubuntu-24.04)

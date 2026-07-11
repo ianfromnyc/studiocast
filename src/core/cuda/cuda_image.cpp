@@ -2,6 +2,27 @@
 
 namespace studiocast::cuda {
 
+CudaImage::CudaImage(CudaImage &&other) noexcept { MoveFrom(other); }
+
+void CudaImage::MoveFrom(CudaImage &other) noexcept {
+  ptr = other.ptr;
+  pitch = other.pitch;
+  w = other.w;
+  h = other.h;
+  format = other.format;
+  owns_memory = other.owns_memory;
+  other.ClearMetadata();
+}
+
+void CudaImage::ClearMetadata() noexcept {
+  ptr = 0;
+  pitch = 0;
+  w = 0;
+  h = 0;
+  format = PixelFormatGpu::rgb_u8;
+  owns_memory = false;
+}
+
 std::size_t BytesPerPixel(PixelFormatGpu fmt) {
   switch (fmt) {
   case PixelFormatGpu::rgb_u8:

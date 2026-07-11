@@ -18,12 +18,14 @@ CudaDriverApi::CudaDriverApi(CudaDriverApi &&other) noexcept
     : initialized_(other.initialized_), lib_(std::move(other.lib_)),
       f_(other.f_), error_(std::move(other.error_)),
       retained_primary_ctx_(other.retained_primary_ctx_),
+      device_ordinal_(other.device_ordinal_),
       primary_dev_(other.primary_dev_), primary_ctx_(other.primary_ctx_),
       primary_ctx_validated_(other.primary_ctx_validated_) {
   other.initialized_ = false;
   other.f_ = Functions{};
   other.error_.clear();
   other.retained_primary_ctx_ = false;
+  other.device_ordinal_ = 0;
   other.primary_dev_ = 0;
   other.primary_ctx_ = nullptr;
   other.primary_ctx_validated_ = false;
@@ -43,6 +45,7 @@ CudaDriverApi &CudaDriverApi::operator=(CudaDriverApi &&other) noexcept {
   f_ = other.f_;
   error_ = std::move(other.error_);
   retained_primary_ctx_ = other.retained_primary_ctx_;
+  device_ordinal_ = other.device_ordinal_;
   primary_dev_ = other.primary_dev_;
   primary_ctx_ = other.primary_ctx_;
   primary_ctx_validated_ = other.primary_ctx_validated_;
@@ -51,6 +54,7 @@ CudaDriverApi &CudaDriverApi::operator=(CudaDriverApi &&other) noexcept {
   other.f_ = Functions{};
   other.error_.clear();
   other.retained_primary_ctx_ = false;
+  other.device_ordinal_ = 0;
   other.primary_dev_ = 0;
   other.primary_ctx_ = nullptr;
   other.primary_ctx_validated_ = false;
@@ -158,6 +162,36 @@ std::string CudaDriverApi::StatusToString(CUresult code) const {
   return "CUDA error " + std::to_string(code);
 }
 
+bool CudaDriverApi::SetDeviceOrdinal(int device_ordinal,
+                                     std::string *error_out) {
+  if (error_out)
+    error_out->clear();
+  if (device_ordinal < 0) {
+    if (error_out)
+      *error_out = "CUDA device ordinal must be non-negative.";
+    return false;
+  }
+  if (retained_primary_ctx_ && primary_ctx_ &&
+      device_ordinal != device_ordinal_) {
+    if (error_out) {
+      *error_out = "Cannot change CUDA device ordinal after context "
+                   "initialization (current=" +
+                   std::to_string(device_ordinal_) +
+                   ", requested=" + std::to_string(device_ordinal) + ").";
+    }
+    return false;
+  }
+  device_ordinal_ = device_ordinal;
+  return true;
+}
+
+bool CudaDriverApi::EnsureContextForDevice(int device_ordinal,
+                                           std::string *error_out) {
+  if (!SetDeviceOrdinal(device_ordinal, error_out))
+    return false;
+  return EnsureContext(error_out);
+}
+
 bool CudaDriverApi::EnsureContext(std::string *error_out) {
   if (error_out)
     error_out->clear();
@@ -173,14 +207,14 @@ bool CudaDriverApi::EnsureContext(std::string *error_out) {
     return false;
   }
 
-  // Always bind the primary context for device 0.
+  // Always bind the configured primary context.
   //
   // Rationale: other in-process components (e.g. CUDA-capable libraries) can
   // temporarily change the current context on this thread. If we accept an
   // arbitrary "current" context, we can end up with context/stream/module
   // mismatches that manifest as cuLaunchKernel errors like "invalid resource
-  // handle". For StudioCast's usage, a consistent primary context is the most
-  // robust choice.
+  // handle". Binding the configured primary context keeps Driver API kernels,
+  // streams, allocations, and ORT CUDA provider work on the same selected GPU.
   if (!retained_primary_ctx_ || !primary_ctx_) {
     int count = 0;
     CUresult st = f_.cuDeviceGetCount(&count);
@@ -194,12 +228,22 @@ bool CudaDriverApi::EnsureContext(std::string *error_out) {
         *error_out = "No CUDA devices found.";
       return false;
     }
+    if (device_ordinal_ >= count) {
+      if (error_out) {
+        *error_out = "CUDA device ordinal " +
+                     std::to_string(device_ordinal_) +
+                     " is not available (device count: " +
+                     std::to_string(count) + ").";
+      }
+      return false;
+    }
 
     CUdevice dev = 0;
-    st = f_.cuDeviceGet(&dev, 0);
+    st = f_.cuDeviceGet(&dev, device_ordinal_);
     if (st != CUDA_SUCCESS) {
       if (error_out)
-        *error_out = "cuDeviceGet failed: " + StatusToString(st);
+        *error_out = "cuDeviceGet(" + std::to_string(device_ordinal_) +
+                     ") failed: " + StatusToString(st);
       return false;
     }
 
@@ -220,7 +264,9 @@ bool CudaDriverApi::EnsureContext(std::string *error_out) {
   CUresult st = f_.cuCtxSetCurrent(primary_ctx_);
   if (st != CUDA_SUCCESS) {
     if (error_out)
-      *error_out = "cuCtxSetCurrent(primary) failed: " + StatusToString(st);
+      *error_out = "cuCtxSetCurrent(primary device " +
+                   std::to_string(device_ordinal_) +
+                   ") failed: " + StatusToString(st);
     return false;
   }
 

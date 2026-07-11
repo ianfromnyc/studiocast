@@ -299,7 +299,9 @@ bool OpenCudaMattingSession::EnsureInitialized(int frame_w, int frame_h,
   }
 
   std::string err;
-  if (!impl_->cuda->EnsureContext(&err)) {
+  // Setup-time device binding: keep Driver API kernels/allocations and the
+  // ORT CUDA provider on the same CUDA device without per-frame probing.
+  if (!impl_->cuda->EnsureContextForDevice(impl_->opts.device_id, &err)) {
     if (error_out)
       *error_out =
           std::string(

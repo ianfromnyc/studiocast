@@ -9,6 +9,7 @@
 // IMPORTANT: These declarations must match the NVIDIA SDK ABI.
 
 #include <cstdint>
+#include <limits>
 
 namespace studiocast::maxine {
 
@@ -108,5 +109,128 @@ struct NvCVImage {
   void (*deleteProc)(void *p);
   uint64_t bufferBytes;
 };
+
+enum class NvCVImageValidationStatus : uint8_t {
+  ok,
+  unexpected_gpu_mem,
+  unexpected_pixel_format,
+  unexpected_component_type,
+  unexpected_layout,
+  unexpected_component_bytes,
+  unexpected_num_components,
+  unexpected_pixel_bytes,
+  zero_dimensions,
+  null_pixels,
+  row_bytes_exceed_pitch_range,
+  invalid_pitch,
+  pitch_too_small,
+  buffer_too_small,
+};
+
+struct NvCVImageValidationSpec {
+  NvCVImage_PixelFormat pixel_format = NVCV_BGR;
+  NvCVImage_ComponentType component_type = NVCV_U8;
+  uint8_t pixel_bytes = 3;
+  uint8_t component_bytes = 1;
+  uint8_t num_components = 3;
+  uint8_t planar = static_cast<uint8_t>(NVCV_CHUNKY);
+  uint8_t gpu_mem = static_cast<uint8_t>(NVCV_GPU);
+  bool allow_zero_dimensions = false;
+  bool require_buffer_bytes = true;
+};
+
+inline constexpr const char *
+NvCVImageValidationStatusToString(NvCVImageValidationStatus status) {
+  switch (status) {
+  case NvCVImageValidationStatus::ok:
+    return "ok";
+  case NvCVImageValidationStatus::unexpected_gpu_mem:
+    return "unexpected gpuMem";
+  case NvCVImageValidationStatus::unexpected_pixel_format:
+    return "unexpected pixel format";
+  case NvCVImageValidationStatus::unexpected_component_type:
+    return "unexpected component type";
+  case NvCVImageValidationStatus::unexpected_layout:
+    return "unexpected layout";
+  case NvCVImageValidationStatus::unexpected_component_bytes:
+    return "unexpected component byte count";
+  case NvCVImageValidationStatus::unexpected_num_components:
+    return "unexpected component count";
+  case NvCVImageValidationStatus::unexpected_pixel_bytes:
+    return "unexpected pixel byte count";
+  case NvCVImageValidationStatus::zero_dimensions:
+    return "zero dimensions";
+  case NvCVImageValidationStatus::null_pixels:
+    return "null pixels";
+  case NvCVImageValidationStatus::row_bytes_exceed_pitch_range:
+    return "row bytes exceed signed pitch range";
+  case NvCVImageValidationStatus::invalid_pitch:
+    return "invalid pitch";
+  case NvCVImageValidationStatus::pitch_too_small:
+    return "pitch is smaller than one row";
+  case NvCVImageValidationStatus::buffer_too_small:
+    return "bufferBytes is too small";
+  }
+  return "unknown NvCVImage validation status";
+}
+
+inline NvCVImageValidationStatus
+ValidateNvCVImage(const NvCVImage &image,
+                  const NvCVImageValidationSpec &spec) noexcept {
+  if (image.gpuMem != spec.gpu_mem)
+    return NvCVImageValidationStatus::unexpected_gpu_mem;
+  if (image.pixelFormat != spec.pixel_format)
+    return NvCVImageValidationStatus::unexpected_pixel_format;
+  if (image.componentType != spec.component_type)
+    return NvCVImageValidationStatus::unexpected_component_type;
+  if (image.planar != spec.planar)
+    return NvCVImageValidationStatus::unexpected_layout;
+  if (image.componentBytes != spec.component_bytes)
+    return NvCVImageValidationStatus::unexpected_component_bytes;
+  if (image.numComponents != spec.num_components)
+    return NvCVImageValidationStatus::unexpected_num_components;
+  if (image.pixelBytes != spec.pixel_bytes)
+    return NvCVImageValidationStatus::unexpected_pixel_bytes;
+
+  if (image.width == 0 || image.height == 0) {
+    return spec.allow_zero_dimensions
+               ? NvCVImageValidationStatus::ok
+               : NvCVImageValidationStatus::zero_dimensions;
+  }
+
+  if (!image.pixels)
+    return NvCVImageValidationStatus::null_pixels;
+
+  const uint64_t row_bytes =
+      static_cast<uint64_t>(image.width) * spec.pixel_bytes;
+  if (row_bytes >
+      static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+    return NvCVImageValidationStatus::row_bytes_exceed_pitch_range;
+  }
+
+  if (image.pitch <= 0)
+    return NvCVImageValidationStatus::invalid_pitch;
+
+  const uint64_t pitch = static_cast<uint64_t>(image.pitch);
+  if (pitch < row_bytes)
+    return NvCVImageValidationStatus::pitch_too_small;
+
+  const uint64_t required_bytes =
+      pitch * (static_cast<uint64_t>(image.height) - 1u) + row_bytes;
+  if ((spec.require_buffer_bytes || image.bufferBytes != 0) &&
+      image.bufferBytes < required_bytes) {
+    return NvCVImageValidationStatus::buffer_too_small;
+  }
+
+  return NvCVImageValidationStatus::ok;
+}
+
+inline NvCVImageValidationStatus
+ValidateBgrU8CudaNvCVImage(const NvCVImage &image,
+                           bool allow_zero_dimensions = false) noexcept {
+  NvCVImageValidationSpec spec{};
+  spec.allow_zero_dimensions = allow_zero_dimensions;
+  return ValidateNvCVImage(image, spec);
+}
 
 } // namespace studiocast::maxine

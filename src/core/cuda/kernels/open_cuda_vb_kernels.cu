@@ -1,8 +1,10 @@
 // Reference CUDA C kernels for the Open CUDA virtual background path.
 //
 // These kernels are not compiled as part of the StudioCast build.
-// Instead, we compile them to PTX (e.g. via `nvcc -ptx`) and embed the PTX
-// into a C++ translation unit loaded via the CUDA Driver API.
+// Instead, we compile them to PTX and embed the PTX into a C++ translation unit
+// loaded via the CUDA Driver API.
+//
+// PTX_GENERATE: nvcc -ptx -O3 --use_fast_math -arch=compute_52 -I src src/core/cuda/kernels/open_cuda_vb_kernels.cu -o open_cuda_vb_kernels.ptx
 //
 // Keep this file in sync with the embedded PTX module in:
 //   core/cuda/kernels/open_cuda_vb_kernels_ptx.cpp
@@ -17,6 +19,16 @@ __device__ __forceinline__ int clampi(int v, int lo, int hi) {
 
 __device__ __forceinline__ float clamp01(float v) {
   return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+}
+
+__device__ __forceinline__ float clamp_alpha01(float v) {
+  if (!isfinite(v))
+    return 0.0f;
+  return clamp01(v);
+}
+
+__device__ __forceinline__ float clampf(float v, float lo, float hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
 }
 
 } // namespace
@@ -34,16 +46,18 @@ resize_bilinear_f32_1(const void *srcPtr, unsigned int srcPitchBytes,
   const float sx = static_cast<float>(srcW) / static_cast<float>(dstW);
   const float sy = static_cast<float>(srcH) / static_cast<float>(dstH);
 
-  const float srcX = (static_cast<float>(x) + 0.5f) * sx - 0.5f;
-  const float srcY = (static_cast<float>(y) + 0.5f) * sy - 0.5f;
+  // Clamp source coordinates before computing weights: f32 alpha resize uses
+  // edge/replicate border semantics, not extrapolation outside the source.
+  const float srcX = clampf((static_cast<float>(x) + 0.5f) * sx - 0.5f, 0.0f,
+                            static_cast<float>(srcW) - 1.0f);
+  const float srcY = clampf((static_cast<float>(y) + 0.5f) * sy - 0.5f, 0.0f,
+                            static_cast<float>(srcH) - 1.0f);
 
-  int x0 = static_cast<int>(floorf(srcX));
-  int y0 = static_cast<int>(floorf(srcY));
+  const int x0 = static_cast<int>(floorf(srcX));
+  const int y0 = static_cast<int>(floorf(srcY));
   const float tx = srcX - static_cast<float>(x0);
   const float ty = srcY - static_cast<float>(y0);
 
-  x0 = clampi(x0, 0, static_cast<int>(srcW) - 1);
-  y0 = clampi(y0, 0, static_cast<int>(srcH) - 1);
   const int x1 = clampi(x0 + 1, 0, static_cast<int>(srcW) - 1);
   const int y1 = clampi(y0 + 1, 0, static_cast<int>(srcH) - 1);
 
@@ -204,7 +218,7 @@ composite_alpha_u8x3_bg(const void *fgPtr, unsigned int fgPitchBytes,
   const auto *aRowU8 = static_cast<const unsigned char *>(alphaPtr) +
                        static_cast<size_t>(y) * alphaPitchBytes;
   const auto *aRow = reinterpret_cast<const float *>(aRowU8);
-  const float a = clamp01(aRow[x]);
+  const float a = clamp_alpha01(aRow[x]);
   const float ia = 1.0f - a;
 
   auto *outRow = static_cast<unsigned char *>(outPtr) +
@@ -223,8 +237,8 @@ composite_alpha_u8x3_bg(const void *fgPtr, unsigned int fgPitchBytes,
 extern "C" __global__ void
 composite_alpha_u8x3_solid(const void *fgPtr, unsigned int fgPitchBytes,
                            const void *alphaPtr, unsigned int alphaPitchBytes,
-                           unsigned int w, unsigned int h, unsigned char bgR,
-                           unsigned char bgG, unsigned char bgB, void *outPtr,
+                           unsigned int w, unsigned int h, unsigned char bg0,
+                           unsigned char bg1, unsigned char bg2, void *outPtr,
                            unsigned int outPitchBytes) {
   const int x = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
   const int y = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
@@ -236,14 +250,14 @@ composite_alpha_u8x3_solid(const void *fgPtr, unsigned int fgPitchBytes,
   const auto *aRowU8 = static_cast<const unsigned char *>(alphaPtr) +
                        static_cast<size_t>(y) * alphaPitchBytes;
   const auto *aRow = reinterpret_cast<const float *>(aRowU8);
-  const float a = clamp01(aRow[x]);
+  const float a = clamp_alpha01(aRow[x]);
   const float ia = 1.0f - a;
 
   auto *outRow = static_cast<unsigned char *>(outPtr) +
                  static_cast<size_t>(y) * outPitchBytes;
   const int off = x * 3;
 
-  const unsigned char bg[3] = {bgR, bgG, bgB};
+  const unsigned char bg[3] = {bg0, bg1, bg2};
   for (int c = 0; c < 3; ++c) {
     const float f = static_cast<float>(fgRow[off + c]);
     const float b = static_cast<float>(bg[c]);
@@ -273,7 +287,7 @@ key_light_u8x3(const void *srcPtr, unsigned int srcPitchBytes,
   const auto *aRow = reinterpret_cast<const float *>(aRowU8);
 
   const int off = x * 3;
-  const float a = clamp01(aRow[x]);
+  const float a = clamp_alpha01(aRow[x]);
   if (a <= 0.02f || intensity <= 0.0001f) {
     outRow[off + 0] = srcRow[off + 0];
     outRow[off + 1] = srcRow[off + 1];

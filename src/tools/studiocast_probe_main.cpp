@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <csetjmp>
 #include <cstdint>
@@ -75,6 +76,36 @@ bool hasArg(int argc, char **argv, std::string_view flag) {
       return true;
   }
   return false;
+}
+
+bool EnvFlagValueEnabled(std::string_view value) {
+  std::string normalized;
+  normalized.reserve(value.size());
+  for (char c : value) {
+    if (!std::isspace(static_cast<unsigned char>(c))) {
+      normalized.push_back(
+          static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+  }
+  return !normalized.empty() && normalized != "0" && normalized != "false" &&
+         normalized != "off" && normalized != "no";
+}
+
+bool EnvFlagEnabled(const char *name) {
+  const char *value = std::getenv(name);
+  return value && EnvFlagValueEnabled(value);
+}
+
+struct SelfTestOptions {
+  bool require_cuda_runtime = false;
+};
+
+SelfTestOptions ParseSelfTestOptions(int argc, char **argv) {
+  SelfTestOptions options;
+  options.require_cuda_runtime =
+      hasArg(argc, argv, "--require-cuda-runtime") ||
+      EnvFlagEnabled("STUDIOCAST_REQUIRE_CUDA_RUNTIME");
+  return options;
 }
 
 struct VerifyFileResult {
@@ -403,7 +434,7 @@ bool WritePngRgb24File(const std::filesystem::path &path, int w, int h,
   return true;
 }
 
-int RunSelfTest() {
+int RunSelfTest(const SelfTestOptions &self_test_options) {
   int failures = 0;
 
   auto expectEq = [&](const char *name, const std::string &got,
@@ -457,10 +488,44 @@ int RunSelfTest() {
     std::printf("[FAIL] %s\n  got:  %d\n  want: %d\n", name, got, want);
   };
 
+  auto reportCudaSmokeSkip = [&](const char *name, const char *reason,
+                                 const std::string &detail) {
+    if (self_test_options.require_cuda_runtime) {
+      ++failures;
+      std::printf("[FAIL] %s\n  required CUDA runtime smoke skipped: %s",
+                  name, reason);
+      if (!detail.empty())
+        std::printf(": %s", detail.c_str());
+      std::printf("\n");
+      return;
+    }
+
+    std::printf("[SKIP] %s (%s)", name, reason);
+    if (!detail.empty())
+      std::printf(": %s", detail.c_str());
+    std::printf("\n");
+  };
+
   expectEq("TrimCopy", TrimCopy("  hi \n"), "hi");
   expectVecEq("Split", Split("a,b,,c", ','), {"a", "b", "", "c"});
   expectVecEq("SplitLines", SplitLines("a\r\nb\n\nc"), {"a", "b", "", "c"});
   expectEq("FirstNonEmptyLine", FirstNonEmptyLine("\n  \n x \n"), "x");
+
+  {
+    char arg0[] = "studiocast-probe";
+    char arg1[] = "--self-test";
+    char arg2[] = "--require-cuda-runtime";
+    char *args[] = {arg0, arg1, arg2};
+    expectTrue("hasArg --require-cuda-runtime",
+               hasArg(3, args, "--require-cuda-runtime"));
+    expectTrue("hasArg missing option", !hasArg(3, args, "--missing"));
+    expectTrue("EnvFlagValueEnabled true",
+               EnvFlagValueEnabled(" true "));
+    expectTrue("EnvFlagValueEnabled one", EnvFlagValueEnabled("1"));
+    expectTrue("EnvFlagValueEnabled false",
+               !EnvFlagValueEnabled("false"));
+    expectTrue("EnvFlagValueEnabled zero", !EnvFlagValueEnabled("0"));
+  }
 
   // Capture error policy (pure logic; used by the camera pipeline).
   {
@@ -966,11 +1031,10 @@ int RunSelfTest() {
     studiocast::maxine::CudaDriverApi cuda;
     std::string err;
     if (!cuda.Initialize(&err)) {
-      std::printf("[SKIP] CudaImageRoundtrip (CUDA unavailable): %s\n",
-                  err.c_str());
+      reportCudaSmokeSkip("CudaImageRoundtrip", "CUDA unavailable", err);
     } else if (!cuda.EnsureContext(&err)) {
-      std::printf("[SKIP] CudaImageRoundtrip (no CUDA context/device): %s\n",
-                  err.c_str());
+      reportCudaSmokeSkip("CudaImageRoundtrip", "no CUDA context/device",
+                          err);
     } else {
       studiocast::maxine::CUstream stream = nullptr;
       if (!cuda.CreateStream(&stream, &err)) {
@@ -1041,12 +1105,10 @@ int RunSelfTest() {
     studiocast::maxine::CudaDriverApi cuda;
     std::string err;
     if (!cuda.Initialize(&err)) {
-      std::printf("[SKIP] OpenCudaVbKernelsSmoke (CUDA unavailable): %s\n",
-                  err.c_str());
+      reportCudaSmokeSkip("OpenCudaVbKernelsSmoke", "CUDA unavailable", err);
     } else if (!cuda.EnsureContext(&err)) {
-      std::printf(
-          "[SKIP] OpenCudaVbKernelsSmoke (no CUDA context/device): %s\n",
-          err.c_str());
+      reportCudaSmokeSkip("OpenCudaVbKernelsSmoke", "no CUDA context/device",
+                          err);
     } else {
       studiocast::maxine::CUstream stream = nullptr;
       if (!cuda.CreateStream(&stream, &err)) {
@@ -1377,18 +1439,16 @@ int RunSelfTest() {
     studiocast::maxine::CudaDriverApi cuda;
     std::string err;
     if (!cuda.Initialize(&err)) {
-      std::printf("[SKIP] OpenCudaMattingSessionSmoke (CUDA unavailable): %s\n",
-                  err.c_str());
+      reportCudaSmokeSkip("OpenCudaMattingSessionSmoke", "CUDA unavailable",
+                          err);
     } else if (!cuda.EnsureContext(&err)) {
-      std::printf(
-          "[SKIP] OpenCudaMattingSessionSmoke (no CUDA context/device): %s\n",
-          err.c_str());
+      reportCudaSmokeSkip("OpenCudaMattingSessionSmoke",
+                          "no CUDA context/device", err);
     } else {
       studiocast::maxine::CUstream stream = nullptr;
       if (!cuda.CreateStream(&stream, &err)) {
-        std::printf(
-            "[SKIP] OpenCudaMattingSessionSmoke (CreateStream failed): %s\n",
-            err.c_str());
+        reportCudaSmokeSkip("OpenCudaMattingSessionSmoke",
+                            "CreateStream failed", err);
       } else {
         const auto reg = studiocast::open_video::ModelPackRegistry::Scan(
             std::filesystem::path("tests") / "data" / "models" / "open_cuda");
@@ -1448,9 +1508,8 @@ int RunSelfTest() {
                     // self-test stays portable.
                     if (run_err.find("CUDA EP") != std::string::npos ||
                         run_err.find("CUDA") != std::string::npos) {
-                      std::printf("[SKIP] OpenCudaMattingSessionSmoke (ORT "
-                                  "CUDA EP unavailable): %s\n",
-                                  run_err.c_str());
+                      reportCudaSmokeSkip("OpenCudaMattingSessionSmoke",
+                                          "ORT CUDA EP unavailable", run_err);
                       ok = false;
                       break;
                     }
@@ -1499,8 +1558,8 @@ int RunSelfTest() {
       }
     }
 #else
-    std::printf(
-        "[SKIP] OpenCudaMattingSessionSmoke (built without ONNX Runtime)\n");
+    reportCudaSmokeSkip("OpenCudaMattingSessionSmoke",
+                        "built without ONNX Runtime", std::string());
 #endif
   }
 
@@ -1509,10 +1568,9 @@ int RunSelfTest() {
     studiocast::maxine::CudaDriverApi cuda;
     std::string err;
     if (!cuda.Initialize(&err)) {
-      std::printf("[SKIP] CudaKernels (CUDA unavailable): %s\n", err.c_str());
+      reportCudaSmokeSkip("CudaKernels", "CUDA unavailable", err);
     } else if (!cuda.EnsureContext(&err)) {
-      std::printf("[SKIP] CudaKernels (no CUDA context/device): %s\n",
-                  err.c_str());
+      reportCudaSmokeSkip("CudaKernels", "no CUDA context/device", err);
     } else {
       studiocast::maxine::CUstream stream = nullptr;
       if (!cuda.CreateStream(&stream, &err)) {
@@ -4149,7 +4207,7 @@ int RunSelfTest() {
 
 int main(int argc, char **argv) {
   if (hasArg(argc, argv, "--self-test")) {
-    return RunSelfTest();
+    return RunSelfTest(ParseSelfTestOptions(argc, argv));
   }
 
   const bool json = hasArg(argc, argv, "--json");
