@@ -228,8 +228,10 @@ Fedora RPM packaging:
   podman or docker container. Use it on a host that is not Fedora 44. The
   container build takes about 2.5 minutes on a 32-core machine.
 - Other options: `--srpm-only` builds the source RPM only, `--with NAME` and
-  `--without NAME` change a spec build conditional, and `--rpmlint` prints an
-  rpmlint report. The rpmlint status never fails the script.
+  `--without NAME` change a spec build conditional, `--install-builddeps` runs
+  `dnf builddep` on the rendered spec before a native build (needs root or
+  sudo; container mode installs its own build dependencies), and `--rpmlint`
+  prints an rpmlint report. The rpmlint status never fails the script.
 - Spec build conditionals: `open_cuda` (on), `open_audio` (on), `libyuv` (on),
   and `tests` (on); `dlib` (off) and `installer` (off). With `tests`, `%check`
   runs the full ctest suite. `dlib` stays off because Fedora has no dlib
@@ -263,13 +265,17 @@ Fedora RPM packaging:
   the file list, the declared dependencies, and the checksum file.
   `--install-test` installs the binary RPM with `dnf`, runs the programs, and
   removes the package again. That test needs root, so use `--container` to run
-  it in a Fedora 44 container.
+  it in a Fedora 44 container. `--no-container-check` lets it run directly on a
+  disposable root system, such as a CI container job.
 - CI: `.github/workflows/release-packaging.yml` has the `rpm-fedora-44` job. It
   runs in a `registry.fedoraproject.org/fedora:44` container, always on release
   events, and on `workflow_dispatch` when the `build_rpm` input is true, which
   is the default. It uploads the RPMs and the SHA256 file as the
   `studiocast-rpm-fedora-44` artifact. `.github/workflows/ci.yml` has the
-  `rpm-package-smoke` job for the pull-request path.
+  `rpm-package-smoke` job, which runs the same build on every push and is the
+  only Fedora/GCC 16 compile check in push CI. Both jobs run the scripts
+  natively with `--install-builddeps` and `--no-container-check`, because a
+  GitHub container job cannot start podman.
 
 First release checklist:
 
@@ -327,7 +333,9 @@ For release-equivalent local validation with preinstalled packaging tools:
 packaging/appimage/build_appimage.sh --clean --appimage-required
 ```
 
-Maintainer commands for the Fedora RPM, on a Fedora 44 host:
+Maintainer commands for the Fedora RPM, on a Fedora 44 host (add
+`--install-builddeps` to the build command when the build dependencies are not
+installed yet):
 
 ```bash
 packaging/rpm/build_rpm.sh --clean --rpmlint
