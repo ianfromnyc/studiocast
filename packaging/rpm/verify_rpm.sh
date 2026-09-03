@@ -13,6 +13,8 @@ IMAGE_EXPLICIT=0
 INSTALL_TEST=0
 USE_CONTAINER=0
 NO_CONTAINER_CHECK=0
+# Set from the binary RPM metadata in main(); 1 when the package bundles dlib.
+HAS_DLIB=0
 
 usage() {
   cat <<EOF
@@ -45,9 +47,14 @@ Checks:
   and the license files, the run-time dependencies are declared, and the
   checksum file matches every package.
 
+  A package built with dlib declares Provides: bundled(dlib). For such a
+  package the checks also expect the dlib license file, the FlexiBLAS run-time
+  dependency, and the "MPL-2.0 AND BSL-1.0" license tag.
+
   The install test also checks that the package installs with dnf while the
   weak dependency v4l2loopback is unavailable, that the programs run, that the
-  desktop entry is valid, and that removal leaves no files behind.
+  desktop entry is valid, that the installed programs report dlib as compiled
+  in when the package bundles it, and that removal leaves no files behind.
 EOF
 }
 
@@ -114,6 +121,15 @@ package_recommends() {
   rpm -qp --recommends "${package}" 2>/dev/null |
     awk '{ print $1 }' | grep -Fx "${requirement}" >/dev/null ||
     die "$(basename "${package}") does not recommend ${requirement}"
+}
+
+# True when the package was built with the dlib build conditional. The spec
+# declares the static dlib with Provides: bundled(dlib), so the provide is the
+# one piece of metadata that always tells the two builds apart.
+package_bundles_dlib() {
+  local package="$1"
+  rpm -qp --provides "${package}" 2>/dev/null |
+    awk '{ print $1 }' | grep -Fx 'bundled(dlib)' >/dev/null
 }
 
 find_container_runtime() {
@@ -192,13 +208,20 @@ verify_metadata() {
   local rpm_file="$2"
   local release="1.fc${FEDORA_RELEASE}"
 
+  # A dlib build bundles dlib, which is under the Boost Software License 1.0,
+  # so the license tag must name it as well.
+  local license="MPL-2.0"
+  if [[ "${HAS_DLIB}" -eq 1 ]]; then
+    license="MPL-2.0 AND BSL-1.0"
+  fi
+
   require_equal "$(rpm_query "${rpm_file}" '%{name}')" "studiocast" \
     "binary RPM name"
   require_equal "$(rpm_query "${rpm_file}" '%{version}')" "${VERSION}" \
     "binary RPM version"
   require_equal "$(rpm_query "${rpm_file}" '%{release}')" "${release}" \
     "binary RPM release"
-  require_equal "$(rpm_query "${rpm_file}" '%{license}')" "MPL-2.0" \
+  require_equal "$(rpm_query "${rpm_file}" '%{license}')" "${license}" \
     "binary RPM license"
   require_equal "$(rpm_query "${rpm_file}" '%{arch}')" "${ARCH}" \
     "binary RPM architecture"
@@ -208,7 +231,7 @@ verify_metadata() {
     "source RPM version"
   require_equal "$(rpm_query "${srpm}" '%{release}')" "${release}" \
     "source RPM release"
-  require_equal "$(rpm_query "${srpm}" '%{license}')" "MPL-2.0" \
+  require_equal "$(rpm_query "${srpm}" '%{license}')" "${license}" \
     "source RPM license"
 }
 
@@ -234,6 +257,17 @@ verify_file_list() {
     package_lists_path "${rpm_file}" "${path}"
   done
 
+  if [[ "${HAS_DLIB}" -eq 1 ]]; then
+    package_lists_path "${rpm_file}" \
+      /usr/share/licenses/studiocast/dlib-LICENSE.txt
+  fi
+
+  # dlib is linked in statically, so the package must never ship a dlib
+  # shared object of its own.
+  if rpm -qpl "${rpm_file}" 2>/dev/null | grep -E '/libdlib\.so' >/dev/null; then
+    die "$(basename "${rpm_file}") unexpectedly ships a dlib shared object"
+  fi
+
   # The GUI installer and its Ubuntu-only backend are not part of the package.
   if rpm -qpl "${rpm_file}" 2>/dev/null |
       grep -Fx /usr/bin/studiocast-installer >/dev/null; then
@@ -247,6 +281,12 @@ verify_dependencies() {
   package_requires "${rpm_file}" "v4l-utils"
   package_requires "${rpm_file}" "hicolor-icon-theme"
   package_recommends "${rpm_file}" "v4l2loopback"
+
+  if [[ "${HAS_DLIB}" -eq 1 ]]; then
+    # The static dlib calls CBLAS and LAPACK through FlexiBLAS, so rpmbuild
+    # must have found the FlexiBLAS soname in the programs.
+    package_requires "${rpm_file}" "libflexiblas.so.3()(64bit)"
+  fi
 }
 
 verify_checksums() {
@@ -267,6 +307,7 @@ set -euo pipefail
 version="$1"
 arch="$2"
 dist="$3"
+has_dlib="$4"
 
 fail() {
   printf '[verify-rpm] ERROR: %s\n' "$*" >&2
@@ -310,6 +351,34 @@ grep -Fxq 'ExecStart=/usr/bin/studiocastd' \
   /usr/lib/systemd/user/studiocastd.service ||
   fail "the packaged user unit does not start /usr/bin/studiocastd"
 
+# dlib check. StudioCast reports dlib only through the Open Video Eye Contact
+# effect, which needs a running daemon, a camera and an installed model pack,
+# so no command line output can show it here. The compiled program is the
+# cheapest observable instead. studiocastd is the program that carries the
+# landmark code, so look there:
+#   - with dlib the static library leaves its mangled type names, such as
+#     N4dlib5errorE, in the read-only data;
+#   - without dlib those names are gone and the program holds the literal
+#     message that dlib_face_landmarks.cpp emits under !STUDIOCAST_HAVE_DLIB.
+if [ "${has_dlib}" = "1" ]; then
+  echo "[verify-rpm] Checking that dlib is compiled into studiocastd"
+  rpm -q --provides studiocast | grep -Fq 'bundled(dlib)' ||
+    fail "the installed package does not declare bundled(dlib)"
+  if grep -aFq 'STUDIOCAST_HAVE_DLIB=0' /usr/bin/studiocastd; then
+    fail "studiocastd still reports STUDIOCAST_HAVE_DLIB=0"
+  fi
+  grep -aFq 'N4dlib' /usr/bin/studiocastd ||
+    fail "studiocastd holds no dlib type names"
+  [ -f /usr/share/licenses/studiocast/dlib-LICENSE.txt ] ||
+    fail "the dlib license file is missing"
+  echo "[verify-rpm] dlib is compiled in"
+else
+  echo "[verify-rpm] Checking that this build has no dlib"
+  if grep -aFq 'N4dlib' /usr/bin/studiocastd; then
+    fail "studiocastd holds dlib type names in a build without dlib"
+  fi
+fi
+
 echo "[verify-rpm] Removing studiocast"
 dnf remove -y studiocast
 
@@ -337,10 +406,10 @@ run_install_test() {
     log "Running the install test in ${runtime} image ${IMAGE}"
     print_cmd "${runtime}" run --rm -i \
       --volume "${DIST_DIR}:/work/dist:Z" "${IMAGE}" \
-      bash -s -- "${VERSION}" "${ARCH}" /work/dist
+      bash -s -- "${VERSION}" "${ARCH}" /work/dist "${HAS_DLIB}"
     install_test_script | "${runtime}" run --rm -i \
       --volume "${DIST_DIR}:/work/dist:Z" "${IMAGE}" \
-      bash -s -- "${VERSION}" "${ARCH}" /work/dist
+      bash -s -- "${VERSION}" "${ARCH}" /work/dist "${HAS_DLIB}"
     return 0
   fi
 
@@ -351,7 +420,8 @@ run_install_test() {
   [[ "$(id -u)" -eq 0 ]] || die "--install-test needs root"
 
   log "Running the install test on this system"
-  install_test_script | bash -s -- "${VERSION}" "${ARCH}" "${DIST_DIR}"
+  install_test_script | bash -s -- "${VERSION}" "${ARCH}" "${DIST_DIR}" \
+    "${HAS_DLIB}"
 }
 
 main() {
@@ -367,6 +437,14 @@ main() {
   require_file "${srpm}"
   require_file "${rpm_file}"
   require_file "${checksum_file}"
+
+  if package_bundles_dlib "${rpm_file}"; then
+    HAS_DLIB=1
+    log "The package bundles dlib; running the dlib checks as well."
+  else
+    HAS_DLIB=0
+    log "The package was built without dlib; skipping the dlib checks."
+  fi
 
   verify_metadata "${srpm}" "${rpm_file}"
   verify_file_list "${rpm_file}"
