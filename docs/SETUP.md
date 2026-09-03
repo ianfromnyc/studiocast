@@ -367,32 +367,32 @@ Verify:
 StudioCast does **not** ship or redistribute NVIDIA Maxine SDK assets. You must obtain them yourself
 from NVIDIA and comply with NVIDIA's license terms.
 
-Use the helper tool to print authoritative paths and install commands:
+One NGC API key does the whole install. Get a key at <https://ngc.nvidia.com> under
+**Setup -> API key**, then:
 
 ```bash
-./cmake-build-debug/studiocast-maxine init
-./cmake-build-debug/studiocast-maxine install-hints
+export NGC_API_KEY="..."        # do not commit this
+./scripts/setup.sh --maxine -- --download all --install-features --install-afx-features
 ```
 
-Current Linux Maxine SDK builds typically expose `libVideoFX.so` for VFX and
-`libnvARPose.so` for AR. StudioCast now auto-detects those names directly, but
-you still need to run the SDK-provided `install_feature.sh` steps so the effect
-models and feature libraries are installed.
+That asks NGC for the newest SDK version, caches the archives under
+`$XDG_CACHE_HOME/studiocast/maxine`, extracts them under `$XDG_DATA_HOME/studiocast/maxine`,
+and installs the feature models and libraries. Nothing needs `sudo`.
+`NGC_CLI_API_KEY` works as well; the helper exports both names for the NVIDIA scripts.
 
-### Optional: automate extraction + feature install
-
-If you already downloaded the SDK tarballs, you can extract them into the expected layout and install
-features (models/libs) via NGC:
+Your NGC account decides what you can fetch. AFX needs only an NVIDIA Developer Program
+account. VFX and AR for Linux need an NVIDIA AI Enterprise subscription, or a granted
+Maxine Early Access request (`--vfx-resource maxine_linux_vfx_sdk_ea`). Without the
+entitlement the helper stops with a message that names the catalog page, and an audio
+only install still works:
 
 ```bash
-export NGC_CLI_API_KEY="..."   # do not commit this
-export NGC_API_KEY="..."       # do not commit this
-./scripts/setup/maxine.sh \
-  --vfx-tar ~/Downloads/NVIDIA_VFX_SDK_linux_*.tar.gz \
-  --ar-tar  ~/Downloads/NVIDIA_AR_SDK_linux_*.tar.gz \
-  --afx-tar ~/Downloads/Audio_Effects_SDK.tar.gz \
-  --install-features --install-afx-features --build-dir ./cmake-build-debug
+./scripts/setup/maxine.sh --download afx --install-afx-features
 ```
+
+Useful options: `--list-versions afx` prints the versions on NGC, `--sdk-version afx=2.1.0`
+pins one, `--dry-run` shows the steps without writing, and `--vfx-tar/--ar-tar/--afx-tar`
+extract archives that you already have.
 
 By default, `--install-afx-features` downloads the MVP AFX feature set (AEC + Superres). To customize:
 
@@ -400,9 +400,18 @@ By default, `--install-afx-features` downloads the MVP AFX feature set (AEC + Su
 ./scripts/setup/maxine.sh --install-afx-features --afx-effects "superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
 ```
 
-This runs the SDK-provided `install_feature.sh` scripts under the hood.
+Full instructions, including the entitlement table and the offline path, are in
+`docs/maxine_install.md`.
 
-For AFX features, the helper uses the SDK-provided `download_features.sh` script and requires `NGC_API_KEY`.
+Verify the result:
+
+```bash
+./cmake-build-debug/studiocast-maxine doctor
+./cmake-build-debug/studiocast-maxine install-hints
+```
+
+Current Linux Maxine SDK builds typically expose `libVideoFX.so` for VFX and
+`libnvARPose.so` for AR. StudioCast auto-detects those names directly.
 
 ## 5) Run daemon + use in OBS
 
