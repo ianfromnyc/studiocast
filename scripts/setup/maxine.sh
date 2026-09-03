@@ -58,27 +58,45 @@ declare -A COMPONENT_ROOT_NAME=(
 )
 
 # NGC resource holding the core SDK archive. Override with --<comp>-resource.
+# These three are the NVIDIA Developer Program packaging, which every NGC
+# account can read.
 declare -A COMPONENT_RESOURCE=(
-  [vfx]="maxine_linux_vfx_sdk_ga"
-  [ar]="maxine_linux_ar_sdk_ga"
+  [vfx]="vfx_sdk_core"
+  [ar]="ar_sdk_core"
   [afx]="maxine_linux_audio_effects_sdk"
 )
 
 # Other resource names for the same component. They are printed when NGC says
 # the account has no entitlement, because a different tier may be available.
+# The maxine_linux_*_ga names are the NVIDIA AI Enterprise packaging of the
+# same SDKs, and they need that subscription.
 declare -A COMPONENT_ALT_RESOURCES=(
-  [vfx]="maxine_linux_vfx_sdk_ga maxine_linux_vfx_sdk_ea maxine_linux_vfx_sdk"
-  [ar]="maxine_linux_ar_sdk_ga maxine_linux_ar_sdk_ea maxine_linux_ar_sdk"
+  [vfx]="vfx_sdk_core maxine_linux_vfx_sdk_ga maxine_linux_vfx_sdk_ea maxine_linux_vfx_sdk"
+  [ar]="ar_sdk_core maxine_linux_ar_sdk_ga maxine_linux_ar_sdk_ea maxine_linux_ar_sdk"
   [afx]="maxine_linux_audio_effects_sdk"
 )
 
 # NGC models holding the VFX/AR feature packs. Each one has a "<version>_lib_linux"
 # version with the feature library and a "<version>_models_linux_sm<CC>" version
 # with the engine files.
+#
+# These are the features that NVIDIA builds for Linux in SDK 1.x. The word "all"
+# is allowed as well; it lets the SDK script ask NGC for the whole list, which
+# also names Windows only features such as nvarlipsync.
 declare -A COMPONENT_FEATURE_MODELS=(
-  [vfx]="nvvfxgreenscreen nvvfxdenoising nvvfxupscale nvvfxbackgroundblur nvvfxrelighting nvvfxvideosuperres nvvfxtransfer"
-  [ar]="nvarlandmarkdetection nvarbodydetection nvarfaceboxdetection nvargazeredirection nvarbodyposeestimation"
+  [vfx]="nvvfxaigsrelighting nvvfxbackgroundblur nvvfxdenoising nvvfxgreenscreen nvvfxrelighting nvvfxtransfer nvvfxupscale nvvfxvideosuperres"
+  [ar]="nvaractivespeakerdetection nvarbodydetection nvarbodyposeestimation nvarfaceboxdetection nvarfaceexpressions nvargazeredirection nvarlandmarkdetection"
 )
+
+# The same list, kept as it is, for the REST fallback when the user asks for
+# "all" and there is no SDK script to do the discovery.
+declare -A COMPONENT_DEFAULT_FEATURES=(
+  [vfx]="${COMPONENT_FEATURE_MODELS[vfx]}"
+  [ar]="${COMPONENT_FEATURE_MODELS[ar]}"
+)
+
+# Set when the user names the features, so a failure of one of them is fatal.
+declare -A COMPONENT_FEATURES_EXPLICIT=()
 
 # Version pins, filled by --sdk-version / --<comp>-version.
 declare -A COMPONENT_VERSION=()
@@ -103,30 +121,36 @@ Options:
   --vfx-version V       Same as --sdk-version vfx=V.
   --ar-version V        Same as --sdk-version ar=V.
   --afx-resource NAME   Override the NGC resource name for AFX (default: maxine_linux_audio_effects_sdk).
-  --vfx-resource NAME   Override the NGC resource name for VFX (default: maxine_linux_vfx_sdk_ga).
-  --ar-resource NAME    Override the NGC resource name for AR  (default: maxine_linux_ar_sdk_ga).
+  --vfx-resource NAME   Override the NGC resource name for VFX (default: vfx_sdk_core).
+  --ar-resource NAME    Override the NGC resource name for AR  (default: ar_sdk_core).
+  --platform NAME       Platform of the SDK version to take: linux or windows (default: linux).
 
-  --vfx-tar PATH        Path to a local NVIDIA_VFX_SDK_linux_<version> archive
-  --ar-tar PATH         Path to a local NVIDIA_AR_SDK_linux_<version> archive
-  --afx-tar PATH        Path to a local Audio Effects SDK archive
+  --vfx-tar PATH        Path to a local VFXSDK_linux_<version>.tgz
+  --ar-tar PATH         Path to a local ARSDK_linux_<version>.tgz
+  --afx-tar PATH        Path to a local NVIDIA_AFX_SDK_Linux_<version>.tar.gz
   --extract             Extract provided tarballs (default if any tarball arg is given)
 
   --download-features LIST
                         Install the feature packs for afx, vfx, ar or all. It runs the
                         SDK's own feature script when the core SDK is extracted, and
                         otherwise downloads the same packs from NGC over REST.
-  --install-features    Run install_feature.sh for VFX/AR (needs NGC_API_KEY)
+  --install-features    Install the VFX/AR feature packs (needs NGC_API_KEY). Same as
+                        --download-features vfx,ar, but both SDK roots must exist.
   --install-afx-features  Download AFX features needed for the MVP (needs NGC_API_KEY)
   --afx-effects CSV     AFX effect list (default: MVP AEC + Superres)
   --afx-gpu NAME        GPU name for download_features.sh -g (for example a40, t4, l4).
                         Without it the AFX script detects the GPU itself.
-  --vfx-features CSV    VFX feature models to fetch over REST (default: all known).
-  --ar-features CSV     AR feature models to fetch over REST (default: all known).
+  --vfx-features CSV    VFX features to install, or "all" (default: the Linux features
+                        of SDK 1.x). A feature you name here must install, or the run fails.
+  --ar-features CSV     AR features to install, or "all" (default: the Linux features
+                        of SDK 1.x, which leaves out the Windows only nvarlipsync).
   --feature-version C=V Pin the feature pack version of one component,
                         for example --feature-version ar=1.1.1.0.
   --sm NN               GPU compute capability for the REST feature download,
                         for example 86. Default: detected from the local GPU.
-  --gpu ARG             Maxine --gpu argument to pass to install_feature.sh. Can be repeated.
+  --gpu ARG             GPU name for install_feature.sh -g. Can be repeated. A name that
+                        the SDK script does not know is dropped, and the script then reads
+                        the local GPU itself.
   --build-dir DIR       Build dir containing studiocast-maxine (default: ./cmake-build-debug). Used to auto-detect --gpu args.
   --ngc-org ORG         NGC org (default: nvidia)
   --ngc-team TEAM       NGC team (default: maxine)
@@ -135,15 +159,17 @@ Options:
   -h, --help            Show help.
 
 NGC entitlements:
-  AFX (maxine_linux_audio_effects_sdk) needs an NVIDIA Developer Program account.
-  VFX and AR for Linux need an NVIDIA AI Enterprise subscription (the *_ga
-  resources) or a granted Maxine Early Access request (the *_ea resources).
-  Older names without a suffix (maxine_linux_vfx_sdk, maxine_linux_ar_sdk) hold
-  earlier releases. Use --vfx-resource / --ar-resource to pick another one.
+  The VFX, AR and AFX cores and their feature packs are all available to an
+  NVIDIA Developer Program account, under the default resource names
+  vfx_sdk_core, ar_sdk_core and maxine_linux_audio_effects_sdk.
+  The maxine_linux_vfx_sdk_ga and maxine_linux_ar_sdk_ga resources are the
+  NVIDIA AI Enterprise packaging of the same SDKs, and they need that
+  subscription. The *_ea names are Maxine Early Access, by request.
+  Use --vfx-resource / --ar-resource to pick another one.
   Catalog page: https://catalog.ngc.nvidia.com/orgs/nvidia/teams/maxine/resources/<name>
-  The VFX/AR feature packs need only a Developer Program account, but their
-  libraries link against core SDK libraries, so the feature packs alone are not
-  enough to run an effect.
+
+  A core SDK version holds more than one archive. Only the core is extracted;
+  the Triton Inference Server build stays in the cache.
 
 Examples:
   # Full install with one key. This is the normal path:
@@ -159,8 +185,8 @@ Examples:
   ./scripts/setup/maxine.sh --list-versions afx
 
   # Offline fallback: extract archives you already downloaded:
-  ./scripts/setup/maxine.sh --vfx-tar ~/Downloads/NVIDIA_VFX_SDK_linux_*.tar.gz \
-                            --ar-tar  ~/Downloads/NVIDIA_AR_SDK_linux_*.tar.gz
+  ./scripts/setup/maxine.sh --vfx-tar ~/Downloads/VFXSDK_linux_1.2.0.0.tgz \
+                            --ar-tar  ~/Downloads/ARSDK_linux_1.1.1.0.tgz
 
   # Install features with explicit GPU arg(s):
   export NGC_API_KEY="..."
@@ -198,6 +224,7 @@ declare -a DOWNLOAD_COMPONENTS=()
 declare -a FEATURE_COMPONENTS=()
 LIST_VERSIONS_COMPONENT=""
 BUILD_DIR="./cmake-build-debug"
+PLATFORM="linux"
 NGC_ORG="nvidia"
 NGC_TEAM="maxine"
 DRY_RUN=0
@@ -273,8 +300,16 @@ while [[ $# -gt 0 ]]; do
     --afx-resource) COMPONENT_RESOURCE[afx]="${2:-}"; shift 2 ;;
     --vfx-resource) COMPONENT_RESOURCE[vfx]="${2:-}"; shift 2 ;;
     --ar-resource) COMPONENT_RESOURCE[ar]="${2:-}"; shift 2 ;;
-    --vfx-features) COMPONENT_FEATURE_MODELS[vfx]="${2//,/ }"; shift 2 ;;
-    --ar-features) COMPONENT_FEATURE_MODELS[ar]="${2//,/ }"; shift 2 ;;
+    --vfx-features)
+      COMPONENT_FEATURE_MODELS[vfx]="${2//,/ }"
+      COMPONENT_FEATURES_EXPLICIT[vfx]=1
+      shift 2
+      ;;
+    --ar-features)
+      COMPONENT_FEATURE_MODELS[ar]="${2//,/ }"
+      COMPONENT_FEATURES_EXPLICIT[ar]=1
+      shift 2
+      ;;
     --vfx-tar) VFX_TAR="${2:-}"; DO_EXTRACT=1; shift 2 ;;
     --ar-tar) AR_TAR="${2:-}"; DO_EXTRACT=1; shift 2 ;;
     --afx-tar) AFX_TAR="${2:-}"; DO_EXTRACT=1; shift 2 ;;
@@ -286,6 +321,7 @@ while [[ $# -gt 0 ]]; do
     --sm) SM_OVERRIDE="${2:-}"; shift 2 ;;
     --gpu) GPU_ARGS+=("${2:-}"); shift 2 ;;
     --build-dir) BUILD_DIR="${2:-}"; shift 2 ;;
+    --platform) PLATFORM="${2:-}"; shift 2 ;;
     --ngc-org) NGC_ORG="${2:-}"; shift 2 ;;
     --ngc-team) NGC_TEAM="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
@@ -293,6 +329,11 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown argument: $1"; usage; exit 2 ;;
   esac
 done
+
+if [[ "${PLATFORM}" != "linux" && "${PLATFORM}" != "windows" ]]; then
+  err "--platform takes linux or windows (got: '${PLATFORM}')"
+  exit 2
+fi
 
 SC_NGC_ORG="${NGC_ORG}"
 SC_NGC_TEAM="${NGC_TEAM}"
@@ -342,6 +383,15 @@ set_alt_resources_for() {
   done
 }
 
+# Print the platform of one NGC version id, or "-" when it names none.
+version_platform() {
+  case "$1" in
+    *_linux) printf 'linux' ;;
+    *_windows) printf 'windows' ;;
+    *) printf '-' ;;
+  esac
+}
+
 if [[ -n "${LIST_VERSIONS_COMPONENT}" ]]; then
   require_component "${LIST_VERSIONS_COMPONENT}" "--list-versions"
   require_key "--list-versions"
@@ -351,10 +401,13 @@ if [[ -n "${LIST_VERSIONS_COMPONENT}" ]]; then
   set_alt_resources_for "${LIST_VERSIONS_COMPONENT}"
 
   log "Versions of ${RESOURCE} (NGC org ${NGC_ORG}, team ${NGC_TEAM}):"
+  printf '  %-20s %-9s %-18s %s\n' "VERSION" "PLATFORM" "STATUS" "SIZE"
   VERSION_LIST="$(sc_ngc_list_versions "${RESOURCE}")" || exit 2
   while IFS=$'\t' read -r version status size; do
     [[ -n "${version}" ]] || continue
-    printf '  %-16s %-18s %s\n' "${version}" "${status}" "$(sc_ngc_human_bytes "${size:-0}")"
+    printf '  %-20s %-9s %-18s %s\n' \
+      "${version}" "$(version_platform "${version}")" "${status}" \
+      "$(sc_ngc_human_bytes "${size:-0}")"
   done <<< "${VERSION_LIST}"
   exit 0
 fi
@@ -392,12 +445,26 @@ looks_like_sdk_root() {
   esac
 }
 
+# True when a directory name is the SDK root name, or that name with a version
+# after it, such as Audio_Effects_SDK_2.1.0.
+#
+# The name must match exactly otherwise. NVIDIA ships a Triton Inference Server
+# build whose directory is ARSDK-triton-server or VideoFX-triton-server, and
+# that one holds no SDK.
+is_sdk_root_name() {
+  local name="$1"
+  local root_name="$2"
+
+  [[ "${name}" == "${root_name}" ]] && return 0
+  [[ "${name}" =~ ^${root_name}[-_.]?[0-9][0-9._-]*$ ]]
+}
+
 # Print the SDK root inside an extracted tree, or nothing when there is none.
 find_sdk_root() {
   local staging="$1"
   local root_name="$2"
   local comp="$3"
-  local hit
+  local hit entry
   local -a entries=()
 
   hit="$(find "${staging}" -maxdepth 4 -type d -name "${root_name}" -print -quit 2>/dev/null || true)"
@@ -411,12 +478,15 @@ find_sdk_root() {
     return 0
   fi
 
-  # A single versioned directory, for example Audio_Effects_SDK_2.1.0.
+  # A single directory whose name is the root name with a version after it.
   mapfile -t entries < <(find "${staging}" -mindepth 1 -maxdepth 1 -print)
-  if [[ "${#entries[@]}" -eq 1 && -d "${entries[0]}" ]] \
-     && looks_like_sdk_root "${entries[0]}" "${comp}"; then
-    printf '%s' "${entries[0]}"
-    return 0
+  if [[ "${#entries[@]}" -eq 1 && -d "${entries[0]}" ]]; then
+    entry="$(basename "${entries[0]}")"
+    if is_sdk_root_name "${entry}" "${root_name}" \
+       && looks_like_sdk_root "${entries[0]}" "${comp}"; then
+      printf '%s' "${entries[0]}"
+      return 0
+    fi
   fi
 
   return 1
@@ -448,6 +518,16 @@ extract_archive() {
     err "${label} archive not found: ${archive}"
     return 2
   fi
+
+  # The Triton build sits beside the core in the same NGC version. It holds a
+  # model repository for NVIDIA Triton Inference Server, not an SDK.
+  case "$(basename "${archive}")" in
+    *triton*|*Triton*)
+      err "${archive} is the Triton Inference Server build, not the core SDK."
+      err "StudioCast does not use it. Give the *SDK_${PLATFORM}_*.tgz archive instead."
+      return 2
+      ;;
+  esac
 
   log "Extracting ${label}: ${archive}"
   mapfile -t tops < <(archive_top_names "${archive}")
@@ -487,24 +567,85 @@ extract_archive() {
   log "${label} root: ${dest}"
 }
 
+# Print the version of a core SDK to install.
+#
+# A pinned version wins. Otherwise the newest finished version for the wanted
+# platform wins. NGC reports a "latest version" of its own, but for the SDK core
+# resources that is the Windows build, so it cannot be used here.
+resolve_sdk_version() {
+  local comp="$1"
+  local resource="$2"
+  local label="${COMPONENT_LABEL[$comp]}"
+  local pinned list ids matching version
+
+  pinned="${COMPONENT_VERSION[$comp]:-}"
+  if [[ -n "${pinned}" ]]; then
+    log "${label}: using the pinned version ${pinned} of ${resource}." >&2
+    printf '%s' "${pinned}"
+    return 0
+  fi
+
+  log "${label}: asking NGC for the newest ${PLATFORM} version of ${resource}..." >&2
+  list="$(sc_ngc_list_versions "${resource}")" || return 2
+
+  ids="$(printf '%s\n' "${list}" | awk -F'\t' '$2 == "UPLOAD_COMPLETE" { print $1 }')"
+  if [[ -z "${ids}" ]]; then
+    err "${label}: NGC has no finished version of ${resource}."
+    return 2
+  fi
+
+  # Keep the versions of the wanted platform. A resource whose versions name no
+  # platform, such as the audio SDK, keeps all of them.
+  matching="$(printf '%s\n' "${ids}" | grep -E "_${PLATFORM}\$" || true)"
+  if [[ -n "${matching}" ]]; then
+    ids="${matching}"
+  fi
+
+  version="$(printf '%s\n' "${ids}" | sort -V | tail -n 1)"
+  if [[ -z "${version}" ]]; then
+    err "${label}: no ${PLATFORM} version of ${resource} found."
+    return 2
+  fi
+
+  log "${label}: newest ${PLATFORM} version is ${version}." >&2
+  printf '%s' "${version}"
+}
+
+# Print the core SDK archive out of a "<size><TAB><path>" list.
+#
+# A version can also hold the Triton Inference Server build of the same SDK.
+# That one is never the core, so it is dropped. Of what is left, an archive that
+# names the wanted platform wins, and the biggest one wins after that.
+select_main_archive() {
+  printf '%s' "$1" | awk -F'\t' -v plat="_${PLATFORM}" '
+    {
+      if ($2 == "") next;
+      name = tolower($2);
+      sub(/.*\//, "", name);
+      if (index(name, "triton") > 0) next;
+      score = (index(name, plat) > 0) ? 1 : 0;
+      size = $1 + 0;
+      if (score > best_score || (score == best_score && size > best_size)) {
+        best_score = score;
+        best_size = size;
+        best = $2;
+      }
+    }
+    END { if (best != "") print best }
+  '
+}
+
 # Download one core SDK from NGC into the cache, then extract it.
 download_component() {
   local comp="$1"
   local label="${COMPONENT_LABEL[$comp]}"
-  local resource version listing dir dest path size sha
-  local -a archives=()
+  local resource version listing dir dest path size sha main
+  local candidates=""
 
   resource="$(resource_for "${comp}")"
   set_alt_resources_for "${comp}"
 
-  version="${COMPONENT_VERSION[$comp]:-}"
-  if [[ -n "${version}" ]]; then
-    log "${label}: using the pinned version ${version} of ${resource}."
-  else
-    log "${label}: asking NGC for the newest version of ${resource}..."
-    version="$(sc_ngc_latest_version "${resource}")" || return 2
-    log "${label}: newest version is ${version}."
-  fi
+  version="$(resolve_sdk_version "${comp}" "${resource}")" || return 2
 
   listing="$(sc_ngc_list_files "${resource}" "${version}")" || return 2
   if [[ -z "${listing}" ]]; then
@@ -519,21 +660,33 @@ download_component() {
     sc_ngc_download_file "${resource}" "${version}" "${path}" "${dest}" "${sha}" "${size}" || return 2
     case "${path}" in
       *.tar.gz|*.tgz|*.tar|*.tar.xz|*.tar.bz2|*.tar.zst)
-        archives+=("${dest}")
+        candidates+="${size:-0}"$'\t'"${dest}"$'\n'
         ;;
     esac
   done <<< "${listing}"
 
-  if [[ "${#archives[@]}" -eq 0 ]]; then
+  if [[ -z "${candidates}" ]]; then
     err "${label}: ${resource} version ${version} holds no archive to extract."
     err "Files are in ${dir}. Extract them by hand into ${BASE}."
     return 2
   fi
 
-  local archive
-  for archive in "${archives[@]}"; do
-    extract_archive "${comp}" "${archive}" || return 2
-  done
+  main="$(select_main_archive "${candidates}")"
+  if [[ -z "${main}" ]]; then
+    err "${label}: ${resource} version ${version} holds no core SDK archive."
+    err "Files are in ${dir}."
+    return 2
+  fi
+
+  # A version can hold more than one archive. Only the core SDK goes into the
+  # base directory; the Triton server variant and the README stay in the cache.
+  local other
+  while IFS=$'\t' read -r size other; do
+    [[ -n "${other}" && "${other}" != "${main}" ]] || continue
+    log "${label}: keeping $(basename "${other}") in the cache; it is not the core SDK."
+  done <<< "${candidates}"
+
+  extract_archive "${comp}" "${main}" || return 2
 }
 
 # Print the CUDA compute capability of the local GPU as NGC writes it (86, 89).
@@ -722,16 +875,25 @@ add_feature_dependencies() {
 rest_download_sdk_features() {
   local comp="$1"
   local label="${COMPONENT_LABEL[$comp]}"
-  local root features_dir sm name libver modelver mdir tmp pattern
+  local root features_dir models_dir sm name libver modelver tmp pattern
   local -a models=()
   local index=0
 
   root="$(root_for "${comp}")"
   features_dir="${root}/features"
+  # install_feature.sh puts every engine file in one flat directory beside the
+  # SDK libraries, so this fallback writes them in the same place.
+  models_dir="${root}/lib/models"
   sm="$(detect_sm)" || return 2
   pattern="$(feature_version_pattern "${comp}")"
 
-  read -r -a models <<< "${COMPONENT_FEATURE_MODELS[$comp]}"
+  # "all" means whatever the SDK script would discover. This fallback has no
+  # discovery of its own, so it takes the built in list of Linux features.
+  if [[ "${COMPONENT_FEATURE_MODELS[$comp]}" == "all" ]]; then
+    read -r -a models <<< "${COMPONENT_DEFAULT_FEATURES[$comp]}"
+  else
+    read -r -a models <<< "${COMPONENT_FEATURE_MODELS[$comp]}"
+  fi
   if [[ "${#models[@]}" -eq 0 ]]; then
     err "${label}: no feature models named. Use --${comp}-features."
     return 2
@@ -771,13 +933,13 @@ rest_download_sdk_features() {
     fi
 
     if [[ -n "${modelver}" ]]; then
-      mdir="${features_dir}/${name}/models/sm_${sm}"
-      mkdir -p "${mdir}"
-      sc_ngc_download_model_version "${name}" "${modelver}" "${mdir}" || return 2
+      mkdir -p "${models_dir}"
+      sc_ngc_download_model_version "${name}" "${modelver}" "${models_dir}" || return 2
     fi
   done
 
-  log "${label} feature packs are in ${features_dir}"
+  log "${label} feature libraries are in ${features_dir}"
+  log "${label} feature models are in ${models_dir}"
   log "${label}: these packs need the core SDK libraries. Run --download ${comp} as well."
 }
 
@@ -800,32 +962,145 @@ resolve_gpu_args() {
   mapfile -t GPU_ARGS < <("${maxine_bin}" gpu list | sed -n 's/.*(maxine --gpu \([^)]\+\)).*/\1/p' | sort -u)
 }
 
-# Run the SDK's own install_feature.sh for VFX or AR.
+# Print the SDK root that a feature script insists on, or nothing.
+#
+# install_feature.sh of SDK 1.2 starts with VFXSDK_PATH="/usr/local/VideoFX"
+# (ARSDK_PATH for the AR SDK) and stops when that directory is missing. There is
+# no flag and no variable to change it.
+sdk_script_pinned_root() {
+  sed -n 's/^[A-Za-z_]*SDK_PATH="\([^"]*\)".*/\1/p' "$1" | head -n 1
+}
+
+# True when the SDK script knows one --gpu name.
+sdk_script_knows_gpu() {
+  grep -qE "\[\"$2\"\]=" "$1"
+}
+
+# Run the SDK's own install_feature.sh for VFX or AR against our own SDK root.
+#
+# When the script pins another root, a copy with the root replaced is written
+# next to the original. It must stay in the features directory, because the
+# script finds its compute_capability helper beside itself. The copy is removed
+# afterwards.
 run_sdk_install_feature() {
   local comp="$1"
   local label="${COMPONENT_LABEL[$comp]}"
-  local root gpu
-  root="$(root_for "${comp}")"
+  local root script runner pinned gpu status
+  local -a args=()
+  local -a gpus=()
 
-  resolve_gpu_args
-  if [[ "${#GPU_ARGS[@]}" -eq 0 ]]; then
-    err "No --gpu args detected."
-    err "Either:"
-    err "  - Build and run ${BUILD_DIR}/studiocast-maxine gpu list, then re-run this script, OR"
-    err "  - Provide --gpu manually (e.g. --gpu turing / ampere / ada depending on your system)."
-    return 1
+  root="$(root_for "${comp}")"
+  script="${root}/features/install_feature.sh"
+  runner="install_feature.sh"
+
+  pinned="$(sdk_script_pinned_root "${script}")"
+  if [[ -n "${pinned}" ]] && [[ ! "${pinned}" -ef "${root}" ]]; then
+    log "${label}: install_feature.sh installs only into ${pinned}, which is not this install."
+    log "${label}: running a copy of it that points at ${root}."
+    runner="install_feature_local.sh"
+    if [[ "${DRY_RUN}" -ne 1 ]]; then
+      sed "s#^\([A-Za-z_]*SDK_PATH\)=\"${pinned}\"#\1=\"${root}\"#" \
+        "${script}" > "${root}/features/${runner}"
+      chmod +x "${root}/features/${runner}"
+    fi
   fi
 
-  log "Installing ${label} features for GPU args: ${GPU_ARGS[*]}"
-  log "Using NGC org/team: ${NGC_ORG}/${NGC_TEAM}"
-
-  for gpu in "${GPU_ARGS[@]}"; do
-    log "${label} install_feature.sh --gpu ${gpu}"
-    if [[ "${DRY_RUN}" -eq 1 ]]; then
-      continue
+  # The script maps a GPU name to an architecture with a table of its own. A
+  # name that is not in that table would stop it, so those are dropped and the
+  # script reads the local GPU itself.
+  resolve_gpu_args
+  for gpu in ${GPU_ARGS[@]+"${GPU_ARGS[@]}"}; do
+    if sdk_script_knows_gpu "${script}" "${gpu}"; then
+      gpus+=("${gpu}")
+    else
+      log "${label}: install_feature.sh does not know the GPU name '${gpu}'; letting it detect the GPU."
     fi
-    ( cd "${root}/features" && ./install_feature.sh --gpu "${gpu}" --feature all --ngc-org "${NGC_ORG}" --ngc-team "${NGC_TEAM}" )
   done
+
+  args=(--feature "$(feature_list_argument "${comp}")" \
+        --ngc-org "${NGC_ORG}" --ngc-team "${NGC_TEAM}")
+  log "Installing ${label} features. NGC org/team: ${NGC_ORG}/${NGC_TEAM}"
+
+  local out
+  out="$(mktemp)"
+  status=0
+  if [[ "${#gpus[@]}" -eq 0 ]]; then
+    log "${label} ${runner} ${args[*]}"
+    if [[ "${DRY_RUN}" -ne 1 ]]; then
+      ( cd "${root}/features" && "./${runner}" "${args[@]}" ) 2>&1 | tee -a "${out}" || status=$?
+    fi
+  else
+    for gpu in "${gpus[@]}"; do
+      log "${label} ${runner} --gpu ${gpu} ${args[*]}"
+      if [[ "${DRY_RUN}" -eq 1 ]]; then
+        continue
+      fi
+      ( cd "${root}/features" && "./${runner}" --gpu "${gpu}" "${args[@]}" ) 2>&1 | tee -a "${out}" || status=$?
+      [[ "${status}" -eq 0 ]] || break
+    done
+  fi
+
+  if [[ "${runner}" != "install_feature.sh" ]]; then
+    rm -f "${root}/features/${runner}"
+  fi
+
+  # The exit code of the SDK script is only one input; what it installed decides.
+  if [[ "${DRY_RUN}" -ne 1 ]]; then
+    local script_status="${status}"
+    status=0
+    judge_feature_run "${comp}" "${out}" "${script_status}" || status=$?
+  fi
+  rm -f "${out}"
+
+  return "${status}"
+}
+
+# Say whether a feature install worked, from what the SDK script printed.
+#
+# The script stops with 1 when one feature of the whole list has no Linux pack
+# on NGC, even when every other feature installed. NVIDIA builds some features
+# for Windows only, so that alone is not a reason to fail the install.
+judge_feature_run() {
+  local comp="$1"
+  local out="$2"
+  local status="$3"
+  local label="${COMPONENT_LABEL[$comp]}"
+  local installed
+  local -a failed=()
+
+  installed="$(grep -c '^\[OK\]' "${out}" 2>/dev/null || true)"
+  mapfile -t failed < <(
+    sed -n 's/^-- ERROR: Could not determine latest version for \(.*\)$/\1/p' "${out}" | sort -u
+  )
+
+  if [[ "${#failed[@]}" -gt 0 ]]; then
+    log "${label}: NGC has no Linux pack for: ${failed[*]}"
+    log "${label}: those features are built for Windows only, or they are not in this SDK."
+  fi
+
+  if [[ -n "${COMPONENT_FEATURES_EXPLICIT[$comp]:-}" && "${#failed[@]}" -gt 0 ]]; then
+    err "${label}: a feature you asked for could not be installed: ${failed[*]}"
+    return 2
+  fi
+
+  if [[ "${installed}" -gt 0 ]]; then
+    log "${label}: ${installed} feature(s) installed."
+    return 0
+  fi
+
+  err "${label}: no feature was installed (the SDK script ended with ${status})."
+  [[ "${status}" -ne 0 ]] && return "${status}"
+  return 2
+}
+
+# Print the --feature argument for the SDK script: a comma list, or "all".
+feature_list_argument() {
+  local list="${COMPONENT_FEATURE_MODELS[$1]}"
+  if [[ "${list}" == "all" ]]; then
+    printf 'all'
+    return 0
+  fi
+  printf '%s' "${list// /,}"
 }
 
 # Run the SDK's own download_features.sh for AFX.
@@ -873,7 +1148,7 @@ download_features_component() {
     return $?
   fi
 
-  if [[ -x "${root}/features/install_feature.sh" ]]; then
+  if [[ -f "${root}/features/install_feature.sh" ]]; then
     log "${COMPONENT_LABEL[$comp]}: using the SDK script ${root}/features/install_feature.sh"
     run_sdk_install_feature "${comp}"
     return $?
@@ -935,8 +1210,8 @@ if [[ "$DO_INSTALL_FEATURES" -eq 1 ]]; then
     exit 1
   fi
 
-  run_sdk_install_feature vfx || exit 1
-  run_sdk_install_feature ar || exit 1
+  download_features_component vfx || exit 1
+  download_features_component ar || exit 1
 
   log "Feature install complete."
   log "You can now verify with:"
