@@ -7,7 +7,9 @@
 #include "core/config/settings.h"
 #include "core/maxine/effects/vfx_background_blur_effect.h"
 #include "core/maxine/effects/vfx_green_screen_effect.h"
+#include "core/maxine/maxine_manager.h"
 #include "core/maxine/nvcv_api.h"
+#include "core/maxine/sdk_runtime.h"
 #include "core/maxine/vfx_api.h"
 #include "core/probe/probe.h"
 #include "core/util/xdg.h"
@@ -117,6 +119,61 @@ UniqueMaxineGpuArgs(const studiocast::probe::Report &rep) {
   return out;
 }
 
+// Prints where one Maxine component was resolved and whether it can be loaded.
+static void PrintComponentDetail(const studiocast::maxine::ComponentDiagnostics &c) {
+  std::cout << "  " << c.component << "\n";
+  std::cout << "    root     : " << c.root.string() << " ("
+            << (c.root_exists ? "found" : "missing") << ", source "
+            << c.root_source << ")\n";
+
+  std::cout << "    library  : "
+            << (c.library.empty() ? std::string("not found")
+                                  : c.library.string());
+  if (c.library_exists) {
+    std::cout << (c.library_loadable ? " [loadable]" : " [NOT loadable]");
+  }
+  std::cout << "\n";
+  if (c.library_exists && !c.library_loadable &&
+      !c.library_dlopen_error.empty()) {
+    std::cout << "      error  : " << c.library_dlopen_error << "\n";
+  }
+
+  if (c.library_exists) {
+    const auto &rt = studiocast::maxine::PreloadSdkRuntime(c.library, c.root);
+    std::cout << "    runtime  : " << rt.Summary() << "\n";
+    for (const auto &p : rt.problems) {
+      std::cout << "      " << p << "\n";
+    }
+  }
+
+  if (c.require_models_dir || c.models_dir_exists) {
+    std::cout << "    models   : " << c.models_dir.string();
+    if (c.models_dir_exists) {
+      std::cout << " (" << c.models_dir_source << ")";
+    } else {
+      std::cout << " [missing]";
+    }
+    std::cout << "\n";
+  }
+
+  std::cout << "    features : " << c.features_dir.string()
+            << (c.features_dir_exists ? "" : " [missing]") << "\n";
+
+  for (const auto &p : c.problems) {
+    std::cout << "    problem  : " << p << "\n";
+  }
+}
+
+static void PrintMaxineSdkSection() {
+  const studiocast::maxine::MaxineManager mgr;
+  const auto d = mgr.Diagnose(false);
+
+  std::cout << "\nMaxine SDK\n";
+  PrintComponentDetail(d.vfx);
+  PrintComponentDetail(d.ar);
+  PrintComponentDetail(d.afx);
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
     Usage(argv[0]);
@@ -160,6 +217,7 @@ int main(int argc, char **argv) {
   if (cmd == "doctor") {
     const auto rep = studiocast::probe::Run(false);
     std::cout << rep.ToText() << "\n";
+    PrintMaxineSdkSection();
     return rep.AllChecksPassed() ? 0 : 3;
   }
 
