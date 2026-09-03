@@ -380,19 +380,26 @@ That asks NGC for the newest SDK version, caches the archives under
 and installs the feature models and libraries. Nothing needs `sudo`.
 `NGC_CLI_API_KEY` works as well; the helper exports both names for the NVIDIA scripts.
 
-Your NGC account decides what you can fetch. AFX needs only an NVIDIA Developer Program
-account. VFX and AR for Linux need an NVIDIA AI Enterprise subscription, or a granted
-Maxine Early Access request (`--vfx-resource maxine_linux_vfx_sdk_ea`). Without the
-entitlement the helper stops with a message that names the catalog page, and an audio
-only install still works:
+A free NVIDIA Developer Program account is enough. The VFX, AR and AFX cores and all
+their feature packs come from the NGC resources `vfx_sdk_core`, `ar_sdk_core` and
+`maxine_linux_audio_effects_sdk`. The `maxine_linux_vfx_sdk_ga` and
+`maxine_linux_ar_sdk_ga` resources are the NVIDIA AI Enterprise packaging of the same
+SDKs and need that subscription; select one with `--vfx-resource` or `--ar-resource`.
+
+An audio only install is one command:
 
 ```bash
 ./scripts/setup/maxine.sh --download afx --install-afx-features
 ```
 
-Useful options: `--list-versions afx` prints the versions on NGC, `--sdk-version afx=2.1.0`
-pins one, `--dry-run` shows the steps without writing, and `--vfx-tar/--ar-tar/--afx-tar`
-extract archives that you already have.
+Useful options: `--list-versions vfx` prints the versions on NGC with their platform,
+`--sdk-version vfx=1.2.0.0_linux` pins one, `--dry-run` shows the steps without writing,
+and `--vfx-tar/--ar-tar/--afx-tar` extract archives that you already have.
+
+The helper takes the newest Linux version by itself, extracts only the core archive of a
+version (never the Triton Inference Server build beside it), and works around the fixed
+`/usr/local/VideoFX` path inside the SDK's own `install_feature.sh` by running a patched
+copy of it. Nothing is written outside your own directories.
 
 By default, `--install-afx-features` downloads the MVP AFX feature set (AEC + Superres). To customize:
 

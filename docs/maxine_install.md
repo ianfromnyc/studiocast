@@ -43,14 +43,17 @@ Add `--dry-run` to see what would happen. A dry run still asks NGC what it holds
 
 ## 3. What your NGC account must have
 
+The three cores and all their feature packs are available to an **NVIDIA Developer Program** account, which is free:
+
 | Component | NGC resource (default) | Entitlement |
 | --- | --- | --- |
-| Audio Effects (AFX) | `maxine_linux_audio_effects_sdk` | NVIDIA Developer Program (free account) |
-| Video Effects (VFX) | `maxine_linux_vfx_sdk_ga` | NVIDIA AI Enterprise subscription |
-| AR SDK (AR) | `maxine_linux_ar_sdk_ga` | NVIDIA AI Enterprise subscription |
+| Video Effects (VFX) | `vfx_sdk_core` | NVIDIA Developer Program |
+| AR SDK (AR) | `ar_sdk_core` | NVIDIA Developer Program |
+| Audio Effects (AFX) | `maxine_linux_audio_effects_sdk` | NVIDIA Developer Program |
 
-Other names hold the same components on another tier:
+Other names hold the same SDKs in another packaging:
 
+* `maxine_linux_vfx_sdk_ga`, `maxine_linux_ar_sdk_ga` — the NVIDIA AI Enterprise packaging of the same SDKs. They need that subscription.
 * `maxine_linux_vfx_sdk_ea`, `maxine_linux_ar_sdk_ea` — Maxine Early Access. Request access on the catalog page.
 * `maxine_linux_vfx_sdk`, `maxine_linux_ar_sdk` — earlier releases.
 
@@ -62,17 +65,18 @@ Catalog page for any of them:
 https://catalog.ngc.nvidia.com/orgs/nvidia/teams/maxine/resources/<name>
 ```
 
-If your account has no entitlement, the helper stops with a clear message and downloads nothing:
+If your account has no entitlement for the name you asked for, the helper stops with a clear message and downloads nothing:
 
 ```
 [maxine] ERROR: this NGC account has no entitlement for 'maxine_linux_vfx_sdk_ga' (402 Payment Required).
 [maxine] ERROR: See https://catalog.ngc.nvidia.com/orgs/nvidia/teams/maxine/resources/maxine_linux_vfx_sdk_ga and request access there.
 [maxine] ERROR: Alternate names for this component:
+[maxine] ERROR:   vfx_sdk_core
 [maxine] ERROR:   maxine_linux_vfx_sdk_ea
 [maxine] ERROR:   maxine_linux_vfx_sdk
 ```
 
-The exit code is 2. Audio only installs are therefore possible with a free account:
+The exit code is 2. An audio only install is one command:
 
 ```bash
 export NGC_API_KEY="<your key>"
@@ -100,7 +104,18 @@ The cache makes a second run cheap. A file that is already there with the right 
 [maxine] NVIDIA_AFX_SDK_Linux_2.1.0.10.tar.gz: already downloaded, sha256 verified.
 ```
 
-The core SDK archives are large (AFX about 1.4 GB, VFX about 2.6 GB, AR about 2.8 GB). Keep the cache if you plan to reinstall; delete the version directory if you do not.
+The core SDK archives are large (AFX about 1.4 GiB, VFX about 2.6 GiB, AR about 2.7 GiB). Keep the cache if you plan to reinstall; delete the version directory if you do not.
+
+A VFX or AR version holds more than one file. All of them are cached, but only the core SDK archive is extracted:
+
+```
+~/.cache/studiocast/maxine/vfx_sdk_core/1.2.0.0_linux/
+  VFXSDK_linux_1.2.0.0.tgz      <- the core SDK, extracted into VideoFX
+  VFXSDK_triton_1.2.0.0.tgz     <- the Triton Inference Server build, kept in the cache
+  README_VFX_SDK_Triton.md
+```
+
+The Triton archive holds a `VideoFX-triton-server` model repository for NVIDIA Triton Inference Server. StudioCast does not use it, so the helper never unpacks it into the SDK root.
 
 ## 5. Choosing a version
 
@@ -112,15 +127,29 @@ List what NGC holds:
 
 ```
 [maxine] Versions of maxine_linux_audio_effects_sdk (NGC org nvidia, team maxine):
-  2.1.0            UPLOAD_COMPLETE    1.4 GiB
-  2.0.0            UPLOAD_COMPLETE    1.4 GiB
-  1.7.0            UPLOAD_COMPLETE    1.5 GiB
+  VERSION              PLATFORM  STATUS             SIZE
+  2.1.0                -         UPLOAD_COMPLETE    1.4 GiB
+  2.0.0                -         UPLOAD_COMPLETE    1.4 GiB
+  1.7.0                -         UPLOAD_COMPLETE    1.5 GiB
 ```
 
-Without a pin the helper takes the newest finished version. Pin one with:
+The VFX and AR cores hold one version per platform:
+
+```
+[maxine] Versions of vfx_sdk_core (NGC org nvidia, team maxine):
+  VERSION              PLATFORM  STATUS             SIZE
+  1.2.0.0_windows      windows   UPLOAD_COMPLETE    1014.6 MiB
+  1.2.0.0_linux        linux     UPLOAD_COMPLETE    2.6 GiB
+  1.1.0.0_windows      windows   UPLOAD_COMPLETE    1014.5 MiB
+  1.1.0.0_linux        linux     UPLOAD_COMPLETE    2.6 GiB
+```
+
+Without a pin the helper takes the newest finished version **of your platform**, which is Linux. It does not use the "latest version" that NGC reports, because for these resources that is the Windows build. Use `--platform windows` to look at the other side.
+
+Pin a version with:
 
 ```bash
-./scripts/setup/maxine.sh --download afx --sdk-version afx=2.1.0
+./scripts/setup/maxine.sh --download vfx --sdk-version vfx=1.2.0.0_linux
 ```
 
 `--afx-version`, `--vfx-version` and `--ar-version` are short forms of the same thing.
@@ -135,11 +164,31 @@ The core SDK alone runs nothing. Each effect needs a feature pack: a feature lib
 ./scripts/setup/maxine.sh --download-features all   # both, with a fallback (see below)
 ```
 
-`--install-features` and `--install-afx-features` run the scripts that NVIDIA ships inside each SDK. Those scripts need only `curl` or `wget` and the API key, so no `ngc` command line tool is needed.
+All three commands prefer the scripts that NVIDIA ships inside each SDK. Those scripts need only `curl` or `wget` and the API key, so no `ngc` command line tool is needed. When the core SDK is not extracted, `--download-features` fetches the same NGC packs itself over the REST API and writes the same layout.
 
-`--download-features` is the same step with one addition: when the core SDK is not extracted, it fetches the same NGC feature packs itself over the REST API and writes the same layout. That is useful on a machine without an NVIDIA AI Enterprise entitlement, because the VFX and AR **feature packs** need only a Developer Program account even though the **core SDK** does not.
+A feature install puts:
+
+* the feature library in `<SDK root>/features/<feature>/{include,lib}`
+* the engine files in `<SDK root>/lib/models` for VFX and AR, and in `<SDK root>/features/<effect>/models/sm_<CC>` for AFX
 
 > A feature pack alone cannot run an effect. Its library links against core SDK libraries such as `libVideoFXLocal.so`, `libNVCVImage.so` and `libnvARPoseLocal.so`, which ship only in the core SDK archives. Fetch the feature packs without the core SDK for inspection or for a cache, not to run effects.
+
+### The VFX and AR feature script needs one workaround
+
+`features/install_feature.sh` of SDK 1.x starts with a fixed path:
+
+```bash
+VFXSDK_PATH="/usr/local/VideoFX"     # ARSDK_PATH="/usr/local/ARSDK" in the AR SDK
+```
+
+It stops at once when that directory is missing, and it has no option and no variable to change it. StudioCast installs under your XDG data directory instead, so the helper writes a copy of the script beside the original with that one line changed, runs the copy, and deletes it. The copy has to stay in the `features` directory, because the script looks for its `compute_capability` helper beside itself. You see this in the log:
+
+```
+[maxine] VFX: install_feature.sh installs only into /usr/local/VideoFX, which is not this install.
+[maxine] VFX: running a copy of it that points at /home/<user>/.local/share/studiocast/maxine/VideoFX.
+```
+
+Nothing is written outside your own directories, and no step needs root.
 
 ### Audio effects
 
@@ -160,17 +209,36 @@ The AFX script reads the compute capability of GPU 0 by itself. Name the GPU wit
 
 ### GPU architecture
 
-The REST fallback needs the compute capability of your card. It reads it from the SDK helper binary or from `nvidia-smi`. Give it yourself with `--sm`, for example `--sm 86` for an Ampere GeForce card:
+Both the SDK scripts and the REST fallback read the compute capability of your card, from the `compute_capability` helper that the SDK ships or from `nvidia-smi`. `--gpu` names a GPU for `install_feature.sh` (it knows datacenter names such as `a40`, `t4`, `l4`, `h100`); a name it does not know is dropped, and it then detects the GPU itself.
+
+The REST fallback takes the architecture number with `--sm`, for example `--sm 86` for an Ampere GeForce card:
 
 ```bash
 ./scripts/setup/maxine.sh --download-features ar --sm 86
 ```
 
-Select a subset of the VFX or AR feature packs with `--vfx-features` or `--ar-features`. A pack that another pack needs is added by itself:
+### Which features are installed
+
+By default the helper names the features that NVIDIA builds for Linux in SDK 1.x:
+
+* VFX: `nvvfxaigsrelighting`, `nvvfxbackgroundblur`, `nvvfxdenoising`, `nvvfxgreenscreen`, `nvvfxrelighting`, `nvvfxtransfer`, `nvvfxupscale`, `nvvfxvideosuperres`
+* AR: `nvaractivespeakerdetection`, `nvarbodydetection`, `nvarbodyposeestimation`, `nvarfaceboxdetection`, `nvarfaceexpressions`, `nvargazeredirection`, `nvarlandmarkdetection`
+
+Select a subset with `--vfx-features` or `--ar-features`. A pack that another pack needs is added by itself:
 
 ```bash
 ./scripts/setup/maxine.sh --download-features ar --ar-features nvarlandmarkdetection
 ```
+
+Pass `all` to let the SDK script ask NGC for the whole list. That list also names features that NVIDIA builds for Windows only, such as `nvarlipsync`. The SDK script ends with an error for such a feature even when every other one installed, so the helper reads the per-feature result lines instead of the exit code alone:
+
+```
+[maxine] AR: NGC has no Linux pack for: nvarlipsync
+[maxine] AR: those features are built for Windows only, or they are not in this SDK.
+[maxine] AR: 7 feature(s) installed.
+```
+
+The install fails only when no feature at all was installed, or when a feature that you named yourself could not be installed.
 
 ## 7. Offline install
 
@@ -178,8 +246,8 @@ If you already have the archives, or the machine has no network, extract them in
 
 ```bash
 ./scripts/setup/maxine.sh \
-  --vfx-tar ~/Downloads/NVIDIA_VFX_SDK_linux_<version>.tar.gz \
-  --ar-tar  ~/Downloads/NVIDIA_AR_SDK_linux_<version>.tar.gz \
+  --vfx-tar ~/Downloads/VFXSDK_linux_1.2.0.0.tgz \
+  --ar-tar  ~/Downloads/ARSDK_linux_1.1.1.0.tgz \
   --afx-tar ~/Downloads/NVIDIA_AFX_SDK_Linux_<version>.tar.gz
 ```
 
@@ -195,13 +263,36 @@ cmake --build <build-dir> --target studiocast-maxine
 ./<build-dir>/studiocast-maxine doctor
 ```
 
-After an AFX install, `doctor` reports the AFX root, the `libnv_audiofx.so` library, and the features directory as present. After a VFX and AR install, it reports `libVideoFX.so` and `libnvARPose.so` with their models and features directories. `install-hints` prints the paths it expects for your user, and `./<build-dir>/studiocastctl status` shows whether the daemon can use the effects.
+After an AFX install, `doctor` reports the AFX root, the `libnv_audiofx.so` library, and the features directory as present. After a VFX and AR install, it reports `libVideoFX.so` and `libnvARPose.so` with their features directories. `install-hints` prints the paths it expects for your user, and `./<build-dir>/studiocastctl status` shows whether the daemon can use the effects.
 
 Recent Linux Maxine releases name the core libraries `libVideoFX.so` (VFX) and `libnvARPose.so` (AR). StudioCast finds those names, and still accepts older ones such as `libnvvfx.so`, `libNvVFX.so`, `libnvar.so` and `libNvAR.so`.
 
-## 9. Result of a feature install
+> `doctor` looks for a `models` directory at the top of each SDK root. SDK 1.x installs the VFX and AR engine files in `<SDK root>/lib/models` instead, so `doctor` can report that directory as missing while the effects are in fact installed.
 
-For audio, one directory per effect under the AFX features directory:
+## 9. Result of an install
+
+The VFX core, as it comes out of the archive:
+
+```
+VideoFX/Changelog.txt
+VideoFX/README.md
+VideoFX/external/{cuda,tensorrt}     <- the CUDA runtime and TensorRT that the SDK needs
+VideoFX/features/{install_feature.sh,compute_capability,README.md}
+VideoFX/include/
+VideoFX/lib/libVideoFX.so ... libNVCVImage.so, libnvngxruntime.so, models/
+VideoFX/share/
+```
+
+The AR core has the same shape, with `libnvARPose.so` in `lib`.
+
+A VFX or AR feature install adds:
+
+```
+VideoFX/features/nvvfxgreenscreen/{include,lib}
+VideoFX/lib/models/<engine files>
+```
+
+An audio feature install makes one directory per effect:
 
 ```
 Audio_Effects_SDK/features/aec/include/aec.h
@@ -210,12 +301,10 @@ Audio_Effects_SDK/features/aec/models/sm_86/aec_16k_4096.trtpkg
 Audio_Effects_SDK/features/aec/models/sm_86/aec_16k.trtpkg -> aec_16k_4096.trtpkg
 ```
 
-For video, one directory per feature pack under the VFX or AR features directory, with the same shape.
-
 ## Troubleshooting
 
 * `401` — NGC rejected the key. Generate a new one and export it again.
-* `402` — the account has no entitlement for that resource. See the table above.
+* `402` — the account has no entitlement for that resource. Use the Developer Program names in the table above (`vfx_sdk_core`, `ar_sdk_core`).
 * `403` — there is no such name in the org and team, or the key cannot read it. Check the spelling of `--vfx-resource`, `--ar-resource` or `--afx-resource`.
 * `404` — no such version. Run `--list-versions` first.
 * A download that stops can be started again with the same command. It continues where it stopped, and it checks the SHA-256 before it extracts anything.
