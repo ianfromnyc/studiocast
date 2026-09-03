@@ -80,7 +80,10 @@ sc_ort_install_tarball() {
 
   local tmpdir
   tmpdir="$(mktemp -d)"
-  trap 'rm -rf "${tmpdir}"' EXIT
+  # Expand tmpdir now. It is local to this function, so it is gone by the time
+  # the trap runs.
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmpdir}'" EXIT
 
   curl --fail --silent --show-error --location --retry 3 "${url}" -o "${tmpdir}/${tgz}"
 
