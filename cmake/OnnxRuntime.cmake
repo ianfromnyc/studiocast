@@ -6,9 +6,22 @@ function(studiocast_configure_onnxruntime out_found out_target)
   set(_found FALSE)
   set(_target "")
 
-  # 1) Prefer a CMake package config if available.
-  find_package(onnxruntime CONFIG QUIET)
-  if (onnxruntime_FOUND)
+  # An explicit -DONNXRUNTIME_ROOT=<prefix> wins over anything installed on the
+  # system. Without it nothing changes and the search order below is the same as
+  # before. With it, steps 1-3 are skipped so a distro CPU-only package cannot
+  # shadow a hand-installed build, and step 4 uses the root.
+  set(_ort_explicit_root FALSE)
+  if (DEFINED ONNXRUNTIME_ROOT AND NOT ONNXRUNTIME_ROOT STREQUAL "")
+    set(_ort_explicit_root TRUE)
+    message(STATUS "ONNX Runtime: using the explicit ONNXRUNTIME_ROOT=${ONNXRUNTIME_ROOT}")
+  endif()
+
+  # 1) Prefer a CMake package config if available. Skipping the call with an
+  # explicit root also avoids the CMP0144 warning about ONNXRUNTIME_ROOT.
+  if (NOT _ort_explicit_root)
+    find_package(onnxruntime CONFIG QUIET)
+  endif()
+  if (onnxruntime_FOUND AND NOT _ort_explicit_root)
     if (TARGET onnxruntime::onnxruntime)
       set(_found TRUE)
       set(_target onnxruntime::onnxruntime)
@@ -31,7 +44,7 @@ function(studiocast_configure_onnxruntime out_found out_target)
   endif()
 
   # 2) Fall back to pkg-config (common for distro packages).
-  if (NOT _found)
+  if (NOT _found AND NOT _ort_explicit_root)
     if (PkgConfig_FOUND)
       pkg_check_modules(ONNXRUNTIME QUIET IMPORTED_TARGET onnxruntime)
       if (ONNXRUNTIME_FOUND)
@@ -89,7 +102,7 @@ function(studiocast_configure_onnxruntime out_found out_target)
   #
   # Note: This is best-effort and only used as a fallback. For system installs / packaging,
   # prefer a proper CMake package, pkg-config, or ONNXRUNTIME_ROOT.
-  if (NOT _found)
+  if (NOT _found AND NOT _ort_explicit_root)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
       set(_studiocast_ort_py_probe [==[
@@ -200,7 +213,8 @@ print(json.dumps(payload))
     endif()
   endif()
 
-  # 4) Last resort: user-provided root path.
+  # 4) User-provided root path. This is the last resort when ONNXRUNTIME_ROOT is
+  # unset, and the only path that runs when it is set.
   if (NOT _found AND DEFINED ONNXRUNTIME_ROOT)
     find_path(ONNXRUNTIME_INCLUDE_DIR
       NAMES onnxruntime_cxx_api.h
