@@ -20,7 +20,15 @@ struct ComponentPaths {
   std::vector<fs::path> searched_lib_dirs; // derived from root
   fs::path library; // resolved shared library path (empty if missing)
 
+  // Resolved models directory. Legacy SDKs (0.7/0.8) keep it at
+  // `<root>/models`; the SDK Core 1.x keeps it at `<root>/lib/models`.
   fs::path models_dir;
+  // Relative name of the directory that `models_dir` came from: "models" or
+  // "lib/models". Empty when no candidate exists.
+  std::string models_dir_source;
+  // All models directories we look at, in priority order.
+  std::vector<fs::path> candidate_models_dirs;
+
   fs::path features_dir;
 
   // Some components (e.g. AFX) do not ship a `models/` directory.

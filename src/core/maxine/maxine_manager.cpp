@@ -137,6 +137,8 @@ ComponentDiagnostics ConvertComponent(const ComponentPaths &c) {
   out.searched_lib_dirs = c.searched_lib_dirs;
   out.library = c.library;
   out.models_dir = c.models_dir;
+  out.models_dir_source = c.models_dir_source;
+  out.candidate_models_dirs = c.candidate_models_dirs;
   out.features_dir = c.features_dir;
   out.root_exists = c.root_exists;
   out.models_dir_exists = c.models_dir_exists;
@@ -871,6 +873,9 @@ std::string MaxineDiagnostics::ToJson() const {
     oss << ",";
     oss << "\"models_dir\":";
     json_string(c.models_dir.string());
+    oss << ",";
+    oss << "\"models_dir_source\":";
+    json_string(c.models_dir_source);
     oss << ",";
     oss << "\"features_dir\":";
     json_string(c.features_dir.string());

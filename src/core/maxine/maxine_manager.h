@@ -44,6 +44,9 @@ struct ComponentDiagnostics {
   std::filesystem::path library;
 
   std::filesystem::path models_dir;
+  // "models" (legacy) or "lib/models" (SDK Core 1.x). Empty when missing.
+  std::string models_dir_source;
+  std::vector<std::filesystem::path> candidate_models_dirs;
   std::filesystem::path features_dir;
 
   bool root_exists = false;

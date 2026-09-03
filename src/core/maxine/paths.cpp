@@ -145,10 +145,30 @@ ResolveComponent(const std::string &component, const char *env_var,
       ChooseRoot(env_override, xdg_default, system_default, &out.root_source);
   out.root_exists = DirExists(out.root);
 
-  out.models_dir = out.root / "models";
+  // Models directory. Legacy SDKs use `<root>/models`; the SDK Core 1.x
+  // installs the model engines into `<root>/lib/models`. Prefer the legacy
+  // location when both exist so old installs keep their behaviour.
+  static const char *const kModelsDirNames[] = {"models", "lib/models"};
+  out.candidate_models_dirs.clear();
+  for (const char *rel : kModelsDirNames) {
+    out.candidate_models_dirs.push_back(out.root / fs::path(rel));
+  }
+  out.models_dir_source.clear();
+  for (size_t i = 0; i < out.candidate_models_dirs.size(); ++i) {
+    if (DirExists(out.candidate_models_dirs[i])) {
+      out.models_dir = out.candidate_models_dirs[i];
+      out.models_dir_source = kModelsDirNames[i];
+      break;
+    }
+  }
+  if (out.models_dir_source.empty()) {
+    // Keep a stable hint path when nothing exists yet.
+    out.models_dir = out.candidate_models_dirs.front();
+  }
+
   out.features_dir = out.root / "features";
 
-  out.models_dir_exists = DirExists(out.models_dir);
+  out.models_dir_exists = !out.models_dir_source.empty();
   out.features_dir_exists = DirExists(out.features_dir);
 
   out.searched_lib_dirs.clear();
@@ -182,7 +202,9 @@ ResolveComponent(const std::string &component, const char *env_var,
       out.problems.push_back(oss.str());
     }
     if (out.require_models_dir && !out.models_dir_exists) {
-      out.problems.push_back("Missing models dir: " + out.models_dir.string());
+      out.problems.push_back("Missing models dir (expected one of: " +
+                             SearchedDirsString(out.candidate_models_dirs) +
+                             ")");
     }
     if (out.require_features_dir && !out.features_dir_exists) {
       out.problems.push_back("Missing features dir: " +
