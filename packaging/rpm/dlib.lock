@@ -1,0 +1,31 @@
+# Pinned dlib source release for the Fedora RPM build.
+#
+# Fedora ships no dlib package, so packaging/rpm/build_rpm.sh downloads this
+# exact tarball, checks the SHA256, and the spec builds it as a private static
+# library inside the RPM build tree. Nothing is installed on the host and the
+# package ships no extra shared object.
+#
+# Keep the URL on a fixed upstream release tag, never on a branch.
+# To update:
+# 1. Pick the new dlib release tag.
+# 2. Download the tarball:
+#      curl --fail --location --retry 3 -O \
+#        https://github.com/davisking/dlib/archive/refs/tags/v<ver>.tar.gz
+# 3. Run: sha256sum v<ver>.tar.gz
+# 4. Update DLIB_VERSION, DLIB_URL and DLIB_SHA256 below in the same change.
+# 5. Build and verify on Fedora:
+#      packaging/rpm/build_rpm.sh --clean --container --rpmlint
+#      packaging/rpm/verify_rpm.sh --install-test --container
+# 6. Also confirm scripts/install/dlib.sh still builds the new release.
+#
+# The top-level directory inside the tarball must be dlib-<DLIB_VERSION>. The
+# spec and scripts/install/dlib.sh both depend on that name.
+
+DLIB_VERSION="20.0.1"
+DLIB_URL="https://github.com/davisking/dlib/archive/refs/tags/v20.0.1.tar.gz"
+DLIB_SHA256="dab5b4ec4b68bd7dc128a1fb7900723f89d2da107e44cd5def7d38fc57252a9d"
+
+# dlib is under the Boost Software License 1.0. The spec installs the upstream
+# LICENSE.txt next to the StudioCast license files, and the package declares
+# Provides: bundled(dlib), as the Fedora bundling guidelines ask.
+DLIB_LICENSE="BSL-1.0"
