@@ -1,0 +1,163 @@
+# RPM spec template for StudioCast on Fedora.
+#
+# packaging/rpm/build_rpm.sh renders this template into build/rpm/SPECS/
+# studiocast.spec. The only substitution is @VERSION@, which becomes the
+# content of the repository VERSION file. This mirrors how build_appimage.sh
+# renders packaging/appimage/studiocast-installer.desktop.in.
+#
+# Do not run rpmbuild on the .in file. Run packaging/rpm/build_rpm.sh, or on a
+# non-Fedora host run packaging/rpm/build_rpm.sh --container.
+#
+# Build conditionals (pass with rpmbuild --with NAME / --without NAME, or with
+# build_rpm.sh --with NAME / --without NAME):
+#
+#   open_cuda  (default on)   Open CUDA video backend. It uses ONNX Runtime and
+#                             loads the CUDA execution provider at run time, so
+#                             the package still works on a machine with no CUDA.
+#   open_audio (default on)   Open Audio backend. ONNX Runtime, CPU baseline.
+#   dlib       (default off)  dlib face landmarks. Fedora has no dlib-devel, so
+#                             this must stay off for a Fedora build.
+#   tests      (default on)   Build the test suite and run ctest in %%check.
+#   installer  (default off)  The GUI installer and its backend. The backend is
+#                             an apt-based script for Ubuntu, so it is useless
+#                             inside an RPM. Keep it off unless you are testing
+#                             the installer build itself.
+#
+%bcond open_cuda 1
+%bcond open_audio 1
+%bcond dlib 0
+%bcond tests 1
+%bcond installer 0
+
+Name:           studiocast
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        Broadcast-style audio and video effects manager for Linux
+
+License:        MPL-2.0
+URL:            https://github.com/ianfromnyc/studiocast
+
+# The x86 SIMD sources are guarded by CMAKE_SYSTEM_PROCESSOR, so the tree can
+# in principle build on aarch64. Only x86_64 is tested, so keep the package to
+# that architecture until an aarch64 build is verified.
+ExclusiveArch:  x86_64
+
+# build_rpm.sh makes this archive from the git tree with
+# packaging/_lib/source_archive.sh. It is not a release asset URL, so rpmlint
+# reports an invalid Source0 URL. That is expected.
+Source0:        StudioCast-%{version}-source.tar.gz
+
+BuildRequires:  cmake
+BuildRequires:  ninja-build
+BuildRequires:  gcc-c++
+BuildRequires:  pkgconf-pkg-config
+BuildRequires:  qt6-qtbase-devel
+BuildRequires:  pulseaudio-libs-devel
+BuildRequires:  libjpeg-turbo-devel
+BuildRequires:  libpng-devel
+BuildRequires:  sqlite-devel
+BuildRequires:  onnxruntime-devel
+BuildRequires:  libyuv-devel
+BuildRequires:  desktop-file-utils
+BuildRequires:  systemd-rpm-macros
+
+# Command line helpers that the daemon and the probe tool call.
+Requires:       pulseaudio-utils
+Requires:       v4l-utils
+Requires:       hicolor-icon-theme
+
+# The virtual camera needs the v4l2loopback kernel module. Fedora does not ship
+# it; it comes from RPM Fusion as akmod-v4l2loopback or kmod-v4l2loopback. A
+# weak dependency lets the package install when RPM Fusion is not enabled.
+Recommends:     v4l2loopback
+
+%description
+StudioCast applies broadcast-style effects to a webcam and a microphone on
+Linux. It sends the processed video to a v4l2loopback device and the processed
+audio to a PulseAudio or PipeWire null sink, so any conferencing or streaming
+application can use them.
+
+The package ships the GUI, the studiocastd background service, the studiocastctl
+command line client, and the backend helper tools.
+
+The background service is not enabled by the package. To start it:
+
+    systemctl --user enable --now studiocastd.service
+
+%prep
+%autosetup -n StudioCast-%{version}
+
+%build
+# The Fedora %%cmake macro already selects the Ninja generator and passes the
+# distribution build flags, so do not add -G here.
+%cmake \
+    -DSTUDIOCAST_ENABLE_WERROR=OFF \
+    -DSTUDIOCAST_ENABLE_OPEN_CUDA=%{?with_open_cuda:ON}%{!?with_open_cuda:OFF} \
+    -DSTUDIOCAST_ENABLE_OPEN_AUDIO=%{?with_open_audio:ON}%{!?with_open_audio:OFF} \
+    -DSTUDIOCAST_ENABLE_DLIB=%{?with_dlib:ON}%{!?with_dlib:OFF} \
+    -DBUILD_TESTING=%{?with_tests:ON}%{!?with_tests:OFF}
+
+%cmake_build
+
+%install
+# The CMake install rules cover the program files only. The desktop entry, the
+# icon and the systemd unit are installed below.
+DESTDIR=%{buildroot} %{__cmake} --install "%{__cmake_builddir}" --component Runtime
+%if %{with installer}
+DESTDIR=%{buildroot} %{__cmake} --install "%{__cmake_builddir}" --component Installer
+%endif
+
+install -D -p -m 0644 packaging/rpm/studiocast.desktop \
+    %{buildroot}%{_datadir}/applications/studiocast.desktop
+install -D -p -m 0644 packaging/rpm/studiocast.svg \
+    %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/studiocast.svg
+
+# The unit template in packaging/systemd/user/studiocastd.service is for source
+# installs and starts the daemon from the home directory. A packaged install
+# needs the daemon from %{_bindir} instead.
+install -d -m 0755 %{buildroot}%{_userunitdir}
+sed -e 's|@BINDIR@|%{_bindir}|g' \
+    packaging/systemd/user/studiocastd-system.service.in \
+    > %{buildroot}%{_userunitdir}/studiocastd.service
+chmod 0644 %{buildroot}%{_userunitdir}/studiocastd.service
+
+%check
+desktop-file-validate %{buildroot}%{_datadir}/applications/studiocast.desktop
+%if %{with tests}
+%ctest
+%{buildroot}%{_bindir}/studiocast-probe --self-test
+%endif
+
+%post
+%systemd_user_post studiocastd.service
+
+%preun
+%systemd_user_preun studiocastd.service
+
+%postun
+%systemd_user_postun studiocastd.service
+
+%files
+%license LICENSE NOTICE
+%doc README.md CHANGELOG.md
+%{_bindir}/studiocast
+%{_bindir}/studiocast-audio
+%{_bindir}/studiocast-maxine
+%{_bindir}/studiocast-open
+%{_bindir}/studiocast-probe
+%{_bindir}/studiocast-video
+%{_bindir}/studiocastctl
+%{_bindir}/studiocastd
+%{_datadir}/applications/studiocast.desktop
+%{_datadir}/icons/hicolor/scalable/apps/studiocast.svg
+%{_userunitdir}/studiocastd.service
+%if %{with installer}
+%{_bindir}/studiocast-installer
+%dir %{_datadir}/studiocast
+%dir %{_datadir}/studiocast/installer
+%{_datadir}/studiocast/installer/studiocast-installer-backend
+%endif
+
+%changelog
+* Thu Sep 03 2026 Ian Penovich <ip@ianfromnyc.us> - @VERSION@-1
+- First RPM package of StudioCast for Fedora.
