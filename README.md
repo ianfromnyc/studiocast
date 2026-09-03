@@ -116,6 +116,12 @@ sudo dnf install ./dist/rpm/studiocast-<version>-1.fc44.x86_64.rpm
 systemctl --user enable --now studiocastd.service
 ```
 
+  Fedora ships no dlib package, so the build compiles a pinned dlib release
+  from source and links it into the programs statically. Open Video Eye Contact
+  therefore works in the RPM, and the package adds no dlib shared library to
+  the system. `packaging/rpm/build_rpm.sh --without dlib` skips that extra
+  build if you do not want it.
+
   The virtual camera also needs the `v4l2loopback` kernel module, which Fedora
   does not ship. Enable RPM Fusion Free and install `akmod-v4l2loopback` for it.
   `dnf` installs StudioCast without the module, but the virtual camera stays

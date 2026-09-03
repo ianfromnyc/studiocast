@@ -214,9 +214,10 @@ Release packaging:
 Fedora RPM packaging:
 
 - `packaging/rpm/build_rpm.sh` renders `packaging/rpm/studiocast.spec.in` into
-  a spec with the `VERSION` value, creates the source archive, and builds the
-  source RPM and the binary RPMs in a private rpmbuild tree under `build/rpm`.
-  It never touches `~/rpmbuild`.
+  a spec with the `VERSION` value and the pinned dlib version, creates the
+  source archive, downloads the dlib source, and builds the source RPM and the
+  binary RPMs in a private rpmbuild tree under `build/rpm`. It never touches
+  `~/rpmbuild`.
 - The script uses the same `packaging/_lib/source_archive.sh` helper as the
   AppImage script, so both flows ship an identical
   `StudioCast-<version>-source.tar.gz`.
@@ -230,14 +231,51 @@ Fedora RPM packaging:
 - Other options: `--srpm-only` builds the source RPM only, `--with NAME` and
   `--without NAME` change a spec build conditional, `--install-builddeps` runs
   `dnf builddep` on the rendered spec before a native build (needs root or
-  sudo; container mode installs its own build dependencies), and `--rpmlint`
-  prints an rpmlint report. The rpmlint status never fails the script.
+  sudo; container mode installs its own build dependencies), `--rpmlint`
+  prints an rpmlint report, and `--keep-downloads` keeps the cached dlib
+  tarball when `--clean` removes the build tree. The rpmlint status never
+  fails the script.
 - Spec build conditionals: `open_cuda` (on), `open_audio` (on), `libyuv` (on),
-  and `tests` (on); `dlib` (off) and `installer` (off). With `tests`, `%check`
-  runs the full ctest suite. `dlib` stays off because Fedora has no dlib
-  package, so Open Video eye contact is unavailable in the RPM. `installer`
-  stays off because the installer backend is Ubuntu-only. The spec is
-  `ExclusiveArch: x86_64`.
+  `dlib` (on), and `tests` (on); `installer` (off). With `tests`, `%check`
+  runs the full ctest suite. `installer` stays off because the installer
+  backend is Ubuntu-only. The spec is `ExclusiveArch: x86_64`.
+
+Bundled dlib in the RPM:
+
+- Fedora ships no dlib package, so the RPM build makes its own. `Source1` is
+  the dlib release tarball pinned in `packaging/rpm/dlib.lock`, which holds
+  `DLIB_VERSION`, `DLIB_URL`, `DLIB_SHA256`, and the license note.
+- `build_rpm.sh` downloads that tarball on the host, checks the SHA256, caches
+  it under `build/rpm/downloads`, and copies it into the rpmbuild `SOURCES`
+  directory. The container never reaches the network for the sources. A
+  checksum mismatch stops the build.
+- `%build` compiles dlib into a private prefix inside the build tree and
+  passes `-Ddlib_DIR=<prefix>/lib64/cmake/dlib` to the StudioCast configure
+  step. The library is static, position independent, and built with the Fedora
+  hardening, LTO, and annobin flags, so the package ships no extra shared
+  object. Image codecs, the GUI, FFmpeg, and CUDA are all off, because
+  StudioCast uses the shape predictor and the plain image processing headers
+  only.
+- dlib links CBLAS and LAPACK through `flexiblas-devel`, selected with
+  `-DBLA_VENDOR=FlexiBLAS`. FlexiBLAS is the Fedora BLAS front end: it keeps
+  one link-time interface and lets the machine owner pick the back end
+  (OpenBLAS by default) at run time. The package therefore requires
+  `libflexiblas.so.3`.
+- The package declares `Provides: bundled(dlib) = <version>`, installs the
+  upstream license as `/usr/share/licenses/studiocast/dlib-LICENSE.txt`, and
+  carries the license tag `MPL-2.0 AND BSL-1.0`.
+- `--without dlib` skips the download and the extra build. The package is then
+  plain `MPL-2.0`, has no `bundled(dlib)` provide, and Open Video Eye Contact
+  is unavailable.
+- To bump the pin: change `DLIB_VERSION`, `DLIB_URL`, and `DLIB_SHA256` in
+  `packaging/rpm/dlib.lock` in one change, then run
+  `packaging/rpm/build_rpm.sh --clean --container --rpmlint` and
+  `packaging/rpm/verify_rpm.sh --install-test --container`. The lock file holds
+  the full procedure.
+- `scripts/install/dlib.sh` builds the same pinned dlib for a Fedora source
+  build, into `/opt/studiocast/dlib/<version>` by default, and prints the
+  `-Ddlib_DIR` value to pass to CMake. It supports `--prefix`, `--jobs`,
+  `--dry-run`, and `-y`. The RPM build does not need it.
 - The package ships the `Runtime` CMake component only: `studiocast`,
   `studiocastd`, `studiocastctl`, `studiocast-probe`, `studiocast-maxine`,
   `studiocast-open`, `studiocast-audio`, and `studiocast-video`, plus a desktop
@@ -267,6 +305,12 @@ Fedora RPM packaging:
   removes the package again. That test needs root, so use `--container` to run
   it in a Fedora 44 container. `--no-container-check` lets it run directly on a
   disposable root system, such as a CI container job.
+- The script reads `rpm -qp --provides` for `bundled(dlib)` and adapts. For a
+  dlib package it also expects the license tag, the dlib license file, and the
+  FlexiBLAS dependency, and the install test looks for dlib type names inside
+  `/usr/bin/studiocastd`. That binary check is the cheapest observable: dlib
+  shows up in the product only through Open Video Eye Contact, which needs a
+  running daemon, a camera, and an installed model pack.
 - CI: `.github/workflows/release-packaging.yml` has the `rpm-fedora-44` job. It
   runs in a `registry.fedoraproject.org/fedora:44` container, always on release
   events, and on `workflow_dispatch` when the `build_rpm` input is true, which
