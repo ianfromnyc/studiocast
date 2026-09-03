@@ -49,6 +49,9 @@ struct ComponentDiagnostics {
   std::vector<std::filesystem::path> candidate_models_dirs;
   std::filesystem::path features_dir;
 
+  // Some components (e.g. AFX) do not ship a models directory.
+  bool require_models_dir = true;
+
   bool root_exists = false;
   bool models_dir_exists = false;
   bool features_dir_exists = false;

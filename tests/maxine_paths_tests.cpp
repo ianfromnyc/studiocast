@@ -416,7 +416,7 @@ bool TestSdkRuntimePreloadMakesBundledDepsResolvable() {
   if (plain)
     dlclose(plain);
 
-  const auto &report = studiocast::maxine::PreloadSdkRuntime(target);
+  const auto report = studiocast::maxine::PreloadSdkRuntime(target);
   ok &= Require(report.problems.empty(),
                 "expected the pre-load to report no problems");
 
@@ -457,7 +457,7 @@ bool TestSdkRuntimePreloadSkipsSystemLibraries() {
     return false;
   }
 
-  const auto &report = studiocast::maxine::PreloadSdkRuntime(target);
+  const auto report = studiocast::maxine::PreloadSdkRuntime(target);
 
   bool ok = true;
   for (const auto &d : report.dependencies) {

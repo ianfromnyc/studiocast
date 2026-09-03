@@ -1,5 +1,7 @@
 #include "core/maxine/ar_api.h"
 
+#include "core/maxine/sdk_runtime.h"
+
 #include <algorithm>
 #include <filesystem>
 #include <optional>
@@ -89,6 +91,10 @@ FindLibWithSymbol(const std::vector<fs::path> &lib_dirs,
       [&](const fs::path &full) -> std::optional<SharedLibLoadResult> {
     SharedLibLoadResult res;
     res.path = full;
+
+    // The SDK Core 1.x ships its own CUDA/TensorRT runtime under
+    // `<root>/external`. Make it findable before we ask the loader.
+    PreloadSdkRuntimeIfLocal(full);
 
     std::string err;
     if (!res.lib.Open(full, scope, &err)) {
@@ -243,6 +249,8 @@ bool ArApi::InitializeImpl(const std::vector<fs::path> &sdk_roots,
 
 bool ArApi::InitializeFromLibraryPathImpl(const fs::path &library_path,
                                           std::string *error_out) {
+  PreloadSdkRuntimeIfLocal(library_path);
+
   std::string err;
   if (!lib_.Open(library_path, util::DynLib::Scope::Global, &err)) {
     error_ = err;

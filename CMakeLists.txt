@@ -232,6 +232,8 @@ add_library(studiocast_core
         src/core/maxine/reason_codes.cpp
         src/core/maxine/paths.h
         src/core/maxine/paths.cpp
+        src/core/maxine/sdk_runtime.h
+        src/core/maxine/sdk_runtime.cpp
         src/core/maxine/maxine_manager.h
         src/core/maxine/maxine_manager.cpp
         src/core/maxine/nvcv_types.h

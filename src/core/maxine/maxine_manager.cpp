@@ -139,6 +139,7 @@ ComponentDiagnostics ConvertComponent(const ComponentPaths &c) {
   out.models_dir = c.models_dir;
   out.models_dir_source = c.models_dir_source;
   out.candidate_models_dirs = c.candidate_models_dirs;
+  out.require_models_dir = c.require_models_dir;
   out.features_dir = c.features_dir;
   out.root_exists = c.root_exists;
   out.models_dir_exists = c.models_dir_exists;
