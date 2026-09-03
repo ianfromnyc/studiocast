@@ -255,6 +255,94 @@ bool TestCurrentLinuxMaxineLibraryNamesResolve() {
   return ok;
 }
 
+// The Maxine "SDK Core" 1.x tree keeps the model engines in `<root>/lib/models`
+// and has no `<root>/models` directory.
+bool TestSdkCore1xModelsDirResolves() {
+  const fs::path root =
+      fs::temp_directory_path() /
+      ("studiocast-maxine-paths-1x-" + std::to_string(::getpid()));
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path vfx = root / "VideoFX";
+  const fs::path ar = root / "ARSDK";
+
+  fs::create_directories(vfx / "lib" / "models", ec);
+  fs::create_directories(vfx / "features", ec);
+  fs::create_directories(ar / "lib" / "models", ec);
+  fs::create_directories(ar / "features", ec);
+  if (ec) {
+    std::cerr << "failed to create SDK Core 1.x layout: " << ec.message()
+              << "\n";
+    return false;
+  }
+
+  if (!Touch(vfx / "lib" / "libVideoFX.so") ||
+      !Touch(ar / "lib" / "libnvARPose.so")) {
+    std::cerr << "failed to create fake Maxine libraries\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  EnvGuard vfx_env("STUDIOCAST_VFX_SDK_ROOT", vfx.string());
+  EnvGuard ar_env("STUDIOCAST_AR_SDK_ROOT", ar.string());
+
+  const auto rep = studiocast::maxine::ResolveMaxinePaths();
+
+  bool ok = true;
+  ok &= Require(rep.vfx.models_dir_exists,
+                "expected VFX models dir to exist at <root>/lib/models");
+  ok &= Require(rep.vfx.models_dir == vfx / "lib" / "models",
+                "expected VFX models dir <root>/lib/models, got " +
+                    rep.vfx.models_dir.string());
+  ok &= Require(rep.vfx.models_dir_source == "lib/models",
+                "expected VFX models dir source 'lib/models', got '" +
+                    rep.vfx.models_dir_source + "'");
+  ok &= Require(rep.vfx.ok, "expected VFX component to resolve");
+  ok &= Require(rep.ar.models_dir == ar / "lib" / "models",
+                "expected AR models dir <root>/lib/models, got " +
+                    rep.ar.models_dir.string());
+  ok &= Require(rep.ar.ok, "expected AR component to resolve");
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
+// A legacy 0.7/0.8 tree keeps `<root>/models`. Keep preferring it so existing
+// installs do not change behaviour.
+bool TestLegacyModelsDirStillWins() {
+  const fs::path root =
+      fs::temp_directory_path() /
+      ("studiocast-maxine-paths-legacy-" + std::to_string(::getpid()));
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path vfx = root / "VideoFX";
+  fs::create_directories(vfx / "lib" / "models", ec);
+  fs::create_directories(vfx / "models", ec);
+  fs::create_directories(vfx / "features", ec);
+  if (ec || !Touch(vfx / "lib" / "libVideoFX.so")) {
+    std::cerr << "failed to create mixed SDK layout\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  EnvGuard vfx_env("STUDIOCAST_VFX_SDK_ROOT", vfx.string());
+
+  const auto rep = studiocast::maxine::ResolveMaxinePaths();
+
+  bool ok = true;
+  ok &= Require(rep.vfx.models_dir == vfx / "models",
+                "expected legacy <root>/models to win, got " +
+                    rep.vfx.models_dir.string());
+  ok &= Require(rep.vfx.models_dir_source == "models",
+                "expected VFX models dir source 'models', got '" +
+                    rep.vfx.models_dir_source + "'");
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -268,6 +356,19 @@ int main(int argc, char **argv) {
   }
 
   std::cout << "[PASS] current Linux Maxine library names resolve\n";
+
+  if (!TestSdkCore1xModelsDirResolves()) {
+    std::cout << "[FAIL] SDK Core 1.x models dir resolves\n";
+    return 1;
+  }
+  std::cout << "[PASS] SDK Core 1.x models dir resolves\n";
+
+  if (!TestLegacyModelsDirStillWins()) {
+    std::cout << "[FAIL] legacy models dir still wins\n";
+    return 1;
+  }
+  std::cout << "[PASS] legacy models dir still wins\n";
+
   if (argc <= 0 || !argv || !argv[0] ||
       !TestAfxLoaderPrefersExplicitSdkRootBeforeBareLoaderPath(argv[0])) {
     std::cout << "[FAIL] AFX loader prefers explicit SDK root before bare "
