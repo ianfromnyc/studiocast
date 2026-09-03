@@ -57,7 +57,7 @@ studiocast_create_source_archive() {
 
   if command -v git >/dev/null 2>&1 &&
       git -C "${repo_root}" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
-      git -C "${repo_root}" rev-parse --verify HEAD^{commit} >/dev/null 2>&1; then
+      git -C "${repo_root}" rev-parse --verify 'HEAD^{commit}' >/dev/null 2>&1; then
     run git -C "${repo_root}" archive \
       --format=tar.gz \
       --prefix="StudioCast-${version}/" \

@@ -94,6 +94,7 @@ run() {
 }
 
 # The source archive is shared with the RPM flow, so both make the same file.
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=../_lib/source_archive.sh
 source "${REPO_ROOT}/packaging/_lib/source_archive.sh"
 
@@ -277,6 +278,8 @@ stage_appdir() {
   run install -m 0644 "${icon_path}" "${APPDIR}/studiocast-installer.svg"
   run install -m 0644 "${icon_path}" "${APPDIR}/.DirIcon"
 
+  # The AppRun body must stay unexpanded, so the single quotes are deliberate.
+  # shellcheck disable=SC2016
   write_file "${APPDIR}/AppRun" 0755 \
     '#!/usr/bin/env bash' \
     'set -euo pipefail' \

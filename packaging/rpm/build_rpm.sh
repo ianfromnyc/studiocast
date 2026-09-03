@@ -98,6 +98,7 @@ run() {
 }
 
 # The source archive must match the one the AppImage flow ships.
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=../_lib/source_archive.sh
 source "${REPO_ROOT}/packaging/_lib/source_archive.sh"
 
