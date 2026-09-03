@@ -116,8 +116,9 @@ installs the dependencies with `dnf` and configures the virtual camera:
 Add `-y` to answer yes to the `dnf` prompts. Run
 `./scripts/setup/fedora.sh --help` for the full option list. The options have
 the same names as the Ubuntu helper, so `--build`, `--build-dir`,
-`--build-type`, `--video-nr`, `--label`, and `--exclusive-caps` work the same
-way.
+`--build-type`, `--video-nr`, `--label`, `--exclusive-caps` and the
+`--onnxruntime-*` options work the same way. Fedora adds `--cuda-major`,
+`--cudnn-version` and `--check-cuda`.
 
 ### v4l2loopback needs RPM Fusion Free
 
@@ -135,17 +136,86 @@ code 2 and print the command above. The helper then installs
 `akmod-v4l2loopback` and the matching `kernel-devel`, and runs `akmods` so the
 module builds for the running kernel.
 
-### ONNX Runtime is the distro package, CPU only
+### ONNX Runtime: cpu flavor or gpu flavor
 
-Fedora ships `onnxruntime-devel`, and CMake finds it through its CMake config
-file. There is no tarball download and no `pkg-config` shim, so the
-`--onnxruntime-version`, `--onnxruntime-flavor`, and `--onnxruntime-arch`
-options are accepted but do nothing on Fedora. The helper prints a note when
-you pass them.
+The helper picks the flavor the same way as the Ubuntu helper: `gpu` when
+`nvidia-smi` works, `cpu` when it does not. Use `--onnxruntime-flavor cpu|gpu`
+to choose.
 
-The Fedora package has the CPU execution provider only. The Open CUDA backend
-needs the CUDA execution provider, so GPU inference needs an upstream ONNX
-Runtime GPU build installed by hand. See `docs/open_cuda_install.md`.
+The `cpu` flavor installs the Fedora package `onnxruntime-devel`, and CMake
+finds it through its CMake config file. That package has the CPU execution
+provider only, so the Open CUDA backend cannot use it.
+
+The `gpu` flavor downloads the upstream ONNX Runtime CUDA tarball, the same as
+on Ubuntu:
+
+```bash
+./scripts/setup.sh --deps --onnxruntime-flavor gpu -y
+```
+
+It installs:
+
+- ONNX Runtime 1.29.0 under `/opt/studiocast/onnxruntime/<version>/`, with
+  `/etc/ld.so.conf.d/studiocast-onnxruntime.conf` and
+  `/usr/local/lib/pkgconfig/onnxruntime.pc`,
+- cuDNN 9 under `/opt/studiocast/cudnn/<version>/`, with
+  `/etc/ld.so.conf.d/studiocast-cudnn.conf`,
+- the CUDA 13 runtime rpms from the NVIDIA repository.
+
+`--onnxruntime-version`, `--onnxruntime-arch`, `--cuda-major 12|13` and
+`--cudnn-version` change what it downloads. `--cuda-major` defaults to the
+major version reported by `/usr/local/cuda/version.json` or `nvcc`, else 13.
+
+The `gpu` flavor does **not** install `onnxruntime-devel`. CMake finds a
+distro CMake config file before any hand-installed build, so the two together
+would silently give you the CPU build. If `onnxruntime-devel` is already
+installed, the helper warns and asks you to run:
+
+```bash
+sudo dnf remove onnxruntime-devel
+```
+
+`--build` passes `-DONNXRUNTIME_ROOT=<bootstrap root>` when the bootstrap is
+present, which makes CMake use it whatever else is installed. Use the same
+option in your own `cmake` commands.
+
+### CUDA 13 runtime for the gpu flavor
+
+ONNX Runtime 1.29 with the CUDA execution provider needs CUDA 13.x, cuDNN 9.x
+and an NVIDIA driver 580.65.06 or newer. `libcuda.so.1` must come from your
+NVIDIA driver package; the helper never installs a driver.
+
+The CUDA runtime rpms come from the NVIDIA repository, which the helper never
+enables for you. Enable it first, then run the setup again:
+
+```bash
+sudo dnf config-manager addrepo --from-repofile=https://developer.download.nvidia.com/compute/cuda/repos/fedora44/x86_64/cuda-fedora44.repo
+./scripts/setup.sh --deps --onnxruntime-flavor gpu -y
+```
+
+Without it, `--deps --onnxruntime-flavor gpu` stops with exit code 2, prints
+the command above and installs nothing.
+
+Neither Fedora nor NVIDIA has a cuDNN rpm for Fedora 44, so the helper installs
+the NVIDIA cuDNN redistributable tarball and checks its SHA-256 against the
+NVIDIA redistributable index. It skips this step when `libcudnn.so.9` already
+resolves through `ldconfig`.
+
+`--check-cuda` reports the state without installing anything and without
+`sudo`. It exits non-zero when a check fails, so you can use it in scripts:
+
+```bash
+./scripts/setup.sh --check-cuda
+```
+
+It prints one line per CUDA library, plus the driver state, the ONNX Runtime
+bootstrap and `onnxruntime.pc`.
+
+`./scripts/uninstall.sh --greedy` removes `/opt/studiocast/onnxruntime`,
+`/opt/studiocast/cudnn` and the StudioCast files under `/etc/ld.so.conf.d/`. It
+never removes the NVIDIA rpms.
+
+See `docs/open_source_video_models_install.md` for the Open CUDA backend.
 
 ### dlib is not packaged
 

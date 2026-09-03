@@ -39,6 +39,34 @@ This script (via `scripts/setup/ubuntu.sh`):
 - installs it under `/opt/studiocast/onnxruntime/<version>/...`,
 - and provides a `pkg-config` entry (`onnxruntime.pc`) so CMake can find it.
 
+Repo-provided helper (Fedora 44):
+
+```bash
+./scripts/setup.sh --deps --onnxruntime-flavor gpu -y
+```
+
+This script (via `scripts/setup/fedora.sh`) does the same as the Ubuntu helper,
+plus two Fedora-only steps:
+
+- it installs the CUDA 13 runtime rpms from the NVIDIA repository, which you
+  must enable yourself:
+
+  ```bash
+  sudo dnf config-manager addrepo --from-repofile=https://developer.download.nvidia.com/compute/cuda/repos/fedora44/x86_64/cuda-fedora44.repo
+  ```
+
+- neither Fedora nor NVIDIA has a cuDNN rpm for Fedora 44, so it installs the
+  NVIDIA cuDNN redistributable tarball under `/opt/studiocast/cudnn/<version>/`
+  and adds `/etc/ld.so.conf.d/studiocast-cudnn.conf`.
+
+ONNX Runtime 1.29 with the CUDA execution provider needs CUDA 13.x, cuDNN 9.x
+and an NVIDIA driver 580.65.06 or newer. Run `./scripts/setup.sh --check-cuda`
+to see which of those are in place.
+
+The Fedora package `onnxruntime-devel` has the CPU execution provider only, and
+its CMake config file hides the GPU build. The `gpu` flavor therefore does not
+install it, and `--build` passes `-DONNXRUNTIME_ROOT` so CMake uses the tarball.
+
 If you install ONNX Runtime another way, make sure this works:
 
 ```bash
