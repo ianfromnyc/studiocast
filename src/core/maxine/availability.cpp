@@ -168,9 +168,9 @@ BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics &d, MaxineNeed need) {
       add_step("Run `studiocast-probe` to verify GPU/driver.");
       add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
                "install-hints`.");
-      add_step("Ensure `libVideoFX.so` (or legacy `libnvvfx.so` / "
-               "`libNvVFX.so`) is under `<VFX_ROOT>/lib/` and feature "
-               "installs exist under `<VFX_ROOT>/features/`.");
+      add_step("Ensure `libVideoFX.so` is in `<VFX_ROOT>/lib/`, models in "
+               "`<VFX_ROOT>/lib/models/` (SDK Core 1.x) or "
+               "`<VFX_ROOT>/models/`, and features in `<VFX_ROOT>/features/`.");
       return out;
     }
     if (!d.vfx.library_loadable) {
@@ -180,9 +180,9 @@ BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics &d, MaxineNeed need) {
           ").";
       add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
                "install-hints`.");
-      add_step("Ensure `libVideoFX.so` (or legacy `libnvvfx.so` / "
-               "`libNvVFX.so`) is under `<VFX_ROOT>/lib/` and feature "
-               "installs exist under `<VFX_ROOT>/features/`.");
+      add_step("Ensure `libVideoFX.so` is in `<VFX_ROOT>/lib/`, models in "
+               "`<VFX_ROOT>/lib/models/` (SDK Core 1.x) or "
+               "`<VFX_ROOT>/models/`, and features in `<VFX_ROOT>/features/`.");
       return out;
     }
   }
@@ -198,9 +198,9 @@ BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics &d, MaxineNeed need) {
       add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
                "install-hints`.");
       add_step("Expected AR SDK root: " + expected + ".");
-      add_step("Ensure `libnvARPose.so` (or legacy `libnvar.so` / "
-               "`libNvAR.so`) is under `<AR_ROOT>/lib/` and feature "
-               "installs exist under `<AR_ROOT>/features/`.");
+      add_step("Ensure `libnvARPose.so` is in `<AR_ROOT>/lib/`, models in "
+               "`<AR_ROOT>/lib/models/` (SDK Core 1.x) or `<AR_ROOT>/models/`, "
+               "and features in `<AR_ROOT>/features/`.");
       return out;
     }
   }
@@ -250,9 +250,9 @@ BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics &d, MaxineNeed need) {
   add_step("Run `studiocast-probe` to verify GPU/driver.");
   add_step("Run `studiocast-maxine init` then follow `studiocast-maxine "
            "install-hints`.");
-  add_step("Ensure `libVideoFX.so` (or legacy `libnvvfx.so` / "
-           "`libNvVFX.so`) is under `<VFX_ROOT>/lib/` and feature "
-           "installs exist under `<VFX_ROOT>/features/`.");
+  add_step("Ensure `libVideoFX.so` is in `<VFX_ROOT>/lib/`, models in "
+           "`<VFX_ROOT>/lib/models/` (SDK Core 1.x) or `<VFX_ROOT>/models/`, "
+           "and features in `<VFX_ROOT>/features/`.");
   return out;
 }
 
