@@ -17,6 +17,15 @@
 #   open_audio (default on)   Open Audio backend. ONNX Runtime, CPU baseline.
 #   dlib       (default off)  dlib face landmarks. Fedora has no dlib-devel, so
 #                             this must stay off for a Fedora build.
+#   libyuv     (default off) Build against libyuv for an extra RGB to YUYV
+#                             conversion backend. Fedora libyuv fails the
+#                             project contract test studiocast-video-tests at
+#                             width 1: libyuv::ARGBToYUY2 leaves the second
+#                             luma sample of an odd-width macro-pixel at zero,
+#                             while the scalar reference repeats the sample.
+#                             The build keeps its own SSSE3 and AVX2 backends,
+#                             so nothing is lost. Turn this on again once the
+#                             conversion code handles the odd-width case.
 #   tests      (default on)   Build the test suite and run ctest in %%check.
 #   installer  (default off)  The GUI installer and its backend. The backend is
 #                             an apt-based script for Ubuntu, so it is useless
@@ -26,6 +35,7 @@
 %bcond open_cuda 1
 %bcond open_audio 1
 %bcond dlib 0
+%bcond libyuv 0
 %bcond tests 1
 %bcond installer 0
 
@@ -57,7 +67,9 @@ BuildRequires:  libjpeg-turbo-devel
 BuildRequires:  libpng-devel
 BuildRequires:  sqlite-devel
 BuildRequires:  onnxruntime-devel
+%if %{with libyuv}
 BuildRequires:  libyuv-devel
+%endif
 BuildRequires:  desktop-file-utils
 BuildRequires:  systemd-rpm-macros
 

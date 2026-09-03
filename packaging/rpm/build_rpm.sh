@@ -53,7 +53,8 @@ Options:
                             The rpmlint exit status never fails this script.
 
 Build conditionals (see packaging/rpm/studiocast.spec.in):
-  open_cuda (on), open_audio (on), dlib (off), tests (on), installer (off)
+  open_cuda (on), open_audio (on), dlib (off), libyuv (off), tests (on),
+  installer (off)
 
 Artifacts in ${DIST_DIR}:
   studiocast-${VERSION}-1.fc${FEDORA_RELEASE}.src.rpm
