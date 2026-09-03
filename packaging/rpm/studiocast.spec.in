@@ -102,7 +102,13 @@ The background service is not enabled by the package. To start it:
 %build
 # The Fedora %%cmake macro already selects the Ninja generator and passes the
 # distribution build flags, so do not add -G here.
+#
+# %%cmake also sets BUILD_SHARED_LIBS=ON. The internal library studiocast_core
+# has no install rule and no version, so a shared build leaves the programs
+# with a dependency on a library that the package does not ship. Keep it
+# static, so each program carries the code it needs.
 %cmake \
+    -DBUILD_SHARED_LIBS=OFF \
     -DSTUDIOCAST_ENABLE_WERROR=OFF \
     -DSTUDIOCAST_ENABLE_OPEN_CUDA=%{?with_open_cuda:ON}%{!?with_open_cuda:OFF} \
     -DSTUDIOCAST_ENABLE_OPEN_AUDIO=%{?with_open_audio:ON}%{!?with_open_audio:OFF} \
