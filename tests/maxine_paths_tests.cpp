@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -10,6 +11,7 @@
 
 #include "core/maxine/afx_api.h"
 #include "core/maxine/paths.h"
+#include "core/maxine/sdk_runtime.h"
 
 #ifndef STUDIOCAST_CXX_COMPILER
 #define STUDIOCAST_CXX_COMPILER "c++"
@@ -343,6 +345,133 @@ bool TestLegacyModelsDirStillWins() {
   return ok;
 }
 
+bool RunShellCommand(const std::string &cmd) {
+  const int rc = std::system(cmd.c_str());
+  if (!CommandExitedOk(rc)) {
+    std::cerr << "command failed:\n" << cmd << "\n";
+    return false;
+  }
+  return true;
+}
+
+// Builds a shared library that exports one function and, optionally, links
+// against `link_against` so the result carries a DT_NEEDED entry.
+bool BuildSharedLib(const fs::path &out, const std::string &soname,
+                    const std::string &symbol, const fs::path &link_against) {
+  std::error_code ec;
+  fs::create_directories(out.parent_path(), ec);
+
+  const fs::path src = out.parent_path() / (symbol + ".cpp");
+  {
+    std::ofstream f(src, std::ios::out | std::ios::trunc);
+    if (!f)
+      return false;
+    if (!link_against.empty()) {
+      f << "extern \"C\" int sc_fake_dep_value();\n";
+      f << "extern \"C\" int " << symbol
+        << "() { return sc_fake_dep_value(); }\n";
+    } else {
+      f << "extern \"C\" int " << symbol << "() { return 42; }\n";
+    }
+    if (!f.good())
+      return false;
+  }
+
+  std::ostringstream cmd;
+  cmd << ShellQuote(STUDIOCAST_CXX_COMPILER) << " -shared -fPIC "
+      << ShellQuote(src.string()) << " -Wl,-soname," << ShellQuote(soname);
+  if (!link_against.empty()) {
+    cmd << " " << ShellQuote(link_against.string());
+  }
+  cmd << " -o " << ShellQuote(out.string());
+  return RunShellCommand(cmd.str());
+}
+
+// The SDK Core 1.x ships its own CUDA and TensorRT runtime under
+// `<root>/external/*/lib`. Those directories are not on the loader path, so
+// StudioCast must pre-load them before it opens the SDK library.
+bool TestSdkRuntimePreloadMakesBundledDepsResolvable() {
+  const fs::path root =
+      fs::temp_directory_path() /
+      ("studiocast-maxine-preload-" + std::to_string(::getpid()));
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path dep = root / "external" / "cuda" / "lib" / "libsc_fake_dep.so";
+  const fs::path target = root / "lib" / "libsc_fake_target.so";
+
+  if (!BuildSharedLib(dep, "libsc_fake_dep.so", "sc_fake_dep_value", {}) ||
+      !BuildSharedLib(target, "libsc_fake_target.so", "sc_fake_target_value",
+                      dep)) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  bool ok = true;
+
+  // Without help the bundled dependency is not on the loader path.
+  void *plain = dlopen(target.c_str(), RTLD_NOW | RTLD_LOCAL);
+  ok &= Require(plain == nullptr,
+                "expected a plain dlopen of the fake SDK library to fail");
+  if (plain)
+    dlclose(plain);
+
+  const auto &report = studiocast::maxine::PreloadSdkRuntime(target);
+  ok &= Require(report.problems.empty(),
+                "expected the pre-load to report no problems");
+
+  bool saw_dep = false;
+  for (const auto &d : report.dependencies) {
+    if (d.soname == "libsc_fake_dep.so") {
+      saw_dep = true;
+      ok &= Require(d.loaded, "expected the bundled dependency to be loaded");
+      ok &= Require(d.resolved == dep,
+                    "expected the dependency to resolve from external/cuda/lib,"
+                    " got " +
+                        d.resolved.string());
+    }
+  }
+  ok &= Require(saw_dep, "expected the pre-load to name the bundled soname");
+
+  void *after = dlopen(target.c_str(), RTLD_NOW | RTLD_LOCAL);
+  ok &= Require(after != nullptr,
+                "expected dlopen to succeed after the pre-load");
+  if (after)
+    dlclose(after);
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
+// Core system libraries must stay with the system loader.
+bool TestSdkRuntimePreloadSkipsSystemLibraries() {
+  const fs::path root =
+      fs::temp_directory_path() /
+      ("studiocast-maxine-preload-skip-" + std::to_string(::getpid()));
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path target = root / "lib" / "libsc_plain_target.so";
+  if (!BuildSharedLib(target, "libsc_plain_target.so", "sc_plain_value", {})) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  const auto &report = studiocast::maxine::PreloadSdkRuntime(target);
+
+  bool ok = true;
+  for (const auto &d : report.dependencies) {
+    ok &= Require(!d.loaded, "expected no system library to be pre-loaded, but "
+                             "the pre-load took " +
+                                 d.soname);
+  }
+  ok &= Require(report.problems.empty(),
+                "expected no problems for a library with system deps only");
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -368,6 +497,18 @@ int main(int argc, char **argv) {
     return 1;
   }
   std::cout << "[PASS] legacy models dir still wins\n";
+
+  if (!TestSdkRuntimePreloadMakesBundledDepsResolvable()) {
+    std::cout << "[FAIL] SDK runtime pre-load makes bundled deps resolvable\n";
+    return 1;
+  }
+  std::cout << "[PASS] SDK runtime pre-load makes bundled deps resolvable\n";
+
+  if (!TestSdkRuntimePreloadSkipsSystemLibraries()) {
+    std::cout << "[FAIL] SDK runtime pre-load skips system libraries\n";
+    return 1;
+  }
+  std::cout << "[PASS] SDK runtime pre-load skips system libraries\n";
 
   if (argc <= 0 || !argv || !argv[0] ||
       !TestAfxLoaderPrefersExplicitSdkRootBeforeBareLoaderPath(argv[0])) {
