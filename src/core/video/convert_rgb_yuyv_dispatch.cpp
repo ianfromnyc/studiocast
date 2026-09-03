@@ -32,6 +32,8 @@ struct Rgb24ToYuyvDispatchPlan {
   bool needs_scratch;
 };
 
+// Only the build without libyuv makes the scalar path the default plan.
+#if !STUDIOCAST_HAVE_LIBYUV
 void ConvertScalarWithScratch(const std::uint8_t *src, int width, int height,
                               std::size_t src_stride, std::uint8_t *dst,
                               std::size_t dst_stride, std::uint8_t *scratch,
@@ -40,6 +42,7 @@ void ConvertScalarWithScratch(const std::uint8_t *src, int width, int height,
   (void)scratch_size;
   Rgb24ToYuyvScalar(src, width, height, src_stride, dst, dst_stride);
 }
+#endif
 
 #if STUDIOCAST_HAVE_X86_SIMD
 void ConvertSsse3WithScratch(const std::uint8_t *src, int width, int height,
