@@ -140,6 +140,10 @@ jobs:
         # A container job cannot run podman, so this is the native build path.
         # --install-builddeps reads the BuildRequires from the rendered spec,
         # so the package list stays in the spec only.
+        #
+        # The script also downloads the dlib source pinned in
+        # packaging/rpm/dlib.lock and checks its SHA256. Fedora has no dlib
+        # package, so the spec builds that source as a private static library.
         run: |
           packaging/rpm/build_rpm.sh --clean --install-builddeps --rpmlint
 
