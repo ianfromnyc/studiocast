@@ -9,7 +9,10 @@
 #   /etc/ld.so.conf.d/studiocast-onnxruntime.conf
 #   /usr/local/lib/pkgconfig/onnxruntime.pc
 #
-# scripts/uninstall/uninstall.sh removes exactly those three paths.
+# On a distribution whose pkg-config does not search /usr/local/lib/pkgconfig,
+# it also links the .pc file into a directory that pkg-config does search.
+#
+# scripts/uninstall/uninstall.sh removes exactly those paths.
 #
 # The caller must define two helpers before it sources this file:
 #   sc_ort_log <message>      Print one log line.
@@ -138,4 +141,30 @@ Version: ${version}
 Libs: -L\${libdir} -lonnxruntime
 Cflags: -I\${includedir}
 EOF
+
+  sc_ort_link_pkgconfig
+}
+
+# Fedora's pkgconf searches only /usr/lib64/pkgconfig and /usr/share/pkgconfig,
+# so the file written above is invisible there. Add a link in the first
+# directory pkg-config does search. Debian and Ubuntu already search
+# /usr/local/lib/pkgconfig, so this is a no-op for them.
+#
+# Fedora's onnxruntime-devel owns /usr/lib64/pkgconfig/libonnxruntime.pc, a
+# different name, so the link never collides with a package file.
+sc_ort_link_pkgconfig() {
+  command -v pkg-config >/dev/null 2>&1 || return 0
+  [[ -f /usr/local/lib/pkgconfig/onnxruntime.pc ]] || return 0
+
+  if pkg-config --exists onnxruntime; then
+    return 0
+  fi
+
+  local dir
+  dir="$(pkg-config --variable pc_path pkg-config | tr ':' '\n' | grep -v '^$' | head -n 1)"
+  [[ -n "${dir}" ]] || return 0
+
+  sc_ort_log "pkg-config does not search /usr/local/lib/pkgconfig; linking into ${dir}."
+  sc_ort_priv mkdir -p "${dir}"
+  sc_ort_priv ln -sfn /usr/local/lib/pkgconfig/onnxruntime.pc "${dir}/onnxruntime.pc"
 }
