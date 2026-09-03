@@ -539,6 +539,33 @@ back to CPU.
 Canonical video effects are persisted under `video.effects.json` in the daemon
 config.
 
+### Maxine SDK layouts
+
+StudioCast supports two SDK layouts. `src/core/maxine/paths.cpp` resolves them
+and records which one it found in `models_dir_source`.
+
+| Item | Legacy SDK (0.7/0.8) | SDK Core 1.x |
+| --- | --- | --- |
+| Core library | `<root>/lib/libVideoFX.so` | same |
+| Models | `<root>/models/` | `<root>/lib/models/` |
+| Features | `<root>/features/<name>/` | same |
+| Bundled runtime | none | `<root>/external/cuda/lib`, `<root>/external/tensorrt/lib` |
+
+The SDK Core 1.x libraries carry no usable RPATH, and their CUDA 12 and
+TensorRT 10 dependencies exist only under `<root>/external`. Before the VFX,
+AR, AFX or NvCVImage loader calls dlopen, `src/core/maxine/sdk_runtime.cpp`
+reads the DT_NEEDED list of the target library and pre-loads the SDK copy of
+each soname it ships, in dependency order, with `RTLD_NOW | RTLD_GLOBAL`. Core
+system libraries and the driver library stay with the system loader. So
+StudioCast needs no `LD_LIBRARY_PATH`.
+
+Effect and parameter selector strings (`GreenScreen`, `BackgroundBlur`,
+`ModelDir`, `SrcImage0`, ...) live in `src/core/maxine/vfx_api.h` and must match
+`include/nvVideoEffects.h` and the per-feature headers of the SDK.
+
+Run `studiocast-maxine doctor` to see the resolved root, library, pre-loaded
+runtime, models directory and features directory of each component.
+
 ## Model installation and validation
 
 StudioCast keeps model binaries out of git. Metadata templates live under
