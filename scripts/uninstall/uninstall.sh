@@ -175,21 +175,51 @@ greedy_remove_user_data() {
 }
 
 greedy_remove_system_onnxruntime_bootstrap() {
-  # Installed by scripts/setup.sh --deps (scripts/setup/ubuntu.sh).
-  local ort_root="/opt/studiocast/onnxruntime"
-  local ld_conf="/etc/ld.so.conf.d/studiocast-onnxruntime.conf"
+  # Installed by scripts/setup.sh --deps (scripts/setup/ubuntu.sh and
+  # scripts/setup/fedora.sh). The cuDNN tree and the CUDA ld.so.conf.d file come
+  # from the Fedora gpu flavor. The NVIDIA rpms are never touched here.
   local pc_file="/usr/local/lib/pkgconfig/onnxruntime.pc"
+  local -a trees=(
+    "/opt/studiocast/onnxruntime"
+    "/opt/studiocast/cudnn"
+  )
+  local -a ld_confs=(
+    "/etc/ld.so.conf.d/studiocast-onnxruntime.conf"
+    "/etc/ld.so.conf.d/studiocast-cudnn.conf"
+    "/etc/ld.so.conf.d/studiocast-cuda.conf"
+  )
 
-  if [[ -d "$ort_root" ]]; then
-    log "Removing ONNX Runtime under: $ort_root"
-    run sudo rm -rf -- "$ort_root"
-  fi
+  local tree
+  for tree in "${trees[@]}"; do
+    if [[ -d "$tree" ]]; then
+      log "Removing: $tree"
+      run sudo rm -rf -- "$tree"
+    fi
+  done
 
-  if [[ -f "$ld_conf" ]]; then
-    log "Removing: $ld_conf"
-    run sudo rm -f -- "$ld_conf"
+  local removed_ld_conf=0
+  local ld_conf
+  for ld_conf in "${ld_confs[@]}"; do
+    if [[ -f "$ld_conf" ]]; then
+      log "Removing: $ld_conf"
+      run sudo rm -f -- "$ld_conf"
+      removed_ld_conf=1
+    fi
+  done
+
+  if [[ "$removed_ld_conf" -eq 1 ]]; then
     run sudo ldconfig || true
   fi
+
+  # Distributions that do not search /usr/local/lib/pkgconfig get a link in a
+  # directory they do search. Remove it only when it points at our file.
+  local pc_link
+  for pc_link in /usr/lib64/pkgconfig/onnxruntime.pc /usr/lib/pkgconfig/onnxruntime.pc; do
+    if [[ -L "$pc_link" && "$(readlink -- "$pc_link")" == "$pc_file" ]]; then
+      log "Removing: $pc_link"
+      run sudo rm -f -- "$pc_link"
+    fi
+  done
 
   if [[ -f "$pc_file" ]]; then
     log "Removing: $pc_file"
