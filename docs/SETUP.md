@@ -1,8 +1,14 @@
-# Setup / Install (Ubuntu 22.04+)
+# Setup / Install (Ubuntu 22.04+ and Fedora 44)
 
 This repo supports both a manual source-build flow and a StudioCast installer
 wizard target. The GUI installer is the polished user path for releases; the
 scripts below remain the CLI fallback for CI, SSH, recovery, and debugging.
+
+`./scripts/setup.sh` reads `/etc/os-release` and runs the helper for your
+distribution: `scripts/setup/ubuntu.sh` for the Ubuntu family, or
+`scripts/setup/fedora.sh` for Fedora. The numbered steps below are the Ubuntu
+flow. Fedora users read the [Fedora 44](#fedora-44) section first, then follow
+the same numbered steps for the optional parts.
 
 ## GUI installer wizard
 
@@ -78,7 +84,9 @@ Supported installer OS bases:
   `UBUNTU_CODENAME=jammy` or `UBUNTU_CODENAME=noble`.
 
 Unsupported distros fail clearly with the detected `/etc/os-release` fields and
-should use the manual source-build flow below.
+should use the manual source-build flow below. The GUI installer wizard stays
+Ubuntu-only. On Fedora, use the CLI helper or the RPM package described in the
+[Fedora 44](#fedora-44) section.
 
 The installer writes:
 
@@ -95,6 +103,70 @@ Clean install removes app files and the user service before reinstalling. It
 preserves user config, downloaded model packs, logs, and cache by default; the
 GUI and backend require an explicit `--remove-user-data` choice before deleting
 those XDG directories.
+
+## Fedora 44
+
+On Fedora, `./scripts/setup.sh` runs `scripts/setup/fedora.sh`. That helper
+installs the dependencies with `dnf` and configures the virtual camera:
+
+```bash
+./scripts/setup.sh --deps --v4l2loopback --load-loopback --persist-loopback
+```
+
+Add `-y` to answer yes to the `dnf` prompts. Run
+`./scripts/setup/fedora.sh --help` for the full option list. The options have
+the same names as the Ubuntu helper, so `--build`, `--build-dir`,
+`--build-type`, `--video-nr`, `--label`, and `--exclusive-caps` work the same
+way.
+
+### v4l2loopback needs RPM Fusion Free
+
+Fedora does not ship `v4l2loopback`. RPM Fusion Free ships it as
+`akmod-v4l2loopback`. The setup helper does not add third-party repositories
+for you. Enable RPM Fusion Free first, then run the setup again:
+
+```bash
+sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+./scripts/setup.sh --v4l2loopback --load-loopback --persist-loopback
+```
+
+Without that repository, `--v4l2loopback` and `--load-loopback` stop with exit
+code 2 and print the command above. The helper then installs
+`akmod-v4l2loopback` and the matching `kernel-devel`, and runs `akmods` so the
+module builds for the running kernel.
+
+### ONNX Runtime is the distro package, CPU only
+
+Fedora ships `onnxruntime-devel`, and CMake finds it through its CMake config
+file. There is no tarball download and no `pkg-config` shim, so the
+`--onnxruntime-version`, `--onnxruntime-flavor`, and `--onnxruntime-arch`
+options are accepted but do nothing on Fedora. The helper prints a note when
+you pass them.
+
+The Fedora package has the CPU execution provider only. The Open CUDA backend
+needs the CUDA execution provider, so GPU inference needs an upstream ONNX
+Runtime GPU build installed by hand. See `docs/open_cuda_install.md`.
+
+### dlib is not packaged
+
+Fedora has no `dlib-devel` package. CMake reports the missing dependency with a
+STATUS message and disables the Open Video Eye Contact effect. The rest of the
+build is not affected.
+
+### Build a Fedora RPM
+
+You can build and install a package instead of running from a build directory:
+
+```bash
+packaging/rpm/build_rpm.sh
+sudo dnf install ./dist/rpm/studiocast-<version>-1.fc44.x86_64.rpm
+systemctl --user enable --now studiocastd.service
+```
+
+`./scripts/setup.sh --rpm -- <args>` is a shortcut that runs
+`packaging/rpm/build_rpm.sh` with the arguments after `--`. Use
+`packaging/rpm/build_rpm.sh --help` for the build options, such as
+`--container` to build in a Fedora container on a non-Fedora host.
 
 ## 1) Install dependencies + v4l2loopback
 
