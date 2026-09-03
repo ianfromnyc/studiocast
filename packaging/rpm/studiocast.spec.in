@@ -1,9 +1,10 @@
 # RPM spec template for StudioCast on Fedora.
 #
 # packaging/rpm/build_rpm.sh renders this template into build/rpm/SPECS/
-# studiocast.spec. The only substitution is @VERSION@, which becomes the
-# content of the repository VERSION file. This mirrors how build_appimage.sh
-# renders packaging/appimage/studiocast-installer.desktop.in.
+# studiocast.spec. The substitutions are @VERSION@, which becomes the content
+# of the repository VERSION file, and @DLIB_VERSION@, which comes from
+# packaging/rpm/dlib.lock. This mirrors how build_appimage.sh renders
+# packaging/appimage/studiocast-installer.desktop.in.
 #
 # Do not run rpmbuild on the .in file. Run packaging/rpm/build_rpm.sh, or on a
 # non-Fedora host run packaging/rpm/build_rpm.sh --container.
@@ -15,8 +16,13 @@
 #                             loads the CUDA execution provider at run time, so
 #                             the package still works on a machine with no CUDA.
 #   open_audio (default on)   Open Audio backend. ONNX Runtime, CPU baseline.
-#   dlib       (default off)  dlib face landmarks. Fedora has no dlib-devel, so
-#                             this must stay off for a Fedora build.
+#   dlib       (default on)   dlib face landmarks for Open Video Eye Contact.
+#                             Fedora has no dlib package, so the build makes a
+#                             private static dlib from the pinned source
+#                             tarball in packaging/rpm/dlib.lock. Nothing goes
+#                             on the host and the package ships no extra
+#                             shared object. Use --without dlib to skip the
+#                             extra build; Eye Contact is then unavailable.
 #   libyuv     (default on)   Build against libyuv for an extra, optimized RGB
 #                             to YUYV conversion backend. Turn it off to build
 #                             with the project scalar, SSSE3 and AVX2 backends
@@ -29,17 +35,30 @@
 #
 %bcond open_cuda 1
 %bcond open_audio 1
-%bcond dlib 0
+%bcond dlib 1
 %bcond libyuv 1
 %bcond tests 1
 %bcond installer 0
+
+# Pinned dlib release. build_rpm.sh renders this from packaging/rpm/dlib.lock,
+# which also holds the download URL and the SHA256 of the tarball.
+%global dlib_version @DLIB_VERSION@
+# Where the private dlib build installs itself. It stays inside the build tree
+# and never reaches the buildroot.
+%global dlib_prefix %{_builddir}/StudioCast-%{version}/dlib-prefix
 
 Name:           studiocast
 Version:        @VERSION@
 Release:        1%{?dist}
 Summary:        Broadcast-style audio and video effects manager for Linux
 
+# StudioCast itself is MPL-2.0. A dlib build also carries the bundled dlib
+# sources, which are under the Boost Software License 1.0.
+%if %{with dlib}
+License:        MPL-2.0 AND BSL-1.0
+%else
 License:        MPL-2.0
+%endif
 URL:            https://github.com/ianfromnyc/studiocast
 
 # The x86 SIMD sources are guarded by CMAKE_SYSTEM_PROCESSOR, so the tree can
@@ -51,6 +70,17 @@ ExclusiveArch:  x86_64
 # packaging/_lib/source_archive.sh. It is not a release asset URL, so rpmlint
 # reports an invalid Source0 URL. That is expected.
 Source0:        StudioCast-%{version}-source.tar.gz
+
+%if %{with dlib}
+# build_rpm.sh downloads this tarball and checks it against the SHA256 in
+# packaging/rpm/dlib.lock before rpmbuild starts. The text after #/ is the
+# local file name that rpmbuild uses.
+Source1:        https://github.com/davisking/dlib/archive/refs/tags/v%{dlib_version}.tar.gz#/dlib-%{dlib_version}.tar.gz
+
+# dlib is compiled into the programs as a static library, so declare the bundle
+# as the Fedora bundling guidelines ask.
+Provides:       bundled(dlib) = %{dlib_version}
+%endif
 
 BuildRequires:  cmake
 BuildRequires:  ninja-build
@@ -64,6 +94,13 @@ BuildRequires:  sqlite-devel
 BuildRequires:  onnxruntime-devel
 %if %{with libyuv}
 BuildRequires:  libyuv-devel
+%endif
+%if %{with dlib}
+# dlib matrix code uses CBLAS and LAPACK. FlexiBLAS is the Fedora BLAS front
+# end: it keeps one link-time interface and lets the machine owner choose the
+# back end (OpenBLAS by default) at run time. Reference blas-devel and
+# lapack-devel would also work, but they are the slow netlib libraries.
+BuildRequires:  flexiblas-devel
 %endif
 BuildRequires:  desktop-file-utils
 BuildRequires:  systemd-rpm-macros
@@ -92,9 +129,65 @@ The background service is not enabled by the package. To start it:
     systemctl --user enable --now studiocastd.service
 
 %prep
-%autosetup -n StudioCast-%{version}
+%setup -q -n StudioCast-%{version}
+%if %{with dlib}
+# -T -D keeps the already unpacked StudioCast tree and adds Source1 to it, so
+# the dlib source lands at dlib-%%{dlib_version}/ inside the build tree.
+%setup -q -T -D -n StudioCast-%{version} -a 1
+# Copy the dlib license to the top level under a clear name. %%license in
+# %%files then installs it next to the StudioCast license files.
+cp -p dlib-%{dlib_version}/LICENSE.txt dlib-LICENSE.txt
+%endif
 
 %build
+%if %{with dlib}
+# Fedora has no dlib package, so build the pinned dlib source first. It goes
+# into a private prefix inside the build tree and links into the programs as a
+# static library, so the package ships no extra shared object.
+#
+# The Fedora %%cmake macro is deliberately not used here. It forces
+# BUILD_SHARED_LIBS=ON and a fixed build directory name, and both are wrong for
+# this private copy. The distribution build flags are passed by hand instead,
+# so the static library gets the same hardening, LTO and annobin notes as the
+# rest of the package.
+#
+# The exports stay inside a subshell. The %%cmake macro below keeps a CXXFLAGS
+# value that is already set, so leaking these would silently change the
+# StudioCast build too.
+(
+  export CFLAGS="%{build_cflags}"
+  export CXXFLAGS="%{build_cxxflags}"
+  export LDFLAGS="%{build_ldflags}"
+
+  # Only the shape predictor and the plain image processing headers are used,
+  # so every image codec, the GUI, CUDA and the FFmpeg support are off. BLAS
+  # and LAPACK stay on because the landmark solver uses them. BLA_VENDOR picks
+  # FlexiBLAS; without it dlib takes the first thing pkg-config offers.
+  %{__cmake} -S dlib-%{dlib_version} -B dlib-build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=%{dlib_prefix} \
+      -DCMAKE_INSTALL_LIBDIR=%{_lib} \
+      -DBUILD_SHARED_LIBS=OFF \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+      -DBLA_VENDOR=FlexiBLAS \
+      -DDLIB_NO_GUI_SUPPORT=ON \
+      -DDLIB_USE_CUDA=OFF \
+      -DDLIB_USE_BLAS=ON \
+      -DDLIB_USE_LAPACK=ON \
+      -DDLIB_USE_MKL_FFT=OFF \
+      -DDLIB_USE_FFMPEG=OFF \
+      -DDLIB_JPEG_SUPPORT=OFF \
+      -DDLIB_PNG_SUPPORT=OFF \
+      -DDLIB_GIF_SUPPORT=OFF \
+      -DDLIB_WEBP_SUPPORT=OFF \
+      -DDLIB_JXL_SUPPORT=OFF \
+      -DDLIB_LINK_WITH_SQLITE3=OFF
+
+  %{__cmake} --build dlib-build --parallel %{_smp_build_ncpus}
+  %{__cmake} --install dlib-build
+)
+%endif
+
 # The Fedora %%cmake macro already selects the Ninja generator and passes the
 # distribution build flags, so do not add -G here.
 #
@@ -108,6 +201,9 @@ The background service is not enabled by the package. To start it:
     -DSTUDIOCAST_ENABLE_OPEN_CUDA=%{?with_open_cuda:ON}%{!?with_open_cuda:OFF} \
     -DSTUDIOCAST_ENABLE_OPEN_AUDIO=%{?with_open_audio:ON}%{!?with_open_audio:OFF} \
     -DSTUDIOCAST_ENABLE_DLIB=%{?with_dlib:ON}%{!?with_dlib:OFF} \
+%if %{with dlib}
+    -Ddlib_DIR=%{dlib_prefix}/%{_lib}/cmake/dlib \
+%endif
     -DBUILD_TESTING=%{?with_tests:ON}%{!?with_tests:OFF}
 
 %cmake_build
@@ -154,6 +250,9 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/studiocast.desktop
 
 %files
 %license LICENSE NOTICE
+%if %{with dlib}
+%license dlib-LICENSE.txt
+%endif
 %doc README.md CHANGELOG.md
 %{_bindir}/studiocast
 %{_bindir}/studiocast-audio

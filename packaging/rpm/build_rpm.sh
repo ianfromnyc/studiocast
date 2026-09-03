@@ -16,14 +16,20 @@ SOURCE_ARCHIVE_NAME="StudioCast-${VERSION}-source.tar.gz"
 SOURCE_ARCHIVE_PATH="${TOPDIR}/SOURCES/${SOURCE_ARCHIVE_NAME}"
 CHECKSUM_FILE="${DIST_DIR}/studiocast-${VERSION}-rpm.sha256"
 CONTAINER_SCRIPT="${BUILD_DIR}/container-build.sh"
+DOWNLOAD_DIR="${BUILD_DIR}/downloads"
+DLIB_LOCK="${SCRIPT_DIR}/dlib.lock"
 IMAGE="${STUDIOCAST_RPM_IMAGE:-}"
 IMAGE_EXPLICIT=0
 DRY_RUN=0
 CLEAN=0
+KEEP_DOWNLOADS=0
 USE_CONTAINER=0
 SRPM_ONLY=0
 RUN_RPMLINT=0
 INSTALL_BUILDDEPS=0
+# The spec turns dlib on by default. Track the effective setting here, because
+# the dlib source tarball is only needed, and only fetched, when dlib is on.
+WITH_DLIB=1
 RPMBUILD_ARGS=()
 
 usage() {
@@ -37,6 +43,8 @@ Options:
   --help                    Show this help.
   --dry-run                 Print commands without executing them.
   --clean                   Remove the rpmbuild tree and previous artifacts first.
+  --keep-downloads          With --clean, keep the cached downloads directory,
+                            so the dlib tarball is not fetched again.
   --build-dir DIR           Working directory for the private rpmbuild tree.
                             Default: ${BUILD_DIR}
   --dist-dir DIR            Artifact output directory.
@@ -58,7 +66,7 @@ Options:
                             The rpmlint exit status never fails this script.
 
 Build conditionals (see packaging/rpm/studiocast.spec.in):
-  open_cuda (on), open_audio (on), dlib (off), libyuv (on), tests (on),
+  open_cuda (on), open_audio (on), dlib (on), libyuv (on), tests (on),
   installer (off)
 
 Artifacts in ${DIST_DIR}:
@@ -73,9 +81,17 @@ Notes:
   packaging/_lib/source_archive.sh, so the RPM and the AppImage ship the same
   source archive. \$HOME/rpmbuild is never touched.
 
-  In container mode the host prepares the rpmbuild tree, then the container
-  mounts only that tree. The container installs rpm-build and the build
-  dependencies from the rendered spec before it builds.
+  Fedora has no dlib package, so a dlib build compiles dlib from the source
+  release pinned in packaging/rpm/dlib.lock. This script downloads that tarball
+  and checks its SHA256 before rpmbuild starts. The file is cached in
+  ${DOWNLOAD_DIR}
+  and copied into the rpmbuild SOURCES directory. --without dlib skips the
+  download.
+
+  In container mode the host prepares the rpmbuild tree, which includes the
+  dlib download, then the container mounts only that tree. The container
+  installs rpm-build and the build dependencies from the rendered spec before
+  it builds. It never reaches the network for the sources.
 EOF
 }
 
@@ -122,6 +138,10 @@ parse_args() {
         CLEAN=1
         shift
         ;;
+      --keep-downloads)
+        KEEP_DOWNLOADS=1
+        shift
+        ;;
       --build-dir)
         [[ $# -ge 2 ]] || die "--build-dir requires a directory"
         BUILD_DIR="$2"
@@ -165,11 +185,17 @@ parse_args() {
         ;;
       --with)
         [[ $# -ge 2 ]] || die "--with requires a conditional name"
+        if [[ "$2" == "dlib" ]]; then
+          WITH_DLIB=1
+        fi
         RPMBUILD_ARGS+=(--with "$2")
         shift 2
         ;;
       --without)
         [[ $# -ge 2 ]] || die "--without requires a conditional name"
+        if [[ "$2" == "dlib" ]]; then
+          WITH_DLIB=0
+        fi
         RPMBUILD_ARGS+=(--without "$2")
         shift 2
         ;;
@@ -191,9 +217,66 @@ refresh_paths() {
   SOURCE_ARCHIVE_PATH="${TOPDIR}/SOURCES/${SOURCE_ARCHIVE_NAME}"
   CHECKSUM_FILE="${DIST_DIR}/studiocast-${VERSION}-rpm.sha256"
   CONTAINER_SCRIPT="${BUILD_DIR}/container-build.sh"
+  DOWNLOAD_DIR="${BUILD_DIR}/downloads"
   if [[ "${IMAGE_EXPLICIT}" -eq 0 && -z "${IMAGE}" ]]; then
     IMAGE="registry.fedoraproject.org/fedora:${FEDORA_RELEASE}"
   fi
+}
+
+# Reads the pinned dlib release. The version, the URL and the SHA256 live in
+# packaging/rpm/dlib.lock only, so nothing else repeats them.
+load_dlib_lock() {
+  [[ -f "${DLIB_LOCK}" ]] || die "dlib lock file is missing: ${DLIB_LOCK}"
+  # shellcheck source-path=SCRIPTDIR
+  # shellcheck source=dlib.lock
+  source "${DLIB_LOCK}"
+  [[ -n "${DLIB_VERSION:-}" ]] || die "${DLIB_LOCK} does not set DLIB_VERSION"
+  [[ -n "${DLIB_URL:-}" ]] || die "${DLIB_LOCK} does not set DLIB_URL"
+  [[ -n "${DLIB_SHA256:-}" ]] || die "${DLIB_LOCK} does not set DLIB_SHA256"
+  DLIB_ARCHIVE_NAME="dlib-${DLIB_VERSION}.tar.gz"
+}
+
+file_sha256() {
+  sha256sum -- "$1" | awk '{ print $1 }'
+}
+
+# Puts the pinned dlib tarball in the rpmbuild SOURCES directory. It downloads
+# into a cache first, so a second run and a --clean --keep-downloads run reuse
+# the file. Every path checks the SHA256 before the file is used.
+fetch_dlib_source() {
+  local cached="${DOWNLOAD_DIR}/${DLIB_ARCHIVE_NAME}"
+  local target="${TOPDIR}/SOURCES/${DLIB_ARCHIVE_NAME}"
+
+  log "Providing dlib ${DLIB_VERSION} source for the build"
+  run install -d -m 0755 "${DOWNLOAD_DIR}"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    print_cmd curl --fail --location --retry 3 --output "${cached}" "${DLIB_URL}"
+    print_cmd sha256sum --check "-" "<" "${DLIB_SHA256}  ${cached}"
+    print_cmd install -m 0644 "${cached}" "${target}"
+    return 0
+  fi
+
+  if [[ -f "${cached}" ]] && [[ "$(file_sha256 "${cached}")" == "${DLIB_SHA256}" ]]; then
+    log "Reusing the cached download ${cached}"
+  else
+    if [[ -f "${cached}" ]]; then
+      log "The cached download does not match the pin; fetching it again"
+      run rm -f -- "${cached}"
+    fi
+    log "Downloading ${DLIB_URL}"
+    curl --fail --location --retry 3 --output "${cached}" "${DLIB_URL}" ||
+      die "could not download the dlib source from ${DLIB_URL}"
+  fi
+
+  local actual
+  actual="$(file_sha256 "${cached}")"
+  if [[ "${actual}" != "${DLIB_SHA256}" ]]; then
+    die "dlib source checksum mismatch for ${DLIB_ARCHIVE_NAME}: expected ${DLIB_SHA256}, got ${actual}. Fix packaging/rpm/dlib.lock, or remove the stale file."
+  fi
+  log "dlib source SHA256 matches the pin"
+
+  install -m 0644 "${cached}" "${target}"
 }
 
 find_container_runtime() {
@@ -220,14 +303,24 @@ prepare_topdir() {
   studiocast_create_source_archive "${REPO_ROOT}" "${VERSION}" \
     "${SOURCE_ARCHIVE_PATH}"
 
+  if [[ "${WITH_DLIB}" -eq 1 ]]; then
+    fetch_dlib_source
+  else
+    log "dlib is off; skipping the dlib source download"
+  fi
+
   log "Rendering ${SPEC_PATH}"
   if [[ "${DRY_RUN}" -eq 1 ]]; then
-    print_cmd sed "s/@VERSION@/${VERSION}/g" "${SPEC_TEMPLATE}" ">" "${SPEC_PATH}"
+    print_cmd sed -e "s/@VERSION@/${VERSION}/g" \
+      -e "s/@DLIB_VERSION@/${DLIB_VERSION}/g" "${SPEC_TEMPLATE}" ">" "${SPEC_PATH}"
   else
     [[ -f "${SPEC_TEMPLATE}" ]] || die "spec template is missing: ${SPEC_TEMPLATE}"
-    sed "s/@VERSION@/${VERSION}/g" "${SPEC_TEMPLATE}" > "${SPEC_PATH}"
+    sed -e "s/@VERSION@/${VERSION}/g" -e "s/@DLIB_VERSION@/${DLIB_VERSION}/g" \
+      "${SPEC_TEMPLATE}" > "${SPEC_PATH}"
     chmod 0644 "${SPEC_PATH}"
-    if grep -q '@VERSION@' "${SPEC_PATH}"; then
+    # @BINDIR@ is a placeholder for the systemd unit template, not for the
+    # spec, so it must stay. Only check the ones this script renders.
+    if grep -qE '@VERSION@|@DLIB_VERSION@' "${SPEC_PATH}"; then
       die "spec still holds an unsubstituted placeholder: ${SPEC_PATH}"
     fi
   fi
@@ -436,13 +529,33 @@ report_artifacts() {
   log "  ${CHECKSUM_FILE}"
 }
 
+clean_build_dir() {
+  if [[ "${KEEP_DOWNLOADS}" -eq 1 ]]; then
+    log "Cleaning the rpmbuild tree, keeping ${DOWNLOAD_DIR}"
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+      print_cmd find "${BUILD_DIR}" -mindepth 1 -maxdepth 1 \
+        '!' -name downloads -exec rm -rf '{}' '+'
+      return 0
+    fi
+    if [[ -d "${BUILD_DIR}" ]]; then
+      find "${BUILD_DIR}" -mindepth 1 -maxdepth 1 \
+        '!' -name downloads -exec rm -rf '{}' '+'
+    fi
+    return 0
+  fi
+
+  log "Cleaning the rpmbuild tree and the cached downloads"
+  run rm -rf -- "${BUILD_DIR}"
+}
+
 main() {
   parse_args "$@"
   refresh_paths
+  load_dlib_lock
 
   if [[ "${CLEAN}" -eq 1 ]]; then
-    log "Cleaning the rpmbuild tree and previous artifacts"
-    run rm -rf -- "${BUILD_DIR}"
+    clean_build_dir
+    log "Removing the previous artifacts"
     run rm -rf -- "${DIST_DIR}"
   fi
 
