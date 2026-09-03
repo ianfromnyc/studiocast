@@ -12,6 +12,7 @@ IMAGE="${STUDIOCAST_RPM_IMAGE:-}"
 IMAGE_EXPLICIT=0
 INSTALL_TEST=0
 USE_CONTAINER=0
+NO_CONTAINER_CHECK=0
 
 usage() {
   cat <<EOF
@@ -28,6 +29,10 @@ Options:
   --install-test          Install the binary RPM, run the programs, then remove
                           it. This needs root, so run it inside a container or
                           add --container.
+  --no-container-check    Let --install-test run on this system even when it
+                          is not a detected container. Use it only where the
+                          system is disposable, such as a CI job that already
+                          runs inside a container.
   --container[=IMAGE]     Run the install test inside a podman (or docker)
                           container. Implies --install-test.
   --image IMAGE           Container image for the install test. Overrides the
@@ -142,6 +147,10 @@ parse_args() {
         ;;
       --install-test)
         INSTALL_TEST=1
+        shift
+        ;;
+      --no-container-check)
+        NO_CONTAINER_CHECK=1
         shift
         ;;
       --container)
@@ -335,8 +344,10 @@ run_install_test() {
     return 0
   fi
 
-  inside_container ||
-    die "--install-test changes the system. Run it inside a container, or add --container."
+  if [[ "${NO_CONTAINER_CHECK}" -eq 0 ]]; then
+    inside_container ||
+      die "--install-test changes the system. Run it inside a container, add --container, or add --no-container-check."
+  fi
   [[ "$(id -u)" -eq 0 ]] || die "--install-test needs root"
 
   log "Running the install test on this system"
