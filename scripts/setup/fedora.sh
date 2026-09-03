@@ -7,10 +7,12 @@ set -euo pipefail
 # It installs build/runtime prerequisites and configures v4l2loopback.
 #
 # Differences from the Ubuntu helper:
-# - ONNX Runtime comes from the distro package onnxruntime-devel. There is no
-#   tarball download, so the --onnxruntime-* flags are accepted and ignored.
+# - The cpu ONNX Runtime flavor comes from the distro package onnxruntime-devel.
+#   The gpu flavor comes from the upstream CUDA tarball, like on Ubuntu.
 # - v4l2loopback is not in Fedora. It is in RPM Fusion Free, which this script
 #   never enables for you.
+# - The CUDA runtime rpms come from the NVIDIA repository, which this script
+#   never enables for you either.
 
 usage() {
   cat <<'EOF'
@@ -28,9 +30,12 @@ Options:
   --label TEXT            v4l2loopback card label (default: "StudioCast Camera").
   --exclusive-caps 0|1    v4l2loopback exclusive_caps (default: 1).
 
-  --onnxruntime-version V Accepted and ignored on Fedora (see notes below).
-  --onnxruntime-flavor F  Accepted and ignored on Fedora (see notes below).
-  --onnxruntime-arch A    Accepted and ignored on Fedora (see notes below).
+  --onnxruntime-version V ONNX Runtime version for the gpu flavor (default: 1.29.0).
+  --onnxruntime-flavor F  cpu|gpu (default: auto; gpu if nvidia-smi works, else cpu).
+  --onnxruntime-arch A    x64|aarch64 (default: auto from uname -m).
+  --cuda-major 12|13      CUDA major version for the gpu tarball (default: auto, else 13).
+  --cudnn-version V       cuDNN redistributable version (default: 9.25.1.1).
+  --check-cuda            Report the CUDA runtime state and exit. Installs nothing.
 
   --build                 Configure + build StudioCast (dev convenience).
   --build-dir DIR         Build directory (default: ./cmake-build-debug).
@@ -42,11 +47,21 @@ Options:
   -h, --help              Show help.
 
 Fedora notes:
-  - ONNX Runtime comes from the Fedora package onnxruntime-devel. CMake finds it
-    through its CMake config file, so no tarball and no pkg-config shim is
-    needed and the --onnxruntime-* flags do nothing here. That package has the
-    CPU execution provider only. For Open CUDA GPU inference, install an
-    upstream ONNX Runtime GPU build by hand.
+  - ONNX Runtime, cpu flavor: the Fedora package onnxruntime-devel. CMake finds
+    it through its CMake config file. That package has the CPU execution
+    provider only, so the Open CUDA backend cannot use it.
+  - ONNX Runtime, gpu flavor: the upstream CUDA tarball, installed under
+    /opt/studiocast/onnxruntime/<version>/ with a pkg-config file, the same as
+    on Ubuntu. This flavor does not install onnxruntime-devel, because the
+    distro CMake config file would otherwise hide the GPU build. --build then
+    passes -DONNXRUNTIME_ROOT so CMake uses the tarball.
+  - The gpu flavor needs the CUDA 13 runtime rpms and cuDNN 9. The CUDA rpms
+    come from the NVIDIA repository, which this script never enables for you:
+      sudo dnf config-manager addrepo --from-repofile=https://developer.download.nvidia.com/compute/cuda/repos/fedora44/x86_64/cuda-fedora44.repo
+    Fedora and NVIDIA have no cuDNN rpm for Fedora 44, so this script installs
+    the NVIDIA cuDNN redistributable tarball under /opt/studiocast/cudnn/.
+  - ONNX Runtime 1.29 with the CUDA execution provider needs CUDA 13.x, cuDNN
+    9.x and an NVIDIA driver 580.65.06 or newer.
   - Fedora has no dlib package. CMake reports this and disables the Open Video
     Eye Contact effect.
   - v4l2loopback is not in Fedora. It is in RPM Fusion Free as
@@ -56,6 +71,8 @@ Fedora notes:
 
 Examples:
   ./scripts/setup.sh --deps -y
+  ./scripts/setup.sh --deps --onnxruntime-flavor gpu -y
+  ./scripts/setup.sh --check-cuda
   ./scripts/setup.sh --deps --v4l2loopback --load-loopback --persist-loopback
   ./scripts/setup.sh --build --build-type Release
   ./scripts/setup.sh --rpm -- --clean
@@ -67,6 +84,7 @@ DO_DEPS=0
 DO_V4L2=0
 DO_LOAD_LOOP=0
 DO_PERSIST_LOOP=0
+DO_CHECK_CUDA=0
 VIDEO_NR=10
 LABEL="StudioCast Camera"
 EXCLUSIVE_CAPS=1
@@ -77,7 +95,6 @@ DO_MAXINE=0
 DO_RPM=0
 PASSTHRU_ARGS=()
 PARSE_PASSTHRU_ARGS=0
-ORT_FLAGS_SEEN=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -86,6 +103,59 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 OS_RELEASE_FILE="${STUDIOCAST_OS_RELEASE:-/etc/os-release}"
 
 log() { echo "[setup] $*"; }
+warn() { echo "[setup] WARNING: $*" >&2; }
+
+# ONNX Runtime install defaults.
+# - 1.29.0 is the newest stable upstream release with a CUDA 13 Linux tarball.
+#   Its CUDA execution provider needs CUDA 13.x, cuDNN 9.x and an NVIDIA driver
+#   580.65.06 or newer. Its Linux x64 CUDA 13 build covers compute capability
+#   75, 80, 86, 89, 90a and 120a.
+# - Prefer the gpu flavor when an NVIDIA driver is present, like the Ubuntu
+#   helper does.
+ORT_VERSION="${ORT_VERSION:-1.29.0}"
+CUDNN_VERSION="${CUDNN_VERSION:-9.25.1.1}"
+
+if [[ -z "${ORT_ARCH:-}" ]]; then
+  case "$(uname -m)" in
+    x86_64|amd64) ORT_ARCH="x64" ;;
+    aarch64|arm64) ORT_ARCH="aarch64" ;;
+    *) ORT_ARCH="x64" ;;
+  esac
+fi
+
+if [[ -z "${ORT_FLAVOR:-}" ]]; then
+  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    ORT_FLAVOR="gpu"
+  else
+    ORT_FLAVOR="cpu"
+  fi
+fi
+
+# CUDA major version of the installed toolkit, or 13 when there is none.
+detect_cuda_major() {
+  local version_json="/usr/local/cuda/version.json"
+  if [[ -f "${version_json}" ]]; then
+    local v
+    v="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([0-9]\+\)\..*/\1/p' "${version_json}" | head -n 1)"
+    if [[ -n "${v}" ]]; then
+      printf '%s\n' "${v}"
+      return 0
+    fi
+  fi
+
+  if command -v nvcc >/dev/null 2>&1; then
+    local v
+    v="$(nvcc --version 2>/dev/null | sed -n 's/.*release \([0-9]\+\)\..*/\1/p' | head -n 1)"
+    if [[ -n "${v}" ]]; then
+      printf '%s\n' "${v}"
+      return 0
+    fi
+  fi
+
+  printf '13\n'
+}
+
+CUDA_MAJOR="${CUDA_MAJOR:-$(detect_cuda_major)}"
 
 if [[ "${STUDIOCAST_GUI_SUDO_STDIN:-0}" == "1" ]]; then
   sudo() {
@@ -106,12 +176,429 @@ run_priv() {
   fi
 }
 
+# Hooks for scripts/_lib/onnxruntime.sh.
+sc_ort_log() { log "$@"; }
+sc_ort_priv() { run_priv "$@"; }
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=../_lib/onnxruntime.sh
+source "${SCRIPT_DIR}/../_lib/onnxruntime.sh"
+
 DNF_ARGS=()
 
 dnf_install() {
   require_cmd dnf
   run_priv dnf install "${DNF_ARGS[@]}" "$@"
 }
+
+# ---------------------------------------------------------------------------
+# ONNX Runtime, gpu flavor
+# ---------------------------------------------------------------------------
+
+# True when version "$1" is the same as or newer than version "$2".
+version_at_least() {
+  [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" == "$2" ]]
+}
+
+# Upstream asset base name for the gpu flavor.
+#
+# The upstream naming changed twice:
+#   before 1.25.0  onnxruntime-linux-<arch>-gpu-<version>            (CUDA 11/12)
+#   1.25 and 1.26  ...-gpu-<version> is CUDA 12, ...-gpu_cuda13-... exists
+#   1.27.0 onward  ...-gpu_cuda12-<version> and ...-gpu_cuda13-<version>
+onnxruntime_gpu_asset_name() {
+  local arch="$1"
+  local cuda_major="$2"
+  local version="$3"
+
+  local split_from="1.27.0"
+  if [[ "${cuda_major}" == "13" ]]; then
+    split_from="1.25.0"
+  fi
+
+  if version_at_least "${version}" "${split_from}"; then
+    printf 'onnxruntime-linux-%s-gpu_cuda%s-%s\n' "${arch}" "${cuda_major}" "${version}"
+  else
+    warn "ONNX Runtime ${version} has no gpu_cuda${cuda_major} asset; using the old 'gpu' asset name."
+    sc_ort_legacy_asset_name "${arch}" "gpu" "${version}"
+  fi
+}
+
+# SHA-256 of the assets this script installs by default. ONNX Runtime publishes
+# no checksum asset; these are the asset digests from the GitHub release API.
+# Other versions install without a checksum, and the script says so.
+onnxruntime_known_sha256() {
+  case "$1" in
+    onnxruntime-linux-x64-gpu_cuda13-1.29.0.tgz)
+      printf '844c64acfc43ab9423215c26493055ea229268e28283146cc644ecef0bdae048\n' ;;
+    onnxruntime-linux-x64-gpu_cuda12-1.29.0.tgz)
+      printf '4ca594a0da83927befbd73fe020d7f569be151d70bb4fe9741ad405f4882e2ad\n' ;;
+    *)
+      printf '\n' ;;
+  esac
+}
+
+warn_if_distro_onnxruntime_installed() {
+  rpm -q onnxruntime-devel >/dev/null 2>&1 || return 0
+
+  warn "onnxruntime-devel is installed. Its CMake config file has the CPU"
+  warn "execution provider only, and CMake finds it before this GPU build."
+  warn "--build works around this with -DONNXRUNTIME_ROOT, but any other"
+  warn "configure command picks the CPU build. Remove it with:"
+  warn "  sudo dnf remove onnxruntime-devel"
+}
+
+ensure_onnxruntime_gpu_available() {
+  require_cmd curl
+  require_cmd tar
+
+  local asset_name
+  asset_name="$(onnxruntime_gpu_asset_name "${ORT_ARCH}" "${CUDA_MAJOR}" "${ORT_VERSION}")"
+  local root
+  root="$(sc_ort_root "${ORT_VERSION}" "${asset_name}")"
+
+  if [[ -f "${root}/include/onnxruntime_cxx_api.h" ]]; then
+    log "ONNX Runtime ${ORT_VERSION} is already installed at ${root}; skipping the download."
+    sc_ort_link_pkgconfig
+    return 0
+  fi
+
+  local url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${asset_name}.tgz"
+  local sha256
+  sha256="$(onnxruntime_known_sha256 "${asset_name}.tgz")"
+
+  log "Installing ONNX Runtime ${ORT_VERSION} (gpu, CUDA ${CUDA_MAJOR}) from: ${url}"
+  log "  -> ${root}"
+  if [[ -z "${sha256}" ]]; then
+    log "No published SHA-256 is known for this asset; the download is not checksummed."
+  fi
+
+  sc_ort_install_tarball "${ORT_VERSION}" "${asset_name}" "${url}" "${sha256}"
+
+  require_cmd pkg-config
+  log "ONNX Runtime installed; pkg-config reports: $(pkg-config --modversion onnxruntime)"
+}
+
+# ---------------------------------------------------------------------------
+# cuDNN 9
+# ---------------------------------------------------------------------------
+
+# NVIDIA names the redistributable directory after the machine, not after the
+# ONNX Runtime arch token.
+cudnn_arch() {
+  case "${ORT_ARCH}" in
+    aarch64) printf 'sbsa\n' ;;
+    *) printf 'x86_64\n' ;;
+  esac
+}
+
+cudnn_archive_name() {
+  printf 'cudnn-linux-%s-%s_cuda%s-archive\n' "$(cudnn_arch)" "${CUDNN_VERSION}" "${CUDA_MAJOR}"
+}
+
+# The redistributable index file drops the last version component:
+# cuDNN 9.25.1.1 is described by redistrib_9.25.1.json.
+cudnn_release_label() {
+  printf '%s\n' "${CUDNN_VERSION}" | cut -d. -f1-3
+}
+
+# Read the SHA-256 of one archive out of the NVIDIA redistributable index.
+# Prints nothing when the index or the entry is missing.
+cudnn_published_sha256() {
+  local archive="$1"
+  local label
+  label="$(cudnn_release_label)"
+  local index_url="https://developer.download.nvidia.com/compute/cudnn/redist/redistrib_${label}.json"
+
+  local index
+  index="$(curl --fail --silent --show-error --location --retry 3 "${index_url}" 2>/dev/null || true)"
+  [[ -n "${index}" ]] || return 0
+
+  printf '%s\n' "${index}" \
+    | grep -A2 -F "\"relative_path\": \"cudnn/linux-$(cudnn_arch)/${archive}.tar.xz\"" \
+    | sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{64\}\)".*/\1/p' \
+    | head -n 1
+}
+
+ensure_cudnn_available() {
+  if lib_resolves libcudnn.so.9; then
+    log "libcudnn.so.9 already resolves through ldconfig; skipping the cuDNN install."
+    return 0
+  fi
+
+  require_cmd curl
+  require_cmd tar
+
+  local archive arch
+  archive="$(cudnn_archive_name)"
+  arch="$(cudnn_arch)"
+  local prefix="/opt/studiocast/cudnn/${CUDNN_VERSION}"
+  local root="${prefix}/${archive}"
+  local url="https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-${arch}/${archive}.tar.xz"
+
+  log "Installing cuDNN ${CUDNN_VERSION} (CUDA ${CUDA_MAJOR}) from: ${url}"
+  log "  -> ${root}"
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  # Expand tmpdir now. It is local to this function, so it is gone by the time
+  # the trap runs.
+  # shellcheck disable=SC2064
+  trap "rm -rf '${tmpdir}'" EXIT
+
+  curl --fail --silent --show-error --location --retry 3 "${url}" -o "${tmpdir}/${archive}.tar.xz"
+
+  local sha256
+  sha256="$(cudnn_published_sha256 "${archive}")"
+  if [[ -n "${sha256}" ]]; then
+    log "Checking the SHA-256 of ${archive}.tar.xz..."
+    echo "${sha256}  ${tmpdir}/${archive}.tar.xz" | sha256sum --check --status - \
+      || { echo "[setup] ERROR: SHA-256 mismatch for ${archive}.tar.xz" >&2; exit 1; }
+  else
+    log "The NVIDIA redistributable index has no SHA-256 for this archive; skipping the check."
+  fi
+
+  run_priv mkdir -p "${prefix}"
+  run_priv tar -xJf "${tmpdir}/${archive}.tar.xz" -C "${prefix}"
+
+  local libdir="${root}/lib"
+  if [[ ! -e "${libdir}/libcudnn.so.9" ]]; then
+    echo "[setup] ERROR: libcudnn.so.9 not found under ${libdir}" >&2
+    exit 1
+  fi
+
+  run_priv tee /etc/ld.so.conf.d/studiocast-cudnn.conf >/dev/null <<EOF
+${libdir}
+EOF
+  run_priv ldconfig
+
+  rm -rf "${tmpdir}"
+  trap - EXIT
+
+  log "cuDNN installed at ${root}."
+}
+
+# ---------------------------------------------------------------------------
+# CUDA runtime preflight
+# ---------------------------------------------------------------------------
+
+ldconfig_cmd() {
+  if command -v ldconfig >/dev/null 2>&1; then
+    printf 'ldconfig\n'
+  elif [[ -x /sbin/ldconfig ]]; then
+    printf '/sbin/ldconfig\n'
+  else
+    printf '\n'
+  fi
+}
+
+# Directories the CUDA rpms use when they do not install into /usr/lib64.
+cuda_search_dirs() {
+  local d
+  for d in "/usr/local/cuda-${CUDA_MAJOR}"*/targets/*/lib /usr/local/cuda/targets/*/lib; do
+    [[ -d "${d}" ]] && printf '%s\n' "${d}"
+  done
+  return 0
+}
+
+# Print where a soname resolves, or nothing when it does not resolve.
+lib_location() {
+  local soname="$1"
+
+  local ldc
+  ldc="$(ldconfig_cmd)"
+  if [[ -n "${ldc}" ]]; then
+    local hit
+    hit="$("${ldc}" -p 2>/dev/null | sed -n "s|^[[:space:]]*${soname} .*=> ||p" | head -n 1)"
+    if [[ -n "${hit}" ]]; then
+      printf '%s\n' "${hit}"
+      return 0
+    fi
+  fi
+
+  local d
+  while read -r d; do
+    if [[ -e "${d}/${soname}" ]]; then
+      printf '%s\n' "${d}/${soname}"
+      return 0
+    fi
+  done < <(cuda_search_dirs)
+
+  return 1
+}
+
+lib_resolves() {
+  lib_location "$1" >/dev/null 2>&1
+}
+
+# The CUDA libraries the ONNX Runtime CUDA execution provider needs.
+#
+# libcuda.so.1 comes from the NVIDIA driver, never from a CUDA toolkit package.
+# libcudnn and libnvrtc are opened with dlopen, so they are not in the ELF
+# NEEDED list of the provider. Anything else the installed provider links is
+# added to the list, so a different ONNX Runtime version stays covered.
+cuda_required_libs() {
+  {
+    printf 'libcuda.so.1\n'
+    printf 'libcudart.so.%s\n' "${CUDA_MAJOR}"
+    printf 'libcublas.so.%s\n' "${CUDA_MAJOR}"
+    printf 'libcublasLt.so.%s\n' "${CUDA_MAJOR}"
+    printf 'libcurand.so.10\n'
+    printf 'libnvrtc.so.%s\n' "${CUDA_MAJOR}"
+    printf 'libcudnn.so.9\n'
+
+    local root
+    root="$(sc_ort_installed_root)"
+    if [[ -n "${root}" && -f "${root}/lib/libonnxruntime_providers_cuda.so" ]] \
+        && command -v objdump >/dev/null 2>&1; then
+      objdump -p "${root}/lib/libonnxruntime_providers_cuda.so" 2>/dev/null \
+        | sed -n 's/^[[:space:]]*NEEDED[[:space:]]*\(lib\(cu\|nv\)[^[:space:]]*\)$/\1/p'
+    fi
+  } | sort -u
+}
+
+# Print a pass/fail line per check. Returns non-zero when any check failed.
+report_cuda_preflight() {
+  local failures=0
+
+  log "CUDA preflight (CUDA major ${CUDA_MAJOR}, arch ${ORT_ARCH}):"
+
+  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    local driver
+    driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1)"
+    log "  PASS  nvidia-smi (driver ${driver:-unknown})"
+  else
+    log "  FAIL  nvidia-smi (no working NVIDIA driver)"
+    failures=$((failures + 1))
+  fi
+
+  local soname location
+  while read -r soname; do
+    if location="$(lib_location "${soname}")"; then
+      log "  PASS  ${soname} -> ${location}"
+    else
+      log "  FAIL  ${soname} (not found by ldconfig or under /usr/local/cuda*/targets/*/lib)"
+      failures=$((failures + 1))
+    fi
+  done < <(cuda_required_libs)
+
+  local ort_root
+  ort_root="$(sc_ort_installed_root)"
+  if [[ -n "${ort_root}" ]]; then
+    log "  PASS  ONNX Runtime bootstrap -> ${ort_root}"
+  else
+    log "  FAIL  ONNX Runtime bootstrap (nothing under /opt/studiocast/onnxruntime)"
+    failures=$((failures + 1))
+  fi
+
+  local pc_file="/usr/local/lib/pkgconfig/onnxruntime.pc"
+  if [[ -f "${pc_file}" ]]; then
+    log "  PASS  ${pc_file}"
+  else
+    log "  FAIL  ${pc_file} (missing)"
+    failures=$((failures + 1))
+  fi
+
+  if [[ "${failures}" -eq 0 ]]; then
+    log "CUDA preflight: PASS"
+    return 0
+  fi
+
+  log "CUDA preflight: FAIL (${failures} check(s) failed)"
+  return 1
+}
+
+cuda_repo_enabled() {
+  command -v dnf >/dev/null 2>&1 || return 1
+  dnf repolist --enabled 2>/dev/null | grep -q '^cuda-fedora'
+}
+
+print_cuda_repo_hint() {
+  cat >&2 <<EOF
+[setup] ERROR: the CUDA ${CUDA_MAJOR} runtime libraries are missing and the NVIDIA
+[setup] repository is not enabled. This script does not add third-party
+[setup] repositories for you. Enable it, then run the setup again:
+[setup]
+[setup]   sudo dnf config-manager addrepo --from-repofile=https://developer.download.nvidia.com/compute/cuda/repos/fedora44/x86_64/cuda-fedora44.repo
+[setup]   ./scripts/setup.sh --deps --onnxruntime-flavor gpu -y
+[setup]
+[setup] The setup then installs these packages:
+[setup]   cuda-cudart-${CUDA_MAJOR}-N libcublas-${CUDA_MAJOR}-N libcufft-${CUDA_MAJOR}-N
+[setup]   libcurand-${CUDA_MAJOR}-N cuda-nvrtc-${CUDA_MAJOR}-N libnvjitlink-${CUDA_MAJOR}-N
+[setup]
+[setup] libcuda.so.1 comes from the NVIDIA driver package. This script never
+[setup] installs a driver.
+EOF
+}
+
+# Newest <major>-<minor> package suffix the enabled repositories offer.
+cuda_package_suffix() {
+  dnf repoquery --qf '%{name}\n' "cuda-cudart-${CUDA_MAJOR}-*" 2>/dev/null \
+    | sed -n "s/^cuda-cudart-\(${CUDA_MAJOR}-[0-9]\+\)$/\1/p" \
+    | sort -t- -k2 -V \
+    | tail -n 1
+}
+
+ensure_cuda_runtime() {
+  # libcuda.so.1 belongs to the driver, so it is not part of this check.
+  local -a missing=()
+  local soname
+  while read -r soname; do
+    case "${soname}" in
+      libcuda.so.1|libcudnn.so.9) continue ;;
+    esac
+    lib_resolves "${soname}" || missing+=("${soname}")
+  done < <(cuda_required_libs)
+
+  if [[ "${#missing[@]}" -eq 0 ]]; then
+    log "The CUDA ${CUDA_MAJOR} runtime libraries already resolve; skipping the rpm install."
+    return 0
+  fi
+
+  log "Missing CUDA runtime libraries: ${missing[*]}"
+
+  if ! cuda_repo_enabled; then
+    print_cuda_repo_hint
+    exit 2
+  fi
+
+  local suffix
+  suffix="$(cuda_package_suffix)"
+  if [[ -z "${suffix}" ]]; then
+    echo "[setup] ERROR: the enabled NVIDIA repository offers no cuda-cudart-${CUDA_MAJOR}-* package." >&2
+    exit 2
+  fi
+
+  log "Installing the CUDA ${suffix//-/.} runtime rpms..."
+  dnf_install \
+    "cuda-cudart-${suffix}" \
+    "libcublas-${suffix}" \
+    "libcufft-${suffix}" \
+    "libcurand-${suffix}" \
+    "cuda-nvrtc-${suffix}" \
+    "libnvjitlink-${suffix}"
+
+  # The rpms install into /usr/local/cuda-<ver>/targets/<arch>/lib and normally
+  # ship their own ld.so.conf.d entry. Add one when they do not.
+  local still_missing=0
+  for soname in "${missing[@]}"; do
+    lib_resolves "${soname}" || still_missing=1
+  done
+
+  if [[ "${still_missing}" -eq 1 ]]; then
+    local dirs
+    dirs="$(cuda_search_dirs)"
+    if [[ -n "${dirs}" ]]; then
+      log "Adding /etc/ld.so.conf.d/studiocast-cuda.conf for the CUDA library directories."
+      printf '%s\n' "${dirs}" | run_priv tee /etc/ld.so.conf.d/studiocast-cuda.conf >/dev/null
+      run_priv ldconfig
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# v4l2loopback
+# ---------------------------------------------------------------------------
 
 have_module() {
   # Does the module exist for this running kernel?
@@ -206,6 +693,10 @@ EOF
   log "  ls -l /dev/video${VIDEO_NR}"
 }
 
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
 while [[ $# -gt 0 ]]; do
   if [[ "$PARSE_PASSTHRU_ARGS" -eq 1 ]]; then
     PASSTHRU_ARGS+=("$1"); shift; continue
@@ -219,8 +710,12 @@ while [[ $# -gt 0 ]]; do
     --video-nr) VIDEO_NR="${2:-}"; shift 2 ;;
     --label) LABEL="${2:-}"; shift 2 ;;
     --exclusive-caps) EXCLUSIVE_CAPS="${2:-}"; shift 2 ;;
-    --onnxruntime-version|--onnxruntime-flavor|--onnxruntime-arch)
-      ORT_FLAGS_SEEN=1; shift 2 ;;
+    --onnxruntime-version) ORT_VERSION="${2:-}"; shift 2 ;;
+    --onnxruntime-flavor) ORT_FLAVOR="${2:-}"; shift 2 ;;
+    --onnxruntime-arch) ORT_ARCH="${2:-}"; shift 2 ;;
+    --cuda-major) CUDA_MAJOR="${2:-}"; shift 2 ;;
+    --cudnn-version) CUDNN_VERSION="${2:-}"; shift 2 ;;
+    --check-cuda) DO_CHECK_CUDA=1; shift ;;
     --build) DO_BUILD=1; shift ;;
     --build-dir) BUILD_DIR="${2:-}"; shift 2 ;;
     --build-type) BUILD_TYPE="${2:-}"; shift 2 ;;
@@ -232,6 +727,16 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown argument: $1"; usage; exit 2 ;;
   esac
 done
+
+if [[ "${ORT_FLAVOR}" != "cpu" && "${ORT_FLAVOR}" != "gpu" ]]; then
+  echo "[setup] ERROR: --onnxruntime-flavor must be one of: cpu|gpu (got: '${ORT_FLAVOR}')" >&2
+  exit 2
+fi
+
+if [[ "${CUDA_MAJOR}" != "12" && "${CUDA_MAJOR}" != "13" ]]; then
+  echo "[setup] ERROR: --cuda-major must be one of: 12|13 (got: '${CUDA_MAJOR}')" >&2
+  exit 2
+fi
 
 if [[ "$DO_RPM" -eq 1 && "$DO_MAXINE" -eq 1 ]]; then
   echo "[setup] ERROR: --rpm and --maxine both take the arguments after --." >&2
@@ -257,28 +762,55 @@ if [[ "$YES" -eq 1 ]]; then
   DNF_ARGS+=("-y")
 fi
 
-if [[ "$ORT_FLAGS_SEEN" -eq 1 ]]; then
-  log "Note: the --onnxruntime-* flags are ignored on Fedora."
-  log "      ONNX Runtime comes from the distro package onnxruntime-devel."
+# ---------------------------------------------------------------------------
+# Actions
+# ---------------------------------------------------------------------------
+
+if [[ "$DO_CHECK_CUDA" -eq 1 ]]; then
+  report_cuda_preflight || exit 1
+  exit 0
 fi
 
 if [[ "$DO_DEPS" -eq 1 ]]; then
-  log "Installing build/runtime dependencies..."
-  dnf_install \
-    cmake ninja-build gcc-c++ pkgconf-pkg-config \
-    git curl \
-    qt6-qtbase-devel \
-    pulseaudio-libs-devel pulseaudio-utils \
-    libjpeg-turbo-devel libpng-devel \
-    sqlite-devel \
-    onnxruntime-devel \
-    libyuv-devel \
-    clang clang-tools-extra \
-    v4l-utils
+  log "ONNX Runtime flavor: ${ORT_FLAVOR}"
 
-  log "ONNX Runtime comes from onnxruntime-devel; CMake finds it through its CMake config."
-  log "That package has the CPU execution provider only. Open CUDA GPU inference"
-  log "needs an upstream ONNX Runtime GPU build installed by hand."
+  # Fail before any install when the gpu flavor cannot work on this system.
+  if [[ "${ORT_FLAVOR}" == "gpu" ]]; then
+    ensure_cuda_runtime
+  fi
+
+  log "Installing build/runtime dependencies..."
+  DEPS_PACKAGES=(
+    cmake ninja-build gcc-c++ pkgconf-pkg-config
+    git curl tar xz
+    qt6-qtbase-devel
+    pulseaudio-libs-devel pulseaudio-utils
+    libjpeg-turbo-devel libpng-devel
+    sqlite-devel
+    libyuv-devel
+    clang clang-tools-extra
+    v4l-utils
+  )
+
+  # The distro package ships a CMake config file that CMake finds before any
+  # hand-installed build, so it must not be installed next to the GPU tarball.
+  if [[ "${ORT_FLAVOR}" == "cpu" ]]; then
+    DEPS_PACKAGES+=(onnxruntime-devel)
+  fi
+
+  dnf_install "${DEPS_PACKAGES[@]}"
+
+  if [[ "${ORT_FLAVOR}" == "gpu" ]]; then
+    warn_if_distro_onnxruntime_installed
+    ensure_cudnn_available
+    ensure_onnxruntime_gpu_available
+    report_cuda_preflight || true
+  else
+    log "ONNX Runtime comes from onnxruntime-devel; CMake finds it through its CMake config."
+    log "That package has the CPU execution provider only. Open CUDA GPU inference"
+    log "needs the gpu flavor: ./scripts/setup.sh --deps --onnxruntime-flavor gpu"
+  fi
+
   log "Fedora has no dlib package, so CMake disables the Open Video Eye Contact effect."
 fi
 
@@ -302,9 +834,22 @@ fi
 
 if [[ "$DO_BUILD" -eq 1 ]]; then
   log "Configuring + building into: $BUILD_DIR (type: $BUILD_TYPE)"
-  cmake -S . -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-    -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON \
+  CMAKE_ARGS=(
+    -S . -B "$BUILD_DIR" -G Ninja
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
+    -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON
     -DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON
+  )
+
+  # Without this, the distro CMake config file for onnxruntime-devel would win
+  # and the build would silently use the CPU-only ONNX Runtime.
+  ORT_BOOTSTRAP_ROOT="$(sc_ort_installed_root)"
+  if [[ -n "${ORT_BOOTSTRAP_ROOT}" ]]; then
+    log "Using the ONNX Runtime bootstrap at ${ORT_BOOTSTRAP_ROOT}"
+    CMAKE_ARGS+=(-DONNXRUNTIME_ROOT="${ORT_BOOTSTRAP_ROOT}")
+  fi
+
+  cmake "${CMAKE_ARGS[@]}"
   cmake --build "$BUILD_DIR"
   log "Built. Useful commands:"
   echo "  $BUILD_DIR/studiocast --version"
