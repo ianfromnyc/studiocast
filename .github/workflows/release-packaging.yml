@@ -2,6 +2,12 @@ name: release packaging
 
 on:
   workflow_dispatch:
+    inputs:
+      build_rpm:
+        description: "Build the Fedora 44 RPM packages."
+        required: false
+        type: boolean
+        default: true
   release:
     types:
       - published
@@ -101,3 +107,53 @@ jobs:
             dist/appimage/StudioCast-Installer-*.AppDir.tar.gz
             dist/appimage/StudioCast-Installer-*.sha256
             dist/appimage/StudioCast-*-source.tar.gz
+
+  # Fedora RPM packages. A release always builds them; a manual run can turn
+  # them off with the build_rpm input.
+  rpm-fedora-44:
+    name: RPM packages (Fedora 44)
+    # The inputs context is empty for a release event, so test the event first.
+    if: ${{ github.event_name == 'release' || inputs.build_rpm }}
+    runs-on: ubuntu-24.04
+    container:
+      image: registry.fedoraproject.org/fedora:44
+
+    steps:
+      - name: Install base tools (for checkout)
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            git rpm-build rpmdevtools rpmlint dnf5-plugins
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Trust the workspace
+        # The checkout belongs to a different user id than this container, so
+        # git refuses to read it until the workspace is a safe directory.
+        # build_rpm.sh calls git archive to make the source archive.
+        run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Build RPM packages
+        # A container job cannot run podman, so this is the native build path.
+        # --install-builddeps reads the BuildRequires from the rendered spec,
+        # so the package list stays in the spec only.
+        run: |
+          packaging/rpm/build_rpm.sh --clean --install-builddeps --rpmlint
+
+      - name: Verify RPM packages
+        # The job is already root inside a container, so the install test does
+        # not need a container of its own.
+        run: |
+          packaging/rpm/verify_rpm.sh --install-test --no-container-check
+
+      - name: Upload RPM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: studiocast-rpm-fedora-44
+          if-no-files-found: error
+          path: |
+            dist/rpm/*.rpm
+            dist/rpm/studiocast-*-rpm.sha256
