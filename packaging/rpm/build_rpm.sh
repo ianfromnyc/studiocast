@@ -23,6 +23,7 @@ CLEAN=0
 USE_CONTAINER=0
 SRPM_ONLY=0
 RUN_RPMLINT=0
+INSTALL_BUILDDEPS=0
 RPMBUILD_ARGS=()
 
 usage() {
@@ -46,6 +47,10 @@ Options:
                             Use this on a host that is not Fedora ${FEDORA_RELEASE}.
   --image IMAGE             Container image to use. Overrides the default and
                             \$STUDIOCAST_RPM_IMAGE.
+  --install-builddeps       Install the spec BuildRequires with dnf builddep
+                            before the build. Needs root, or sudo. Container
+                            mode installs them by itself, so this option is
+                            unnecessary there.
   --srpm-only               Build the source RPM only.
   --with NAME               Enable a spec build conditional. May be repeated.
   --without NAME            Disable a spec build conditional. May be repeated.
@@ -150,6 +155,10 @@ parse_args() {
         IMAGE_EXPLICIT=1
         shift 2
         ;;
+      --install-builddeps)
+        INSTALL_BUILDDEPS=1
+        shift
+        ;;
       --srpm-only)
         SRPM_ONLY=1
         shift
@@ -222,6 +231,33 @@ prepare_topdir() {
       die "spec still holds an unsubstituted placeholder: ${SPEC_PATH}"
     fi
   fi
+}
+
+# Installs the BuildRequires of the rendered spec. The package list stays in
+# the spec only, so no other file repeats it.
+install_builddeps() {
+  command -v dnf >/dev/null 2>&1 ||
+    die "dnf was not found; --install-builddeps needs a Fedora host."
+
+  local -a privileged=()
+  if [[ "$(id -u)" -ne 0 ]]; then
+    command -v sudo >/dev/null 2>&1 ||
+      die "--install-builddeps changes the system. Run it as root, or install sudo."
+    privileged=(sudo)
+  fi
+
+  # dnf builddep comes from dnf5-plugins on Fedora 44 and from
+  # dnf-plugins-core on older releases.
+  if [[ "${DRY_RUN}" -eq 0 ]] && ! dnf builddep --help >/dev/null 2>&1; then
+    die "dnf builddep was not found. Install dnf5-plugins, or dnf-plugins-core on an older Fedora."
+  fi
+
+  if [[ ${#RPMBUILD_ARGS[@]} -gt 0 ]]; then
+    log "Note: dnf builddep reads the spec defaults; --with and --without are not passed on."
+  fi
+
+  log "Installing the build dependencies from ${SPEC_PATH}"
+  run "${privileged[@]}" dnf builddep -y "${SPEC_PATH}"
 }
 
 build_native() {
@@ -413,8 +449,14 @@ main() {
   prepare_topdir
 
   if [[ "${USE_CONTAINER}" -eq 1 ]]; then
+    if [[ "${INSTALL_BUILDDEPS}" -eq 1 ]]; then
+      log "Container mode installs the build dependencies itself; ignoring --install-builddeps"
+    fi
     build_in_container
   else
+    if [[ "${INSTALL_BUILDDEPS}" -eq 1 ]]; then
+      install_builddeps
+    fi
     build_native
   fi
 
