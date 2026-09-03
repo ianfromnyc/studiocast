@@ -12,6 +12,7 @@
 #include "core/maxine/afx_api.h"
 #include "core/maxine/paths.h"
 #include "core/maxine/sdk_runtime.h"
+#include "core/maxine/vfx_api.h"
 
 #ifndef STUDIOCAST_CXX_COMPILER
 #define STUDIOCAST_CXX_COMPILER "c++"
@@ -472,6 +473,43 @@ bool TestSdkRuntimePreloadSkipsSystemLibraries() {
   return ok;
 }
 
+// The effect and parameter selector strings are part of the Maxine ABI. These
+// are the values in `nvVideoEffects.h` and in the per-feature headers of the
+// VFX SDK Core 1.x (they are the same in the 0.7/0.8 SDK).
+bool TestVfxSelectorsMatchTheSdkHeaders() {
+  namespace vfx = studiocast::maxine::vfx;
+
+  auto same = [](const char *got, const char *want, const char *what) {
+    return Require(std::string(got) == want,
+                   std::string("expected ") + what + " to be '" + want +
+                       "', got '" + got + "'");
+  };
+
+  bool ok = true;
+  ok &= same(vfx::NVVFX_FX_GREEN_SCREEN, "GreenScreen", "the green screen id");
+  ok &= same(vfx::NVVFX_FX_BGBLUR, "BackgroundBlur", "the background blur id");
+  ok &= same(vfx::NVVFX_FX_DENOISING, "Denoising", "the denoising id");
+  ok &= same(vfx::NVVFX_FX_TRANSFER, "Transfer", "the transfer id");
+  ok &= same(vfx::NVVFX_FX_RELIGHTING, "Relighting", "the relighting id");
+  ok &= same(vfx::NVVFX_FX_AIGS_RELIGHTING, "AIGSRelighting",
+             "the AIGS relighting id");
+
+  ok &= same(vfx::NVVFX_MODEL_DIRECTORY, "ModelDir", "the model dir selector");
+  ok &= same(vfx::NVVFX_CUDA_STREAM, "CudaStream", "the CUDA stream selector");
+  ok &= same(vfx::NVVFX_STRENGTH, "Strength", "the strength selector");
+  ok &= same(vfx::NVVFX_MODE, "Mode", "the mode selector");
+  ok &= same(vfx::NVVFX_TEMPORAL, "Temporal", "the temporal selector");
+  ok &= same(vfx::NVVFX_STATE, "State", "the state selector");
+  ok &= same(vfx::NVVFX_STATE_SIZE, "StateSize", "the state size selector");
+  ok &= same(vfx::NVVFX_STATE_COUNT, "NumStateObjects",
+             "the state count selector");
+  ok &= same(vfx::NVVFX_INPUT_IMAGE, "SrcImage0", "the input image selector");
+  ok &= same(vfx::NVVFX_INPUT_IMAGE_1, "SrcImage1",
+             "the second input image selector");
+  ok &= same(vfx::NVVFX_OUTPUT_IMAGE, "DstImage0", "the output image selector");
+  return ok;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -509,6 +547,12 @@ int main(int argc, char **argv) {
     return 1;
   }
   std::cout << "[PASS] SDK runtime pre-load skips system libraries\n";
+
+  if (!TestVfxSelectorsMatchTheSdkHeaders()) {
+    std::cout << "[FAIL] VFX selectors match the SDK headers\n";
+    return 1;
+  }
+  std::cout << "[PASS] VFX selectors match the SDK headers\n";
 
   if (argc <= 0 || !argv || !argv[0] ||
       !TestAfxLoaderPrefersExplicitSdkRootBeforeBareLoaderPath(argv[0])) {
