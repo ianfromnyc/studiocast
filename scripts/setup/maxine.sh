@@ -4,15 +4,86 @@ set -euo pipefail
 # StudioCast Maxine setup helper.
 #
 # This script does NOT redistribute NVIDIA Maxine SDK assets.
-# You must obtain the SDK tarballs yourself from NVIDIA and you must comply with NVIDIA's licensing terms.
+# The SDK comes from NVIDIA and you must comply with NVIDIA's licensing terms.
 #
 # What this script CAN do:
 # - Create the expected StudioCast Maxine directory layout under XDG_DATA_HOME
+# - Download the core SDK archives from NGC with your NGC API key (--download)
 # - Extract user-provided Maxine SDK tarballs into the correct locations
-# - (Optionally) install Maxine "features" (models/libs) for VFX/AR via the SDK's install_feature.sh scripts
-#   if you provide an NGC API key (NGC_CLI_API_KEY) and a supported GPU mapping.
-# - (Optionally) download Audio Effects (AFX) features via the SDK's download_features.sh script
-#   if you provide an NGC API key (NGC_API_KEY).
+# - Install Maxine "features" (models and feature libraries). It prefers the
+#   SDK's own install_feature.sh / download_features.sh scripts and falls back
+#   to the NGC REST API when the core SDK is not there (--download-features).
+#
+# One key drives every step. Export NGC_API_KEY (NGC_CLI_API_KEY also works);
+# this script gives both names to the SDK scripts that it calls.
+#
+# Everything runs as the normal user. No step needs sudo, because the whole
+# layout lives under your own XDG directories.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+log() {
+  echo "[maxine] $*"
+}
+
+err() {
+  echo "[maxine] ERROR: $*" >&2
+}
+
+# scripts/_lib/ngc.sh keeps these names, so its messages get the same prefix.
+sc_ngc_log() {
+  log "$@"
+}
+
+sc_ngc_err() {
+  err "$@"
+}
+
+# shellcheck source=scripts/_lib/ngc.sh
+source "${REPO_ROOT}/scripts/_lib/ngc.sh"
+
+# Component tables. The key is the short name used on the command line.
+declare -A COMPONENT_LABEL=(
+  [vfx]="VFX"
+  [ar]="AR"
+  [afx]="AFX"
+)
+
+# Directory each component must end up in, under the Maxine base directory.
+declare -A COMPONENT_ROOT_NAME=(
+  [vfx]="VideoFX"
+  [ar]="ARSDK"
+  [afx]="Audio_Effects_SDK"
+)
+
+# NGC resource holding the core SDK archive. Override with --<comp>-resource.
+declare -A COMPONENT_RESOURCE=(
+  [vfx]="maxine_linux_vfx_sdk_ga"
+  [ar]="maxine_linux_ar_sdk_ga"
+  [afx]="maxine_linux_audio_effects_sdk"
+)
+
+# Other resource names for the same component. They are printed when NGC says
+# the account has no entitlement, because a different tier may be available.
+declare -A COMPONENT_ALT_RESOURCES=(
+  [vfx]="maxine_linux_vfx_sdk_ga maxine_linux_vfx_sdk_ea maxine_linux_vfx_sdk"
+  [ar]="maxine_linux_ar_sdk_ga maxine_linux_ar_sdk_ea maxine_linux_ar_sdk"
+  [afx]="maxine_linux_audio_effects_sdk"
+)
+
+# NGC models holding the VFX/AR feature packs. Each one has a "<version>_lib_linux"
+# version with the feature library and a "<version>_models_linux_sm<CC>" version
+# with the engine files.
+declare -A COMPONENT_FEATURE_MODELS=(
+  [vfx]="nvvfxgreenscreen nvvfxdenoising nvvfxupscale nvvfxbackgroundblur nvvfxrelighting nvvfxvideosuperres nvvfxtransfer"
+  [ar]="nvarlandmarkdetection nvarbodydetection nvarfaceboxdetection nvargazeredirection nvarbodyposeestimation"
+)
+
+# Version pins, filled by --sdk-version / --<comp>-version.
+declare -A COMPONENT_VERSION=()
+# Feature pack version pins, filled by --feature-version.
+declare -A COMPONENT_FEATURE_VERSION=()
 
 usage() {
   cat <<'EOF'
@@ -21,39 +92,83 @@ Usage:
 
 Options:
   --base DIR            Base directory (default: $XDG_DATA_HOME/studiocast/maxine or ~/.local/share/studiocast/maxine)
-  --vfx-tar PATH        Path to NVIDIA_VFX_SDK_linux_<version>.tar.gz
-  --ar-tar PATH         Path to NVIDIA_AR_SDK_linux_<version>.tar.gz
-  --afx-tar PATH        Path to Audio_Effects_SDK.tar.gz
+  --cache-dir DIR       Download cache (default: $XDG_CACHE_HOME/studiocast/maxine or ~/.cache/studiocast/maxine)
+
+  --download LIST       Download and extract core SDKs from NGC. LIST is afx, vfx, ar or all,
+                        as a comma separated list. The option can be repeated.
+                        Needs NGC_API_KEY (or NGC_CLI_API_KEY).
+  --list-versions COMP  Print the NGC versions of one component (afx|vfx|ar) and exit.
+  --sdk-version C=V     Pin one component to version V, for example --sdk-version afx=2.1.0.
+  --afx-version V       Same as --sdk-version afx=V.
+  --vfx-version V       Same as --sdk-version vfx=V.
+  --ar-version V        Same as --sdk-version ar=V.
+  --afx-resource NAME   Override the NGC resource name for AFX (default: maxine_linux_audio_effects_sdk).
+  --vfx-resource NAME   Override the NGC resource name for VFX (default: maxine_linux_vfx_sdk_ga).
+  --ar-resource NAME    Override the NGC resource name for AR  (default: maxine_linux_ar_sdk_ga).
+
+  --vfx-tar PATH        Path to a local NVIDIA_VFX_SDK_linux_<version> archive
+  --ar-tar PATH         Path to a local NVIDIA_AR_SDK_linux_<version> archive
+  --afx-tar PATH        Path to a local Audio Effects SDK archive
   --extract             Extract provided tarballs (default if any tarball arg is given)
-  --install-features    Run install_feature.sh for VFX/AR (requires NGC_CLI_API_KEY)
-  --install-afx-features  Download AFX features needed for the MVP (requires NGC_API_KEY)
-  --afx-effects CSV     AFX effect list to pass to download_features.sh --effects (default: MVP AEC + Superres)
+
+  --download-features LIST
+                        Install the feature packs for afx, vfx, ar or all. It runs the
+                        SDK's own feature script when the core SDK is extracted, and
+                        otherwise downloads the same packs from NGC over REST.
+  --install-features    Run install_feature.sh for VFX/AR (needs NGC_API_KEY)
+  --install-afx-features  Download AFX features needed for the MVP (needs NGC_API_KEY)
+  --afx-effects CSV     AFX effect list (default: MVP AEC + Superres)
+  --afx-gpu NAME        GPU name for download_features.sh -g (for example a40, t4, l4).
+                        Without it the AFX script detects the GPU itself.
+  --vfx-features CSV    VFX feature models to fetch over REST (default: all known).
+  --ar-features CSV     AR feature models to fetch over REST (default: all known).
+  --feature-version C=V Pin the feature pack version of one component,
+                        for example --feature-version ar=1.1.1.0.
+  --sm NN               GPU compute capability for the REST feature download,
+                        for example 86. Default: detected from the local GPU.
   --gpu ARG             Maxine --gpu argument to pass to install_feature.sh. Can be repeated.
   --build-dir DIR       Build dir containing studiocast-maxine (default: ./cmake-build-debug). Used to auto-detect --gpu args.
   --ngc-org ORG         NGC org (default: nvidia)
   --ngc-team TEAM       NGC team (default: maxine)
+  --dry-run             Ask NGC what it would fetch, then print the download and
+                        extract steps without running them.
   -h, --help            Show help.
 
+NGC entitlements:
+  AFX (maxine_linux_audio_effects_sdk) needs an NVIDIA Developer Program account.
+  VFX and AR for Linux need an NVIDIA AI Enterprise subscription (the *_ga
+  resources) or a granted Maxine Early Access request (the *_ea resources).
+  Older names without a suffix (maxine_linux_vfx_sdk, maxine_linux_ar_sdk) hold
+  earlier releases. Use --vfx-resource / --ar-resource to pick another one.
+  Catalog page: https://catalog.ngc.nvidia.com/orgs/nvidia/teams/maxine/resources/<name>
+  The VFX/AR feature packs need only a Developer Program account, but their
+  libraries link against core SDK libraries, so the feature packs alone are not
+  enough to run an effect.
+
 Examples:
-  # Extract VFX + AR SDKs into the default XDG location:
+  # Full install with one key. This is the normal path:
+  export NGC_API_KEY="..."
+  ./scripts/setup/maxine.sh --download all --install-features --install-afx-features
+
+  # Audio only, pinned to one SDK version:
+  export NGC_API_KEY="..."
+  ./scripts/setup/maxine.sh --download afx --sdk-version afx=2.1.0 --install-afx-features
+
+  # See what is available before downloading:
+  export NGC_API_KEY="..."
+  ./scripts/setup/maxine.sh --list-versions afx
+
+  # Offline fallback: extract archives you already downloaded:
   ./scripts/setup/maxine.sh --vfx-tar ~/Downloads/NVIDIA_VFX_SDK_linux_*.tar.gz \
                             --ar-tar  ~/Downloads/NVIDIA_AR_SDK_linux_*.tar.gz
 
-  # Install features (requires NGC_CLI_API_KEY). Auto-detect --gpu args from studiocast-maxine:
-  export NGC_CLI_API_KEY="..."
-  ./scripts/setup/maxine.sh --install-features --build-dir ./cmake-build-debug
-
   # Install features with explicit GPU arg(s):
-  export NGC_CLI_API_KEY="..."
+  export NGC_API_KEY="..."
   ./scripts/setup/maxine.sh --install-features --gpu turing
 
-  # Download AFX features for the audio MVP (does not require --gpu):
+  # Fetch one AR feature pack without the core SDK:
   export NGC_API_KEY="..."
-  ./scripts/setup/maxine.sh --afx-tar ~/Downloads/Audio_Effects_SDK.tar.gz --install-afx-features
-
-  # Download a custom AFX feature set:
-  export NGC_API_KEY="..."
-  ./scripts/setup/maxine.sh --install-afx-features --afx-effects "superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
+  ./scripts/setup/maxine.sh --download-features ar --ar-features nvarlandmarkdetection
 EOF
 }
 
@@ -62,7 +177,13 @@ default_base() {
   echo "${xdg}/studiocast/maxine"
 }
 
+default_cache_dir() {
+  local xdg="${XDG_CACHE_HOME:-$HOME/.cache}"
+  echo "${xdg}/studiocast/maxine"
+}
+
 BASE="$(default_base)"
+CACHE_DIR="$(default_cache_dir)"
 VFX_TAR=""
 AR_TAR=""
 AFX_TAR=""
@@ -70,14 +191,90 @@ DO_EXTRACT=0
 DO_INSTALL_FEATURES=0
 DO_INSTALL_AFX_FEATURES=0
 AFX_EFFECTS_CSV=""
+AFX_GPU=""
+SM_OVERRIDE=""
 declare -a GPU_ARGS=()
+declare -a DOWNLOAD_COMPONENTS=()
+declare -a FEATURE_COMPONENTS=()
+LIST_VERSIONS_COMPONENT=""
 BUILD_DIR="./cmake-build-debug"
 NGC_ORG="nvidia"
 NGC_TEAM="maxine"
+DRY_RUN=0
+
+# MVP minimal AFX list: AEC + Superres.
+AFX_EFFECTS_DEFAULT="superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
+
+# Check one component short name.
+require_component() {
+  local comp="$1"
+  local option="$2"
+  if [[ -z "${COMPONENT_LABEL[$comp]:-}" ]]; then
+    err "${option} takes one of: afx, vfx, ar (got: '${comp}')"
+    exit 2
+  fi
+}
+
+# Add every component named in a comma separated list to one array.
+# Arguments: <array name> <option name> <list>
+add_components() {
+  local -n target="$1"
+  local option="$2"
+  local list="$3"
+  local comp existing
+  local -a wanted=()
+
+  IFS=',' read -r -a wanted <<< "${list}"
+  for comp in "${wanted[@]}"; do
+    comp="${comp//[[:space:]]/}"
+    [[ -n "${comp}" ]] || continue
+    if [[ "${comp}" == "all" ]]; then
+      add_components "$1" "${option}" "vfx,ar,afx"
+      continue
+    fi
+    require_component "${comp}" "${option}"
+    for existing in ${target[@]+"${target[@]}"}; do
+      [[ "${existing}" != "${comp}" ]] || continue 2
+    done
+    target+=("${comp}")
+  done
+}
+
+# Pin one version from a "component=version" argument.
+# Arguments: <array name> <option name> <pair>
+set_component_version() {
+  local -n pins="$1"
+  local option="$2"
+  local pair="$3"
+  local comp="${pair%%=*}"
+  local version="${pair#*=}"
+
+  if [[ "${pair}" != *=* || -z "${comp}" || -z "${version}" ]]; then
+    err "${option} takes COMPONENT=VERSION (got: '${pair}')"
+    exit 2
+  fi
+  require_component "${comp}" "${option}"
+  # shellcheck disable=SC2034  # pins is a nameref to the caller's array.
+  pins["${comp}"]="${version}"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --base) BASE="${2:-}"; shift 2 ;;
+    --cache-dir) CACHE_DIR="${2:-}"; shift 2 ;;
+    --download) add_components DOWNLOAD_COMPONENTS --download "${2:-}"; shift 2 ;;
+    --download-features) add_components FEATURE_COMPONENTS --download-features "${2:-}"; shift 2 ;;
+    --list-versions) LIST_VERSIONS_COMPONENT="${2:-}"; shift 2 ;;
+    --sdk-version) set_component_version COMPONENT_VERSION --sdk-version "${2:-}"; shift 2 ;;
+    --afx-version) set_component_version COMPONENT_VERSION --sdk-version "afx=${2:-}"; shift 2 ;;
+    --vfx-version) set_component_version COMPONENT_VERSION --sdk-version "vfx=${2:-}"; shift 2 ;;
+    --ar-version) set_component_version COMPONENT_VERSION --sdk-version "ar=${2:-}"; shift 2 ;;
+    --feature-version) set_component_version COMPONENT_FEATURE_VERSION --feature-version "${2:-}"; shift 2 ;;
+    --afx-resource) COMPONENT_RESOURCE[afx]="${2:-}"; shift 2 ;;
+    --vfx-resource) COMPONENT_RESOURCE[vfx]="${2:-}"; shift 2 ;;
+    --ar-resource) COMPONENT_RESOURCE[ar]="${2:-}"; shift 2 ;;
+    --vfx-features) COMPONENT_FEATURE_MODELS[vfx]="${2//,/ }"; shift 2 ;;
+    --ar-features) COMPONENT_FEATURE_MODELS[ar]="${2//,/ }"; shift 2 ;;
     --vfx-tar) VFX_TAR="${2:-}"; DO_EXTRACT=1; shift 2 ;;
     --ar-tar) AR_TAR="${2:-}"; DO_EXTRACT=1; shift 2 ;;
     --afx-tar) AFX_TAR="${2:-}"; DO_EXTRACT=1; shift 2 ;;
@@ -85,14 +282,82 @@ while [[ $# -gt 0 ]]; do
     --install-features) DO_INSTALL_FEATURES=1; shift ;;
     --install-afx-features) DO_INSTALL_AFX_FEATURES=1; shift ;;
     --afx-effects) AFX_EFFECTS_CSV="${2:-}"; shift 2 ;;
+    --afx-gpu) AFX_GPU="${2:-}"; shift 2 ;;
+    --sm) SM_OVERRIDE="${2:-}"; shift 2 ;;
     --gpu) GPU_ARGS+=("${2:-}"); shift 2 ;;
     --build-dir) BUILD_DIR="${2:-}"; shift 2 ;;
     --ngc-org) NGC_ORG="${2:-}"; shift 2 ;;
     --ngc-team) NGC_TEAM="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1"; usage; exit 2 ;;
   esac
 done
+
+SC_NGC_ORG="${NGC_ORG}"
+SC_NGC_TEAM="${NGC_TEAM}"
+SC_NGC_DRY_RUN="${DRY_RUN}"
+
+# One key drives every step:
+#   install_feature.sh  (VFX/AR) reads NGC_CLI_API_KEY
+#   download_features.sh (AFX)   reads NGC_API_KEY
+#   scripts/_lib/ngc.sh          reads either one
+# Take whichever the user set, prefer NGC_API_KEY, and export both names.
+NGC_KEY="${NGC_API_KEY:-${NGC_CLI_API_KEY:-}}"
+if [[ -n "${NGC_KEY}" ]]; then
+  export NGC_API_KEY="${NGC_KEY}"
+  export NGC_CLI_API_KEY="${NGC_KEY}"
+fi
+
+require_key() {
+  local what="$1"
+  if [[ -n "${NGC_KEY}" ]]; then
+    return 0
+  fi
+  err "${what} needs an NGC API key, and none is set."
+  err "Export your key (do not commit it):"
+  err '  export NGC_API_KEY="..."'
+  err "NGC_CLI_API_KEY works too. Get a key at https://ngc.nvidia.com -> Setup -> API key."
+  exit 2
+}
+
+resource_for() {
+  printf '%s' "${COMPONENT_RESOURCE[$1]}"
+}
+
+# Fill SC_NGC_ALT_RESOURCES so a 402 answer names the other tiers, without
+# repeating the name that just failed.
+set_alt_resources_for() {
+  local comp="$1"
+  local current name
+  local -a known=()
+
+  current="$(resource_for "${comp}")"
+  read -r -a known <<< "${COMPONENT_ALT_RESOURCES[$comp]}"
+
+  SC_NGC_ALT_RESOURCES=()
+  for name in "${known[@]}"; do
+    [[ "${name}" != "${current}" ]] || continue
+    SC_NGC_ALT_RESOURCES+=("${name}")
+  done
+}
+
+if [[ -n "${LIST_VERSIONS_COMPONENT}" ]]; then
+  require_component "${LIST_VERSIONS_COMPONENT}" "--list-versions"
+  require_key "--list-versions"
+  sc_ngc_require_tools || exit 2
+
+  RESOURCE="$(resource_for "${LIST_VERSIONS_COMPONENT}")"
+  set_alt_resources_for "${LIST_VERSIONS_COMPONENT}"
+
+  log "Versions of ${RESOURCE} (NGC org ${NGC_ORG}, team ${NGC_TEAM}):"
+  VERSION_LIST="$(sc_ngc_list_versions "${RESOURCE}")" || exit 2
+  while IFS=$'\t' read -r version status size; do
+    [[ -n "${version}" ]] || continue
+    printf '  %-16s %-18s %s\n' "${version}" "${status}" "$(sc_ngc_human_bytes "${size:-0}")"
+  done <<< "${VERSION_LIST}"
+  exit 0
+fi
 
 mkdir -p "$BASE"
 
@@ -100,130 +365,604 @@ VFX_ROOT="${BASE}/VideoFX"
 AR_ROOT="${BASE}/ARSDK"
 AFX_ROOT="${BASE}/Audio_Effects_SDK"
 
+root_for() {
+  printf '%s/%s' "${BASE}" "${COMPONENT_ROOT_NAME[$1]}"
+}
+
+# Print the top level names inside an archive. Only the first entries are read,
+# which is enough to tell the layout and keeps a multi GB archive cheap to scan.
+archive_top_names() {
+  local archive="$1"
+  (
+    set +o pipefail
+    tar -tf "${archive}" 2>/dev/null | head -n 200 \
+      | sed -e 's#^\./##' -e 's#/.*##' | grep -v '^$' | sort -u
+  )
+}
+
+# True when a directory holds what an SDK root should hold.
+looks_like_sdk_root() {
+  local dir="$1"
+  local comp="$2"
+
+  case "${comp}" in
+    afx) [[ -d "${dir}/nvafx" || -d "${dir}/features" ]] ;;
+    *) [[ -d "${dir}/lib" || -d "${dir}/lib64" || -d "${dir}/include" \
+          || -d "${dir}/features" || -d "${dir}/bin" ]] ;;
+  esac
+}
+
+# Print the SDK root inside an extracted tree, or nothing when there is none.
+find_sdk_root() {
+  local staging="$1"
+  local root_name="$2"
+  local comp="$3"
+  local hit
+  local -a entries=()
+
+  hit="$(find "${staging}" -maxdepth 4 -type d -name "${root_name}" -print -quit 2>/dev/null || true)"
+  if [[ -n "${hit}" ]]; then
+    printf '%s' "${hit}"
+    return 0
+  fi
+
+  if looks_like_sdk_root "${staging}" "${comp}"; then
+    printf '%s' "${staging}"
+    return 0
+  fi
+
+  # A single versioned directory, for example Audio_Effects_SDK_2.1.0.
+  mapfile -t entries < <(find "${staging}" -mindepth 1 -maxdepth 1 -print)
+  if [[ "${#entries[@]}" -eq 1 && -d "${entries[0]}" ]] \
+     && looks_like_sdk_root "${entries[0]}" "${comp}"; then
+    printf '%s' "${entries[0]}"
+    return 0
+  fi
+
+  return 1
+}
+
+# Extract one core SDK archive so that <base>/<root name> holds the SDK.
+#
+# Arguments: <component> <archive path>
+#
+# NVIDIA does not use one layout for every SDK, so the archive is first checked.
+# When its only top level directory is already the expected one, it is unpacked
+# straight into the base directory. Any other layout is unpacked into a staging
+# directory, and the SDK root inside it is moved into place.
+extract_archive() {
+  local comp="$1"
+  local archive="$2"
+  local label="${COMPONENT_LABEL[$comp]}"
+  local root_name="${COMPONENT_ROOT_NAME[$comp]}"
+  local dest="${BASE}/${root_name}"
+  local staging src
+  local -a tops=()
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    log "Would extract ${label}: ${archive} -> ${dest}"
+    return 0
+  fi
+
+  if [[ ! -f "${archive}" ]]; then
+    err "${label} archive not found: ${archive}"
+    return 2
+  fi
+
+  log "Extracting ${label}: ${archive}"
+  mapfile -t tops < <(archive_top_names "${archive}")
+
+  if [[ "${#tops[@]}" -eq 1 && "${tops[0]}" == "${root_name}" ]]; then
+    tar -xf "${archive}" -C "${BASE}"
+    if [[ ! -d "${dest}" ]]; then
+      err "expected ${label} root at ${dest} after extraction."
+      return 2
+    fi
+    log "${label} root: ${dest}"
+    return 0
+  fi
+
+  staging="${BASE}/.studiocast-extract.$$"
+  rm -rf "${staging}"
+  mkdir -p "${staging}"
+  tar -xf "${archive}" -C "${staging}"
+
+  if ! src="$(find_sdk_root "${staging}" "${root_name}" "${comp}")" || [[ -z "${src}" ]]; then
+    err "could not find the ${label} SDK root inside ${archive}."
+    err "Expected a '${root_name}' directory. The archive contains:"
+    find "${staging}" -maxdepth 2 -printf '  %P\n' 2>/dev/null | head -n 40 >&2
+    err "Extract it by hand so that ${dest} holds the SDK, then re-run with --extract."
+    rm -rf "${staging}"
+    return 2
+  fi
+
+  if [[ -d "${dest}" ]]; then
+    log "${dest} exists; merging the new files into it."
+    cp -a "${src}/." "${dest}/"
+  else
+    mv "${src}" "${dest}"
+  fi
+  rm -rf "${staging}"
+
+  log "${label} root: ${dest}"
+}
+
+# Download one core SDK from NGC into the cache, then extract it.
+download_component() {
+  local comp="$1"
+  local label="${COMPONENT_LABEL[$comp]}"
+  local resource version listing dir dest path size sha
+  local -a archives=()
+
+  resource="$(resource_for "${comp}")"
+  set_alt_resources_for "${comp}"
+
+  version="${COMPONENT_VERSION[$comp]:-}"
+  if [[ -n "${version}" ]]; then
+    log "${label}: using the pinned version ${version} of ${resource}."
+  else
+    log "${label}: asking NGC for the newest version of ${resource}..."
+    version="$(sc_ngc_latest_version "${resource}")" || return 2
+    log "${label}: newest version is ${version}."
+  fi
+
+  listing="$(sc_ngc_list_files "${resource}" "${version}")" || return 2
+  if [[ -z "${listing}" ]]; then
+    err "${label}: NGC lists no files for ${resource} version ${version}."
+    return 2
+  fi
+
+  dir="${CACHE_DIR}/${resource}/${version}"
+  while IFS=$'\t' read -r path size sha; do
+    [[ -n "${path}" ]] || continue
+    dest="${dir}/${path}"
+    sc_ngc_download_file "${resource}" "${version}" "${path}" "${dest}" "${sha}" "${size}" || return 2
+    case "${path}" in
+      *.tar.gz|*.tgz|*.tar|*.tar.xz|*.tar.bz2|*.tar.zst)
+        archives+=("${dest}")
+        ;;
+    esac
+  done <<< "${listing}"
+
+  if [[ "${#archives[@]}" -eq 0 ]]; then
+    err "${label}: ${resource} version ${version} holds no archive to extract."
+    err "Files are in ${dir}. Extract them by hand into ${BASE}."
+    return 2
+  fi
+
+  local archive
+  for archive in "${archives[@]}"; do
+    extract_archive "${comp}" "${archive}" || return 2
+  done
+}
+
+# Print the CUDA compute capability of the local GPU as NGC writes it (86, 89).
+detect_sm() {
+  local bin="${AFX_ROOT}/samples/utils/compute_capability/compute_capability"
+  local cc=""
+
+  if [[ -n "${SM_OVERRIDE}" ]]; then
+    printf '%s' "${SM_OVERRIDE}"
+    return 0
+  fi
+
+  if [[ -x "${bin}" ]]; then
+    cc="$("${bin}" 2>/dev/null || true)"
+  fi
+
+  if [[ -z "${cc}" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+    cc="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 || true)"
+  fi
+
+  cc="${cc//[^0-9]/}"
+  if [[ -z "${cc}" ]]; then
+    err "could not read the GPU compute capability."
+    err "Pass it yourself, for example --sm 86 for an Ampere GeForce card."
+    return 2
+  fi
+
+  printf '%s' "${cc}"
+}
+
+# Print the highest version of one NGC model that matches a regular expression.
+# No match prints nothing and is not an error; only an API failure returns 2.
+pick_model_version() {
+  local model="$1"
+  local pattern="$2"
+  local list hit
+
+  list="$(sc_ngc_list_model_versions "${model}")" || return 2
+  hit="$(printf '%s\n' "${list}" | cut -f1 | grep -E "${pattern}" | sort -V | tail -n 1 || true)"
+  printf '%s' "${hit}"
+}
+
+# Turn a version pin into a regular expression part. Without a pin any version
+# prefix matches.
+feature_version_pattern() {
+  local pin="${COMPONENT_FEATURE_VERSION[$1]:-}"
+  if [[ -z "${pin}" ]]; then
+    printf '.+'
+    return 0
+  fi
+  printf '%s' "${pin//./\\.}"
+}
+
+# Unpack every archive of a feature library pack into a directory.
+extract_feature_libs() {
+  local srcdir="$1"
+  local destdir="$2"
+  local archive
+  local found=0
+
+  shopt -s nullglob
+  for archive in "${srcdir}"/*.tar.gz "${srcdir}"/*.tgz "${srcdir}"/*.tar; do
+    tar -xf "${archive}" -C "${destdir}"
+    found=1
+  done
+  shopt -u nullglob
+
+  [[ "${found}" -eq 1 ]] || return 1
+}
+
+# Download the AFX feature packs over REST, in the layout that the SDK's own
+# download_features.sh writes:
+#   <AFX root>/features/<effect>/{include,lib}
+#   <AFX root>/features/<effect>/models/sm_<CC>/<model>.trtpkg
+rest_download_afx_features() {
+  local features_dir="${AFX_ROOT}/features"
+  local effects sm entry effect rate model dir libver modelver mdir tmp base link
+  local pattern
+
+  sm="$(detect_sm)" || return 2
+  effects="${AFX_EFFECTS_CSV:-$AFX_EFFECTS_DEFAULT}"
+  pattern="$(feature_version_pattern afx)"
+
+  log "AFX: downloading feature packs for sm${sm}: ${effects}"
+  mkdir -p "${features_dir}"
+
+  local -a wanted=()
+  IFS=',' read -r -a wanted <<< "${effects}"
+  for entry in "${wanted[@]}"; do
+    entry="${entry//[[:space:]]/}"
+    [[ -n "${entry}" ]] || continue
+
+    effect="${entry%-*}"
+    rate="${entry##*-}"
+    if [[ "${entry}" == *voice_font* ]]; then
+      rate=""
+    fi
+
+    model="afx_${effect}"
+    dir="${features_dir}/${effect}"
+
+    libver="$(pick_model_version "${model}" "^${pattern}-lib$")" || return 2
+    if [[ -z "${libver}" ]]; then
+      err "AFX: NGC has no feature library version for ${model}."
+      return 2
+    fi
+
+    if [[ -n "${rate}" ]]; then
+      modelver="$(pick_model_version "${model}" "^${pattern}-${rate}-sm${sm}$")" || return 2
+    else
+      modelver="$(pick_model_version "${model}" "^${pattern}-sm${sm}$")" || return 2
+    fi
+    if [[ -z "${modelver}" ]]; then
+      err "AFX: NGC has no ${entry} models for sm${sm} (model ${model})."
+      err "Check --sm, or pick another effect."
+      return 2
+    fi
+
+    log "AFX ${entry}: library ${libver}, models ${modelver}"
+    mkdir -p "${dir}"
+
+    tmp="$(mktemp -d)"
+    if ! sc_ngc_download_model_version "${model}" "${libver}" "${tmp}"; then
+      rm -rf "${tmp}"
+      return 2
+    fi
+    if [[ "${DRY_RUN}" -ne 1 ]] && ! extract_feature_libs "${tmp}" "${dir}"; then
+      err "AFX: the feature library pack of ${model} holds no archive."
+      rm -rf "${tmp}"
+      return 2
+    fi
+    rm -rf "${tmp}"
+
+    mdir="${dir}/models/sm_${sm}"
+    mkdir -p "${mdir}"
+    sc_ngc_download_model_version "${model}" "${modelver}" "${mdir}" || return 2
+
+    # The SDK links every model to a name without the trailing size, because
+    # that is the name the runtime opens.
+    [[ "${DRY_RUN}" -ne 1 ]] || continue
+    shopt -s nullglob
+    for base in "${mdir}"/*.trtpkg; do
+      base="$(basename "${base}")"
+      link="$(printf '%s' "${base}" | sed 's/_[0-9]\+\.trtpkg$/.trtpkg/')"
+      if [[ "${link}" != "${base}" ]]; then
+        ln -sfn "${base}" "${mdir}/${link}"
+      fi
+    done
+    shopt -u nullglob
+  done
+
+  log "AFX feature packs are in ${features_dir}"
+}
+
+# Add the features that one feature pack needs to a work list.
+#
+# Arguments: <array name> <feature directory>
+#
+# A pack ships <Name>_dependencies.txt holding names such as
+# "nvARFaceBoxDetection;". The NGC model name is the same word in lower case.
+add_feature_dependencies() {
+  local -n queue="$1"
+  local dir="$2"
+  local file dep known
+  local -a deps=()
+
+  shopt -s nullglob
+  for file in "${dir}"/*_dependencies.txt; do
+    mapfile -t deps < <(tr ';' '\n' < "${file}" | tr -d '[:space:]' | grep -v '^$' || true)
+    for dep in ${deps[@]+"${deps[@]}"}; do
+      dep="${dep,,}"
+      for known in "${queue[@]}"; do
+        [[ "${known}" != "${dep}" ]] || continue 2
+      done
+      log "Feature ${dep} is needed by another feature; adding it."
+      queue+=("${dep}")
+    done
+  done
+  shopt -u nullglob
+}
+
+# Download the VFX or AR feature packs over REST, in the layout the SDK's
+# install_feature.sh writes:
+#   <SDK root>/features/<model>/{include,lib}
+#   <SDK root>/features/<model>/models/sm_<CC>/<engine>.trtpkg
+rest_download_sdk_features() {
+  local comp="$1"
+  local label="${COMPONENT_LABEL[$comp]}"
+  local root features_dir sm name libver modelver mdir tmp pattern
+  local -a models=()
+  local index=0
+
+  root="$(root_for "${comp}")"
+  features_dir="${root}/features"
+  sm="$(detect_sm)" || return 2
+  pattern="$(feature_version_pattern "${comp}")"
+
+  read -r -a models <<< "${COMPONENT_FEATURE_MODELS[$comp]}"
+  if [[ "${#models[@]}" -eq 0 ]]; then
+    err "${label}: no feature models named. Use --${comp}-features."
+    return 2
+  fi
+
+  log "${label}: downloading feature packs for sm${sm}: ${models[*]}"
+  mkdir -p "${features_dir}"
+
+  # A feature can need another feature. The list grows while it is walked, so
+  # that a narrowed list still gets everything it needs.
+  while [[ "${index}" -lt "${#models[@]}" ]]; do
+    name="${models[$index]}"
+    index=$((index + 1))
+    libver="$(pick_model_version "${name}" "^${pattern}_lib_linux$")" || return 2
+    modelver="$(pick_model_version "${name}" "^${pattern}_models_linux_sm${sm}$")" || return 2
+
+    if [[ -z "${libver}" && -z "${modelver}" ]]; then
+      err "${label}: NGC has no Linux feature pack for ${name} on sm${sm}."
+      return 2
+    fi
+
+    log "${label} ${name}: library ${libver:-none}, models ${modelver:-none}"
+
+    if [[ -n "${libver}" ]]; then
+      tmp="$(mktemp -d)"
+      if ! sc_ngc_download_model_version "${name}" "${libver}" "${tmp}"; then
+        rm -rf "${tmp}"
+        return 2
+      fi
+      if [[ "${DRY_RUN}" -ne 1 ]] && ! extract_feature_libs "${tmp}" "${features_dir}"; then
+        err "${label}: the feature library pack of ${name} holds no archive."
+        rm -rf "${tmp}"
+        return 2
+      fi
+      rm -rf "${tmp}"
+      add_feature_dependencies models "${features_dir}/${name}"
+    fi
+
+    if [[ -n "${modelver}" ]]; then
+      mdir="${features_dir}/${name}/models/sm_${sm}"
+      mkdir -p "${mdir}"
+      sc_ngc_download_model_version "${name}" "${modelver}" "${mdir}" || return 2
+    fi
+  done
+
+  log "${label} feature packs are in ${features_dir}"
+  log "${label}: these packs need the core SDK libraries. Run --download ${comp} as well."
+}
+
+# Work out the --gpu values for install_feature.sh from studiocast-maxine.
+resolve_gpu_args() {
+  local maxine_bin=""
+
+  [[ "${#GPU_ARGS[@]}" -eq 0 ]] || return 0
+
+  if [[ -x "${BUILD_DIR}/studiocast-maxine" ]]; then
+    maxine_bin="${BUILD_DIR}/studiocast-maxine"
+  elif command -v studiocast-maxine >/dev/null 2>&1; then
+    maxine_bin="$(command -v studiocast-maxine)"
+  fi
+
+  [[ -n "${maxine_bin}" ]] || return 0
+
+  log "Auto-detecting Maxine --gpu args via: ${maxine_bin} gpu list"
+  # Example output includes: "(maxine --gpu turing)"
+  mapfile -t GPU_ARGS < <("${maxine_bin}" gpu list | sed -n 's/.*(maxine --gpu \([^)]\+\)).*/\1/p' | sort -u)
+}
+
+# Run the SDK's own install_feature.sh for VFX or AR.
+run_sdk_install_feature() {
+  local comp="$1"
+  local label="${COMPONENT_LABEL[$comp]}"
+  local root gpu
+  root="$(root_for "${comp}")"
+
+  resolve_gpu_args
+  if [[ "${#GPU_ARGS[@]}" -eq 0 ]]; then
+    err "No --gpu args detected."
+    err "Either:"
+    err "  - Build and run ${BUILD_DIR}/studiocast-maxine gpu list, then re-run this script, OR"
+    err "  - Provide --gpu manually (e.g. --gpu turing / ampere / ada depending on your system)."
+    return 1
+  fi
+
+  log "Installing ${label} features for GPU args: ${GPU_ARGS[*]}"
+  log "Using NGC org/team: ${NGC_ORG}/${NGC_TEAM}"
+
+  for gpu in "${GPU_ARGS[@]}"; do
+    log "${label} install_feature.sh --gpu ${gpu}"
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+      continue
+    fi
+    ( cd "${root}/features" && ./install_feature.sh --gpu "${gpu}" --feature all --ngc-org "${NGC_ORG}" --ngc-team "${NGC_TEAM}" )
+  done
+}
+
+# Run the SDK's own download_features.sh for AFX.
+run_sdk_download_features() {
+  local effects
+  local -a args=()
+
+  effects="${AFX_EFFECTS_CSV:-$AFX_EFFECTS_DEFAULT}"
+  if [[ -z "${effects}" ]]; then
+    err "--afx-effects was provided but empty."
+    return 1
+  fi
+
+  # download_features.sh needs only curl or wget and the NGC_API_KEY variable.
+  # Without -g it reads the compute capability of the local GPU itself.
+  args=(--ngc-org "${NGC_ORG}" --ngc-team "${NGC_TEAM}" --effects "${effects}")
+  if [[ -n "${AFX_GPU}" ]]; then
+    args+=(--gpu "${AFX_GPU}")
+  fi
+
+  log "Downloading AFX features: ${effects}"
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    log "Would run: ${AFX_ROOT}/features/download_features.sh ${args[*]}"
+    return 0
+  fi
+  ( cd "${AFX_ROOT}/features" && ./download_features.sh "${args[@]}" )
+}
+
+# Install the feature packs of one component. The SDK's own script is the first
+# choice, because NVIDIA keeps it in step with the SDK. The REST fallback exists
+# for a machine that has no core SDK, for example an audio only install.
+download_features_component() {
+  local comp="$1"
+  local root
+  root="$(root_for "${comp}")"
+
+  if [[ "${comp}" == "afx" ]]; then
+    if [[ -x "${AFX_ROOT}/features/download_features.sh" ]]; then
+      log "AFX: using the SDK script ${AFX_ROOT}/features/download_features.sh"
+      run_sdk_download_features
+      return $?
+    fi
+    log "AFX: no SDK feature script under ${AFX_ROOT}; using the NGC REST API."
+    rest_download_afx_features
+    return $?
+  fi
+
+  if [[ -x "${root}/features/install_feature.sh" ]]; then
+    log "${COMPONENT_LABEL[$comp]}: using the SDK script ${root}/features/install_feature.sh"
+    run_sdk_install_feature "${comp}"
+    return $?
+  fi
+
+  log "${COMPONENT_LABEL[$comp]}: no SDK feature script under ${root}; using the NGC REST API."
+  rest_download_sdk_features "${comp}"
+}
+
+if [[ "${#DOWNLOAD_COMPONENTS[@]}" -gt 0 ]]; then
+  require_key "--download"
+  sc_ngc_require_tools || exit 2
+
+  log "Base: $BASE"
+  log "Download cache: ${CACHE_DIR}"
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    log "Dry run: NGC is only asked what it holds. Nothing is written."
+  fi
+
+  for COMPONENT in "${DOWNLOAD_COMPONENTS[@]}"; do
+    download_component "${COMPONENT}" || exit 2
+  done
+fi
+
 if [[ "$DO_EXTRACT" -eq 1 ]]; then
-  echo "[maxine] Base: $BASE"
+  log "Base: $BASE"
 
   if [[ -n "$VFX_TAR" ]]; then
-    echo "[maxine] Extracting VFX: $VFX_TAR"
-    tar -xvf "$VFX_TAR" -C "$BASE"
-    if [[ ! -d "$VFX_ROOT" ]]; then
-      echo "[maxine] ERROR: Expected VFX root at $VFX_ROOT after extraction."
-      echo "[maxine] Make sure the VFX SDK tarball contains a top-level 'VideoFX' directory."
-      exit 1
-    fi
+    extract_archive vfx "$VFX_TAR" || exit 1
   fi
 
   if [[ -n "$AR_TAR" ]]; then
-    echo "[maxine] Extracting AR: $AR_TAR"
-    tar -xvf "$AR_TAR" -C "$BASE"
-    if [[ ! -d "$AR_ROOT" ]]; then
-      echo "[maxine] ERROR: Expected AR root at $AR_ROOT after extraction."
-      echo "[maxine] Make sure the AR SDK tarball contains a top-level 'ARSDK' directory."
-      exit 1
-    fi
+    extract_archive ar "$AR_TAR" || exit 1
   fi
 
   if [[ -n "$AFX_TAR" ]]; then
-    echo "[maxine] Extracting AFX: $AFX_TAR"
-    mkdir -p "$BASE"
-    ( cd "$BASE" && tar xvf "$AFX_TAR" --one-top-level Audio_Effects_SDK )
-    if [[ ! -d "$AFX_ROOT" ]]; then
-      echo "[maxine] ERROR: Expected AFX root at $AFX_ROOT after extraction."
-      exit 1
-    fi
+    extract_archive afx "$AFX_TAR" || exit 1
   fi
 fi
 
-# If user didn't specify --gpu args, try to derive them from studiocast-maxine (best source of truth).
-if [[ "${#GPU_ARGS[@]}" -eq 0 && "$DO_INSTALL_FEATURES" -eq 1 ]]; then
-  MAXINE_BIN=""
-  if [[ -x "${BUILD_DIR}/studiocast-maxine" ]]; then
-    MAXINE_BIN="${BUILD_DIR}/studiocast-maxine"
-  elif command -v studiocast-maxine >/dev/null 2>&1; then
-    MAXINE_BIN="$(command -v studiocast-maxine)"
-  fi
+if [[ "${#FEATURE_COMPONENTS[@]}" -gt 0 ]]; then
+  require_key "--download-features"
+  sc_ngc_require_tools || exit 2
 
-  if [[ -n "$MAXINE_BIN" ]]; then
-    echo "[maxine] Auto-detecting Maxine --gpu args via: $MAXINE_BIN gpu list"
-    # Example output includes: "(maxine --gpu turing)"
-    mapfile -t GPU_ARGS < <("$MAXINE_BIN" gpu list | sed -n 's/.*(maxine --gpu \([^)]\+\)).*/\1/p' | sort -u)
-  fi
+  for COMPONENT in "${FEATURE_COMPONENTS[@]}"; do
+    download_features_component "${COMPONENT}" || exit 2
+  done
 fi
 
 if [[ "$DO_INSTALL_FEATURES" -eq 1 ]]; then
-  if [[ -z "${NGC_CLI_API_KEY:-}" ]]; then
-    echo "[maxine] ERROR: NGC_CLI_API_KEY is not set."
-    echo "[maxine] Export your NGC API key (do not commit it):"
-    echo '  export NGC_CLI_API_KEY="..."'
-    exit 1
-  fi
-
-  if [[ "${#GPU_ARGS[@]}" -eq 0 ]]; then
-    echo "[maxine] ERROR: No --gpu args detected."
-    echo "[maxine] Either:"
-    echo "  - Build and run ${BUILD_DIR}/studiocast-maxine gpu list, then re-run this script, OR"
-    echo "  - Provide --gpu manually (e.g. --gpu turing / ampere / ada depending on your system)."
-    exit 1
-  fi
+  require_key "--install-features"
 
   if [[ ! -d "${VFX_ROOT}/features" ]]; then
-    echo "[maxine] ERROR: VFX features directory not found at ${VFX_ROOT}/features"
+    err "VFX features directory not found at ${VFX_ROOT}/features"
     exit 1
   fi
   if [[ ! -d "${AR_ROOT}/features" ]]; then
-    echo "[maxine] ERROR: AR features directory not found at ${AR_ROOT}/features"
+    err "AR features directory not found at ${AR_ROOT}/features"
     exit 1
   fi
 
-  echo "[maxine] Installing VFX/AR features for GPU args: ${GPU_ARGS[*]}"
-  echo "[maxine] Using NGC org/team: ${NGC_ORG}/${NGC_TEAM}"
+  run_sdk_install_feature vfx || exit 1
+  run_sdk_install_feature ar || exit 1
 
-  for gpu in "${GPU_ARGS[@]}"; do
-    echo "[maxine] VFX install_feature.sh --gpu ${gpu}"
-    ( cd "${VFX_ROOT}/features" && ./install_feature.sh --gpu "${gpu}" --feature all --ngc-org "${NGC_ORG}" --ngc-team "${NGC_TEAM}" )
-
-    echo "[maxine] AR install_feature.sh --gpu ${gpu}"
-    ( cd "${AR_ROOT}/features" && ./install_feature.sh --gpu "${gpu}" --feature all --ngc-org "${NGC_ORG}" --ngc-team "${NGC_TEAM}" )
-  done
-
-  echo "[maxine] Feature install complete."
-  echo "[maxine] You can now verify with:"
+  log "Feature install complete."
+  log "You can now verify with:"
   echo "  ${BUILD_DIR}/studiocast-maxine doctor"
 fi
 
 if [[ "$DO_INSTALL_AFX_FEATURES" -eq 1 ]]; then
-  if [[ -z "${NGC_API_KEY:-}" ]]; then
-    echo "[maxine] ERROR: NGC_API_KEY is not set."
-    echo "[maxine] Export your NGC API key (do not commit it):"
-    echo '  export NGC_API_KEY="..."'
-    exit 1
-  fi
+  require_key "--install-afx-features"
 
   if [[ ! -d "${AFX_ROOT}/features" ]]; then
-    echo "[maxine] ERROR: AFX features directory not found at ${AFX_ROOT}/features"
-    echo "[maxine] Make sure you extracted Audio_Effects_SDK.tar.gz so that ${AFX_ROOT} exists."
+    err "AFX features directory not found at ${AFX_ROOT}/features"
+    err "Make sure you extracted the Audio Effects SDK so that ${AFX_ROOT} exists,"
+    err "for example with: $0 --download afx"
     exit 1
   fi
 
-  # MVP minimal list: AEC + Superres.
-  AFX_EFFECTS_DEFAULT="superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
-  AFX_EFFECTS="${AFX_EFFECTS_CSV:-$AFX_EFFECTS_DEFAULT}"
-  if [[ -z "$AFX_EFFECTS" ]]; then
-    echo "[maxine] ERROR: --afx-effects was provided but empty."
-    exit 1
-  fi
+  run_sdk_download_features || exit 1
 
-  echo "[maxine] Downloading AFX features: ${AFX_EFFECTS}"
-  ( cd "${AFX_ROOT}/features" && ./download_features.sh --effects "${AFX_EFFECTS}" )
-
-  echo "[maxine] AFX feature download complete."
-  echo "[maxine] You can now verify with:"
+  log "AFX feature download complete."
+  log "You can now verify with:"
   echo "  ${BUILD_DIR}/studiocast-maxine doctor"
   echo "  ${BUILD_DIR}/studiocastctl status"
 fi
 
-echo "[maxine] Roots:"
+log "Roots:"
 echo "  VFX: $VFX_ROOT"
 echo "  AR : $AR_ROOT"
 echo "  AFX: $AFX_ROOT"
-echo "[maxine] Done."
+log "Done."
