@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <string>
@@ -49,6 +51,37 @@ struct AudioTransportDecision {
   // Human-friendly note for the daemon status and the GUI banners.
   std::string note;
 };
+
+// Canonical device identities. They are the same on every backend, so a user
+// sees one name whatever StudioCast runs on.
+inline constexpr std::string_view kVirtualMicNodeName = "studiocast_mic";
+inline constexpr std::string_view kVirtualMicDescription =
+    "StudioCast Microphone";
+inline constexpr std::string_view kVirtualSpeakerNodeName =
+    "studiocast_speakers";
+inline constexpr std::string_view kVirtualSpeakerDescription =
+    "StudioCast Speakers";
+inline constexpr std::string_view kVirtualCameraNodeName = "studiocast_camera";
+inline constexpr std::string_view kVirtualCameraDescription =
+    "StudioCast Camera";
+
+// Value for the `node.latency` property. It asks the server for a quantum of
+// `frame_samples` at `sample_rate`. The server may still give a smaller
+// quantum, which the ring buffer absorbs.
+std::string NodeLatencyProperty(std::uint32_t frame_samples, int sample_rate);
+
+// Value for the `node.rate` property.
+std::string NodeRateProperty(int sample_rate);
+
+// Size in bytes of one pipeline frame of interleaved float32 samples.
+std::size_t AudioFrameBytes(std::uint32_t frame_samples,
+                            std::uint32_t channels);
+
+// Size in bytes of the ring that joins the real-time callback to the pipeline
+// thread. It always holds at least two frames, so a write and a read never
+// meet on the same frame.
+std::size_t AudioRingCapacityBytes(std::uint32_t frame_samples,
+                                   std::uint32_t channels, int frames);
 
 // Injection points for the socket probe, so the rules are testable without a
 // server. `get_env` returns an empty string for a variable that is not set.

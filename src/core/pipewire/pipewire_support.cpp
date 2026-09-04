@@ -57,6 +57,27 @@ std::string_view ToString(AudioTransportPreference p) {
   return "auto";
 }
 
+std::string NodeLatencyProperty(std::uint32_t frame_samples, int sample_rate) {
+  return std::to_string(frame_samples) + "/" + std::to_string(sample_rate);
+}
+
+std::string NodeRateProperty(int sample_rate) {
+  return "1/" + std::to_string(sample_rate);
+}
+
+std::size_t AudioFrameBytes(std::uint32_t frame_samples,
+                            std::uint32_t channels) {
+  return static_cast<std::size_t>(frame_samples) *
+         static_cast<std::size_t>(channels) * sizeof(float);
+}
+
+std::size_t AudioRingCapacityBytes(std::uint32_t frame_samples,
+                                   std::uint32_t channels, int frames) {
+  const int held = frames < 2 ? 2 : frames;
+  return static_cast<std::size_t>(held) *
+         AudioFrameBytes(frame_samples, channels);
+}
+
 PipeWireSocketProbe ProbePipeWireSocket(const PipeWireProbeEnv &env) {
   PipeWireSocketProbe out;
   if (!env.get_env || !env.path_exists) {

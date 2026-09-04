@@ -175,6 +175,43 @@ bool TestSocketProbeReportsAMissingRuntimeDirectory() {
                 "the reason should name the missing variable: " + p.reason);
 }
 
+bool TestNodePropertyArithmetic() {
+  using studiocast::pw::AudioFrameBytes;
+  using studiocast::pw::AudioRingCapacityBytes;
+  using studiocast::pw::NodeLatencyProperty;
+  using studiocast::pw::NodeRateProperty;
+
+  return Expect(NodeLatencyProperty(480, 48000) == "480/48000",
+                "node.latency must be samples over rate") &&
+         Expect(NodeRateProperty(48000) == "1/48000",
+                "node.rate must be one over rate") &&
+         Expect(AudioFrameBytes(480, 2) == 480u * 2u * sizeof(float),
+                "a frame is float32 interleaved") &&
+         Expect(AudioRingCapacityBytes(480, 1, 4) ==
+                    4u * AudioFrameBytes(480, 1),
+                "the ring holds the asked number of frames") &&
+         Expect(AudioRingCapacityBytes(480, 1, 1) ==
+                    2u * AudioFrameBytes(480, 1),
+                "the ring never holds fewer than two frames");
+}
+
+bool TestCanonicalNodeNames() {
+  using namespace studiocast::pw;
+  return Expect(std::string(kVirtualMicNodeName) == "studiocast_mic",
+                "the virtual microphone node name must not change") &&
+         Expect(std::string(kVirtualMicDescription) == "StudioCast Microphone",
+                "the virtual microphone description must not change") &&
+         Expect(std::string(kVirtualSpeakerNodeName) == "studiocast_speakers",
+                "the virtual speaker node name must not change") &&
+         Expect(std::string(kVirtualSpeakerDescription) ==
+                    "StudioCast Speakers",
+                "the virtual speaker description must not change") &&
+         Expect(std::string(kVirtualCameraNodeName) == "studiocast_camera",
+                "the virtual camera node name must not change") &&
+         Expect(std::string(kVirtualCameraDescription) == "StudioCast Camera",
+                "the virtual camera description must not change");
+}
+
 } // namespace
 
 int main() {
@@ -206,6 +243,8 @@ int main() {
        &TestSocketProbeReportsAMissingSocket},
       {"socket probe reports a missing runtime directory",
        &TestSocketProbeReportsAMissingRuntimeDirectory},
+      {"node property arithmetic", &TestNodePropertyArithmetic},
+      {"canonical node names", &TestCanonicalNodeNames},
   };
 
   int failed = 0;
