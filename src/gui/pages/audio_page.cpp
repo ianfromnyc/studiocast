@@ -397,6 +397,15 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
                                     studiocast::audio::kMicMonitorMaxLatencyMs);
       monitorLatencySpin_->setValue(20);
       latencyRow->addWidget(monitorLatencySpin_);
+
+      latencyRow->addSpacing(16);
+      latencyRow->addWidget(new QLabel("Volume:", monitorBox_));
+      monitorVolumeSpin_ = new QSpinBox(monitorBox_);
+      monitorVolumeSpin_->setRange(0, 100);
+      monitorVolumeSpin_->setSuffix(QStringLiteral(" %"));
+      monitorVolumeSpin_->setValue(100);
+      latencyRow->addWidget(monitorVolumeSpin_);
+
       latencyRow->addStretch(1);
       monitorLayout->addLayout(latencyRow);
 
@@ -887,6 +896,10 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
   if (monitorLatencySpin_) {
     connect(monitorLatencySpin_, QOverload<int>::of(&QSpinBox::valueChanged),
             this, &AudioPage::OnMonitorLatencyChanged);
+  }
+  if (monitorVolumeSpin_) {
+    connect(monitorVolumeSpin_, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, &AudioPage::OnMonitorVolumeChanged);
   }
   if (refreshMonitorSinksBtn_) {
     connect(refreshMonitorSinksBtn_, &QPushButton::clicked, this,
@@ -1442,6 +1455,8 @@ void AudioPage::PushDaemonMonitorConfig() {
   }
   if (monitorLatencySpin_)
     monitor.insert("latency_ms", monitorLatencySpin_->value());
+  if (monitorVolumeSpin_)
+    monitor.insert("volume", monitorVolumeSpin_->value());
 
   QJsonObject patch;
   patch.insert("monitor", monitor);
@@ -1482,6 +1497,12 @@ void AudioPage::OnMonitorSinkChanged(int /*index*/) {
 }
 
 void AudioPage::OnMonitorLatencyChanged(int /*value*/) {
+  if (updatingMonitorUi_)
+    return;
+  PushDaemonMonitorConfig();
+}
+
+void AudioPage::OnMonitorVolumeChanged(int /*value*/) {
   if (updatingMonitorUi_)
     return;
   PushDaemonMonitorConfig();
@@ -2157,6 +2178,7 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
       const QString monitorError =
           monitor.value("last_error").toString().trimmed();
       const int monitorLatency = monitor.value("latency_ms").toInt(20);
+      const int monitorVolume = monitor.value("volume").toInt(100);
 
       const bool sinkChanged = daemonMonitorSink_ != monitorSink;
       daemonMonitorSink_ = monitorSink;
@@ -2166,6 +2188,8 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
       monitorEnableCheck_->setChecked(monitorEnabled);
       if (monitorLatencySpin_ && !monitorLatencySpin_->hasFocus())
         monitorLatencySpin_->setValue(monitorLatency);
+      if (monitorVolumeSpin_ && !monitorVolumeSpin_->hasFocus())
+        monitorVolumeSpin_->setValue(monitorVolume);
       updatingMonitorUi_ = false;
 
       if (sinkChanged && monitorSinkCombo_ && monitorSinkCombo_->count() > 0) {

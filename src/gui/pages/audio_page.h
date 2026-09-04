@@ -82,6 +82,7 @@ private slots:
   void OnMonitorEnabledToggled(bool checked);
   void OnMonitorSinkChanged(int index);
   void OnMonitorLatencyChanged(int value);
+  void OnMonitorVolumeChanged(int value);
 
 private:
   struct SourceRefreshResult {
@@ -177,6 +178,7 @@ private:
   QComboBox *monitorSinkCombo_ = nullptr;
   QPushButton *refreshMonitorSinksBtn_ = nullptr;
   QSpinBox *monitorLatencySpin_ = nullptr;
+  QSpinBox *monitorVolumeSpin_ = nullptr;
   QLabel *monitorStatusLabel_ = nullptr;
 
   // Advanced / legacy loopback and virtual device controls (microphone).
