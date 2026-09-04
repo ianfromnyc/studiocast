@@ -958,6 +958,7 @@ if [[ "$DO_DEPS" -eq 1 ]]; then
     git curl tar xz
     qt6-qtbase-devel
     pulseaudio-libs-devel pulseaudio-utils
+    pipewire-devel pipewire-utils
     libjpeg-turbo-devel libpng-devel
     sqlite-devel
     libyuv-devel

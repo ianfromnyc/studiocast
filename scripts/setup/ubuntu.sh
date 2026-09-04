@@ -321,6 +321,7 @@ if [[ "$DO_DEPS" -eq 1 ]]; then
     qtbase5-dev \
     libxkbcommon-dev \
     libpulse-dev libpulse0 pulseaudio-utils \
+    libpipewire-0.3-dev pipewire-bin \
     clang clang-format clang-tidy \
     v4l-utils \
     libblas-dev liblapack-dev \
