@@ -164,6 +164,92 @@ std::string MaxineReasonToEnglish(const std::string &code) {
   return studiocast::maxine::reasons::ToEnglish(code);
 }
 
+// Prints the microphone monitor block of the status JSON in plain language.
+void PrintAudioMonitorPretty(const Value::Object *root) {
+  const Value::Object *audio = nullptr;
+  if (root) {
+    if (auto it = root->find("audio"); it != root->end())
+      audio = it->second.AsObject();
+  }
+  const Value::Object *monitor = nullptr;
+  if (audio) {
+    if (auto it = audio->find("monitor"); it != audio->end())
+      monitor = it->second.AsObject();
+  }
+  if (!monitor) {
+    std::cout << "Microphone monitor: (not reported by daemon)\n";
+    return;
+  }
+
+  auto boolField = [&](const char *key) {
+    if (auto it = monitor->find(key); it != monitor->end()) {
+      if (const auto *b = it->second.AsBool())
+        return *b;
+    }
+    return false;
+  };
+  auto stringField = [&](const char *key) -> std::string {
+    if (auto it = monitor->find(key); it != monitor->end()) {
+      if (const auto *s = it->second.AsString())
+        return *s;
+    }
+    return {};
+  };
+  auto intField = [&](const char *key) {
+    if (auto it = monitor->find(key); it != monitor->end()) {
+      if (const auto *n = it->second.AsNumber())
+        return static_cast<int>(*n);
+    }
+    return 0;
+  };
+
+  const bool enabled = boolField("enabled");
+  const bool active = boolField("active");
+  std::cout << "Microphone monitor: "
+            << (enabled ? (active ? "on (playing)" : "on (not playing)")
+                        : "off")
+            << "\n";
+  std::cout << "  sink_requested: " << stringField("sink") << "\n";
+  std::cout << "  sink_resolved: " << stringField("sink_resolved") << "\n";
+  std::cout << "  latency_ms: " << intField("latency_ms") << "\n";
+  std::cout << "  volume: " << intField("volume") << "\n";
+  if (active)
+    std::cout << "  module_id: " << intField("module_id") << "\n";
+  const std::string sinkError = stringField("sink_error");
+  if (!sinkError.empty())
+    std::cout << "  sink_error: " << sinkError << "\n";
+  const std::string lastError = stringField("last_error");
+  if (!lastError.empty())
+    std::cout << "  last_error: " << lastError << "\n";
+}
+
+// `studiocastctl audio monitor status`: read GET_STATUS and print only the
+// monitor block.
+bool PrintAudioMonitorStatus() {
+  studiocast::ipc::DaemonCallResult res;
+  std::string err;
+  if (!studiocast::ipc::DaemonCall("GET_STATUS", &res, &err)) {
+    std::cerr << "ERROR: " << err << "\n";
+    return false;
+  }
+  if (!res.ok) {
+    std::cerr << (res.error_json.empty()
+                      ? std::string("{\"error\":\"daemon_error\"}")
+                      : res.error_json)
+              << "\n";
+    return false;
+  }
+
+  Value root;
+  std::string jerr;
+  if (!studiocast::util::json::Parse(res.json, &root, &jerr)) {
+    std::cerr << "ERROR: invalid status JSON: " << jerr << "\n";
+    return false;
+  }
+  PrintAudioMonitorPretty(root.AsObject());
+  return true;
+}
+
 void PrintMaxinePrettyFromStatusJson(const std::string &statusJson) {
   Value root;
   std::string err;
@@ -233,6 +319,10 @@ void PrintMaxinePrettyFromStatusJson(const std::string &statusJson) {
   } else {
     std::cout << "Maxine: (not reported by daemon)\n";
   }
+
+  // Microphone monitor. Printed before the video block, which may return
+  // early when the daemon reports no video.
+  PrintAudioMonitorPretty(o);
 
   // ----------------
   // Video negotiated formats
@@ -738,6 +828,10 @@ void Usage(const char *argv0) {
       << "  " << argv0 << " audio set --file <audio.json|->\n"
       << "  " << argv0 << " audio start\n"
       << "  " << argv0 << " audio stop\n"
+      << "  " << argv0
+      << " audio monitor on|off [--sink NAME|auto] [--latency-ms N] "
+         "[--volume N]\n"
+      << "  " << argv0 << " audio monitor status\n"
       << "  " << argv0
       << " effects enable <effect_id> [--engine auto|maxine|open_cuda] "
          "[--model <id>] [--strength N|0..1] [--intensity N|0..1] ...\n"
@@ -1351,6 +1445,58 @@ int main(int argc, char **argv) {
     }
     if (sub == "stop") {
       return CallOrDie("AUDIO_STOP") ? 0 : 1;
+    }
+    if (sub == "monitor") {
+      if (argc < 4) {
+        std::cerr << "audio monitor requires on|off|status\n";
+        return 2;
+      }
+
+      const std::string action = argv[3] ? std::string(argv[3]) : std::string();
+      if (action == "status")
+        return PrintAudioMonitorStatus() ? 0 : 1;
+      if (action != "on" && action != "off") {
+        std::cerr << "audio monitor requires on|off|status\n";
+        return 2;
+      }
+
+      std::string sink;
+      std::string latency;
+      std::string volume;
+      for (int i = 4; i < argc; ++i) {
+        const std::string_view a =
+            argv[i] ? std::string_view(argv[i]) : std::string_view();
+        const bool hasValue = (i + 1 < argc) && argv[i + 1];
+        if (a == "--sink" && hasValue) {
+          sink = argv[++i];
+          continue;
+        }
+        if (a == "--latency-ms" && hasValue) {
+          latency = argv[++i];
+          continue;
+        }
+        if (a == "--volume" && hasValue) {
+          volume = argv[++i];
+          continue;
+        }
+        std::cerr << "Unknown audio monitor option: " << a << "\n";
+        return 2;
+      }
+
+      std::string patch = "{\"monitor\":{\"enabled\":";
+      patch += (action == "on") ? "true" : "false";
+      if (!sink.empty()) {
+        patch +=
+            ",\"sink\":\"" + studiocast::util::json::EscapeString(sink) + "\"";
+      }
+      if (!latency.empty())
+        patch +=
+            ",\"latency_ms\":" + std::to_string(std::atoi(latency.c_str()));
+      if (!volume.empty())
+        patch += ",\"volume\":" + std::to_string(std::atoi(volume.c_str()));
+      patch += "}}";
+
+      return CallOrDie(std::string("SET_AUDIO_CONFIG ") + patch) ? 0 : 1;
     }
     if (sub == "set") {
       std::string path;
