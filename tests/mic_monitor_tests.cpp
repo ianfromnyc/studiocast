@@ -689,6 +689,127 @@ bool TestMonitorConsumerIsCountedApartFromApps() {
   return true;
 }
 
+// Whole-lifecycle simulation: the service drives the real monitor helper and
+// only Pulse is faked, so the recorded pactl transcript proves the wiring.
+bool TestServiceDrivesRealHelperThroughPactl() {
+  std::mutex log_mu;
+  std::vector<std::string> log;
+  std::atomic<bool> monitor_loaded{false};
+
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    {
+      std::lock_guard<std::mutex> lock(log_mu);
+      log.push_back(command);
+    }
+
+    if (command == "pactl --version 2>&1")
+      return ExecResult(0, "pactl 17.0\n");
+    if (command == "pactl get-default-sink 2>&1")
+      return ExecResult(0, "physical_test_sink\n");
+    if (command == "pactl get-default-source 2>&1")
+      return ExecResult(0, "physical_test_mic\n");
+    if (command == "pactl list short sources 2>&1") {
+      return ExecResult(0, "1\tstudiocast_sink.monitor\tmodule-null-sink.c\t"
+                           "s16le 2ch 48000Hz\n"
+                           "2\tphysical_test_mic\tmodule-alsa-card.c\t"
+                           "s16le 2ch 48000Hz\n");
+    }
+    if (command == "pactl list short sinks 2>&1") {
+      return ExecResult(0, "3\tphysical_test_sink\tmodule-alsa-card.c\t"
+                           "s16le 2ch 48000Hz\tSUSPENDED\n");
+    }
+    if (command == "pactl list short modules 2>&1") {
+      if (!monitor_loaded.load(std::memory_order_relaxed))
+        return ExecResult(0,
+                          "10\tmodule-null-sink\tsink_name=studiocast_sink\n");
+      return ExecResult(0, "10\tmodule-null-sink\tsink_name=studiocast_sink\n"
+                           "551\tmodule-loopback\tsource=studiocast_mic "
+                           "sink=physical_test_sink latency_msec=20 "
+                           "source_output_properties=media.name="
+                           "StudioCast_Microphone_Monitor "
+                           "sink_input_properties=media.name="
+                           "StudioCast_Microphone_Monitor\n");
+    }
+    if (command.rfind("pactl load-module ", 0) == 0) {
+      monitor_loaded.store(true, std::memory_order_relaxed);
+      return ExecResult(0, "551\n");
+    }
+    if (command == "pactl unload-module 551 2>&1") {
+      monitor_loaded.store(false, std::memory_order_relaxed);
+      return ExecResult(0, "");
+    }
+    if (command == "pactl list sink-inputs 2>&1") {
+      return ExecResult(0,
+                        "Sink Input #900\n"
+                        "\tOwner Module: 551\n"
+                        "\tSink: 3\n"
+                        "\t\tmedia.name = \"StudioCast_Microphone_Monitor\"\n"
+                        "\n");
+    }
+    if (command.rfind("pactl set-sink-input-volume ", 0) == 0)
+      return ExecResult(0, "");
+    return ExecResult(0, "");
+  });
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+
+  VirtualAudioService service(std::move(hooks));
+  auto cfg = MonitorServiceConfig();
+  cfg.monitor.volume = 55;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool active = WaitUntil(
+      [&] {
+        const auto st = service.Status();
+        return st.monitor_active && st.monitor_module_id == 551;
+      },
+      1000ms);
+  if (!active) {
+    std::cerr << "the real helper did not bring the monitor up; error='"
+              << service.Status().monitor_last_error << "'\n";
+    service.Stop();
+    return false;
+  }
+
+  service.Stop();
+
+  std::vector<std::string> recorded;
+  {
+    std::lock_guard<std::mutex> lock(log_mu);
+    recorded = log;
+  }
+
+  bool ok = true;
+  const std::string wantLoad =
+      "pactl load-module 'module-loopback' 'source=studiocast_mic' "
+      "'sink=physical_test_sink' 'latency_msec=20' "
+      "'source_output_properties=media.name=StudioCast_Microphone_Monitor' "
+      "'sink_input_properties=media.name=StudioCast_Microphone_Monitor' 2>&1";
+  if (!CommandWasRun(recorded, wantLoad)) {
+    std::cerr << "the service did not issue the monitor load-module command\n";
+    ok = false;
+  }
+  if (!CommandWasRun(recorded, "pactl set-sink-input-volume 900 55% 2>&1")) {
+    std::cerr << "the service did not apply the monitor volume\n";
+    ok = false;
+  }
+  if (!CommandWasRun(recorded, "pactl unload-module 551 2>&1")) {
+    std::cerr << "the service did not unload the monitor when it stopped\n";
+    ok = false;
+  }
+  if (monitor_loaded.load(std::memory_order_relaxed)) {
+    std::cerr << "a monitor loopback outlived the service\n";
+    ok = false;
+  }
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -720,6 +841,8 @@ int main() {
        &TestServiceRetriesMonitorAndReportsError},
       {"monitor consumer is counted apart from apps",
        &TestMonitorConsumerIsCountedApartFromApps},
+      {"service drives the real helper through pactl",
+       &TestServiceDrivesRealHelperThroughPactl},
   };
 
   int failed = 0;
