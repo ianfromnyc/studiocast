@@ -153,6 +153,64 @@ The rules in `src/core/audio/audio_device_safety.cpp` still apply. The native
 backend refuses to capture from a StudioCast virtual source and refuses to
 play into a StudioCast virtual sink. This stops a feedback loop.
 
+## Moving between the backends
+
+A PulseAudio module lives in the sound server, so it outlives the process that
+loaded it. A native node dies with its process. The two directions therefore
+need different work.
+
+### PulseAudio to native
+
+The native backend removes the Pulse device modules before it creates its
+nodes. Without that step the graph holds two nodes named `studiocast_mic`, one
+from `module-remap-source` and one native, and an application can pick the
+stale one.
+
+It removes, in this order:
+
+| Module | Match |
+| --- | --- |
+| `module-loopback` | `sink=studiocast_sink` |
+| `module-loopback` | `source=studiocast_speakers.monitor` |
+| `module-remap-source` | `source_name=studiocast_mic` |
+| `module-null-sink` | `sink_name=studiocast_sink` |
+| `module-null-sink` | `sink_name=studiocast_speakers` |
+
+The loopbacks go first, then the remap source, then the null sinks it used, so
+a module is never unloaded while another one still needs it. Each removal
+prints one line to the daemon log.
+
+Two modules are never removed:
+
+- The microphone monitor loopback. It reads `studiocast_mic` on both backends
+  and carries `media.name=StudioCast_Microphone_Monitor`, which is what tells
+  it apart from a stale device module. The monitor also claims only its own
+  tagged loopback, so the two clean-ups cannot take each other's modules.
+- Any module of another application.
+
+### Native to PulseAudio
+
+The service takes the native nodes down whenever the transport resolves to
+PulseAudio. Inside one process that covers a live backend change. Across a
+restart there is nothing to do, because the nodes went away with the process.
+
+## The microphone monitor
+
+The monitor plays the processed microphone feed on an output sink. It loads a
+`module-loopback` with `pactl` and takes its input from the `studiocast_mic`
+source.
+
+This works on both backends and needs no change. `pipewire-pulse` shows a node
+whose `media.class` is `Audio/Source` to PulseAudio clients as a plain source,
+so `pactl` finds `studiocast_mic` whether a `pactl` module or a native node
+made it. Verified on Fedora 44 with PipeWire 1.6.8:
+
+    $ pactl list short sources | grep studiocast_mic
+    6109  studiocast_mic  PipeWire  float32le 1ch 48000Hz  SUSPENDED
+
+The monitor therefore needs `pipewire-pulse` (or a real PulseAudio server) even
+when `audio.backend` is `pipewire`. Almost every desktop has it.
+
 ## Status fields
 
 `studiocastctl status` reports the active backend:
