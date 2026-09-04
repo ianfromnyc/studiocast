@@ -108,11 +108,13 @@ sc_ort_install_tarball() {
   #
   # RETURN covers a normal return, ERR covers the paths where set -e ends the
   # script. Both run while the frame of this function is still live, so they
-  # can read the local tmpdir. The handler takes itself off again and puts the
-  # ERR trap of the caller back, so nothing of this call outlives it.
-  local prev_err_trap
+  # can read the local tmpdir. The handler takes itself off again and puts both
+  # traps of the caller back, so nothing of this call outlives it. The RETURN
+  # trap matters under set -T, which passes the RETURN trap of the caller in.
+  local prev_err_trap prev_return_trap
   prev_err_trap="$(trap -p ERR)"
-  trap 'rm -rf "${tmpdir}"; trap - RETURN ERR; eval "${prev_err_trap}"' RETURN ERR
+  prev_return_trap="$(trap -p RETURN)"
+  trap 'rm -rf "${tmpdir}"; trap - RETURN ERR; eval "${prev_err_trap}"; eval "${prev_return_trap}"' RETURN ERR
 
   curl --fail --silent --show-error --location --retry 3 "${url}" -o "${tmpdir}/${tgz}"
 

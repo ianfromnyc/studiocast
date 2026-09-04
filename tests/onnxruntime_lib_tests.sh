@@ -155,6 +155,65 @@ CHILD
   fi
 }
 
+# The helper installs a RETURN trap of its own. With functrace on, a RETURN
+# trap of the caller reaches the helper, so the helper must put it back the way
+# it puts the ERR trap back. Otherwise the caller loses its own clean-up.
+test_a_caller_return_trap_survives_the_call() {
+  local tmproot="${SANDBOX}/return-trap-tmp"
+  mkdir -p "${tmproot}"
+
+  local child="${SANDBOX}/return-trap-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+# functrace passes the RETURN trap of the caller into every function it calls.
+set -T
+sc_ort_log() { :; }
+sc_ort_priv() { :; }
+# shellcheck source=/dev/null
+source "$1"
+export TMPDIR="$2"
+VERSION="$3"
+ASSET="$4"
+URL="$5"
+
+caller_with_a_return_trap() {
+  trap 'echo CALLER_RETURN_TRAP_RAN' RETURN
+  local before after
+  before="$(trap -p RETURN)"
+  sc_ort_install_tarball "${VERSION}" "${ASSET}" "${URL}" 2>/dev/null || true
+  after="$(trap -p RETURN)"
+  if [[ "${before}" == "${after}" ]]; then
+    echo RETURN_TRAP_UNCHANGED
+  else
+    echo "RETURN_TRAP_CHANGED [${before}] -> [${after}]"
+  fi
+}
+
+caller_with_a_return_trap
+CHILD
+
+  local out
+  out="$(bash "${child}" "${ORT_LIB}" "${tmproot}" \
+    "${FAKE_VERSION}" "${FAKE_ASSET}" "${FAKE_URL}" 2>/dev/null)"
+
+  local marker
+  for marker in RETURN_TRAP_UNCHANGED CALLER_RETURN_TRAP_RAN; do
+    if [[ "${out}" != *"${marker}"* ]]; then
+      t_fail "expected ${marker} in the output of the RETURN trap check: ${out}"
+    else
+      t_pass "${marker}"
+    fi
+  done
+
+  local leftovers
+  leftovers="$(leftover_entries "${tmproot}")"
+  if [[ -n "${leftovers}" ]]; then
+    t_fail "temporary directory left behind by the RETURN trap check: ${leftovers}"
+  else
+    t_pass "the temporary directory was removed under a caller RETURN trap"
+  fi
+}
+
 # A bootstrap root keeps its libraries in lib or in lib64. Everything that
 # looks inside a root must follow the layout of that root.
 test_libdir_follows_the_layout_of_the_root() {
@@ -186,6 +245,7 @@ test_libdir_follows_the_layout_of_the_root() {
 
 test_repeated_calls_clean_up_and_keep_the_caller_trap
 test_download_failure_cleans_up_and_runs_the_caller_trap
+test_a_caller_return_trap_survives_the_call
 test_libdir_follows_the_layout_of_the_root
 
 if [[ "${FAILURES}" -ne 0 ]]; then
