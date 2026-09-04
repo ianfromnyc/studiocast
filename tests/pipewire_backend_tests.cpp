@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "core/audio/pipewire/pipewire_audio_devices.h"
+#include "core/audio/mic_monitor.h"
+#include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_audio_service.h"
 #include "core/config/daemon_config.h"
 #include "core/pipewire/pipewire_audio_node.h"
@@ -601,6 +603,176 @@ bool TestLiveVirtualCameraFeedsAGstreamerConsumer() {
          Expect(consumers > 0, "no consumer link was counted");
 }
 
+// Restores the real pactl runner when the test ends.
+class ScopedPactlHook final {
+public:
+  explicit ScopedPactlHook(studiocast::audio::pulse::PactlExecCaptureHook hook) {
+    studiocast::audio::pulse::SetPactlExecCaptureHookForTesting(
+        std::move(hook));
+  }
+  ~ScopedPactlHook() {
+    studiocast::audio::pulse::SetPactlExecCaptureHookForTesting(nullptr);
+  }
+};
+
+// A module list that holds every leftover the Pulse device path can make,
+// plus two modules the cleanup must not touch.
+const char *kStaleModuleList =
+    "536870916\tmodule-null-sink\tsink_name=studiocast_sink "
+    "sink_properties=device.description=StudioCast\n"
+    "536870917\tmodule-remap-source\tmaster=studiocast_sink.monitor "
+    "source_name=studiocast_mic\n"
+    "536870918\tmodule-null-sink\tsink_name=studiocast_speakers\n"
+    "536870919\tmodule-loopback\tsource=studiocast_speakers.monitor "
+    "sink=alsa_output.pci-0000_00_1f.3.analog-stereo latency_msec=10\n"
+    "536870920\tmodule-loopback\tsink=studiocast_sink "
+    "source=physical_test_mic latency_msec=10\n"
+    "536870921\tmodule-loopback\tsource=studiocast_mic "
+    "sink=alsa_output.pci-0000_00_1f.3.analog-stereo latency_msec=20 "
+    "source_output_properties=media.name=StudioCast_Microphone_Monitor\n"
+    "536870922\tmodule-null-sink\tsink_name=other_app_sink\n";
+
+bool TestStalePulseModuleDetectionSkipsTheMonitorAndOtherApps() {
+  ScopedPactlHook hook([](const std::string &command) {
+    if (command == "pactl --version 2>&1")
+      return studiocast::util::ExecResult{0, false, "pactl 17.0\n"};
+    if (command == "pactl list short modules 2>&1")
+      return studiocast::util::ExecResult{0, false, kStaleModuleList};
+    return studiocast::util::ExecResult{99, false, "unexpected command: " + command};
+  });
+
+  std::string error;
+  const auto stale =
+      studiocast::audio::pw_backend::DetectStalePulseDeviceModules(&error);
+
+  std::vector<int> ids;
+  for (const auto &m : stale)
+    ids.push_back(m.id);
+
+  const std::vector<int> want{536870919, 536870920, 536870917, 536870916,
+                              536870918};
+  return Expect(error.empty(), "detection reported an error: " + error) &&
+         Expect(ids == want,
+                "unexpected stale module ids or order; got " +
+                    [&ids] {
+                      std::string s;
+                      for (int id : ids)
+                        s += std::to_string(id) + " ";
+                      return s;
+                    }());
+}
+
+bool TestStalePulseModuleCleanupIssuesTheRightPactlCalls() {
+  std::vector<std::string> commands;
+  ScopedPactlHook hook([&commands](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl --version 2>&1")
+      return studiocast::util::ExecResult{0, false, "pactl 17.0\n"};
+    if (command == "pactl list short modules 2>&1")
+      return studiocast::util::ExecResult{0, false, kStaleModuleList};
+    if (command.rfind("pactl unload-module ", 0) == 0)
+      return studiocast::util::ExecResult{0, false, ""};
+    return studiocast::util::ExecResult{99, false, "unexpected command: " + command};
+  });
+
+  std::vector<std::string> removed;
+  std::string error;
+  const bool ok = studiocast::audio::pw_backend::UnloadStalePulseDeviceModules(
+      &removed, &error);
+
+  std::vector<std::string> unloads;
+  for (const auto &c : commands) {
+    if (c.rfind("pactl unload-module ", 0) == 0)
+      unloads.push_back(c);
+  }
+
+  // Loopbacks go first, then the remap source, then the null sinks it used,
+  // so a module is never unloaded while another one still needs it.
+  const std::vector<std::string> want{
+      "pactl unload-module 536870919 2>&1", "pactl unload-module 536870920 2>&1",
+      "pactl unload-module 536870917 2>&1", "pactl unload-module 536870916 2>&1",
+      "pactl unload-module 536870918 2>&1"};
+
+  bool keptMonitor = true;
+  bool keptOtherApp = true;
+  for (const auto &c : unloads) {
+    if (c == "pactl unload-module 536870921 2>&1")
+      keptMonitor = false;
+    if (c == "pactl unload-module 536870922 2>&1")
+      keptOtherApp = false;
+  }
+
+  return Expect(ok, "cleanup failed: " + error) &&
+         Expect(unloads == want, "unexpected unload command lines") &&
+         Expect(keptMonitor,
+                "the microphone monitor loopback must survive the cleanup") &&
+         Expect(keptOtherApp,
+                "a null sink of another application must survive") &&
+         Expect(removed.size() == 5,
+                "the cleanup log should name every removed module") &&
+         Expect(removed[0].find("module-loopback") != std::string::npos,
+                "the log should name the module type: " + removed[0]);
+}
+
+bool TestStalePulseModuleCleanupIsQuietWhenNothingIsLoaded() {
+  std::vector<std::string> commands;
+  ScopedPactlHook hook([&commands](const std::string &command) {
+    commands.push_back(command);
+    if (command == "pactl --version 2>&1")
+      return studiocast::util::ExecResult{0, false, "pactl 17.0\n"};
+    if (command == "pactl list short modules 2>&1")
+      return studiocast::util::ExecResult(
+          0, "536870922\tmodule-null-sink\tsink_name=other_app_sink\n");
+    return studiocast::util::ExecResult{99, false, "unexpected command: " + command};
+  });
+
+  std::vector<std::string> removed;
+  std::string error;
+  const bool ok = studiocast::audio::pw_backend::UnloadStalePulseDeviceModules(
+      &removed, &error);
+
+  bool anyUnload = false;
+  for (const auto &c : commands) {
+    if (c.rfind("pactl unload-module ", 0) == 0)
+      anyUnload = true;
+  }
+
+  return Expect(ok, "cleanup failed: " + error) &&
+         Expect(!anyUnload, "nothing should be unloaded") &&
+         Expect(removed.empty(), "the cleanup log should stay empty");
+}
+
+bool TestMicMonitorCleanupIgnoresNativePathNames() {
+  // The native path names its streams after StudioCast too. None of them is a
+  // Pulse module, but a name-only match would still be a trap, so pin that the
+  // monitor needs its own stream tag before it removes anything.
+  ScopedPactlHook hook([](const std::string &command) {
+    if (command == "pactl --version 2>&1")
+      return studiocast::util::ExecResult{0, false, "pactl 17.0\n"};
+    if (command == "pactl list short modules 2>&1") {
+      return studiocast::util::ExecResult{
+          0, false,
+          "10\tmodule-loopback\tsource=studiocast_mic "
+          "sink=studiocast_speakers_route\n"
+          "11\tmodule-loopback\tsource=studiocast_mic_capture "
+          "sink=alsa_output.analog-stereo\n"
+          "12\tmodule-null-sink\tsink_name=studiocast_speakers_out\n"
+          "13\tmodule-loopback\tsource=studiocast_mic "
+          "sink=alsa_output.analog-stereo "
+          "source_output_properties=media.name=StudioCast_Microphone_Monitor\n"};
+    }
+    return studiocast::util::ExecResult{99, false,
+                                        "unexpected command: " + command};
+  });
+
+  std::string error;
+  const auto ids = studiocast::audio::DetectMicMonitorModuleIds(&error);
+  const std::vector<int> want{13};
+  return Expect(error.empty(), "detection reported an error: " + error) &&
+         Expect(ids == want,
+                "the monitor must claim only its own tagged loopback");
+}
+
 } // namespace
 
 int main() {
@@ -647,6 +819,14 @@ int main() {
        &TestServiceTransportDefaultsToPulse},
       {"daemon config round trips the audio backend key",
        &TestDaemonConfigRoundTripsTheAudioBackendKey},
+      {"stale pulse module detection skips the monitor and other apps",
+       &TestStalePulseModuleDetectionSkipsTheMonitorAndOtherApps},
+      {"stale pulse module cleanup issues the right pactl calls",
+       &TestStalePulseModuleCleanupIssuesTheRightPactlCalls},
+      {"stale pulse module cleanup is quiet when nothing is loaded",
+       &TestStalePulseModuleCleanupIsQuietWhenNothingIsLoaded},
+      {"mic monitor cleanup ignores native path names",
+       &TestMicMonitorCleanupIgnoresNativePathNames},
       {"canonical node names", &TestCanonicalNodeNames},
       {"video output backend parsing", &TestVideoOutputBackendParsing},
       {"video output backend selection", &TestVideoOutputBackendSelection},

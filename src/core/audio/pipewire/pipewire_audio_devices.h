@@ -2,12 +2,46 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "core/audio/audio_pipeline.h"
 #include "core/audio/virtual_audio_service.h"
 #include "core/pipewire/pipewire_audio_node.h"
 
 namespace studiocast::audio::pw_backend {
+
+// One PulseAudio module that the Pulse device path left behind.
+struct StalePulseModule {
+  int id = -1;
+  std::string name; // e.g. "module-null-sink"
+  std::string args;
+};
+
+// Finds the PulseAudio modules that belong to the StudioCast Pulse device
+// path: the null sinks behind the virtual microphone and the virtual
+// speakers, the remap source that carries the microphone, the legacy
+// pass-through loopback into the StudioCast sink, and the speaker route.
+//
+// Pulse modules live in the sound server, so they outlive the process that
+// loaded them. A native node dies with the process. Only the move from the
+// Pulse path to the native path therefore needs a clean-up: without it the
+// graph holds two nodes named `studiocast_mic` and an application can pick
+// the stale one.
+//
+// The list is ordered for unloading: the loopbacks come first, then the remap
+// source, then the null sinks it used.
+//
+// Two things are never in the list:
+//  - the microphone monitor loopback, which reads `studiocast_mic` and works
+//    the same on both backends. It carries the monitor stream name, and that
+//    is what tells it apart.
+//  - a module of another application, whatever it is named.
+std::vector<StalePulseModule> DetectStalePulseDeviceModules(std::string *error);
+
+// Unloads what DetectStalePulseDeviceModules finds. `removed` gets one
+// human-readable line for each module that went away.
+bool UnloadStalePulseDeviceModules(std::vector<std::string> *removed,
+                                   std::string *error);
 
 // Owns the native PipeWire virtual devices of the process.
 //
@@ -30,6 +64,9 @@ public:
                             std::string *error);
   bool StopSpeakerLoopback(std::string *error);
 
+  // What the last clean-up removed, one line for each module.
+  std::vector<std::string> LastPulseCleanupLog() const;
+
   AudioConsumerSnapshot DetectMicrophoneConsumers() const;
   AudioConsumerSnapshot DetectSpeakerConsumers() const;
 
@@ -41,6 +78,10 @@ public:
 private:
   NativeAudioDevices();
   ~NativeAudioDevices();
+
+  // Removes the Pulse device modules an earlier run left in the sound server,
+  // and writes one line for each to the daemon log.
+  void RemoveStalePulseDevices();
 
   struct State;
   std::unique_ptr<State> state_;

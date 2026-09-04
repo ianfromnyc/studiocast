@@ -1,6 +1,7 @@
 #include "core/audio/pipewire/pipewire_audio_devices.h"
 
 #include <atomic>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -8,6 +9,8 @@
 #include <vector>
 
 #include "core/audio/audio_device_safety.h"
+#include "core/audio/mic_monitor.h"
+#include "core/audio/pulse/pactl.h"
 #include "core/pipewire/pipewire_support.h"
 
 namespace studiocast::audio::pw_backend {
@@ -47,7 +50,127 @@ std::string StripMonitorSuffix(const std::string &name) {
   return name;
 }
 
+bool Contains(const std::string &hay, const std::string &needle) {
+  return hay.find(needle) != std::string::npos;
+}
+
+// Names the Pulse device path uses. They are the same strings the pactl
+// helpers in core/audio/virtual_mic.cpp and virtual_speaker.cpp load.
+constexpr const char *kPulseSinkName = "studiocast_sink";
+constexpr const char *kPulseMicSourceName = "studiocast_mic";
+constexpr const char *kPulseSpeakersSinkName = "studiocast_speakers";
+
+// True when the module belongs to the microphone monitor, which works on both
+// backends and must survive the clean-up. The monitor tags its loopback with
+// its own stream name, so a plain `source=studiocast_mic` match is not enough.
+bool IsMicMonitorModule(const pulse::PactlModule &m) {
+  return m.name == "module-loopback" &&
+         Contains(m.args, MicMonitorStreamName());
+}
+
 } // namespace
+
+std::vector<StalePulseModule> DetectStalePulseDeviceModules(
+    std::string *error) {
+  if (error)
+    error->clear();
+
+  std::string details;
+  if (!pulse::PactlAvailable(&details)) {
+    // No pactl means no Pulse modules to remove. That is not a failure.
+    return {};
+  }
+
+  std::string listErr;
+  const auto modules = pulse::ListModules(&listErr);
+  if (!listErr.empty()) {
+    if (error)
+      *error = listErr;
+    return {};
+  }
+
+  std::vector<StalePulseModule> loopbacks;
+  std::vector<StalePulseModule> remaps;
+  std::vector<StalePulseModule> sinks;
+
+  for (const auto &m : modules) {
+    if (IsMicMonitorModule(m))
+      continue;
+
+    const StalePulseModule entry{m.id, m.name, m.args};
+
+    if (m.name == "module-loopback") {
+      // The legacy pass-through into the StudioCast sink, and the Pulse
+      // speaker route out of the virtual speakers.
+      if (Contains(m.args, std::string("sink=") + kPulseSinkName) ||
+          Contains(m.args,
+                   std::string("source=") + kPulseSpeakersSinkName +
+                       ".monitor")) {
+        loopbacks.push_back(entry);
+      }
+      continue;
+    }
+
+    if (m.name == "module-remap-source" &&
+        Contains(m.args, std::string("source_name=") + kPulseMicSourceName)) {
+      remaps.push_back(entry);
+      continue;
+    }
+
+    if (m.name == "module-null-sink" &&
+        (Contains(m.args, std::string("sink_name=") + kPulseSinkName) ||
+         Contains(m.args,
+                  std::string("sink_name=") + kPulseSpeakersSinkName))) {
+      sinks.push_back(entry);
+      continue;
+    }
+  }
+
+  // Unload order: a module is never removed while another one still needs it.
+  std::vector<StalePulseModule> out;
+  out.reserve(loopbacks.size() + remaps.size() + sinks.size());
+  out.insert(out.end(), loopbacks.begin(), loopbacks.end());
+  out.insert(out.end(), remaps.begin(), remaps.end());
+  out.insert(out.end(), sinks.begin(), sinks.end());
+  return out;
+}
+
+bool UnloadStalePulseDeviceModules(std::vector<std::string> *removed,
+                                   std::string *error) {
+  if (removed)
+    removed->clear();
+  if (error)
+    error->clear();
+
+  std::string detectErr;
+  const auto stale = DetectStalePulseDeviceModules(&detectErr);
+  if (!detectErr.empty()) {
+    if (error)
+      *error = detectErr;
+    return false;
+  }
+
+  bool ok = true;
+  for (const auto &m : stale) {
+    std::string err;
+    if (!pulse::UnloadModule(m.id, &err)) {
+      ok = false;
+      if (error) {
+        if (!error->empty())
+          *error += "; ";
+        *error += "Could not unload " + m.name + " " + std::to_string(m.id);
+        if (!err.empty())
+          *error += ": " + err;
+      }
+      continue;
+    }
+    if (removed) {
+      removed->push_back("Removed stale Pulse " + m.name + " (id " +
+                         std::to_string(m.id) + "): " + m.args);
+    }
+  }
+  return ok;
+}
 
 // ---------------------------------------------------------------------------
 // NativeAudioDevices
@@ -62,6 +185,9 @@ struct NativeAudioDevices::State {
   std::unique_ptr<PipeWireAudioNode> loopback_playback;
   std::thread loopback_thread;
   std::atomic<bool> loopback_stop{false};
+
+  // What the last Pulse clean-up removed, for the log and the status.
+  std::vector<std::string> cleanup_log;
 };
 
 NativeAudioDevices::NativeAudioDevices() : state_(std::make_unique<State>()) {}
@@ -79,6 +205,8 @@ NativeAudioDevices &NativeAudioDevices::Instance() {
 }
 
 bool NativeAudioDevices::CreateVirtualMic(std::string *error) {
+  RemoveStalePulseDevices();
+
   std::lock_guard<std::mutex> lock(state_->mu);
   if (state_->mic)
     return true;
@@ -107,6 +235,8 @@ bool NativeAudioDevices::DestroyVirtualMic(std::string *error) {
 }
 
 bool NativeAudioDevices::CreateVirtualSpeaker(std::string *error) {
+  RemoveStalePulseDevices();
+
   std::lock_guard<std::mutex> lock(state_->mu);
   if (state_->speaker)
     return true;
@@ -221,6 +351,28 @@ bool NativeAudioDevices::StopSpeakerLoopback(std::string *error) {
   std::lock_guard<std::mutex> lock(state_->mu);
   state_->loopback_playback.reset();
   return true;
+}
+
+void NativeAudioDevices::RemoveStalePulseDevices() {
+  std::vector<std::string> removed;
+  std::string error;
+  const bool ok = UnloadStalePulseDeviceModules(&removed, &error);
+
+  for (const auto &line : removed)
+    std::cerr << "[studiocast] " << line << "\n";
+  if (!ok && !error.empty()) {
+    std::cerr << "[studiocast] Stale Pulse device clean-up: " << error << "\n";
+  }
+
+  if (removed.empty())
+    return;
+  std::lock_guard<std::mutex> lock(state_->mu);
+  state_->cleanup_log = std::move(removed);
+}
+
+std::vector<std::string> NativeAudioDevices::LastPulseCleanupLog() const {
+  std::lock_guard<std::mutex> lock(state_->mu);
+  return state_->cleanup_log;
 }
 
 AudioConsumerSnapshot NativeAudioDevices::DetectMicrophoneConsumers() const {
