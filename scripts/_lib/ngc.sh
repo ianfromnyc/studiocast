@@ -21,8 +21,9 @@
 # Authentication:
 #   A modern personal key starts with "nvapi-" and is a bearer token itself.
 #   An older key is not. For such a key the helper gets a JWT from
-#   authn.nvidia.com and sends that instead. It tries the raw key first and
-#   falls back to the exchange when NGC answers 401.
+#   authn.nvidia.com and sends that instead. Every request goes through
+#   sc_ngc_ensure_token first, so a download works as the first call of a run.
+#   A GET that still gets a 401 with a raw older key retries the exchange once.
 #
 # The caller can set these before it calls a function:
 #   SC_NGC_API_KEY        Key to use. Default: $NGC_API_KEY, then $NGC_CLI_API_KEY.
@@ -210,6 +211,38 @@ PY
   return 0
 }
 
+# Put a bearer token for the current API key in _SC_NGC_TOKEN.
+#
+# A modern "nvapi-" key is a bearer token itself, so it is used as it stands.
+# An older key is not, so it goes through the authn.nvidia.com exchange here.
+# Every path that talks to NGC calls this first, which is why a download works
+# as the first call of a run.
+#
+# Returns 2 when there is no key. A failed exchange is not fatal: the raw key
+# stays in place, and the caller reports the status NGC answers with.
+sc_ngc_ensure_token() {
+  local key
+
+  if ! key="$(sc_ngc_api_key)"; then
+    sc_ngc_err "no NGC API key. Export NGC_API_KEY (or NGC_CLI_API_KEY) first."
+    return 2
+  fi
+
+  [[ -z "${_SC_NGC_TOKEN}" ]] || return 0
+
+  _SC_NGC_TOKEN="${key}"
+  _SC_NGC_TOKEN_KIND="key"
+
+  if [[ "${key}" != nvapi-* ]]; then
+    # This line goes to stderr, because a caller may read the answer of the
+    # function that called this one through a command substitution.
+    sc_ngc_log "The NGC key is not an 'nvapi-' key. Asking authn.nvidia.com for a token..." >&2
+    _sc_ngc_exchange_token "${key}" || true
+  fi
+
+  return 0
+}
+
 # List the other names the caller knows for the same component.
 _sc_ngc_print_alternates() {
   local name
@@ -264,15 +297,8 @@ sc_ngc_api_get() {
   local resource="${3:-}"
   local key status
 
-  if ! key="$(sc_ngc_api_key)"; then
-    sc_ngc_err "no NGC API key. Export NGC_API_KEY (or NGC_CLI_API_KEY) first."
-    return 2
-  fi
-
-  if [[ -z "${_SC_NGC_TOKEN}" ]]; then
-    _SC_NGC_TOKEN="${key}"
-    _SC_NGC_TOKEN_KIND="key"
-  fi
+  sc_ngc_ensure_token || return 2
+  key="$(sc_ngc_api_key)"
 
   # These two lines go to stderr, because a caller may read the answer of this
   # function through a command substitution.
@@ -517,10 +543,7 @@ sc_ngc_download_kind_file() {
     return 0
   fi
 
-  if ! sc_ngc_have_key; then
-    sc_ngc_err "no NGC API key. Export NGC_API_KEY (or NGC_CLI_API_KEY) first."
-    return 2
-  fi
+  sc_ngc_ensure_token || return 2
 
   mkdir -p "$(dirname "${dest}")"
 
@@ -538,7 +561,7 @@ sc_ngc_download_kind_file() {
     curl --fail --location "${progress[@]}" \
       --retry "${SC_NGC_RETRIES}" --retry-delay 2 --retry-connrefused \
       --continue-at - \
-      --header "Authorization: Bearer ${_SC_NGC_TOKEN:-$(sc_ngc_api_key)}" \
+      --header "Authorization: Bearer ${_SC_NGC_TOKEN}" \
       --output "${part}" \
       "${url}" || status=$?
 

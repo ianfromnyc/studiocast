@@ -867,6 +867,13 @@ if (BUILD_TESTING)
                 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         )
 
+        add_test(NAME studiocast-ngc-lib-tests
+                COMMAND "${STUDIOCAST_BASH_PROGRAM}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/ngc_lib_tests.sh")
+        set_tests_properties(studiocast-ngc-lib-tests PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+
         add_test(NAME studiocast-uninstall-pkgconfig-tests
                 COMMAND "${STUDIOCAST_BASH_PROGRAM}"
                         "${CMAKE_CURRENT_SOURCE_DIR}/tests/uninstall_pkgconfig_tests.sh")
