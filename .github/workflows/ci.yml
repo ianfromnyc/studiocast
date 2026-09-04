@@ -325,7 +325,7 @@ jobs:
     steps:
       - name: Install base tools (for checkout)
         run: |
-          dnf install -y --setopt=install_weak_deps=False \
+          dnf install -y --setopt=install_weak_deps=false \
             git rpm-build rpmdevtools rpmlint dnf5-plugins
 
       - name: Checkout

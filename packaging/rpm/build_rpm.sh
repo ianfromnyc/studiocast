@@ -419,11 +419,11 @@ RPMBUILD_ARGS=(${rpmbuild_args})
 FIX_OWNERSHIP="\${STUDIOCAST_FIX_OWNERSHIP:-0}"
 
 echo "[rpm-container] Installing rpmbuild and the dependency resolver"
-dnf install -y --setopt=install_weak_deps=False rpm-build rpmdevtools
-dnf install -y --setopt=install_weak_deps=False dnf5-plugins ||
-  dnf install -y --setopt=install_weak_deps=False dnf-plugins-core
+dnf install -y --setopt=install_weak_deps=false rpm-build rpmdevtools
+dnf install -y --setopt=install_weak_deps=false dnf5-plugins ||
+  dnf install -y --setopt=install_weak_deps=false dnf-plugins-core
 if [[ "\${RUN_RPMLINT}" -eq 1 ]]; then
-  dnf install -y --setopt=install_weak_deps=False rpmlint
+  dnf install -y --setopt=install_weak_deps=false rpmlint
 fi
 
 echo "[rpm-container] Building the source RPM"
