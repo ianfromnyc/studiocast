@@ -179,7 +179,8 @@ bool Rgb24ToYuyvLibyuv(const std::uint8_t *src, int width, int height,
   // An odd width still writes the whole final YUYV pair, so a row shorter than
   // ceil(width / 2) * 4 bytes cannot hold the result. Decline it and let the
   // caller fall back rather than write past the row.
-  const std::size_t row_bytes = static_cast<std::size_t>((width + 1) / 2) * 4u;
+  const std::size_t row_bytes =
+      ((static_cast<std::size_t>(width) + 1u) / 2u) * 4u;
   if (dst_stride < row_bytes)
     return false;
 

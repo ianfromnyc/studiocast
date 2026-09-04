@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -613,6 +614,25 @@ bool TestRgb24ToYuyvLibyuvKeepsTheOddWidthRowContract() {
         return false;
       }
     }
+  }
+
+  return true;
+}
+
+// The row size is ceil(width / 2) * 4 bytes. Computed as (width + 1) / 2 in
+// int, that addition overflows at the largest width, so the backend must size
+// the row in std::size_t. It still has to refuse a row that cannot hold the
+// result, and it must do so before it touches the buffers.
+bool TestRgb24ToYuyvLibyuvRefusesTheWidestRow() {
+  constexpr int width = std::numeric_limits<int>::max();
+  std::array<std::uint8_t, 8> src{};
+  std::array<std::uint8_t, 8> dst{};
+
+  if (video::internal::Rgb24ToYuyvLibyuv(src.data(), width, 1, src.size(),
+                                         dst.data(), dst.size(), nullptr, 0)) {
+    std::cerr << "libyuv accepted an " << dst.size() << " byte row for width "
+              << width << "\n";
+    return false;
   }
 
   return true;
