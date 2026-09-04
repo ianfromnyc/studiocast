@@ -11,6 +11,7 @@
 #include "core/audio/pulse/pactl.h"
 #include "gui/status/pending_daemon_write_guard.h"
 
+class QCheckBox;
 class QComboBox;
 class QGroupBox;
 class QLabel;
@@ -77,6 +78,11 @@ private slots:
 
   void OnToggleAdvanced(bool checked);
 
+  void RefreshMonitorSinks();
+  void OnMonitorEnabledToggled(bool checked);
+  void OnMonitorSinkChanged(int index);
+  void OnMonitorLatencyChanged(int value);
+
 private:
   struct SourceRefreshResult {
     bool pactlOk = false;
@@ -99,6 +105,8 @@ private:
   void ApplySourceRefreshResult(const SourceRefreshResult &result);
   void ApplySpeakerTargetRefreshResult(
       const SpeakerTargetRefreshResult &result);
+  void ApplyMonitorSinkRefreshResult(const SpeakerTargetRefreshResult &result);
+  void PushDaemonMonitorConfig();
   void RefreshStatusFromCachedDaemon(bool forceControlResync);
   void ApplyCachedDaemonAudioStatus(bool forceControlResync = false);
   void ScheduleDaemonAudioConfigWrite();
@@ -162,6 +170,14 @@ private:
   QLineEdit *openAudioModelPathEdit_ = nullptr;
   QPushButton *browseOpenAudioModelBtn_ = nullptr;
   QPushButton *openAudioInstallHintsBtn_ = nullptr;
+
+  // Microphone monitor: hear the processed feed on a chosen output.
+  QGroupBox *monitorBox_ = nullptr;
+  QCheckBox *monitorEnableCheck_ = nullptr;
+  QComboBox *monitorSinkCombo_ = nullptr;
+  QPushButton *refreshMonitorSinksBtn_ = nullptr;
+  QSpinBox *monitorLatencySpin_ = nullptr;
+  QLabel *monitorStatusLabel_ = nullptr;
 
   // Advanced / legacy loopback and virtual device controls (microphone).
   QGroupBox *legacyInputBox_ = nullptr;
@@ -232,6 +248,10 @@ private:
   QString daemonSpeakersRouteMode_;
   QString daemonSpeakerTarget_;
 
+  // Last microphone monitor state reported by the daemon.
+  bool updatingMonitorUi_ = false;
+  QString daemonMonitorSink_;
+
   // Cached daemon effects blob so we can preserve fields not represented in
   // this UI.
   QJsonObject lastAudioEffectsObj_;
@@ -245,6 +265,7 @@ private:
   PendingDaemonWriteGuard audioWriteGuard_;
   QThread *sourceRefreshThread_ = nullptr;
   QThread *speakerTargetRefreshThread_ = nullptr;
+  QThread *monitorSinkRefreshThread_ = nullptr;
 };
 
 } // namespace studiocast::gui

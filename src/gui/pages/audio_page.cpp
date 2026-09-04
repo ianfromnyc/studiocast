@@ -1,5 +1,6 @@
 #include "audio_page.h"
 
+#include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
 #include <QFileDialog>
@@ -31,6 +32,7 @@
 
 #include "core/audio/audio_device_safety.h"
 #include "core/audio/effects/broadcast_audio_effects.h"
+#include "core/audio/mic_monitor.h"
 #include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_mic.h"
 #include "core/audio/virtual_speaker.h"
@@ -366,6 +368,49 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
           micEffectsBox_));
     }
     root->addWidget(micEffectsBox_);
+
+    // -----------------------
+    // Microphone monitor
+    // -----------------------
+    monitorBox_ = new QGroupBox("Monitor", this);
+    {
+      auto *monitorLayout = new QVBoxLayout(monitorBox_);
+      monitorLayout->setSpacing(10);
+
+      monitorEnableCheck_ =
+          new QCheckBox("Monitor processed microphone", monitorBox_);
+      monitorLayout->addWidget(monitorEnableCheck_);
+
+      auto *sinkRow = new QHBoxLayout();
+      sinkRow->addWidget(new QLabel("Play on:", monitorBox_));
+      monitorSinkCombo_ = new QComboBox(monitorBox_);
+      monitorSinkCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+      sinkRow->addWidget(monitorSinkCombo_, 1);
+      refreshMonitorSinksBtn_ = new QPushButton("Refresh", monitorBox_);
+      sinkRow->addWidget(refreshMonitorSinksBtn_);
+      monitorLayout->addLayout(sinkRow);
+
+      auto *latencyRow = new QHBoxLayout();
+      latencyRow->addWidget(new QLabel("Delay (ms):", monitorBox_));
+      monitorLatencySpin_ = new QSpinBox(monitorBox_);
+      monitorLatencySpin_->setRange(studiocast::audio::kMicMonitorMinLatencyMs,
+                                    studiocast::audio::kMicMonitorMaxLatencyMs);
+      monitorLatencySpin_->setValue(20);
+      latencyRow->addWidget(monitorLatencySpin_);
+      latencyRow->addStretch(1);
+      monitorLayout->addLayout(latencyRow);
+
+      monitorStatusLabel_ = MutedLabel(QString(), monitorBox_);
+      monitorStatusLabel_->setVisible(false);
+      monitorLayout->addWidget(monitorStatusLabel_);
+
+      monitorLayout->addWidget(MutedLabel(
+          "Hear the processed microphone on the selected output while you "
+          "adjust the effects. Use headphones: speakers can feed the sound "
+          "back into the microphone.",
+          monitorBox_));
+    }
+    root->addWidget(monitorBox_);
 
     root->addWidget(backendBox_);
 
@@ -830,6 +875,24 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
             this, &AudioPage::OnSourceChanged);
   }
 
+  if (monitorEnableCheck_) {
+    connect(monitorEnableCheck_, &QCheckBox::toggled, this,
+            &AudioPage::OnMonitorEnabledToggled);
+  }
+  if (monitorSinkCombo_) {
+    connect(monitorSinkCombo_,
+            QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &AudioPage::OnMonitorSinkChanged);
+  }
+  if (monitorLatencySpin_) {
+    connect(monitorLatencySpin_, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, &AudioPage::OnMonitorLatencyChanged);
+  }
+  if (refreshMonitorSinksBtn_) {
+    connect(refreshMonitorSinksBtn_, &QPushButton::clicked, this,
+            &AudioPage::RefreshMonitorSinks);
+  }
+
   audioWriteDebounceTimer_ = new QTimer(this);
   audioWriteDebounceTimer_->setSingleShot(true);
   audioWriteDebounceTimer_->setInterval(180);
@@ -841,6 +904,7 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
   // Initial state.
   if (mode_ == AudioPageMode::Microphone) {
     RefreshSources();
+    RefreshMonitorSinks();
   } else {
     RefreshSpeakerTargets();
   }
@@ -1254,6 +1318,173 @@ void AudioPage::ApplySpeakerTargetRefreshResult(
   }
   speakerTargetCombo_->blockSignals(false);
   updatingSpeakerTargetUi_ = false;
+}
+
+void AudioPage::RefreshMonitorSinks() {
+  if (!monitorSinkCombo_)
+    return;
+  if (monitorSinkRefreshThread_)
+    return;
+
+  updatingMonitorUi_ = true;
+  monitorSinkCombo_->blockSignals(true);
+  monitorSinkCombo_->clear();
+  monitorSinkCombo_->addItem(QStringLiteral("Loading outputs..."));
+  monitorSinkCombo_->setEnabled(false);
+  monitorSinkCombo_->blockSignals(false);
+  updatingMonitorUi_ = false;
+  if (refreshMonitorSinksBtn_)
+    refreshMonitorSinksBtn_->setEnabled(false);
+
+  auto result = std::make_shared<SpeakerTargetRefreshResult>();
+  auto *thread = QThread::create([result] {
+    result->pactlOk =
+        studiocast::audio::pulse::PactlAvailable(&result->pactlDetails);
+    if (!result->pactlOk)
+      return;
+    result->sinks = studiocast::audio::pulse::ListSinks(&result->listError);
+    std::string defaultError;
+    result->defaultSink =
+        studiocast::audio::pulse::GetDefaultSinkName(&defaultError);
+  });
+  monitorSinkRefreshThread_ = thread;
+  connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+  connect(thread, &QThread::finished, this, [this, thread, result] {
+    if (monitorSinkRefreshThread_ == thread)
+      monitorSinkRefreshThread_ = nullptr;
+    ApplyMonitorSinkRefreshResult(*result);
+    if (refreshMonitorSinksBtn_)
+      refreshMonitorSinksBtn_->setEnabled(true);
+  });
+  thread->start();
+}
+
+void AudioPage::ApplyMonitorSinkRefreshResult(
+    const SpeakerTargetRefreshResult &result) {
+  if (!monitorSinkCombo_)
+    return;
+
+  updatingMonitorUi_ = true;
+  monitorSinkCombo_->blockSignals(true);
+  monitorSinkCombo_->clear();
+
+  if (!result.pactlOk) {
+    monitorSinkCombo_->addItem(QString::fromLatin1(kAudioControlsUnavailable));
+    monitorSinkCombo_->setEnabled(false);
+    if (monitorEnableCheck_)
+      monitorEnableCheck_->setEnabled(false);
+    monitorSinkCombo_->blockSignals(false);
+    updatingMonitorUi_ = false;
+    return;
+  }
+
+  monitorSinkCombo_->setEnabled(true);
+  monitorSinkCombo_->addItem("System default",
+                             QVariant(QString::fromLatin1(kAutoPulseSink)));
+
+  const QString daemonSink = daemonMonitorSink_.trimmed();
+  int daemonIndex = -1;
+  int added = 1;
+
+  // StudioCast's own sinks would feed the microphone back into itself.
+  for (const auto &sink : result.sinks) {
+    if (sink.name.empty())
+      continue;
+    std::string reason;
+    if (studiocast::audio::IsUnsafeSpeakerTargetSinkName(sink.name, &reason))
+      continue;
+
+    std::string label = sink.name;
+    if (result.defaultSink && sink.name == *result.defaultSink)
+      label += " (default)";
+
+    monitorSinkCombo_->addItem(QString::fromStdString(label),
+                               QVariant(QString::fromStdString(sink.name)));
+    if (!daemonSink.isEmpty() &&
+        daemonSink != QString::fromLatin1(kAutoPulseSink) &&
+        sink.name == daemonSink.toStdString()) {
+      daemonIndex = added;
+    }
+    ++added;
+  }
+
+  int index = 0;
+  if (!daemonSink.isEmpty() &&
+      daemonSink != QString::fromLatin1(kAutoPulseSink)) {
+    if (daemonIndex >= 0) {
+      index = daemonIndex;
+    } else {
+      const int insertAt = std::min(1, monitorSinkCombo_->count());
+      monitorSinkCombo_->insertItem(
+          insertAt, QStringLiteral("<disconnected: %1>").arg(daemonSink),
+          QVariant(daemonSink));
+      index = insertAt;
+    }
+  }
+
+  monitorSinkCombo_->setCurrentIndex(index);
+  monitorSinkCombo_->blockSignals(false);
+  updatingMonitorUi_ = false;
+}
+
+void AudioPage::PushDaemonMonitorConfig() {
+  if (!daemonAiSupported_ || !monitorEnableCheck_) {
+    audioWriteGuard_.MarkWriteRejected();
+    return;
+  }
+
+  QJsonObject monitor;
+  monitor.insert("enabled", monitorEnableCheck_->isChecked());
+  if (monitorSinkCombo_ && monitorSinkCombo_->isEnabled()) {
+    const auto sink = monitorSinkCombo_->currentData().toString();
+    if (!sink.isEmpty())
+      monitor.insert("sink", sink);
+  }
+  if (monitorLatencySpin_)
+    monitor.insert("latency_ms", monitorLatencySpin_->value());
+
+  QJsonObject patch;
+  patch.insert("monitor", monitor);
+  const auto json = QJsonDocument(patch).toJson(QJsonDocument::Compact);
+
+  std::string out;
+  QString err;
+  if (!DaemonRequest(std::string("SET_AUDIO_CONFIG ") + json.toStdString(),
+                     &out, &err)) {
+    if (statusText_) {
+      SetPlainTextPreservingScroll(
+          statusText_,
+          QStringLiteral("Microphone monitor save failed:\n%1").arg(err));
+    }
+    ShowError("Audio",
+              QStringLiteral("The microphone monitor was not changed.\n\nOpen "
+                             "Support for technical details."));
+    audioWriteGuard_.MarkWriteRejected();
+    RefreshStatusFromCachedDaemon(/*forceControlResync=*/true);
+    emit StatusRefreshRequested();
+    return;
+  }
+
+  audioWriteGuard_.MarkWriteAccepted();
+  emit StatusRefreshRequested();
+}
+
+void AudioPage::OnMonitorEnabledToggled(bool /*checked*/) {
+  if (updatingMonitorUi_)
+    return;
+  PushDaemonMonitorConfig();
+}
+
+void AudioPage::OnMonitorSinkChanged(int /*index*/) {
+  if (updatingMonitorUi_)
+    return;
+  PushDaemonMonitorConfig();
+}
+
+void AudioPage::OnMonitorLatencyChanged(int /*value*/) {
+  if (updatingMonitorUi_)
+    return;
+  PushDaemonMonitorConfig();
 }
 
 void AudioPage::OnSourceChanged(int /*index*/) {
@@ -1910,6 +2141,86 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
             "technical details.");
       micSourceStatusLabel_->setText(sourceLines.join(QStringLiteral("\n")));
       micSourceStatusLabel_->setVisible(!sourceLines.isEmpty());
+    }
+
+    // Microphone monitor controls follow the daemon, which owns the route.
+    if (monitorEnableCheck_) {
+      const auto monitor = audio.value("monitor").toObject();
+      const bool monitorReported = audio.contains("monitor");
+      const bool monitorEnabled = monitor.value("enabled").toBool(false);
+      const bool monitorActive = monitor.value("active").toBool(false);
+      const QString monitorSink = monitor.value("sink").toString();
+      const QString monitorSinkResolved =
+          monitor.value("sink_resolved").toString().trimmed();
+      const QString monitorSinkError =
+          monitor.value("sink_error").toString().trimmed();
+      const QString monitorError =
+          monitor.value("last_error").toString().trimmed();
+      const int monitorLatency = monitor.value("latency_ms").toInt(20);
+
+      const bool sinkChanged = daemonMonitorSink_ != monitorSink;
+      daemonMonitorSink_ = monitorSink;
+
+      updatingMonitorUi_ = true;
+      monitorEnableCheck_->setEnabled(monitorReported && daemonAiSupported_);
+      monitorEnableCheck_->setChecked(monitorEnabled);
+      if (monitorLatencySpin_ && !monitorLatencySpin_->hasFocus())
+        monitorLatencySpin_->setValue(monitorLatency);
+      updatingMonitorUi_ = false;
+
+      if (sinkChanged && monitorSinkCombo_ && monitorSinkCombo_->count() > 0) {
+        // Re-select only; a full list refresh happens on the Refresh button.
+        updatingMonitorUi_ = true;
+        int index = 0;
+        for (int i = 0; i < monitorSinkCombo_->count(); ++i) {
+          if (monitorSinkCombo_->itemData(i).toString() == monitorSink) {
+            index = i;
+            break;
+          }
+        }
+        monitorSinkCombo_->setCurrentIndex(index);
+        updatingMonitorUi_ = false;
+      }
+
+      if (monitorStatusLabel_) {
+        QStringList monitorLines;
+        if (!monitorReported) {
+          monitorLines << QStringLiteral(
+              "This daemon does not report the microphone monitor.");
+        } else if (monitorActive) {
+          monitorLines << QStringLiteral("Playing on: %1")
+                              .arg(monitorSinkResolved.isEmpty()
+                                       ? QStringLiteral("system default")
+                                       : monitorSinkResolved);
+        } else if (monitorEnabled) {
+          monitorLines << QStringLiteral("Monitor is on but not playing yet.");
+        }
+        if (!monitorSinkError.isEmpty()) {
+          monitorLines << QStringLiteral(
+              "The selected output cannot be used for monitoring. Choose "
+              "another output.");
+        }
+        if (!monitorError.isEmpty()) {
+          monitorLines << QStringLiteral(
+              "The monitor needs attention. Open Support for technical "
+              "details.");
+        }
+        monitorStatusLabel_->setText(monitorLines.join(QStringLiteral("\n")));
+        monitorStatusLabel_->setVisible(!monitorLines.isEmpty());
+      }
+
+      daemonStatusText_ +=
+          QString("monitor_enabled=%1 monitor_active=%2 monitor_sink=%3 "
+                  "monitor_sink_resolved=%4\n")
+              .arg(monitorEnabled ? "true" : "false")
+              .arg(monitorActive ? "true" : "false")
+              .arg(monitorSink.isEmpty() ? "(none)" : monitorSink)
+              .arg(monitorSinkResolved.isEmpty() ? "(none)"
+                                                 : monitorSinkResolved);
+      if (!monitorError.isEmpty())
+        daemonStatusText_ += "monitor_last_error: " + monitorError + "\n";
+      if (!monitorSinkError.isEmpty())
+        daemonStatusText_ += "monitor_sink_error: " + monitorSinkError + "\n";
     }
   }
 
