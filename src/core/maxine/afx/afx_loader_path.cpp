@@ -94,6 +94,8 @@ LdLibraryPathWithDirs(const std::string &current,
   return out;
 }
 
+fs::path ExecPathForRestart(const fs::path &) { return {}; }
+
 void EnsureAfxFeatureLibsOnLoaderPath(char **argv, std::string *note) {
   if (note)
     note->clear();

@@ -611,6 +611,26 @@ bool TestRunPassesChannelPointers() {
   return ok;
 }
 
+// A restart through `/proc/self/exe` leaves the kernel with `exe` as the
+// process name, which hides the daemon from `pgrep -x studiocastd` and from
+// the process views. Start the program by its real path instead.
+bool TestExecPathForRestart() {
+  using studiocast::maxine::afx::ExecPathForRestart;
+
+  bool ok = Require(ExecPathForRestart("/usr/bin/studiocastd") ==
+                        fs::path("/usr/bin/studiocastd"),
+                    "expected the real path of the program");
+  ok &= Require(ExecPathForRestart(fs::path()) == fs::path("/proc/self/exe"),
+                "expected the link when the target is unknown");
+  ok &= Require(ExecPathForRestart("/usr/bin/studiocastd (deleted)") ==
+                    fs::path("/proc/self/exe"),
+                "expected the link when the program file is gone");
+  ok &= Require(ExecPathForRestart("build/studiocastd") ==
+                    fs::path("/proc/self/exe"),
+                "expected the link when the target is not absolute");
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -624,6 +644,7 @@ int main() {
   ok = TestFeatureLibDirsAreListed() && ok;
   ok = TestLoaderPathValue() && ok;
   ok = TestRunPassesChannelPointers() && ok;
+  ok = TestExecPathForRestart() && ok;
 
   if (!ok)
     return 1;

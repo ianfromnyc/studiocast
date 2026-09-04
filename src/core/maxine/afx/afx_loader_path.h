@@ -22,6 +22,15 @@ std::optional<std::string>
 LdLibraryPathWithDirs(const std::string &current,
                       const std::vector<fs::path> &dirs);
 
+// The program to start again, given what `/proc/self/exe` points at (an empty
+// path when that could not be read).
+//
+// A restart through `/proc/self/exe` makes the kernel set the process name to
+// `exe`, so `pgrep -x studiocastd` and the process views no longer find the
+// daemon. The real path keeps the name. The link stays the answer when the
+// target is unknown, is not absolute, or names a program file that is gone.
+fs::path ExecPathForRestart(const fs::path &self_exe_target);
+
 // Puts the AFX feature library directories on the loader path.
 //
 // glibc reads LD_LIBRARY_PATH once, at start, so a program can only change
