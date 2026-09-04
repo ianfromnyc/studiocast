@@ -199,6 +199,46 @@ bool TestResolvesTheVersionedLibrary() {
   return ok;
 }
 
+// The SDK installs the real file as `libnv_audiofx_<name>.so.2.1.0` and links
+// the shorter names to it. A tree that kept only the real files must still
+// resolve, and the highest version must win.
+bool TestResolvesTheRealFileWithoutTheLinks() {
+  const fs::path root = TempRoot("realfile");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  const fs::path lib_dir = features / "denoiser" / "lib";
+  fs::create_directories(lib_dir, ec);
+  const bool made = !ec &&
+                    Touch(lib_dir / "libnv_audiofx_denoiser.so.2.0.5") &&
+                    Touch(lib_dir / "libnv_audiofx_denoiser.so.2.1.0") &&
+                    MakeModel(features / "denoiser" / "models" / "sm_86",
+                              "denoiser_48k", "3072");
+  if (!made) {
+    std::cerr << "failed to build the AFX library without links\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  studiocast::maxine::afx::AfxEffect fx(nullptr);
+  const auto cfg = MakeConfig(features, "denoiser", "denoiser");
+  std::string err;
+
+  const bool configured = fx.Configure(cfg, &err);
+  bool ok = Require(configured,
+                    "expected the real file alone to configure: " + err);
+  if (ok) {
+    ok &= Require(fx.resolved_feature_lib_path() ==
+                      lib_dir / "libnv_audiofx_denoiser.so.2.1.0",
+                  "expected libnv_audiofx_denoiser.so.2.1.0, got " +
+                      fx.resolved_feature_lib_path().string());
+  }
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 // A feature with no library must still give the clear message, and it must
 // name every library that the lookup tried.
 bool TestMissingLibraryKeepsTheClearError() {
@@ -678,6 +718,7 @@ int main() {
   bool ok = true;
   ok = TestResolvesTheRealAfxLayout() && ok;
   ok = TestResolvesTheVersionedLibrary() && ok;
+  ok = TestResolvesTheRealFileWithoutTheLinks() && ok;
   ok = TestMissingLibraryKeepsTheClearError() && ok;
   ok = TestLoadsStudioVoiceWithoutTheOptionalParameters() && ok;
   ok = TestNonMonoChannelCountIsRefused() && ok;

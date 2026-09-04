@@ -87,6 +87,70 @@ FindFirstExistingFile(const std::vector<fs::path> &candidates) {
   return std::nullopt;
 }
 
+// The version numbers of `<stem>.so.<digits>[.<digits>...]`, or nothing when
+// `filename` does not have that shape. The parts order the versions: `.so.2`
+// gives {2}, `.so.2.1.0` gives {2, 1, 0}, and {2} sorts below {2, 1, 0}.
+std::optional<std::vector<unsigned long long>>
+SoVersionParts(const std::string &filename, const std::string &stem) {
+  const std::string prefix = stem + ".so.";
+  if (filename.size() <= prefix.size() ||
+      filename.compare(0, prefix.size(), prefix) != 0) {
+    return std::nullopt;
+  }
+
+  std::vector<unsigned long long> parts;
+  unsigned long long value = 0;
+  bool have_digits = false;
+  for (std::size_t i = prefix.size(); i < filename.size(); ++i) {
+    const char c = filename[i];
+    if (c >= '0' && c <= '9') {
+      value = value * 10ull + static_cast<unsigned long long>(c - '0');
+      have_digits = true;
+      continue;
+    }
+    if (c == '.' && have_digits) {
+      parts.push_back(value);
+      value = 0;
+      have_digits = false;
+      continue;
+    }
+    return std::nullopt;
+  }
+
+  if (!have_digits)
+    return std::nullopt;
+  parts.push_back(value);
+  return parts;
+}
+
+// The highest `<stem>.so.<version>` file in `lib_dir`, or an empty path when
+// there is none.
+fs::path HighestVersionedLibrary(const fs::path &lib_dir,
+                                 const std::string &stem) {
+  std::error_code ec;
+  fs::directory_iterator it(lib_dir, ec);
+  const fs::directory_iterator end;
+
+  fs::path best;
+  std::optional<std::vector<unsigned long long>> best_version;
+  for (; !ec && it != end; it.increment(ec)) {
+    const auto parts = SoVersionParts(it->path().filename().string(), stem);
+    if (!parts)
+      continue;
+
+    std::error_code file_ec;
+    if (!fs::is_regular_file(it->path(), file_ec) || file_ec)
+      continue;
+
+    if (!best_version || *best_version < *parts) {
+      best_version = parts;
+      best = it->path();
+    }
+  }
+
+  return best;
+}
+
 // The libraries that can hold one effect, in the order to try them. A feature
 // that holds more than one effect, such as studio voice, names its libraries
 // after the effect selector; the other features name theirs after the feature.
@@ -102,11 +166,20 @@ std::vector<fs::path> FeatureLibraryCandidates(const fs::path &lib_dir,
     stems.push_back("libnv_audiofx_" + feature_id);
 
   std::vector<fs::path> out;
-  out.reserve(stems.size() * 3);
+  out.reserve(stems.size() * 4);
   for (const auto &stem : stems) {
     out.push_back(lib_dir / (stem + ".so"));
     out.push_back(lib_dir / (stem + ".so.2"));
     out.push_back(lib_dir / (stem + ".so.1"));
+  }
+
+  // The names above are the links the SDK installs beside the real file. A
+  // tree that lost the links still holds `<stem>.so.2.1.0`, so try the highest
+  // version of each stem after the names we know.
+  for (const auto &stem : stems) {
+    const fs::path versioned = HighestVersionedLibrary(lib_dir, stem);
+    if (!versioned.empty())
+      out.push_back(versioned);
   }
   return out;
 }
