@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace studiocast::maxine::afx {
 
@@ -72,7 +73,7 @@ SmFolderFromComputeCap(const std::optional<std::pair<int, int>> &cap,
 }
 
 std::optional<fs::path>
-FindFirstExistingFile(std::initializer_list<fs::path> candidates) {
+FindFirstExistingFile(const std::vector<fs::path> &candidates) {
   std::error_code ec;
   for (const auto &p : candidates) {
     if (p.empty())
@@ -82,6 +83,30 @@ FindFirstExistingFile(std::initializer_list<fs::path> candidates) {
     }
   }
   return std::nullopt;
+}
+
+// The libraries that can hold one effect, in the order to try them. A feature
+// that holds more than one effect, such as studio voice, names its libraries
+// after the effect selector; the other features name theirs after the feature.
+// AFX 2.1.0 installs `.so`, `.so.2` and `.so.2.1.0`; `.so.1` is for the older
+// SDK.
+std::vector<fs::path> FeatureLibraryCandidates(const fs::path &lib_dir,
+                                               const std::string &selector,
+                                               const std::string &feature_id) {
+  std::vector<std::string> stems;
+  if (!selector.empty())
+    stems.push_back("libnv_audiofx_" + selector);
+  if (!feature_id.empty() && feature_id != selector)
+    stems.push_back("libnv_audiofx_" + feature_id);
+
+  std::vector<fs::path> out;
+  out.reserve(stems.size() * 3);
+  for (const auto &stem : stems) {
+    out.push_back(lib_dir / (stem + ".so"));
+    out.push_back(lib_dir / (stem + ".so.2"));
+    out.push_back(lib_dir / (stem + ".so.1"));
+  }
+  return out;
 }
 
 bool PrependEnvPath(const char *var, const fs::path &dir,
@@ -174,23 +199,34 @@ std::optional<fs::path> ResolveModelPath(const AfxEffectConfig &cfg,
     return std::nullopt;
   }
 
-  std::string model_name;
-  if (cfg.feature_id == "denoiser") {
-    model_name = cfg.use_denoiser_v2_model ? "denoiser_v2_48k.trtpkg"
-                                           : "denoiser_48k.trtpkg";
-  } else if (cfg.effect_selector == "studio_voice_low_latency") {
-    model_name = "studio_voice_low_latency_48k.trtpkg";
-  } else {
-    model_name = cfg.feature_id + "_48k.trtpkg";
+  // The model is named after the effect selector, which for most features is
+  // the feature id itself. The denoiser has a second model.
+  std::vector<std::string> model_names;
+  if (cfg.feature_id == "denoiser" && cfg.use_denoiser_v2_model) {
+    model_names.push_back("denoiser_v2_48k.trtpkg");
+  }
+  if (!cfg.effect_selector.empty()) {
+    model_names.push_back(cfg.effect_selector + "_48k.trtpkg");
+  }
+  if (!cfg.feature_id.empty() && cfg.feature_id != cfg.effect_selector) {
+    model_names.push_back(cfg.feature_id + "_48k.trtpkg");
   }
 
-  const fs::path expected =
-      cfg.features_dir / cfg.feature_id / "models" / *sm / model_name;
-  if (!fs::exists(expected, ec)) {
+  const fs::path model_dir = cfg.features_dir / cfg.feature_id / "models" / *sm;
+  std::vector<fs::path> candidates;
+  candidates.reserve(model_names.size());
+  for (const auto &name : model_names) {
+    candidates.push_back(model_dir / name);
+  }
+
+  const auto found = FindFirstExistingFile(candidates);
+  if (!found) {
     if (error_out) {
       std::ostringstream oss;
-      oss << "AFX model file not found: " << expected.string() << ". "
-          << "Expected models under `"
+      oss << "AFX model file not found: "
+          << (candidates.empty() ? model_dir.string()
+                                 : candidates.front().string())
+          << ". Expected models under `"
           << (cfg.features_dir / cfg.feature_id / "models").string() << "` "
           << "(SM folder " << *sm << ").";
       *error_out = oss.str();
@@ -198,7 +234,7 @@ std::optional<fs::path> ResolveModelPath(const AfxEffectConfig &cfg,
     return std::nullopt;
   }
 
-  return expected;
+  return *found;
 }
 
 } // namespace
@@ -288,18 +324,25 @@ bool AfxEffect::Configure(const AfxEffectConfig &cfg, std::string *error_out) {
   resolved_model_path_ = *mp;
 
   resolved_feature_lib_dir_ = cfg_.features_dir / cfg_.feature_id / "lib";
-  const auto lib = FindFirstExistingFile({
-      resolved_feature_lib_dir_ / ("libnv_audiofx_" + cfg_.feature_id + ".so"),
-      resolved_feature_lib_dir_ /
-          ("libnv_audiofx_" + cfg_.feature_id + ".so.1"),
-  });
+  const auto lib_candidates = FeatureLibraryCandidates(
+      resolved_feature_lib_dir_, cfg_.effect_selector, cfg_.feature_id);
+  const auto lib = FindFirstExistingFile(lib_candidates);
   if (!lib) {
     if (error_out) {
+      std::ostringstream tried;
+      bool first = true;
+      for (const auto &c : lib_candidates) {
+        if (!first)
+          tried << ", ";
+        first = false;
+        tried << c.filename().string();
+      }
       std::ostringstream oss;
       oss << "AFX feature library not found for `" << cfg_.feature_id << "`. "
-          << "Expected `libnv_audiofx_" << cfg_.feature_id << ".so` under `"
+          << "Tried " << tried.str() << " under `"
           << resolved_feature_lib_dir_.string() << "`. "
-          << "Ensure you ran the AFX `install_feature.sh` for this feature.";
+          << "Ensure you downloaded the AFX feature `" << cfg_.feature_id
+          << "`.";
       *error_out = oss.str();
     }
     return false;
@@ -424,7 +467,11 @@ bool AfxEffect::Load(std::string *error_out) {
 
   Destroy();
 
-  // Ensure the feature library can be discovered by the AFX SDK loader.
+  // Put the feature library directory on LD_LIBRARY_PATH for any process that
+  // StudioCast starts later. It does not help this process: glibc reads
+  // LD_LIBRARY_PATH once, at start, so a later setenv does not change where
+  // dlopen looks. The AFX core loads the feature library by its bare name, so
+  // the directory must already be on the loader path when the daemon starts.
   std::string env_err;
   if (!PrependEnvPath("LD_LIBRARY_PATH", resolved_feature_lib_dir_, &env_err)) {
     if (error_out)
@@ -506,7 +553,8 @@ bool AfxEffect::Load(std::string *error_out) {
   }
   if (cfg_.vad_enabled) {
     if (!SetU32Any(handle_, "vad_enabled",
-                   {"useVAD", "use_vad", "vad", "enableVAD"}, 1u, &set_err)) {
+                   {"enable_vad", "useVAD", "use_vad", "vad", "enableVAD"}, 1u,
+                   &set_err)) {
       if (error_out)
         *error_out = set_err;
       Destroy();
