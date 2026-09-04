@@ -7,6 +7,7 @@ namespace {
 
 using studiocast::pw::AudioTransport;
 using studiocast::pw::AudioTransportPreference;
+using studiocast::pw::ParseAudioTransportPreference;
 using studiocast::pw::PipeWireAvailability;
 using studiocast::pw::ResolveAudioTransport;
 
@@ -83,6 +84,23 @@ bool TestPipeWirePreferenceFallsBackAndExplainsWhy() {
                 "the note should carry the availability reason");
 }
 
+bool TestAudioTransportPreferenceParsing() {
+  const auto pulse = ParseAudioTransportPreference("pulse");
+  const auto pw = ParseAudioTransportPreference("PipeWire");
+  const auto autoPref = ParseAudioTransportPreference(" auto ");
+  const auto pulseAlias = ParseAudioTransportPreference("pulseaudio");
+  const auto bad = ParseAudioTransportPreference("jack");
+  return Expect(pulse && *pulse == AudioTransportPreference::kPulse,
+                "\"pulse\" should parse") &&
+         Expect(pw && *pw == AudioTransportPreference::kPipeWire,
+                "the parser should ignore letter case") &&
+         Expect(autoPref && *autoPref == AudioTransportPreference::kAuto,
+                "the parser should ignore surrounding spaces") &&
+         Expect(pulseAlias && *pulseAlias == AudioTransportPreference::kPulse,
+                "\"pulseaudio\" is an accepted alias") &&
+         Expect(!bad.has_value(), "an unknown name must not parse");
+}
+
 } // namespace
 
 int main() {
@@ -100,6 +118,8 @@ int main() {
        &TestPulsePreferenceNeverSelectsPipeWire},
       {"pipewire preference falls back and explains why",
        &TestPipeWirePreferenceFallsBackAndExplainsWhy},
+      {"audio transport preference parsing",
+       &TestAudioTransportPreferenceParsing},
   };
 
   int failed = 0;

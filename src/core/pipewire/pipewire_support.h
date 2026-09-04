@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -40,12 +41,17 @@ struct AudioTransportDecision {
 };
 
 std::string_view ToString(AudioTransport t);
+
+// Parses a config value or a command-line value. Letter case and surrounding
+// spaces do not matter. Returns nothing for an unknown name.
+std::optional<AudioTransportPreference>
+ParseAudioTransportPreference(std::string_view s);
+
 std::string_view ToString(AudioTransportPreference p);
 
 // Chooses the transport. `kAuto` prefers native PipeWire when it is usable,
 // and uses PulseAudio in every other case.
-AudioTransportDecision
-ResolveAudioTransport(AudioTransportPreference pref,
-                      const PipeWireAvailability &avail);
+AudioTransportDecision ResolveAudioTransport(AudioTransportPreference pref,
+                                             const PipeWireAvailability &avail);
 
 } // namespace studiocast::pw
