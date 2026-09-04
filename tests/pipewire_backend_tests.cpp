@@ -473,9 +473,21 @@ bool TestVideoOutputBackendSelection() {
                 "conference applications read V4L2 only") &&
          Expect(both.backends.v4l2loopback && both.backends.pipewire,
                 "both must enable the two outputs") &&
-         Expect(!nativeOnly.backends.v4l2loopback &&
+         Expect(both.note.empty(),
+                "both gets what it asks for, so it needs no note") &&
+         Expect(nativeOnly.backends.v4l2loopback &&
                     nativeOnly.backends.pipewire,
-                "pipewire alone must drop v4l2loopback") &&
+                "pipewire must keep v4l2loopback, because the loopback is "
+                "still the format source and node-only output is not "
+                "implemented") &&
+         Expect(nativeOnly.used_fallback,
+                "pipewire gives more than it was asked for, so it is a "
+                "fallback") &&
+         Expect(!nativeOnly.note.empty(),
+                "pipewire must say why the loopback is still there") &&
+         Expect(nativeOnly.note.find('\n') == std::string::npos,
+                "the pipewire note goes into JSON and into a banner, so it "
+                "stays one line") &&
          Expect(nativeMissing.backends.v4l2loopback &&
                     !nativeMissing.backends.pipewire,
                 "an unavailable server must fall back to v4l2loopback") &&

@@ -91,13 +91,14 @@ Config key `video.output.backend`, or the flag `--video-output-backend`:
 | --- | --- |
 | `auto` (default) | v4l2loopback only |
 | `v4l2loopback` | v4l2loopback only |
-| `pipewire` | the `Video/Source` node, beside v4l2loopback |
+| `pipewire` | the `Video/Source` node, beside v4l2loopback, with a note |
 | `both` | v4l2loopback and the node together |
 
 v4l2loopback stays the source of truth for the frame format, because the
 pipeline negotiates the output size, rate and pixel format with the loopback
-device. `pipewire` therefore still opens the loopback device today. A
-node-only mode is future work.
+device. `pipewire` therefore still opens the loopback device today, and it is
+the same result as `both`. The daemon prints a note that says so, because the
+name promises a node alone. A node-only mode is future work.
 
 `auto` does not select PipeWire because most video conference applications read
 V4L2 devices only. Mirroring the frames to both outputs is cheap: the node

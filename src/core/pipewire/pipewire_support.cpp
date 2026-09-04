@@ -101,12 +101,18 @@ ResolveVideoOutputBackends(VideoOutputPreference pref,
     return out;
 
   case VideoOutputPreference::kPipeWire:
-    if (avail.Usable()) {
-      out.backends.pipewire = true;
-      return out;
-    }
+    // The pipeline negotiates the frame size, rate and pixel format with the
+    // loopback device and mirrors the result onto the node, so the node cannot
+    // stand alone yet. Report the loopback that really runs.
     out.backends.v4l2loopback = true;
     out.used_fallback = true;
+    if (avail.Usable()) {
+      out.backends.pipewire = true;
+      out.note = "Node-only camera output is not implemented yet; the "
+                 "loopback stays the format source, so v4l2loopback runs "
+                 "beside the node.";
+      return out;
+    }
     out.note = "A native PipeWire camera was requested but is unavailable; "
                "using v4l2loopback.";
     if (const auto r = FirstLine(avail.reason); !r.empty())

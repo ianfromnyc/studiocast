@@ -109,8 +109,10 @@ ParseVideoOutputPreference(std::string_view s);
 
 // Chooses the outputs. `kAuto` keeps v4l2loopback alone, because most video
 // conference applications read V4L2 devices only and cannot see an application
-// node. A request for the node falls back to v4l2loopback when no server
-// answers.
+// node. `kPipeWire` adds the node but keeps v4l2loopback with a note, because
+// the loopback is still the format source and node-only output is not
+// implemented. A request for the node falls back to v4l2loopback alone when no
+// server answers.
 VideoOutputDecision
 ResolveVideoOutputBackends(VideoOutputPreference pref,
                            const PipeWireAvailability &avail);
