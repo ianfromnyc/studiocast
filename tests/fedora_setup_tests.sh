@@ -178,6 +178,66 @@ CHILD
   fi
 }
 
+# The helper installs a RETURN trap of its own. With functrace on, a RETURN
+# trap of the caller reaches the helper, so the helper must put it back the way
+# it puts the ERR trap back. Otherwise the caller loses its own clean-up.
+test_a_caller_return_trap_survives_the_call() {
+  local tmproot="${SANDBOX}/return-trap-tmp"
+  mkdir -p "${tmproot}"
+
+  local child="${SANDBOX}/return-trap-child.sh"
+  {
+    echo 'set -uo pipefail'
+    echo "${CHILD_PREAMBLE}"
+    cat <<'CHILD'
+# Sourcing the helper turns errexit on. Turn it off again here, so that a
+# return value can be observed instead of ending this shell.
+set +e
+# functrace passes the RETURN trap of the caller into every function it calls.
+set -T
+
+export TMPDIR="$2"
+export CUDNN_VERSION="$3"
+
+caller_with_a_return_trap() {
+  trap 'echo CALLER_RETURN_TRAP_RAN' RETURN
+  local before after
+  before="$(trap -p RETURN)"
+  ensure_cudnn_available 2>/dev/null
+  after="$(trap -p RETURN)"
+  if [[ "${before}" == "${after}" ]]; then
+    echo RETURN_TRAP_UNCHANGED
+  else
+    echo "RETURN_TRAP_CHANGED [${before}] -> [${after}]"
+  fi
+}
+
+caller_with_a_return_trap
+CHILD
+  } > "${child}"
+
+  local out
+  out="$(bash "${child}" "${FEDORA_SETUP}" "${tmproot}" "${FAKE_CUDNN_VERSION}" \
+    2>/dev/null)"
+
+  local marker
+  for marker in RETURN_TRAP_UNCHANGED CALLER_RETURN_TRAP_RAN; do
+    if [[ "${out}" != *"${marker}"* ]]; then
+      t_fail "expected ${marker} in the RETURN trap check, got: $(first_line "${out}")"
+    else
+      t_pass "${marker}"
+    fi
+  done
+
+  local leftovers
+  leftovers="$(leftover_entries "${tmproot}")"
+  if [[ -n "${leftovers}" ]]; then
+    t_fail "temporary directory left behind by the RETURN trap check: ${leftovers}"
+  else
+    t_pass "the temporary directory was removed under a caller RETURN trap"
+  fi
+}
+
 # The bootstrap root holds its libraries in lib or in lib64, so the CUDA
 # preflight must follow the layout of the root it finds.
 test_cuda_required_libs_follows_the_root_layout() {
@@ -218,6 +278,7 @@ STUB
 
 test_repeated_calls_clean_up_and_keep_the_caller_trap
 test_download_failure_cleans_up_and_runs_the_caller_trap
+test_a_caller_return_trap_survives_the_call
 test_cuda_required_libs_follows_the_root_layout
 
 if [[ "${FAILURES}" -ne 0 ]]; then
