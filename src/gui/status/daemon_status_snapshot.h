@@ -145,7 +145,7 @@ struct DaemonStatusSnapshot {
   QString speakersActiveBackend;
 
   // Sound server API the daemon runs on: "pulse" or "pipewire", and the
-  // reason for a fall back, if there was one.
+  // reason for a fallback, if there was one.
   QString audioTransportBackend;
   QString audioTransportNote;
 

@@ -67,7 +67,7 @@ Config key `audio.backend`, or the command-line flag `--audio-backend`:
 | --- | --- |
 | `pulse` (default) | always PulseAudio |
 | `auto` | native PipeWire when the option is compiled in and a PipeWire server is reachable, else PulseAudio |
-| `pipewire` | native PipeWire, with a fall back to PulseAudio and a note when it is not available |
+| `pipewire` | native PipeWire, with a fallback to PulseAudio and a note when it is not available |
 
 PulseAudio is the default because it works on a PulseAudio server and on a
 PipeWire server through `pipewire-pulse`. An upgrade therefore changes nothing
