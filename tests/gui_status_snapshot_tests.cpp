@@ -10,6 +10,7 @@
 
 #include <QApplication>
 #include <QAbstractItemModel>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QEventLoop>
 #include <QFrame>
@@ -17,11 +18,13 @@
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QTimer>
 #include <unistd.h>
 
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
+#include "gui/pages/audio_page.h"
 #include "gui/pages/engines_models_page.h"
 #include "gui/pages/video_page.h"
 #include "gui/status/daemon_status_snapshot.h"
@@ -1476,6 +1479,126 @@ bool TestPendingDaemonWriteGuardSkipsRoutineStatusUntilWriteSettles() {
                 "rejected write should allow forced daemon resync");
 }
 
+// The status a daemon without a microphone monitor sends: an audio object with
+// no "monitor" member.
+const char *const kAudioStatusWithoutMonitor = R"({
+        "service_running":true,
+        "audio":{
+          "enabled":false,
+          "mic_present":true,
+          "source_error":"",
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })";
+
+// The same status from a daemon that does report the monitor.
+const char *const kAudioStatusWithMonitor = R"({
+        "service_running":true,
+        "audio":{
+          "enabled":false,
+          "mic_present":true,
+          "source_error":"",
+          "monitor":{
+            "enabled":false,
+            "active":false,
+            "sink":"",
+            "latency_ms":20,
+            "volume":100
+          },
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })";
+
+// The daemon owns the monitor route, so a daemon that does not report a
+// monitor refuses every write the group can make. All of the controls must go
+// dead together, not the check box alone, and they must come back when a
+// daemon that has the monitor answers.
+bool TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() {
+  // The page reads the daemon socket under XDG_RUNTIME_DIR. Point it at an
+  // empty directory, so nothing here can reach a daemon of the person running
+  // the tests.
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  // No event loop runs in this test, on purpose. The page lists the audio
+  // devices on a background thread, and on a machine without pactl that
+  // listing ends in a modal dialog. UpdateStatus is synchronous, which is all
+  // this test needs.
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *enableCheck =
+      page.findChild<QCheckBox *>(QStringLiteral("monitorEnableCheck"));
+  auto *sinkCombo =
+      page.findChild<QComboBox *>(QStringLiteral("monitorSinkCombo"));
+  auto *latencySpin =
+      page.findChild<QSpinBox *>(QStringLiteral("monitorLatencySpin"));
+  auto *volumeSpin =
+      page.findChild<QSpinBox *>(QStringLiteral("monitorVolumeSpin"));
+  auto *refreshBtn =
+      page.findChild<QPushButton *>(QStringLiteral("refreshMonitorSinksBtn"));
+
+  bool ok = Expect(enableCheck != nullptr && sinkCombo != nullptr &&
+                       latencySpin != nullptr && volumeSpin != nullptr &&
+                       refreshBtn != nullptr,
+                   "every monitor control should be findable");
+  if (!ok)
+    return false;
+
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(
+      QString::fromLatin1(kAudioStatusWithoutMonitor)));
+
+  ok = Expect(!enableCheck->isEnabled(),
+              "the monitor check box should be disabled without a monitor") &&
+       ok;
+  ok = Expect(!sinkCombo->isEnabled(),
+              "the monitor sink combo should be disabled without a monitor") &&
+       ok;
+  ok = Expect(!latencySpin->isEnabled(),
+              "the monitor delay should be disabled without a monitor") &&
+       ok;
+  ok = Expect(!volumeSpin->isEnabled(),
+              "the monitor volume should be disabled without a monitor") &&
+       ok;
+  ok = Expect(!refreshBtn->isEnabled(),
+              "the sink refresh should be disabled without a monitor") &&
+       ok;
+
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(
+      QString::fromLatin1(kAudioStatusWithMonitor)));
+
+  ok = Expect(enableCheck->isEnabled(),
+              "the monitor check box should come back with a monitor") &&
+       ok;
+  ok = Expect(latencySpin->isEnabled(),
+              "the monitor delay should come back with a monitor") &&
+       ok;
+  ok = Expect(volumeSpin->isEnabled(),
+              "the monitor volume should come back with a monitor") &&
+       ok;
+
+  // The sink combo and the refresh button also need pactl and a finished sink
+  // list, which a test machine need not have, so they are not checked here.
+
+  return ok;
+}
+
 bool TestVideoPageKeepsUserSelectedInputWhenRoutineStatusStillAuto() {
   studiocast::gui::VideoPage page;
   auto *inputCombo =
@@ -1759,5 +1882,10 @@ int main(int argc, char **argv) {
   ok = TestVideoPageKeepsUserSelectedInputWhenRoutineStatusStillAuto() && ok;
   ok = TestVideoPageEnablesAvailableVirtualBackgroundRemoveMode() && ok;
   ok = TestVideoPageKeepsReplaceModeSelectedWhileImagePathIsMissing() && ok;
+
+  // Last: the audio page leaves a device listing running on a background
+  // thread, and nothing after this may pump the event loop that would deliver
+  // its result.
+  ok = TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() && ok;
   return ok ? 0 : 1;
 }

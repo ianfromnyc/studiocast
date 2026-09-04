@@ -107,6 +107,10 @@ private:
   void ApplySpeakerTargetRefreshResult(
       const SpeakerTargetRefreshResult &result);
   void ApplyMonitorSinkRefreshResult(const SpeakerTargetRefreshResult &result);
+
+  // Enable or disable every monitor control together, from the state the
+  // daemon reports and the state of the sink list.
+  void UpdateMonitorControlsEnabled();
   void PushDaemonMonitorConfig();
 
   // Microphone input the monitor sink rule must be checked against. Empty
@@ -256,6 +260,8 @@ private:
 
   // Last microphone monitor state reported by the daemon.
   bool updatingMonitorUi_ = false;
+  bool daemonMonitorReported_ = false;
+  bool monitorSinksUsable_ = false;
   QString daemonMonitorSink_;
 
   // Microphone input the daemon resolved, and the input the monitor sink list

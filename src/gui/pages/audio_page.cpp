@@ -379,20 +379,25 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
 
       monitorEnableCheck_ =
           new QCheckBox("Monitor processed microphone", monitorBox_);
+      monitorEnableCheck_->setObjectName(QStringLiteral("monitorEnableCheck"));
       monitorLayout->addWidget(monitorEnableCheck_);
 
       auto *sinkRow = new QHBoxLayout();
       sinkRow->addWidget(new QLabel("Play on:", monitorBox_));
       monitorSinkCombo_ = new QComboBox(monitorBox_);
+      monitorSinkCombo_->setObjectName(QStringLiteral("monitorSinkCombo"));
       monitorSinkCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
       sinkRow->addWidget(monitorSinkCombo_, 1);
       refreshMonitorSinksBtn_ = new QPushButton("Refresh", monitorBox_);
+      refreshMonitorSinksBtn_->setObjectName(
+          QStringLiteral("refreshMonitorSinksBtn"));
       sinkRow->addWidget(refreshMonitorSinksBtn_);
       monitorLayout->addLayout(sinkRow);
 
       auto *latencyRow = new QHBoxLayout();
       latencyRow->addWidget(new QLabel("Delay (ms):", monitorBox_));
       monitorLatencySpin_ = new QSpinBox(monitorBox_);
+      monitorLatencySpin_->setObjectName(QStringLiteral("monitorLatencySpin"));
       monitorLatencySpin_->setRange(studiocast::audio::kMicMonitorMinLatencyMs,
                                     studiocast::audio::kMicMonitorMaxLatencyMs);
       monitorLatencySpin_->setValue(20);
@@ -401,6 +406,7 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
       latencyRow->addSpacing(16);
       latencyRow->addWidget(new QLabel("Volume:", monitorBox_));
       monitorVolumeSpin_ = new QSpinBox(monitorBox_);
+      monitorVolumeSpin_->setObjectName(QStringLiteral("monitorVolumeSpin"));
       monitorVolumeSpin_->setRange(0, 100);
       monitorVolumeSpin_->setSuffix(QStringLiteral(" %"));
       monitorVolumeSpin_->setValue(100);
@@ -914,6 +920,10 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
 
   SetAdvancedVisible(false);
 
+  // The daemon owns the monitor, so every monitor control stays dead until a
+  // status says the daemon has one.
+  UpdateMonitorControlsEnabled();
+
   // Initial state.
   if (mode_ == AudioPageMode::Microphone) {
     RefreshSources();
@@ -1360,11 +1370,10 @@ void AudioPage::RefreshMonitorSinks() {
   monitorSinkCombo_->blockSignals(true);
   monitorSinkCombo_->clear();
   monitorSinkCombo_->addItem(QStringLiteral("Loading outputs..."));
-  monitorSinkCombo_->setEnabled(false);
   monitorSinkCombo_->blockSignals(false);
   updatingMonitorUi_ = false;
-  if (refreshMonitorSinksBtn_)
-    refreshMonitorSinksBtn_->setEnabled(false);
+  monitorSinksUsable_ = false;
+  UpdateMonitorControlsEnabled();
 
   auto result = std::make_shared<SpeakerTargetRefreshResult>();
   auto *thread = QThread::create([result] {
@@ -1383,8 +1392,7 @@ void AudioPage::RefreshMonitorSinks() {
     if (monitorSinkRefreshThread_ == thread)
       monitorSinkRefreshThread_ = nullptr;
     ApplyMonitorSinkRefreshResult(*result);
-    if (refreshMonitorSinksBtn_)
-      refreshMonitorSinksBtn_->setEnabled(true);
+    UpdateMonitorControlsEnabled();
   });
   thread->start();
 }
@@ -1400,15 +1408,14 @@ void AudioPage::ApplyMonitorSinkRefreshResult(
 
   if (!result.pactlOk) {
     monitorSinkCombo_->addItem(QString::fromLatin1(kAudioControlsUnavailable));
-    monitorSinkCombo_->setEnabled(false);
-    if (monitorEnableCheck_)
-      monitorEnableCheck_->setEnabled(false);
     monitorSinkCombo_->blockSignals(false);
     updatingMonitorUi_ = false;
+    monitorSinksUsable_ = false;
+    UpdateMonitorControlsEnabled();
     return;
   }
 
-  monitorSinkCombo_->setEnabled(true);
+  monitorSinksUsable_ = true;
   monitorSinkCombo_->addItem("System default",
                              QVariant(QString::fromLatin1(kAutoPulseSink)));
 
@@ -1461,6 +1468,30 @@ void AudioPage::ApplyMonitorSinkRefreshResult(
   monitorSinkCombo_->setCurrentIndex(index);
   monitorSinkCombo_->blockSignals(false);
   updatingMonitorUi_ = false;
+  UpdateMonitorControlsEnabled();
+}
+
+// The monitor controls all write to the daemon, and the daemon owns the route.
+// A daemon that does not report a monitor rejects every one of those writes, so
+// the whole group goes dead together instead of only the check box.
+void AudioPage::UpdateMonitorControlsEnabled() {
+  const bool supported = daemonMonitorReported_ && daemonAiSupported_;
+
+  if (monitorEnableCheck_)
+    monitorEnableCheck_->setEnabled(supported);
+  if (monitorLatencySpin_)
+    monitorLatencySpin_->setEnabled(supported);
+  if (monitorVolumeSpin_)
+    monitorVolumeSpin_->setEnabled(supported);
+
+  // The sink list also needs pactl, and it is being rebuilt while the refresh
+  // thread runs.
+  if (monitorSinkCombo_)
+    monitorSinkCombo_->setEnabled(supported && monitorSinksUsable_);
+  if (refreshMonitorSinksBtn_) {
+    refreshMonitorSinksBtn_->setEnabled(supported &&
+                                        monitorSinkRefreshThread_ == nullptr);
+  }
 }
 
 void AudioPage::PushDaemonMonitorConfig() {
@@ -1877,6 +1908,10 @@ void AudioPage::SetAiControlsEnabled(bool enabled, const QString &reason) {
   if (speakerStrengthValueLabel_)
     speakerStrengthValueLabel_->setEnabled(enabled);
 
+  // The monitor group follows the service too, but it needs the daemon to
+  // report a monitor as well.
+  UpdateMonitorControlsEnabled();
+
   if (aiBanner_) {
     aiBanner_->setVisible(!enabled && !reason.isEmpty());
     aiBanner_->setText(reason);
@@ -2214,8 +2249,10 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
         RefreshMonitorSinks();
       }
 
+      daemonMonitorReported_ = monitorReported;
+      UpdateMonitorControlsEnabled();
+
       updatingMonitorUi_ = true;
-      monitorEnableCheck_->setEnabled(monitorReported && daemonAiSupported_);
       monitorEnableCheck_->setChecked(monitorEnabled);
       if (monitorLatencySpin_ && !monitorLatencySpin_->hasFocus())
         monitorLatencySpin_->setValue(monitorLatency);
