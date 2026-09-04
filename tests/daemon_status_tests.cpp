@@ -478,6 +478,146 @@ bool TestAudioStatusPropagatesSourceErrorFromService() {
                 "source_error should propagate service availability error");
 }
 
+int NumberFieldOr(const JsonObject &obj, const std::string &key, int fallback) {
+  const auto it = obj.find(key);
+  if (it == obj.end())
+    return fallback;
+  const double *value = it->second.AsNumber();
+  return value ? static_cast<int>(*value) : fallback;
+}
+
+bool TestAudioConfigJsonRoundTripsMonitor() {
+  studiocast::audio::VirtualAudioServiceConfig cfg;
+  cfg.monitor.enabled = true;
+  cfg.monitor.sink = "alsa_output.usb_headset";
+  cfg.monitor.latency_ms = 35;
+  cfg.monitor.volume = 60;
+
+  const std::string json = AudioConfigToJson(cfg);
+
+  studiocast::audio::VirtualAudioServiceConfig parsed;
+  std::vector<std::string> warnings;
+  std::string error;
+  if (!ApplyAudioConfigPatchJsonText(json, &parsed, &warnings, &error)) {
+    std::cerr << "monitor config patch should apply: " << error << "\n";
+    return false;
+  }
+
+  return Expect(parsed.monitor.enabled, "monitor enabled should round trip") &&
+         Expect(parsed.monitor.sink == "alsa_output.usb_headset",
+                "monitor sink should round trip") &&
+         Expect(parsed.monitor.latency_ms == 35,
+                "monitor latency should round trip") &&
+         Expect(parsed.monitor.volume == 60,
+                "monitor volume should round trip");
+}
+
+bool TestAudioConfigPatchRejectsUnsafeMonitorSink() {
+  studiocast::audio::VirtualAudioServiceConfig cfg;
+  std::vector<std::string> warnings;
+  std::string error;
+  if (!ApplyAudioConfigPatchJsonText(
+          "{\"monitor\":{\"enabled\":true,\"sink\":\"studiocast_sink\"}}", &cfg,
+          &warnings, &error)) {
+    std::cerr << "the patch itself should parse: " << error << "\n";
+    return false;
+  }
+
+  error.clear();
+  const bool safe = ValidateAudioConfigSafetyForDaemon(cfg, &warnings, &error);
+  return Expect(!safe, "a StudioCast sink should be refused for the monitor") &&
+         Expect(!error.empty(), "the refusal should carry a reason");
+}
+
+bool TestAudioStatusReportsMonitor() {
+  studiocast::video::VirtualCameraServiceStatus videoStatus;
+  studiocast::video::VirtualCameraServiceConfig videoConfig;
+
+  studiocast::audio::VirtualAudioServiceStatus audioStatus;
+  audioStatus.mic_present = true;
+  audioStatus.monitor_active = true;
+  audioStatus.monitor_module_id = 551;
+  audioStatus.monitor_sink_active = "alsa_output.usb_headset";
+  audioStatus.monitor_latency_ms_active = 20;
+  audioStatus.monitor_volume_active = 100;
+  audioStatus.mic_consumer_count = 2;
+  audioStatus.mic_app_consumer_count = 1;
+  audioStatus.mic_monitor_consumer_count = 1;
+
+  studiocast::audio::VirtualAudioServiceConfig audioConfig;
+  audioConfig.monitor.enabled = true;
+  audioConfig.monitor.sink = "auto";
+  audioConfig.monitor.latency_ms = 20;
+
+  studiocast::util::json::Value rootValue;
+  std::string error;
+  if (!studiocast::util::json::Parse(
+          StatusToJson(videoStatus, videoConfig, audioStatus, audioConfig,
+                       std::filesystem::path("/tmp/studiocastd-test.sock"),
+                       /*maxineJson=*/"", /*openCudaJson=*/"",
+                       /*openAudioJson=*/"", /*loopbackJson=*/""),
+          &rootValue, &error)) {
+    std::cerr << "status JSON should parse: " << error << "\n";
+    return false;
+  }
+
+  const JsonObject *root = rootValue.AsObject();
+  if (!root)
+    return false;
+  const JsonObject *audio = ObjectAt(*root, "audio", "audio should exist");
+  if (!audio)
+    return false;
+  const JsonObject *monitor =
+      ObjectAt(*audio, "monitor", "audio.monitor should exist");
+  if (!monitor)
+    return false;
+
+  const std::string *sink =
+      StringAt(*monitor, "sink", "monitor sink should exist");
+  const std::string *resolved =
+      StringAt(*monitor, "sink_resolved", "monitor sink_resolved should exist");
+  if (!sink || !resolved)
+    return false;
+
+  return Expect(JsonBoolField(*monitor, "enabled", false),
+                "monitor should report enabled") &&
+         Expect(JsonBoolField(*monitor, "active", false),
+                "monitor should report active") &&
+         Expect(*sink == "auto", "monitor should echo the requested sink") &&
+         Expect(*resolved == "alsa_output.usb_headset",
+                "monitor should report the resolved sink") &&
+         Expect(JsonBoolField(*audio, "mic_consumer_present", false) == false,
+                "consumer presence should stay untouched") &&
+         Expect(NumberFieldOr(*audio, "mic_app_consumer_count", -1) == 1,
+                "status should report the app consumer count") &&
+         Expect(NumberFieldOr(*audio, "mic_monitor_consumer_count", -1) == 1,
+                "status should report the monitor consumer count");
+}
+
+bool TestMicrophoneReadinessNamesMonitorOnlyListener() {
+  studiocast::audio::VirtualAudioServiceStatus ast;
+  ast.mic_present = true;
+  ast.pipeline_running = true;
+  ast.pipeline_state = "running";
+  ast.monitor_active = true;
+  ast.mic_consumer_count = 1;
+  ast.mic_app_consumer_count = 0;
+  ast.mic_monitor_consumer_count = 1;
+
+  studiocast::audio::VirtualAudioServiceConfig acfg;
+  acfg.enabled = true;
+  acfg.monitor.enabled = true;
+
+  const auto readiness = BuildMicrophoneEndpointReadiness(ast, acfg, "");
+  return Expect(readiness.state == "processing",
+                "the pipeline runs while only the monitor listens") &&
+         Expect(readiness.detail.find("monitor") != std::string::npos,
+                "readiness detail should name the monitor as the listener") &&
+         Expect(readiness.detail.find("Waiting for an app") !=
+                    std::string::npos,
+                "readiness detail should still wait for an app");
+}
+
 } // namespace
 
 int main() {
@@ -490,5 +630,9 @@ int main() {
   ok = TestBuiltinEffectReadyWithoutDiagnostics() && ok;
   ok = TestAudioStatusReportsResolvedSourceAndWarnings() && ok;
   ok = TestAudioStatusPropagatesSourceErrorFromService() && ok;
+  ok = TestAudioConfigJsonRoundTripsMonitor() && ok;
+  ok = TestAudioConfigPatchRejectsUnsafeMonitorSink() && ok;
+  ok = TestAudioStatusReportsMonitor() && ok;
+  ok = TestMicrophoneReadinessNamesMonitorOnlyListener() && ok;
   return ok ? 0 : 1;
 }

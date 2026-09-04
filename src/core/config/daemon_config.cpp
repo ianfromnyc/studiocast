@@ -246,6 +246,20 @@ DaemonConfig LoadDaemonConfig() {
       if (auto it = kv.find("audio.source"); it != kv.end()) {
         s.audio_source = it->second;
       }
+      if (auto it = kv.find("audio.monitor.enabled"); it != kv.end()) {
+        s.audio_monitor_enabled =
+            ParseBool(it->second, s.audio_monitor_enabled);
+      }
+      if (auto it = kv.find("audio.monitor.sink"); it != kv.end()) {
+        s.audio_monitor_sink = it->second;
+      }
+      if (auto it = kv.find("audio.monitor.latency_ms"); it != kv.end()) {
+        s.audio_monitor_latency_ms =
+            ParseInt(it->second, s.audio_monitor_latency_ms);
+      }
+      if (auto it = kv.find("audio.monitor.volume"); it != kv.end()) {
+        s.audio_monitor_volume = ParseInt(it->second, s.audio_monitor_volume);
+      }
 
       // Canonical audio effects persistence.
       if (auto it = kv.find("audio.effects.json");
@@ -695,6 +709,12 @@ bool SaveDaemonConfig(const DaemonConfig &s, std::string *error) {
   out << "audio.speakers.latency_ms = " << s.audio_speaker_latency_ms << "\n";
   if (!s.audio_source.empty())
     out << "audio.source = " << s.audio_source << "\n";
+  out << "audio.monitor.enabled = "
+      << (s.audio_monitor_enabled ? "true" : "false") << "\n";
+  if (!s.audio_monitor_sink.empty())
+    out << "audio.monitor.sink = " << s.audio_monitor_sink << "\n";
+  out << "audio.monitor.latency_ms = " << s.audio_monitor_latency_ms << "\n";
+  out << "audio.monitor.volume = " << s.audio_monitor_volume << "\n";
   out << "\n";
 
   out << "# Canonical audio effects (Broadcast schema)\n";
@@ -784,6 +804,11 @@ ToAudioServiceConfig(const DaemonConfig &s) {
   cfg.speaker_target_sink = s.audio_speaker_target_sink;
   cfg.speaker_latency_ms = s.audio_speaker_latency_ms;
   cfg.source_name = s.audio_source;
+  cfg.monitor.enabled = s.audio_monitor_enabled;
+  cfg.monitor.sink = s.audio_monitor_sink;
+  cfg.monitor.latency_ms = s.audio_monitor_latency_ms;
+  cfg.monitor.volume = s.audio_monitor_volume;
+  cfg.monitor = studiocast::audio::NormalizeMicMonitorConfig(cfg.monitor);
   cfg.effects = s.audio_effects;
   // Use defaults for polling/retry for now.
   return cfg;
@@ -801,6 +826,10 @@ void ApplyAudioServiceConfigToDaemonConfig(
   out->audio_speaker_target_sink = cfg.speaker_target_sink;
   out->audio_speaker_latency_ms = cfg.speaker_latency_ms;
   out->audio_source = cfg.source_name;
+  out->audio_monitor_enabled = cfg.monitor.enabled;
+  out->audio_monitor_sink = cfg.monitor.sink;
+  out->audio_monitor_latency_ms = cfg.monitor.latency_ms;
+  out->audio_monitor_volume = cfg.monitor.volume;
   out->audio_effects = cfg.effects;
 }
 

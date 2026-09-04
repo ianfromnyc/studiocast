@@ -640,6 +640,12 @@ EndpointReadiness BuildMicrophoneEndpointReadiness(
     out.summary = ast.pipeline_starting || pipelineState == "starting"
                       ? "Microphone processing is starting."
                       : "Microphone processing is active.";
+    // The monitor is a consumer of StudioCast Microphone, so it starts the
+    // pipeline on its own. Say so rather than implying an app is connected.
+    if (ast.monitor_active && ast.mic_app_consumer_count == 0) {
+      out.detail = "Only the microphone monitor is listening. Waiting for an "
+                   "app to use StudioCast Microphone.";
+    }
     return out;
   }
 
@@ -1492,6 +1498,45 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"mic_consumer_count\":" << ast.mic_consumer_count << ",";
   oss << "\"mic_consumer_error\":\"" << JsonEscape(ast.mic_consumer_error)
       << "\",";
+  oss << "\"mic_app_consumer_count\":" << ast.mic_app_consumer_count << ",";
+  oss << "\"mic_monitor_consumer_count\":" << ast.mic_monitor_consumer_count
+      << ",";
+
+  // Microphone monitor: the processed microphone feed played on an output sink
+  // so the user can hear the effects.
+  {
+    std::string monitorSinkResolved = ast.monitor_sink_active.empty()
+                                          ? acfg.monitor.sink
+                                          : ast.monitor_sink_active;
+    std::string monitorSinkError;
+    {
+      std::string reason;
+      if (studiocast::audio::IsUnsafeMicMonitorSinkName(
+              acfg.monitor.sink, acfg.source_name, &reason)) {
+        monitorSinkError = reason;
+      }
+    }
+
+    oss << "\"monitor\":{";
+    oss << "\"enabled\":" << BoolJson(acfg.monitor.enabled) << ",";
+    oss << "\"active\":" << BoolJson(ast.monitor_active) << ",";
+    oss << "\"sink\":\""
+        << JsonEscape(acfg.monitor.sink.empty() ? std::string("auto")
+                                                : acfg.monitor.sink)
+        << "\",";
+    oss << "\"sink_resolved\":\""
+        << JsonEscape(monitorSinkResolved.empty() ? std::string("auto")
+                                                  : monitorSinkResolved)
+        << "\",";
+    oss << "\"sink_error\":\"" << JsonEscape(monitorSinkError) << "\",";
+    oss << "\"module_id\":" << ast.monitor_module_id << ",";
+    oss << "\"latency_ms\":" << acfg.monitor.latency_ms << ",";
+    oss << "\"latency_ms_active\":" << ast.monitor_latency_ms_active << ",";
+    oss << "\"volume\":" << acfg.monitor.volume << ",";
+    oss << "\"volume_active\":" << ast.monitor_volume_active << ",";
+    oss << "\"last_error\":\"" << JsonEscape(ast.monitor_last_error) << "\"";
+    oss << "},";
+  }
 
   const EndpointReadiness microphoneReadiness =
       BuildMicrophoneEndpointReadiness(ast, acfg, audioSourceError);
@@ -1760,6 +1805,15 @@ AudioConfigToJson(const studiocast::audio::VirtualAudioServiceConfig &cfg) {
       << JsonEscape(cfg.source_name.empty() ? std::string("auto")
                                             : cfg.source_name)
       << "\",";
+  oss << "\"monitor\":{";
+  oss << "\"enabled\":" << BoolJson(cfg.monitor.enabled) << ",";
+  oss << "\"sink\":\""
+      << JsonEscape(cfg.monitor.sink.empty() ? std::string("auto")
+                                             : cfg.monitor.sink)
+      << "\",";
+  oss << "\"latency_ms\":" << cfg.monitor.latency_ms << ",";
+  oss << "\"volume\":" << cfg.monitor.volume;
+  oss << "},";
   oss << "\"audio_effects\":"
       << studiocast::audio::effects::BroadcastAudioEffectsToJson(cfg.effects);
   oss << "}";
@@ -1879,6 +1933,76 @@ bool ApplyAudioConfigPatchJsonText(
     cfg->source_name = (*s == "auto") ? std::string() : *s;
   }
 
+  // monitor (microphone monitor). Additive object; every member is optional.
+  if (auto it = obj->find("monitor"); it != obj->end()) {
+    const auto *monitor = it->second.AsObject();
+    if (!monitor) {
+      if (error)
+        *error = "monitor must be a JSON object";
+      return false;
+    }
+
+    if (auto m = monitor->find("enabled"); m != monitor->end()) {
+      const bool *b = m->second.AsBool();
+      if (!b) {
+        if (error)
+          *error = "monitor.enabled must be a boolean";
+        return false;
+      }
+      cfg->monitor.enabled = *b;
+    }
+
+    if (auto m = monitor->find("sink"); m != monitor->end()) {
+      const std::string *s = m->second.AsString();
+      if (!s) {
+        if (error)
+          *error = "monitor.sink must be a string";
+        return false;
+      }
+      cfg->monitor.sink = s->empty() ? std::string("auto") : *s;
+    }
+
+    if (auto m = monitor->find("latency_ms"); m != monitor->end()) {
+      const double *n = m->second.AsNumber();
+      if (!n) {
+        if (error)
+          *error = "monitor.latency_ms must be a number";
+        return false;
+      }
+      const int v = static_cast<int>(std::lround(*n));
+      if (v < studiocast::audio::kMicMonitorMinLatencyMs ||
+          v > studiocast::audio::kMicMonitorMaxLatencyMs) {
+        if (error) {
+          *error = "monitor.latency_ms out of range (expected " +
+                   std::to_string(studiocast::audio::kMicMonitorMinLatencyMs) +
+                   ".." +
+                   std::to_string(studiocast::audio::kMicMonitorMaxLatencyMs) +
+                   ")";
+        }
+        return false;
+      }
+      cfg->monitor.latency_ms = v;
+    }
+
+    if (auto m = monitor->find("volume"); m != monitor->end()) {
+      const double *n = m->second.AsNumber();
+      if (!n) {
+        if (error)
+          *error = "monitor.volume must be a number";
+        return false;
+      }
+      const int v = static_cast<int>(std::lround(*n));
+      if (v < 0 || v > 100) {
+        if (error)
+          *error = "monitor.volume out of range (expected 0..100)";
+        return false;
+      }
+      cfg->monitor.volume = v;
+    }
+
+    cfg->monitor = studiocast::audio::NormalizeMicMonitorConfig(cfg->monitor);
+  }
+
   // effects blob
   const studiocast::util::json::Value *fxVal = nullptr;
   if (auto it = obj->find("audio_effects"); it != obj->end()) {
@@ -1943,6 +2067,28 @@ bool ValidateAudioConfigSafetyForDaemon(
     if (warnings) {
       warnings->insert(warnings->end(), source.warnings.begin(),
                        source.warnings.end());
+    }
+  }
+
+  if (studiocast::audio::IsUnsafeMicMonitorSinkName(cfg.monitor.sink,
+                                                    cfg.source_name, &reason)) {
+    if (error) {
+      *error = "Unsafe microphone monitor output: " + reason +
+               " Select a physical output sink or use monitor.sink=\"auto\".";
+    }
+    return false;
+  }
+
+  if (cfg.monitor.enabled && cfg.enabled) {
+    std::string monitorErr;
+    if (!studiocast::audio::ChooseSafeMicMonitorSinkName(
+            cfg.monitor.sink, cfg.source_name, &monitorErr)) {
+      if (error) {
+        *error = "Unsafe microphone monitor configuration: " +
+                 (monitorErr.empty() ? "no safe physical output sink was found"
+                                     : monitorErr);
+      }
+      return false;
     }
   }
 
