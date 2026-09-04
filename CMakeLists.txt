@@ -309,6 +309,8 @@ add_library(studiocast_core
         src/core/audio/virtual_speaker_state.cpp
         src/core/audio/virtual_speaker.h
         src/core/audio/virtual_speaker.cpp
+        src/core/audio/mic_monitor.h
+        src/core/audio/mic_monitor.cpp
         src/core/audio/virtual_audio_service.h
         src/core/audio/virtual_audio_service.cpp
         src/core/video/v4l2loopback.h
@@ -836,6 +838,30 @@ if (BUILD_TESTING AND PULSE_SIMPLE_FOUND)
     add_test(NAME studiocast-audio-tests COMMAND studiocast-audio-tests)
 elseif (BUILD_TESTING)
     message(STATUS "Skipping studiocast-audio-tests because libpulse-simple was not found.")
+endif()
+
+if (BUILD_TESTING)
+    add_executable(studiocast-mic-monitor-tests
+            tests/mic_monitor_tests.cpp
+    )
+
+    target_link_libraries(studiocast-mic-monitor-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-mic-monitor-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-mic-monitor-tests)
+    studiocast_enable_sanitizers(studiocast-mic-monitor-tests)
+
+    set_target_properties(studiocast-mic-monitor-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-mic-monitor-tests COMMAND studiocast-mic-monitor-tests)
 endif()
 
 if (BUILD_TESTING)

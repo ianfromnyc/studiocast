@@ -555,4 +555,90 @@ bool UpdateSourceProplist(const std::string &source_name_or_index,
   }
   return true;
 }
+
+std::vector<PactlSinkInputInfo> ListSinkInputsDetailed(std::string *error) {
+  auto res = RunPactlCommand("pactl list sink-inputs 2>&1");
+  if (res.exit_code != 0) {
+    if (error)
+      *error = util::TrimCopy(res.stdout_str);
+    return {};
+  }
+
+  std::vector<PactlSinkInputInfo> out;
+  PactlSinkInputInfo cur;
+  bool haveCur = false;
+
+  auto flush = [&]() {
+    if (haveCur && cur.id >= 0)
+      out.push_back(cur);
+    cur = PactlSinkInputInfo{};
+    haveCur = false;
+  };
+
+  auto unquote = [](std::string s) {
+    s = util::TrimCopy(s);
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
+      s = s.substr(1, s.size() - 2);
+    return s;
+  };
+
+  for (const auto &raw : util::SplitLines(res.stdout_str)) {
+    const auto t = util::TrimCopy(raw);
+    if (t.empty())
+      continue;
+
+    if (StartsWith(t, "Sink Input #")) {
+      flush();
+      haveCur = true;
+      cur.id = std::atoi(t.substr(std::string("Sink Input #").size()).c_str());
+      continue;
+    }
+
+    if (!haveCur)
+      continue;
+
+    if (StartsWith(t, "Owner Module:")) {
+      const auto v =
+          util::TrimCopy(t.substr(std::string("Owner Module:").size()));
+      cur.owner_module = (v == "n/a") ? -1 : std::atoi(v.c_str());
+      continue;
+    }
+
+    if (StartsWith(t, "Sink:")) {
+      cur.sink = util::TrimCopy(t.substr(std::string("Sink:").size()));
+      continue;
+    }
+
+    if (StartsWith(t, "media.name")) {
+      const auto eq = t.find('=');
+      if (eq != std::string::npos)
+        cur.media_name = unquote(t.substr(eq + 1));
+      continue;
+    }
+  }
+
+  flush();
+  return out;
+}
+
+bool SetSinkInputVolumePercent(int sink_input_id, int percent,
+                               std::string *error) {
+  if (sink_input_id < 0) {
+    if (error)
+      *error = "invalid sink input id";
+    return false;
+  }
+
+  std::ostringstream oss;
+  oss << "pactl set-sink-input-volume " << sink_input_id << " " << percent
+      << "% 2>&1";
+  auto res = RunPactlCommand(oss.str());
+  const auto out = util::TrimCopy(res.stdout_str);
+  if (res.exit_code != 0 || LooksLikeFailure(out)) {
+    if (error)
+      *error = out.empty() ? "set-sink-input-volume failed" : out;
+    return false;
+  }
+  return true;
+}
 } // namespace studiocast::audio::pulse

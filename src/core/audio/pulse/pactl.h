@@ -35,6 +35,13 @@ struct PactlSinkInput {
   std::string sink;
 };
 
+struct PactlSinkInputInfo {
+  int id = -1;
+  int owner_module = -1; // -1 when the stream has no owner module
+  std::string sink;      // sink index or name as reported by pactl
+  std::string media_name;
+};
+
 struct PactlPort {
   std::string name;        // e.g. "analog-input-internal-mic"
   std::string description; // e.g. "Internal Microphone"
@@ -89,5 +96,13 @@ bool UpdateSinkProplist(const std::string &sink_name_or_index,
 bool UpdateSourceProplist(const std::string &source_name_or_index,
                           const std::vector<std::string> &kv_pairs,
                           std::string *error);
+
+// Detailed sink input list. Use it to find a stream by its owner module or by
+// a property that StudioCast set when the stream was created.
+std::vector<PactlSinkInputInfo> ListSinkInputsDetailed(std::string *error);
+
+// Sets the volume of one sink input, in percent (0..100 and above).
+bool SetSinkInputVolumePercent(int sink_input_id, int percent,
+                               std::string *error);
 
 } // namespace studiocast::audio::pulse
