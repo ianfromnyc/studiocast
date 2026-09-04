@@ -543,6 +543,64 @@ bool TestCameraNodeRejectsAShortFrame() {
          Expect(!error.empty(), "the refusal must explain itself");
 }
 
+// Proves the node is a working PipeWire camera, not only a graph entry: a
+// real consumer must link to it and receive the staged frames.
+bool TestLiveVirtualCameraFeedsAGstreamerConsumer() {
+  static constexpr const char *kName = "studiocast_camera_gsttest";
+  if (!LiveServerAvailable("live virtual camera feeds a GStreamer consumer"))
+    return true;
+  if (RunCapture("command -v gst-launch-1.0 2>/dev/null").empty()) {
+    std::cout << "[SKIP] live virtual camera feeds a GStreamer consumer: "
+                 "gst-launch-1.0 is not installed\n";
+    return true;
+  }
+
+  studiocast::video::pw_backend::CameraNodeConfig cfg;
+  cfg.node_name = kName;
+  cfg.width = 160;
+  cfg.height = 120;
+  cfg.fps = 30;
+
+  studiocast::video::pw_backend::PipeWireCameraNode node;
+  std::string error;
+  if (!Expect(node.Start(cfg, &error), "camera node start failed: " + error))
+    return false;
+
+  std::atomic<bool> stop{false};
+  // The consumer link disappears when GStreamer exits, so the count has to be
+  // sampled while it runs.
+  std::atomic<int> peak_consumers{0};
+  const std::size_t bytes = studiocast::video::pw_backend::CameraFrameBytes(
+      cfg.width, cfg.height, cfg.format);
+  std::thread feeder([&] {
+    std::vector<std::uint8_t> frame(bytes, 0x40);
+    std::string err;
+    while (!stop.load(std::memory_order_acquire)) {
+      (void)node.WriteFrame(frame.data(), frame.size(), &err);
+      const int seen = node.ConsumerCount();
+      if (seen > peak_consumers.load(std::memory_order_relaxed))
+        peak_consumers.store(seen, std::memory_order_relaxed);
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  });
+
+  const std::string cmd =
+      std::string("timeout 15 gst-launch-1.0 -q pipewiresrc target-object=") +
+      kName + " num-buffers=5 ! videoconvert ! fakesink 2>&1; echo rc=$?";
+  const std::string out = RunCapture(cmd);
+  const std::uint64_t sent = node.FramesSent();
+
+  stop.store(true, std::memory_order_release);
+  feeder.join();
+  const int consumers = peak_consumers.load(std::memory_order_relaxed);
+  node.Stop();
+
+  return Expect(out.find("rc=0") != std::string::npos,
+                "the GStreamer consumer did not finish cleanly: " + out) &&
+         Expect(sent > 0, "the node handed no frame to a consumer") &&
+         Expect(consumers > 0, "no consumer link was counted");
+}
+
 } // namespace
 
 int main() {
@@ -597,6 +655,8 @@ int main() {
        &TestCameraNodeRejectsAShortFrame},
       {"live virtual camera node reaches the graph",
        &TestLiveVirtualCameraNodeReachesTheGraph},
+      {"live virtual camera feeds a GStreamer consumer",
+       &TestLiveVirtualCameraFeedsAGstreamerConsumer},
   };
 
   int failed = 0;

@@ -133,6 +133,43 @@ void OnStreamStateChanged(void *data, enum pw_stream_state old,
   }
 }
 
+// The server picked a format. Answer with the buffer layout StudioCast wants,
+// otherwise the stream never gets data ports and a consumer receives nothing.
+void OnParamChanged(void *data, std::uint32_t id, const struct spa_pod *param) {
+  auto *impl = static_cast<PipeWireCameraNode::Impl *>(data);
+  if (param == nullptr || id != SPA_PARAM_Format)
+    return;
+
+  std::uint32_t media_type = 0;
+  std::uint32_t media_subtype = 0;
+  if (::spa_format_parse(param, &media_type, &media_subtype) < 0)
+    return;
+  if (media_type != SPA_MEDIA_TYPE_video ||
+      media_subtype != SPA_MEDIA_SUBTYPE_raw)
+    return;
+
+  struct spa_video_info_raw raw {};
+  if (::spa_format_video_raw_parse(param, &raw) < 0)
+    return;
+
+  const auto stride = static_cast<std::int32_t>(impl->stride_bytes);
+  const auto size = static_cast<std::int32_t>(impl->frame_bytes);
+
+  std::uint8_t pod_buffer[1024];
+  struct spa_pod_builder builder =
+      SPA_POD_BUILDER_INIT(pod_buffer, sizeof(pod_buffer));
+  const struct spa_pod *params[1];
+  params[0] = static_cast<const struct spa_pod *>(spa_pod_builder_add_object(
+      &builder, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+      SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 2, 8),
+      SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
+      SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride),
+      SPA_PARAM_BUFFERS_dataType,
+      SPA_POD_CHOICE_FLAGS_Int(1 << SPA_DATA_MemPtr)));
+
+  ::pw_stream_update_params(impl->stream, params, 1);
+}
+
 void OnStreamProcess(void *data) {
   auto *impl = static_cast<PipeWireCameraNode::Impl *>(data);
   struct pw_buffer *b = ::pw_stream_dequeue_buffer(impl->stream);
@@ -178,6 +215,7 @@ const struct pw_stream_events &StreamEvents() {
     struct pw_stream_events e {};
     e.version = PW_VERSION_STREAM_EVENTS;
     e.state_changed = OnStreamStateChanged;
+    e.param_changed = OnParamChanged;
     e.process = OnStreamProcess;
     return e;
   }();
@@ -345,8 +383,8 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
       PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Playback",
       PW_KEY_MEDIA_ROLE, "Camera", PW_KEY_MEDIA_CLASS, "Video/Source",
       PW_KEY_NODE_NAME, name.c_str(), PW_KEY_NODE_DESCRIPTION,
-      description.c_str(), PW_KEY_NODE_VIRTUAL, "true", PW_KEY_APP_NAME,
-      "StudioCast", nullptr);
+      description.c_str(), PW_KEY_NODE_VIRTUAL, "true", PW_KEY_NODE_DRIVER,
+      "true", PW_KEY_APP_NAME, "StudioCast", nullptr);
 
   impl_->stream = ::pw_stream_new(impl_->core, name.c_str(), props);
   if (!impl_->stream) {
@@ -377,8 +415,13 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
       ::spa_format_video_raw_build(&builder, SPA_PARAM_EnumFormat, &info);
 
   // A Video/Source node waits for consumers, so it must not connect itself.
+  //
+  // It also drives its part of the graph: a frame arriving from the pipeline
+  // is what starts a cycle. Without this the graph has no clock for the link
+  // and a consumer receives nothing.
   const auto flags = static_cast<enum pw_stream_flags>(
-      PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS);
+      PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS |
+      PW_STREAM_FLAG_DRIVER);
 
   const int rc = ::pw_stream_connect(impl_->stream, SPA_DIRECTION_OUTPUT,
                                      PW_ID_ANY, flags, params, 1);
@@ -459,11 +502,19 @@ bool PipeWireCameraNode::WriteFrame(const std::uint8_t *data,
     return false;
   }
 
-  std::lock_guard<std::mutex> lock(impl_->frame_mu);
-  if (impl_->staged_valid)
-    impl_->frames_dropped.fetch_add(1, std::memory_order_relaxed);
-  std::memcpy(impl_->staged.data(), data, impl_->frame_bytes);
-  impl_->staged_valid = true;
+  {
+    std::lock_guard<std::mutex> lock(impl_->frame_mu);
+    if (impl_->staged_valid)
+      impl_->frames_dropped.fetch_add(1, std::memory_order_relaxed);
+    std::memcpy(impl_->staged.data(), data, impl_->frame_bytes);
+    impl_->staged_valid = true;
+  }
+
+#if STUDIOCAST_HAVE_PIPEWIRE
+  // The node drives the graph, so a new frame starts a cycle.
+  if (impl_->stream)
+    ::pw_stream_trigger_process(impl_->stream);
+#endif
   return true;
 }
 
