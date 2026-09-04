@@ -45,6 +45,12 @@ v4l2loopback support, PulseAudio tools, ONNX Runtime, and optional model/SDK
 assets are installed or checked through supported system packages and the
 backend scripts.
 
+`scripts/setup.sh --deps` also installs the PipeWire development package
+(`pipewire-devel` on Fedora, `libpipewire-0.3-dev` on Ubuntu). The build then
+turns on the native PipeWire backends. They stay switched off at run time until
+you set `audio.backend` or `video.output.backend`. See `docs/PIPEWIRE.md`. To
+build without them, configure with `-DSTUDIOCAST_ENABLE_PIPEWIRE=OFF`.
+
 Build and run the installer from a checkout:
 
 ```bash
