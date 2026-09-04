@@ -93,6 +93,8 @@ void Usage(const char *argv0) {
          "(default: #000000)\n"
       << "  --background-replace-image PATH    Replace-mode background image "
          "path\n"
+      << "  --audio-backend B        Sound server API: pulse|auto|pipewire "
+         "(default: pulse)\n"
       << "  --poll-ms N              Consumer poll interval (default: 250)\n"
       << "  --stop-grace-ms N        Stop after N ms without consumers "
          "(default: 1000)\n"
@@ -1492,6 +1494,10 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
     oss << "\"" << JsonEscape(audioSourceWarnings[i]) << "\"";
   }
   oss << "],";
+  oss << "\"transport_backend\":\"" << JsonEscape(ast.transport_backend_active)
+      << "\",";
+  oss << "\"transport_backend_note\":\"" << JsonEscape(ast.transport_note)
+      << "\",";
   oss << "\"mic_present\":" << BoolJson(ast.mic_present) << ",";
   oss << "\"mic_consumer_present\":" << BoolJson(ast.mic_consumer_present)
       << ",";
@@ -2338,6 +2344,16 @@ int main(int argc, char **argv) {
   if (const auto v = GetArgValue(argc, argv, "--background-replace-image");
       !v.empty()) {
     cfg.pipeline.effects.virtual_background.replace_path = v;
+  }
+
+  if (const auto v = GetArgValue(argc, argv, "--audio-backend"); !v.empty()) {
+    if (const auto pref = studiocast::pw::ParseAudioTransportPreference(v)) {
+      acfg.transport = *pref;
+    } else {
+      std::cerr << "Unknown --audio-backend value: " << v
+                << " (use pulse, auto or pipewire)\n";
+      return 2;
+    }
   }
 
   if (const int v = GetArgInt(argc, argv, "--poll-ms", -1); v > 0)

@@ -59,6 +59,9 @@ struct DaemonConfig {
   int audio_speaker_latency_ms = 10;
   std::string audio_source; // empty = Pulse default
 
+  // Sound server API for the virtual devices and the real-time streams:
+  // "pulse" (default), "auto" or "pipewire". See docs/PIPEWIRE.md.
+  std::string audio_backend = "pulse";
   // Microphone monitor: play the processed microphone feed on an output sink
   // so the user can hear the effects while adjusting them.
   bool audio_monitor_enabled = false;

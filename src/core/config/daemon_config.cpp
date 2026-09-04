@@ -243,6 +243,12 @@ DaemonConfig LoadDaemonConfig() {
         s.audio_speaker_latency_ms =
             ParseInt(it->second, s.audio_speaker_latency_ms);
       }
+      if (auto it = kv.find("audio.backend"); it != kv.end()) {
+        // An unknown name keeps the default, so a typo cannot silently move a
+        // working machine onto another backend.
+        if (studiocast::pw::ParseAudioTransportPreference(it->second))
+          s.audio_backend = it->second;
+      }
       if (auto it = kv.find("audio.source"); it != kv.end()) {
         s.audio_source = it->second;
       }
@@ -709,6 +715,7 @@ bool SaveDaemonConfig(const DaemonConfig &s, std::string *error) {
   out << "audio.speakers.latency_ms = " << s.audio_speaker_latency_ms << "\n";
   if (!s.audio_source.empty())
     out << "audio.source = " << s.audio_source << "\n";
+  out << "audio.backend = " << s.audio_backend << "\n";
   out << "audio.monitor.enabled = "
       << (s.audio_monitor_enabled ? "true" : "false") << "\n";
   if (!s.audio_monitor_sink.empty())
@@ -804,6 +811,9 @@ ToAudioServiceConfig(const DaemonConfig &s) {
   cfg.speaker_target_sink = s.audio_speaker_target_sink;
   cfg.speaker_latency_ms = s.audio_speaker_latency_ms;
   cfg.source_name = s.audio_source;
+  if (const auto pref =
+          studiocast::pw::ParseAudioTransportPreference(s.audio_backend))
+    cfg.transport = *pref;
   cfg.monitor.enabled = s.audio_monitor_enabled;
   cfg.monitor.sink = s.audio_monitor_sink;
   cfg.monitor.latency_ms = s.audio_monitor_latency_ms;
@@ -826,6 +836,7 @@ void ApplyAudioServiceConfigToDaemonConfig(
   out->audio_speaker_target_sink = cfg.speaker_target_sink;
   out->audio_speaker_latency_ms = cfg.speaker_latency_ms;
   out->audio_source = cfg.source_name;
+  out->audio_backend = std::string(ToString(cfg.transport));
   out->audio_monitor_enabled = cfg.monitor.enabled;
   out->audio_monitor_sink = cfg.monitor.sink;
   out->audio_monitor_latency_ms = cfg.monitor.latency_ms;

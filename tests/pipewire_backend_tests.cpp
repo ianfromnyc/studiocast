@@ -1,6 +1,9 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <map>
 #include <string>
@@ -9,6 +12,7 @@
 
 #include "core/audio/pipewire/pipewire_audio_devices.h"
 #include "core/audio/virtual_audio_service.h"
+#include "core/config/daemon_config.h"
 #include "core/pipewire/pipewire_audio_node.h"
 
 #include "core/pipewire/pipewire_support.h"
@@ -391,6 +395,42 @@ bool TestServiceTransportDefaultsToPulse() {
                 "the service default preference must be pulse");
 }
 
+bool TestDaemonConfigRoundTripsTheAudioBackendKey() {
+  namespace fs = std::filesystem;
+  const fs::path root =
+      fs::temp_directory_path() / "studiocast-pipewire-config-test";
+  std::error_code ec;
+  fs::remove_all(root, ec);
+  fs::create_directories(root, ec);
+
+  const std::string previous =
+      std::getenv("XDG_CONFIG_HOME") ? std::getenv("XDG_CONFIG_HOME") : "";
+  ::setenv("XDG_CONFIG_HOME", root.c_str(), 1);
+
+  studiocast::config::DaemonConfig cfg;
+  const bool defaultsToPulse = cfg.audio_backend == "pulse";
+  cfg.audio_backend = "pipewire";
+
+  std::string error;
+  const bool saved = studiocast::config::SaveDaemonConfig(cfg, &error);
+  const auto loaded = studiocast::config::LoadDaemonConfig();
+  const auto service = studiocast::config::ToAudioServiceConfig(loaded);
+
+  if (previous.empty())
+    ::unsetenv("XDG_CONFIG_HOME");
+  else
+    ::setenv("XDG_CONFIG_HOME", previous.c_str(), 1);
+  fs::remove_all(root, ec);
+
+  return Expect(defaultsToPulse,
+                "the daemon config default backend must be pulse") &&
+         Expect(saved, "saving the daemon config failed: " + error) &&
+         Expect(loaded.audio_backend == "pipewire",
+                "the audio backend key did not survive a save and load") &&
+         Expect(service.transport == AudioTransportPreference::kPipeWire,
+                "the service config did not take the backend preference");
+}
+
 } // namespace
 
 int main() {
@@ -435,6 +475,8 @@ int main() {
        &TestServiceTransportFollowsTheConfiguredPreference},
       {"service transport defaults to pulse",
        &TestServiceTransportDefaultsToPulse},
+      {"daemon config round trips the audio backend key",
+       &TestDaemonConfigRoundTripsTheAudioBackendKey},
       {"canonical node names", &TestCanonicalNodeNames},
   };
 
