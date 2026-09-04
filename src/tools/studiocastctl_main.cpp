@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +15,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/audio/mic_monitor.h"
 #include "core/ipc/daemon_client.h"
 #include "core/maxine/reason_codes.h"
 #include "core/util/exec.h"
@@ -138,6 +140,30 @@ std::optional<double> ParseDouble(std::string_view s) {
   if (!end || *end != '\0')
     return std::nullopt;
   return v;
+}
+
+// Reads a whole decimal number from a command line option.
+//
+// The whole argument must be the number, so "12abc" and "12.5" are errors
+// rather than 12. `what` names the option in the message.
+std::optional<int> ParseIntArg(std::string_view s, int min, int max,
+                               const char *what, std::string *error) {
+  const std::string tmp(s);
+  const char *begin = tmp.c_str();
+  char *end = nullptr;
+  errno = 0;
+  const long v = std::strtol(begin, &end, 10);
+
+  const bool wholeString = !tmp.empty() && end && *end == '\0';
+  if (!wholeString || errno == ERANGE || v < min || v > max) {
+    if (error) {
+      *error = std::string(what) + " needs a whole number in " +
+               std::to_string(min) + ".." + std::to_string(max) + ", got '" +
+               tmp + "'";
+    }
+    return std::nullopt;
+  }
+  return static_cast<int>(v);
 }
 
 bool ParseBoolArg(std::string_view s, bool *out) {
@@ -829,8 +855,8 @@ void Usage(const char *argv0) {
       << "  " << argv0 << " audio start\n"
       << "  " << argv0 << " audio stop\n"
       << "  " << argv0
-      << " audio monitor on|off [--sink NAME|auto] [--latency-ms N] "
-         "[--volume N]\n"
+      << " audio monitor on|off [--sink NAME|auto] [--latency-ms 1..500] "
+         "[--volume 0..100]\n"
       << "  " << argv0 << " audio monitor status\n"
       << "  " << argv0
       << " effects enable <effect_id> [--engine auto|maxine|open_cuda] "
@@ -1461,8 +1487,8 @@ int main(int argc, char **argv) {
       }
 
       std::string sink;
-      std::string latency;
-      std::string volume;
+      std::optional<int> latency;
+      std::optional<int> volume;
       for (int i = 4; i < argc; ++i) {
         const std::string_view a =
             argv[i] ? std::string_view(argv[i]) : std::string_view();
@@ -1472,11 +1498,24 @@ int main(int argc, char **argv) {
           continue;
         }
         if (a == "--latency-ms" && hasValue) {
-          latency = argv[++i];
+          std::string parseError;
+          latency =
+              ParseIntArg(argv[++i], studiocast::audio::kMicMonitorMinLatencyMs,
+                          studiocast::audio::kMicMonitorMaxLatencyMs,
+                          "--latency-ms", &parseError);
+          if (!latency) {
+            std::cerr << parseError << "\n";
+            return 2;
+          }
           continue;
         }
         if (a == "--volume" && hasValue) {
-          volume = argv[++i];
+          std::string parseError;
+          volume = ParseIntArg(argv[++i], 0, 100, "--volume", &parseError);
+          if (!volume) {
+            std::cerr << parseError << "\n";
+            return 2;
+          }
           continue;
         }
         std::cerr << "Unknown audio monitor option: " << a << "\n";
@@ -1489,11 +1528,10 @@ int main(int argc, char **argv) {
         patch +=
             ",\"sink\":\"" + studiocast::util::json::EscapeString(sink) + "\"";
       }
-      if (!latency.empty())
-        patch +=
-            ",\"latency_ms\":" + std::to_string(std::atoi(latency.c_str()));
-      if (!volume.empty())
-        patch += ",\"volume\":" + std::to_string(std::atoi(volume.c_str()));
+      if (latency)
+        patch += ",\"latency_ms\":" + std::to_string(*latency);
+      if (volume)
+        patch += ",\"volume\":" + std::to_string(*volume);
       patch += "}}";
 
       return CallOrDie(std::string("SET_AUDIO_CONFIG ") + patch) ? 0 : 1;
