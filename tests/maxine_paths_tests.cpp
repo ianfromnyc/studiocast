@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "core/maxine/afx_api.h"
+#include "core/maxine/ar_api.h"
 #include "core/maxine/paths.h"
 #include "core/maxine/sdk_runtime.h"
 #include "core/maxine/vfx_api.h"
@@ -510,6 +511,62 @@ bool TestVfxSelectorsMatchTheSdkHeaders() {
   return ok;
 }
 
+// Effects only know the library they loaded, so they must be able to derive
+// the models directory from it in both layouts.
+bool TestModelsDirForLibrary() {
+  const fs::path root =
+      fs::temp_directory_path() /
+      ("studiocast-maxine-modeldir-" + std::to_string(::getpid()));
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path new_root = root / "ARSDK";
+  const fs::path old_root = root / "VideoFX";
+  fs::create_directories(new_root / "lib" / "models", ec);
+  fs::create_directories(old_root / "models", ec);
+  fs::create_directories(old_root / "lib", ec);
+  if (ec || !Touch(new_root / "lib" / "libnvARPose.so") ||
+      !Touch(old_root / "lib" / "libVideoFX.so")) {
+    std::cerr << "failed to create models dir layout\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  bool ok = true;
+  ok &= Require(studiocast::maxine::ModelsDirForLibrary(
+                    new_root / "lib" / "libnvARPose.so") ==
+                    new_root / "lib" / "models",
+                "expected the SDK Core 1.x models dir next to the library");
+  ok &= Require(studiocast::maxine::ModelsDirForLibrary(
+                    old_root / "lib" / "libVideoFX.so") == old_root / "models",
+                "expected the legacy models dir one level up");
+  ok &= Require(studiocast::maxine::ModelsDirForLibrary({}).empty(),
+                "expected an empty result for an empty library path");
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
+// The AR feature ids come from the per-feature headers of the AR SDK.
+bool TestArFeatureIdsMatchTheSdkHeaders() {
+  namespace ar = studiocast::maxine::ar;
+
+  auto same = [](const char *got, const char *want, const char *what) {
+    return Require(std::string(got) == want,
+                   std::string("expected ") + what + " to be '" + want +
+                       "', got '" + got + "'");
+  };
+
+  bool ok = true;
+  ok &= same(ar::NVAR_FEATURE_GAZE_REDIRECTION, "GazeRedirection",
+             "the gaze redirection id");
+  ok &= same(ar::NVAR_FEATURE_FACE_BOX_DETECTION, "FaceBoxDetection",
+             "the face box detection id");
+  ok &= same(ar::NVAR_FEATURE_BODY_DETECTION, "BodyDetection",
+             "the body detection id");
+  return ok;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -553,6 +610,18 @@ int main(int argc, char **argv) {
     return 1;
   }
   std::cout << "[PASS] VFX selectors match the SDK headers\n";
+
+  if (!TestArFeatureIdsMatchTheSdkHeaders()) {
+    std::cout << "[FAIL] AR feature ids match the SDK headers\n";
+    return 1;
+  }
+  std::cout << "[PASS] AR feature ids match the SDK headers\n";
+
+  if (!TestModelsDirForLibrary()) {
+    std::cout << "[FAIL] models dir resolves from the library path\n";
+    return 1;
+  }
+  std::cout << "[PASS] models dir resolves from the library path\n";
 
   if (argc <= 0 || !argv || !argv[0] ||
       !TestAfxLoaderPrefersExplicitSdkRootBeforeBareLoaderPath(argv[0])) {
