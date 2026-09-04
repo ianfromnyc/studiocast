@@ -52,9 +52,11 @@ void Rgb24ToYuyvAvx2(const std::uint8_t *src, int width, int height,
 
 bool Rgb24ToYuyvLibyuvAvailable();
 std::size_t Rgb24ToYuyvLibyuvScratchBytes(int width, int height);
-// Returns false, and writes nothing, when the build has no libyuv, when the
-// scratch buffer is too small, or when dst_stride is under the row size above.
-// The caller then falls back to another converter.
+// Returns false, and writes nothing, when the build has no libyuv or when the
+// scratch buffer is too small. The caller then falls back to another
+// converter. A dst_stride under the row size above gives the same false, but
+// that row size is an input precondition every converter shares, so the false
+// is only a guard: no fallback can hold the result either.
 bool Rgb24ToYuyvLibyuv(const std::uint8_t *src, int width, int height,
                        std::size_t src_stride, std::uint8_t *dst,
                        std::size_t dst_stride, std::uint8_t *scratch,
