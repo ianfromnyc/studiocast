@@ -742,6 +742,29 @@ bool TestStalePulseModuleCleanupIsQuietWhenNothingIsLoaded() {
          Expect(removed.empty(), "the cleanup log should stay empty");
 }
 
+bool TestPulseBackendTearsDownNativeNodes() {
+  auto &devices = studiocast::audio::pw_backend::NativeAudioDevices::Instance();
+
+  // On a machine with a server this really creates a node; without one the
+  // create fails and the teardown still has to be safe.
+  std::string error;
+  (void)devices.CreateVirtualMic(&error);
+  (void)devices.CreateVirtualSpeaker(&error);
+
+  studiocast::audio::pw_backend::ShutdownNativeAudioDevices();
+  const bool firstClean =
+      devices.MicNode() == nullptr && devices.SpeakerNode() == nullptr;
+
+  // A second call must be a safe no-op, because the service calls it on every
+  // start that resolves to PulseAudio.
+  studiocast::audio::pw_backend::ShutdownNativeAudioDevices();
+
+  return Expect(firstClean,
+                "switching to PulseAudio must take the native nodes down") &&
+         Expect(devices.MicNode() == nullptr && devices.SpeakerNode() == nullptr,
+                "a repeated teardown must stay clean");
+}
+
 bool TestMicMonitorCleanupIgnoresNativePathNames() {
   // The native path names its streams after StudioCast too. None of them is a
   // Pulse module, but a name-only match would still be a trap, so pin that the
@@ -825,6 +848,8 @@ int main() {
        &TestStalePulseModuleCleanupIssuesTheRightPactlCalls},
       {"stale pulse module cleanup is quiet when nothing is loaded",
        &TestStalePulseModuleCleanupIsQuietWhenNothingIsLoaded},
+      {"pulse backend tears down native nodes",
+       &TestPulseBackendTearsDownNativeNodes},
       {"mic monitor cleanup ignores native path names",
        &TestMicMonitorCleanupIgnoresNativePathNames},
       {"canonical node names", &TestCanonicalNodeNames},

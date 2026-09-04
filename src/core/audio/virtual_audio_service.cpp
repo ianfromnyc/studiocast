@@ -464,6 +464,12 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
     st_.transport_note = decision.note;
   }
 
+  // A native node would otherwise stay in the graph beside the Pulse devices
+  // when a running daemon moves back to the Pulse path. The Pulse modules need
+  // no matching step here: the native backend removes them when it comes up.
+  if (transport_active_ == studiocast::pw::AudioTransport::kPulse)
+    pw_backend::ShutdownNativeAudioDevices();
+
   stop_.store(false, std::memory_order_release);
   try {
     th_ = std::thread([this]() { ThreadMain(); });

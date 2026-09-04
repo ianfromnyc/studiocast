@@ -395,6 +395,14 @@ PipeWireAudioNode *NativeAudioDevices::SpeakerNode() const {
   return state_->speaker.get();
 }
 
+void ShutdownNativeAudioDevices() {
+  auto &devices = NativeAudioDevices::Instance();
+  std::string ignored;
+  (void)devices.StopSpeakerLoopback(&ignored);
+  (void)devices.DestroyVirtualMic(&ignored);
+  (void)devices.DestroyVirtualSpeaker(&ignored);
+}
+
 // ---------------------------------------------------------------------------
 // PipeWireAudioIo
 // ---------------------------------------------------------------------------

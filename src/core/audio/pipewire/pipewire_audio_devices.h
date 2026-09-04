@@ -87,6 +87,14 @@ private:
   std::unique_ptr<State> state_;
 };
 
+// Takes down every native node this process owns.
+//
+// A native node dies with the process, so a restart needs nothing. This covers
+// the move back to the Pulse path inside one running daemon, where the native
+// nodes would otherwise stay in the graph beside the Pulse devices. It is safe
+// to call when there is no node.
+void ShutdownNativeAudioDevices();
+
 // Real-time pipeline I/O over native PipeWire nodes.
 //
 // The microphone pipeline captures from a real source and writes into the
