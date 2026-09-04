@@ -62,64 +62,70 @@ std::string JsonEscape(const std::string &s) {
   return out;
 }
 
-bool HasFeatureMarker(const fs::path &features_dir,
-                      const std::string &feature_id) {
+// The directory names that install each StudioCast feature id, newest first.
+// SDK Core 1.x names each VFX or AR feature directory after its NGC model,
+// for example `nvvfxdenoising`; AFX names each directory after the effect.
+// The older names stay in the list so an SDK 0.7 or 0.8 tree keeps working.
+std::vector<std::string> MarkerNamesFor(const std::string &feature_id) {
+  // VFX.
+  if (feature_id == "greenscreen")
+    return {"nvvfxgreenscreen", "greenscreen"};
+  if (feature_id == "bgblur")
+    return {"nvvfxbackgroundblur", "backgroundblur", "bgblur"};
+  if (feature_id == "denoise")
+    return {"nvvfxdenoising", "denoising", "denoise"};
+  if (feature_id == "relighting")
+    return {"nvvfxrelighting", "nvvfxaigsrelighting", "aigsrelighting",
+            "relighting"};
+
+  // AR.
+  if (feature_id == "gaze_redirection")
+    return {"nvargazeredirection", "gazeredirection", "eyecontact",
+            "gaze_redirection"};
+  if (feature_id == "face_detection")
+    return {"nvarfaceboxdetection", "faceboxdetection", "facebox",
+            "face_detection"};
+  if (feature_id == "body_detection")
+    return {"nvarbodydetection", "bodydetection", "bodyboxdetection",
+            "bodybox", "body_detection"};
+
+  // AFX. The directory names are the ids that StudioCast uses, except for
+  // the older name of the dereverb effect.
+  if (feature_id == "dereverb")
+    return {"dereverb", "room_echo_removal"};
+  return {feature_id};
+}
+
+// True when `features_dir` holds an entry that one of `names` names. The
+// comparison takes the whole name, without case: a name that only holds
+// another one, such as `dereverb_denoiser` and `dereverb`, must not count,
+// and neither must the SDK helpers (`install_feature.sh`, `README.md`,
+// `compute_capability`), which no feature names.
+bool HasAnyFeatureMarker(const fs::path &features_dir,
+                         const std::vector<std::string> &names) {
   if (features_dir.empty()) {
     return false;
   }
   std::error_code ec;
-  if (!fs::exists(features_dir, ec) || !fs::is_directory(features_dir, ec)) {
+  if (!fs::is_directory(features_dir, ec)) {
     return false;
   }
 
-  // Fast path: exact directory/file match.
-  if (fs::exists(features_dir / feature_id, ec)) {
-    return true;
+  std::set<std::string> wanted;
+  for (const auto &name : names) {
+    wanted.insert(ToLowerCopy(name));
   }
 
-  // Heuristic: match against entry names (case-insensitive substring).
-  const std::string needle = ToLowerCopy(feature_id);
   for (const auto &entry : fs::directory_iterator(features_dir, ec)) {
     if (ec) {
       break;
     }
-    const std::string name = ToLowerCopy(entry.path().filename().string());
-    if (name.find(needle) != std::string::npos) {
+    if (wanted.count(ToLowerCopy(entry.path().filename().string())) != 0) {
       return true;
     }
   }
 
   return false;
-}
-
-bool HasAnyFeatureMarker(const fs::path &features_dir,
-                         const std::vector<std::string> &ids) {
-  for (const auto &id : ids) {
-    if (HasFeatureMarker(features_dir, id))
-      return true;
-  }
-  return false;
-}
-
-// The SDK directory names that install each StudioCast feature id.
-std::vector<std::string> MarkerNamesFor(const std::string &feature_id) {
-  std::vector<std::string> names;
-  names.push_back(feature_id);
-  if (feature_id == "bgblur") {
-    names.push_back("blur");
-  } else if (feature_id == "gaze_redirection") {
-    names.push_back("eyecontact");
-    names.push_back("GazeRedirection");
-  } else if (feature_id == "face_detection") {
-    names.push_back("FaceBoxDetection");
-    names.push_back("facebox");
-  } else if (feature_id == "body_detection") {
-    names.push_back("BodyBoxDetection");
-    names.push_back("bodybox");
-  } else if (feature_id == "dereverb") {
-    names.push_back("room_echo_removal");
-  }
-  return names;
 }
 
 bool MeetsMinDriverVersion(const studiocast::probe::Version &v) {
