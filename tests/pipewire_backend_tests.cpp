@@ -431,6 +431,51 @@ bool TestDaemonConfigRoundTripsTheAudioBackendKey() {
                 "the service config did not take the backend preference");
 }
 
+bool TestVideoOutputBackendParsing() {
+  using studiocast::pw::ParseVideoOutputPreference;
+  using studiocast::pw::VideoOutputPreference;
+
+  return Expect(ParseVideoOutputPreference("auto") ==
+                    VideoOutputPreference::kAuto,
+                "\"auto\" should parse") &&
+         Expect(ParseVideoOutputPreference("V4L2Loopback") ==
+                    VideoOutputPreference::kV4l2Loopback,
+                "the parser should ignore letter case") &&
+         Expect(ParseVideoOutputPreference(" both ") ==
+                    VideoOutputPreference::kBoth,
+                "the parser should ignore surrounding spaces") &&
+         Expect(!ParseVideoOutputPreference("gstreamer").has_value(),
+                "an unknown name must not parse");
+}
+
+bool TestVideoOutputBackendSelection() {
+  using studiocast::pw::ResolveVideoOutputBackends;
+  using studiocast::pw::VideoOutputPreference;
+
+  const auto autoPick =
+      ResolveVideoOutputBackends(VideoOutputPreference::kAuto, Available());
+  const auto both =
+      ResolveVideoOutputBackends(VideoOutputPreference::kBoth, Available());
+  const auto nativeOnly =
+      ResolveVideoOutputBackends(VideoOutputPreference::kPipeWire, Available());
+  const auto nativeMissing =
+      ResolveVideoOutputBackends(VideoOutputPreference::kPipeWire, NoServer());
+
+  return Expect(autoPick.backends.v4l2loopback && !autoPick.backends.pipewire,
+                "auto must keep v4l2loopback alone, because most video "
+                "conference applications read V4L2 only") &&
+         Expect(both.backends.v4l2loopback && both.backends.pipewire,
+                "both must enable the two outputs") &&
+         Expect(!nativeOnly.backends.v4l2loopback &&
+                    nativeOnly.backends.pipewire,
+                "pipewire alone must drop v4l2loopback") &&
+         Expect(nativeMissing.backends.v4l2loopback &&
+                    !nativeMissing.backends.pipewire,
+                "an unavailable server must fall back to v4l2loopback") &&
+         Expect(nativeMissing.used_fallback, "the fallback flag should be set") &&
+         Expect(!nativeMissing.note.empty(), "the fallback must explain itself");
+}
+
 } // namespace
 
 int main() {
@@ -478,6 +523,8 @@ int main() {
       {"daemon config round trips the audio backend key",
        &TestDaemonConfigRoundTripsTheAudioBackendKey},
       {"canonical node names", &TestCanonicalNodeNames},
+      {"video output backend parsing", &TestVideoOutputBackendParsing},
+      {"video output backend selection", &TestVideoOutputBackendSelection},
   };
 
   int failed = 0;

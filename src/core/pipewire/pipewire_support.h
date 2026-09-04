@@ -83,6 +83,38 @@ std::size_t AudioFrameBytes(std::uint32_t frame_samples,
 std::size_t AudioRingCapacityBytes(std::uint32_t frame_samples,
                                    std::uint32_t channels, int frames);
 
+// Which output carries the processed camera frames.
+enum class VideoOutputPreference {
+  kAuto,
+  kV4l2Loopback,
+  kPipeWire,
+  kBoth,
+};
+
+struct VideoOutputBackends {
+  bool v4l2loopback = false;
+  bool pipewire = false;
+};
+
+struct VideoOutputDecision {
+  VideoOutputBackends backends;
+  bool used_fallback = false;
+  std::string note;
+};
+
+std::string_view ToString(VideoOutputPreference p);
+
+std::optional<VideoOutputPreference>
+ParseVideoOutputPreference(std::string_view s);
+
+// Chooses the outputs. `kAuto` keeps v4l2loopback alone, because most video
+// conference applications read V4L2 devices only and cannot see an application
+// node. A request for the node falls back to v4l2loopback when no server
+// answers.
+VideoOutputDecision
+ResolveVideoOutputBackends(VideoOutputPreference pref,
+                           const PipeWireAvailability &avail);
+
 // Injection points for the socket probe, so the rules are testable without a
 // server. `get_env` returns an empty string for a variable that is not set.
 struct PipeWireProbeEnv {

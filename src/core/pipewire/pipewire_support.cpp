@@ -57,6 +57,76 @@ std::string_view ToString(AudioTransportPreference p) {
   return "auto";
 }
 
+std::string_view ToString(VideoOutputPreference p) {
+  switch (p) {
+  case VideoOutputPreference::kAuto:
+    return "auto";
+  case VideoOutputPreference::kV4l2Loopback:
+    return "v4l2loopback";
+  case VideoOutputPreference::kPipeWire:
+    return "pipewire";
+  case VideoOutputPreference::kBoth:
+    return "both";
+  }
+  return "auto";
+}
+
+std::optional<VideoOutputPreference>
+ParseVideoOutputPreference(std::string_view s) {
+  const std::string v = Normalize(s);
+  if (v == "auto")
+    return VideoOutputPreference::kAuto;
+  if (v == "v4l2loopback" || v == "v4l2")
+    return VideoOutputPreference::kV4l2Loopback;
+  if (v == "pipewire" || v == "pw")
+    return VideoOutputPreference::kPipeWire;
+  if (v == "both")
+    return VideoOutputPreference::kBoth;
+  return std::nullopt;
+}
+
+VideoOutputDecision
+ResolveVideoOutputBackends(VideoOutputPreference pref,
+                           const PipeWireAvailability &avail) {
+  VideoOutputDecision out;
+
+  switch (pref) {
+  case VideoOutputPreference::kAuto:
+  case VideoOutputPreference::kV4l2Loopback:
+    out.backends.v4l2loopback = true;
+    return out;
+
+  case VideoOutputPreference::kPipeWire:
+    if (avail.Usable()) {
+      out.backends.pipewire = true;
+      return out;
+    }
+    out.backends.v4l2loopback = true;
+    out.used_fallback = true;
+    out.note = "A native PipeWire camera was requested but is unavailable; "
+               "using v4l2loopback.";
+    if (const auto r = FirstLine(avail.reason); !r.empty())
+      out.note += "\n" + r;
+    return out;
+
+  case VideoOutputPreference::kBoth:
+    out.backends.v4l2loopback = true;
+    if (avail.Usable()) {
+      out.backends.pipewire = true;
+      return out;
+    }
+    out.used_fallback = true;
+    out.note = "A native PipeWire camera was requested but is unavailable; "
+               "using v4l2loopback alone.";
+    if (const auto r = FirstLine(avail.reason); !r.empty())
+      out.note += "\n" + r;
+    return out;
+  }
+
+  out.backends.v4l2loopback = true;
+  return out;
+}
+
 std::string NodeLatencyProperty(std::uint32_t frame_samples, int sample_rate) {
   return std::to_string(frame_samples) + "/" + std::to_string(sample_rate);
 }
