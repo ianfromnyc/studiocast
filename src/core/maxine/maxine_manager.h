@@ -8,6 +8,13 @@
 
 namespace studiocast::maxine {
 
+// True when `features_dir` (an `<SDK root>/features` directory) holds the
+// install marker of the StudioCast feature `feature_id` (for example
+// "denoise"). The known SDK directory names of each feature stay in
+// `maxine_manager.cpp`. Exposed for the tests.
+bool FeatureMarkerInstalled(const std::filesystem::path &features_dir,
+                            const std::string &feature_id);
+
 struct FeatureInstallStatus {
   std::string id; // e.g. "greenscreen"
   bool installed = false;

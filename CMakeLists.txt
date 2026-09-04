@@ -902,6 +902,29 @@ if (BUILD_TESTING)
 
     add_test(NAME studiocast-maxine-paths-tests COMMAND studiocast-maxine-paths-tests)
 
+    add_executable(studiocast-maxine-features-tests
+            tests/maxine_features_tests.cpp
+    )
+
+    target_link_libraries(studiocast-maxine-features-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-maxine-features-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-maxine-features-tests)
+    studiocast_enable_sanitizers(studiocast-maxine-features-tests)
+
+    set_target_properties(studiocast-maxine-features-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-maxine-features-tests
+            COMMAND studiocast-maxine-features-tests)
+
     add_executable(studiocast-nvcv-validation-tests
             tests/nvcv_validation_tests.cpp
     )

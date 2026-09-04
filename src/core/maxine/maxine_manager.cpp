@@ -101,6 +101,27 @@ bool HasAnyFeatureMarker(const fs::path &features_dir,
   return false;
 }
 
+// The SDK directory names that install each StudioCast feature id.
+std::vector<std::string> MarkerNamesFor(const std::string &feature_id) {
+  std::vector<std::string> names;
+  names.push_back(feature_id);
+  if (feature_id == "bgblur") {
+    names.push_back("blur");
+  } else if (feature_id == "gaze_redirection") {
+    names.push_back("eyecontact");
+    names.push_back("GazeRedirection");
+  } else if (feature_id == "face_detection") {
+    names.push_back("FaceBoxDetection");
+    names.push_back("facebox");
+  } else if (feature_id == "body_detection") {
+    names.push_back("BodyBoxDetection");
+    names.push_back("bodybox");
+  } else if (feature_id == "dereverb") {
+    names.push_back("room_echo_removal");
+  }
+  return names;
+}
+
 bool MeetsMinDriverVersion(const studiocast::probe::Version &v) {
   // Developer note (docs/maxine_install.md): Maxine Linux requires
   // 570.26+.
@@ -279,6 +300,11 @@ std::string PickTopReasonFromMissingEffects(
 
 } // namespace
 
+bool FeatureMarkerInstalled(const fs::path &features_dir,
+                            const std::string &feature_id) {
+  return HasAnyFeatureMarker(features_dir, MarkerNamesFor(feature_id));
+}
+
 MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
   MaxineDiagnostics d;
 
@@ -391,16 +417,12 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
     }
   }
 
-  // Feature install markers (best-effort heuristics).
+  // Feature install markers (see MarkerNamesFor).
   auto add_feature = [&](ComponentDiagnostics *comp, const std::string &id,
-                         const std::string &hint,
-                         const std::vector<std::string> &marker_aliases = {}) {
+                         const std::string &hint) {
     FeatureInstallStatus f;
     f.id = id;
-    std::vector<std::string> markers;
-    markers.push_back(id);
-    markers.insert(markers.end(), marker_aliases.begin(), marker_aliases.end());
-    f.installed = HasAnyFeatureMarker(comp->features_dir, markers);
+    f.installed = FeatureMarkerInstalled(comp->features_dir, id);
     f.details = f.installed ? "installed" : hint;
     comp->features.push_back(std::move(f));
   };
@@ -408,26 +430,22 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
   add_feature(&d.vfx, "greenscreen",
               "missing (run VFX install_feature.sh for greenscreen)");
   add_feature(&d.vfx, "bgblur",
-              "missing (run VFX install_feature.sh for bgblur)", {"blur"});
+              "missing (run VFX install_feature.sh for bgblur)");
   add_feature(&d.vfx, "denoise",
               "missing (run VFX install_feature.sh for denoise)");
   add_feature(&d.vfx, "relighting",
               "missing (run VFX install_feature.sh for relighting)");
   add_feature(&d.ar, "gaze_redirection",
-              "missing (run AR install_feature.sh for gaze_redirection)",
-              {"eyecontact", "GazeRedirection"});
+              "missing (run AR install_feature.sh for gaze_redirection)");
   add_feature(&d.ar, "face_detection",
-              "missing (run AR install_feature.sh for face_detection)",
-              {"FaceBoxDetection", "facebox"});
+              "missing (run AR install_feature.sh for face_detection)");
   add_feature(&d.ar, "body_detection",
-              "optional (install AR body detection to improve tracking)",
-              {"BodyBoxDetection", "bodybox"});
+              "optional (install AR body detection to improve tracking)");
 
   add_feature(&d.afx, "denoiser",
               "missing (run AFX install_feature.sh for denoiser)");
   add_feature(&d.afx, "dereverb",
-              "missing (run AFX install_feature.sh for dereverb)",
-              {"room_echo_removal"});
+              "missing (run AFX install_feature.sh for dereverb)");
   add_feature(&d.afx, "dereverb_denoiser",
               "missing (run AFX install_feature.sh for dereverb_denoiser)");
   add_feature(&d.afx, "studio_voice",
