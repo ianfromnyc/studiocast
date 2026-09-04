@@ -106,8 +106,69 @@ bool TestMissingOnnxRuntimeDoesNotForceOpenBackendsOff() {
                 "missing");
 }
 
+// An empty -DONNXRUNTIME_ROOT= must mean "no root", the same as an unset one.
+// The root search (step 4 of cmake/OnnxRuntime.cmake) must stay off, because
+// with an empty hint it searches the system directories and shadows the
+// distro and pkg-config order above it. find_path() and find_library() always
+// write their cache entry, so the absence of ONNXRUNTIME_INCLUDE_DIR in the
+// cache shows that the step did not run.
+bool TestEmptyOnnxRuntimeRootDoesNotRunTheRootSearch() {
+  ScopedTempDir temp("studiocast-cmake-empty-ort-root");
+  if (!Expect(temp.ok(), temp.error().c_str()))
+    return false;
+
+  const fs::path repo = fs::path(STUDIOCAST_SOURCE_DIR);
+  const fs::path buildDir = temp.path() / "build";
+  const fs::path noPkgConfig = temp.path() / "empty-pkgconfig";
+  std::error_code ec;
+  fs::create_directories(noPkgConfig, ec);
+  if (!Expect(!ec, "failed to create empty pkg-config directory"))
+    return false;
+
+  std::string command = "env -u ONNXRUNTIME_ROOT PKG_CONFIG_LIBDIR=" +
+                        ShellQuote(noPkgConfig.string()) + " " +
+                        ShellQuote(STUDIOCAST_CMAKE_COMMAND) + " -S " +
+                        ShellQuote(repo.string()) + " -B " +
+                        ShellQuote(buildDir.string()) +
+                        " -DONNXRUNTIME_ROOT="
+                        " -DBUILD_TESTING=OFF"
+                        " -DSTUDIOCAST_ENABLE_DLIB=OFF"
+                        " -DSTUDIOCAST_ENABLE_OPEN_CUDA=ON"
+                        " -DSTUDIOCAST_ENABLE_OPEN_AUDIO=ON"
+                        " -DCMAKE_DISABLE_FIND_PACKAGE_onnxruntime=ON"
+                        " -DCMAKE_DISABLE_FIND_PACKAGE_Python3=ON"
+                        " 2>&1";
+
+  studiocast::util::ExecCaptureOptions options;
+  options.timeout_ms = 60000;
+  options.max_output_bytes = 2 * 1024 * 1024;
+  const auto result = studiocast::util::ExecCapture(command, options);
+  if (!Expect(result.exit_code == 0,
+              "nested CMake configure with an empty ONNXRUNTIME_ROOT should "
+              "succeed")) {
+    std::cerr << result.stdout_str << "\n";
+    return false;
+  }
+
+  if (!Expect(result.stdout_str.find("using the explicit ONNXRUNTIME_ROOT") ==
+                  std::string::npos,
+              "an empty ONNXRUNTIME_ROOT must not count as an explicit root")) {
+    std::cerr << result.stdout_str << "\n";
+    return false;
+  }
+
+  const std::string cache = ReadFile(buildDir / "CMakeCache.txt");
+  return Expect(cache.find("ONNXRUNTIME_INCLUDE_DIR") == std::string::npos,
+                "the root search must not run for an empty ONNXRUNTIME_ROOT") &&
+         Expect(cache.find("ONNXRUNTIME_LIBRARY") == std::string::npos,
+                "the root search must not run for an empty ONNXRUNTIME_ROOT");
+}
+
 } // namespace
 
 int main() {
-  return TestMissingOnnxRuntimeDoesNotForceOpenBackendsOff() ? 0 : 1;
+  return (TestMissingOnnxRuntimeDoesNotForceOpenBackendsOff() &&
+          TestEmptyOnnxRuntimeRootDoesNotRunTheRootSearch())
+             ? 0
+             : 1;
 }

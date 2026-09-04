@@ -213,9 +213,12 @@ print(json.dumps(payload))
     endif()
   endif()
 
-  # 4) User-provided root path. This is the last resort when ONNXRUNTIME_ROOT is
-  # unset, and the only path that runs when it is set.
-  if (NOT _found AND DEFINED ONNXRUNTIME_ROOT)
+  # 4) User-provided root path. It runs only when ONNXRUNTIME_ROOT holds a
+  # value, and it is then the only path that runs. Use the same flag as step 1
+  # so that an empty -DONNXRUNTIME_ROOT= is "no root" for both: steps 1-3 keep
+  # the search order, and this step does not look in the system directories
+  # with an empty hint.
+  if (NOT _found AND _ort_explicit_root)
     find_path(ONNXRUNTIME_INCLUDE_DIR
       NAMES onnxruntime_cxx_api.h
       HINTS "${ONNXRUNTIME_ROOT}"
