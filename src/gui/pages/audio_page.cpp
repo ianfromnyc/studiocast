@@ -1333,11 +1333,28 @@ void AudioPage::ApplySpeakerTargetRefreshResult(
   updatingSpeakerTargetUi_ = false;
 }
 
+std::string AudioPage::CurrentMicSourceName() const {
+  // Prefer the name the user picked. On "auto" the daemon resolves the input,
+  // so use the name it reports back.
+  if (sourceCombo_ && sourceCombo_->isEnabled()) {
+    const QString selected = sourceCombo_->currentData().toString().trimmed();
+    if (!selected.isEmpty() &&
+        selected != QString::fromLatin1(kAutoPulseSource)) {
+      return selected.toStdString();
+    }
+  }
+  return daemonSourceResolved_.trimmed().toStdString();
+}
+
 void AudioPage::RefreshMonitorSinks() {
   if (!monitorSinkCombo_)
     return;
   if (monitorSinkRefreshThread_)
     return;
+
+  // Record the microphone input this list is built for, so that a later change
+  // of input builds it again.
+  monitorSinkListMicSource_ = QString::fromStdString(CurrentMicSourceName());
 
   updatingMonitorUi_ = true;
   monitorSinkCombo_->blockSignals(true);
@@ -1399,13 +1416,19 @@ void AudioPage::ApplyMonitorSinkRefreshResult(
   int daemonIndex = -1;
   int added = 1;
 
-  // StudioCast's own sinks would feed the microphone back into itself.
+  // Offer only the sinks the daemon accepts for the monitor. That rule also
+  // refuses the sink whose `.monitor` is the selected microphone input, which
+  // would feed the processed sound straight back into the capture.
+  const std::string micSource = CurrentMicSourceName();
+
   for (const auto &sink : result.sinks) {
     if (sink.name.empty())
       continue;
     std::string reason;
-    if (studiocast::audio::IsUnsafeSpeakerTargetSinkName(sink.name, &reason))
+    if (studiocast::audio::IsUnsafeMicMonitorSinkName(sink.name, micSource,
+                                                      &reason)) {
       continue;
+    }
 
     std::string label = sink.name;
     if (result.defaultSink && sink.name == *result.defaultSink)
@@ -2056,6 +2079,7 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
       FirstLine(microphoneEndpoint.value("action").toString());
   SyncSourceSelectionFromDaemon(audio.value("source").toString());
   const QString sourceResolved = audio.value("source_resolved").toString();
+  daemonSourceResolved_ = sourceResolved;
   const QString sourceErr = audio.value("source_error").toString();
   const auto sourceWarnings = audio.value("source_warnings").toArray();
   const QString micMode = audio.value("mic_mode").toString();
@@ -2182,6 +2206,13 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
 
       const bool sinkChanged = daemonMonitorSink_ != monitorSink;
       daemonMonitorSink_ = monitorSink;
+
+      // The safe sinks depend on the microphone input, so build the list again
+      // when the input changes.
+      if (monitorSinkListMicSource_ !=
+          QString::fromStdString(CurrentMicSourceName())) {
+        RefreshMonitorSinks();
+      }
 
       updatingMonitorUi_ = true;
       monitorEnableCheck_->setEnabled(monitorReported && daemonAiSupported_);

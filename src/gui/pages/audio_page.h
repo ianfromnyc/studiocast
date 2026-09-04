@@ -108,6 +108,10 @@ private:
       const SpeakerTargetRefreshResult &result);
   void ApplyMonitorSinkRefreshResult(const SpeakerTargetRefreshResult &result);
   void PushDaemonMonitorConfig();
+
+  // Microphone input the monitor sink rule must be checked against. Empty
+  // when it is not known yet.
+  std::string CurrentMicSourceName() const;
   void RefreshStatusFromCachedDaemon(bool forceControlResync);
   void ApplyCachedDaemonAudioStatus(bool forceControlResync = false);
   void ScheduleDaemonAudioConfigWrite();
@@ -253,6 +257,12 @@ private:
   // Last microphone monitor state reported by the daemon.
   bool updatingMonitorUi_ = false;
   QString daemonMonitorSink_;
+
+  // Microphone input the daemon resolved, and the input the monitor sink list
+  // was built for. A change means the list can hold a sink that would now feed
+  // back into the capture.
+  QString daemonSourceResolved_;
+  QString monitorSinkListMicSource_;
 
   // Cached daemon effects blob so we can preserve fields not represented in
   // this UI.
