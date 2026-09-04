@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 # StudioCast uninstall helper.
 #
@@ -7,6 +6,9 @@ set -euo pipefail
 #   1) Simple uninstall (default): remove user-installed binaries/service + runtime socket.
 #   2) Greedy uninstall (--greedy): additionally remove most local data/config/state and
 #      attempt to purge common system dependencies installed by repo helper scripts.
+#
+# Everything at the top level is a definition, so sourcing this file only makes
+# the functions available. The shell options and the work belong to main().
 
 usage() {
   cat <<'EOF'
@@ -37,15 +39,17 @@ DRY_RUN=0
 YES=0
 GREEDY=0
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --greedy) GREEDY=1; shift ;;
-    --dry-run) DRY_RUN=1; shift ;;
-    -y|--yes) YES=1; shift ;;
-    -h|--help) usage; exit 0 ;;
-    *) die "Unknown argument: $1 (use --help)" ;;
-  esac
-done
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --greedy) GREEDY=1; shift ;;
+      --dry-run) DRY_RUN=1; shift ;;
+      -y|--yes) YES=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "Unknown argument: $1 (use --help)" ;;
+    esac
+  done
+}
 
 run() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -94,25 +98,29 @@ confirm() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-HOME_DIR="${HOME:-}"
-[[ -n "$HOME_DIR" ]] || die "HOME is not set"
+# Work out the user directories the uninstall touches. This reads the
+# environment and runs a command, so main() calls it instead of the top level.
+resolve_user_paths() {
+  HOME_DIR="${HOME:-}"
+  [[ -n "$HOME_DIR" ]] || die "HOME is not set"
 
-XDG_DATA_HOME_DIR="${XDG_DATA_HOME:-$HOME_DIR/.local/share}"
-XDG_CONFIG_HOME_DIR="${XDG_CONFIG_HOME:-$HOME_DIR/.config}"
-XDG_STATE_HOME_DIR="${XDG_STATE_HOME:-$HOME_DIR/.local/state}"
+  XDG_DATA_HOME_DIR="${XDG_DATA_HOME:-$HOME_DIR/.local/share}"
+  XDG_CONFIG_HOME_DIR="${XDG_CONFIG_HOME:-$HOME_DIR/.config}"
+  XDG_STATE_HOME_DIR="${XDG_STATE_HOME:-$HOME_DIR/.local/state}"
 
-UID_NUM="$(id -u)"
-XDG_RUNTIME_DIR_DIR="${XDG_RUNTIME_DIR:-/tmp/studiocast-runtime-${UID_NUM}}"
+  UID_NUM="$(id -u)"
+  XDG_RUNTIME_DIR_DIR="${XDG_RUNTIME_DIR:-/tmp/studiocast-runtime-${UID_NUM}}"
 
-STUDIOCAST_DATA_DIR="${XDG_DATA_HOME_DIR}/studiocast"
-STUDIOCAST_CONFIG_DIR="${XDG_CONFIG_HOME_DIR}/studiocast"
-STUDIOCAST_STATE_DIR="${XDG_STATE_HOME_DIR}/studiocast"
-STUDIOCAST_RUNTIME_DIR="${XDG_RUNTIME_DIR_DIR}/studiocast"
+  STUDIOCAST_DATA_DIR="${XDG_DATA_HOME_DIR}/studiocast"
+  STUDIOCAST_CONFIG_DIR="${XDG_CONFIG_HOME_DIR}/studiocast"
+  STUDIOCAST_STATE_DIR="${XDG_STATE_HOME_DIR}/studiocast"
+  STUDIOCAST_RUNTIME_DIR="${XDG_RUNTIME_DIR_DIR}/studiocast"
 
-SYSTEMD_USER_DIR="${XDG_CONFIG_HOME_DIR}/systemd/user"
-SYSTEMD_SERVICE_PATH="${SYSTEMD_USER_DIR}/studiocastd.service"
+  SYSTEMD_USER_DIR="${XDG_CONFIG_HOME_DIR}/systemd/user"
+  SYSTEMD_SERVICE_PATH="${SYSTEMD_USER_DIR}/studiocastd.service"
 
-LOCAL_BIN_DIR="${HOME_DIR}/.local/bin"
+  LOCAL_BIN_DIR="${HOME_DIR}/.local/bin"
+}
 
 remove_systemd_user_service() {
   if ! have_cmd systemctl; then
@@ -321,6 +329,11 @@ greedy_purge_apt_dependencies() {
 }
 
 main() {
+  set -euo pipefail
+
+  parse_args "$@"
+  resolve_user_paths
+
   log "Mode: $([[ "$GREEDY" -eq 1 ]] && echo greedy || echo simple)"
   log "Dry-run: $([[ "$DRY_RUN" -eq 1 ]] && echo yes || echo no)"
 
@@ -352,8 +365,11 @@ main() {
   log "Done."
 }
 
-# Run only when this file is the program. tests/uninstall_pkgconfig_tests.sh
-# sources it to call single functions.
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  main
+# Everything above is a definition. Stop here when the file is sourced, so that
+# tests/uninstall_pkgconfig_tests.sh can call single functions without an
+# uninstall, without argument parsing, and without new shell options.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
 fi
+
+main "$@"

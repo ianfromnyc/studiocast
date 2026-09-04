@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Offline checks for the onnxruntime.pc clean-up in
-# scripts/uninstall/uninstall.sh.
+# scripts/uninstall/uninstall.sh, and for what sourcing that file does.
 #
 # The script is sourced, never run, so no uninstall step happens here. Only the
 # two helpers below are called, and they work on a sandbox directory with a
@@ -113,9 +113,70 @@ test_only_our_own_symlink_is_removed() {
   fi
 }
 
+# Sourcing the file must only define things. A caller that sources it keeps its
+# own arguments and its own shell options, and sees no output.
+test_sourcing_has_no_side_effects() {
+  local probe="${SANDBOX}/source_probe.sh"
+  local report="${SANDBOX}/source_probe.report"
+  local noise="${SANDBOX}/source_probe.noise"
+
+  cat > "${probe}" <<'PROBE'
+#!/usr/bin/env bash
+# Source the uninstall script with arguments in place, then report what the
+# sourcing changed in this shell.
+uninstall_path="$1"
+report_path="$2"
+noise_path="$3"
+
+set -- --greedy --foo
+
+# shellcheck source=/dev/null
+source "${uninstall_path}" >"${noise_path}" 2>&1
+
+{
+  printf 'args=%s\n' "$*"
+  set -o | awk '$1 == "errexit" { print "errexit=" $2 }'
+} > "${report_path}"
+PROBE
+
+  : > "${report}"
+  : > "${noise}"
+
+  local probe_status=0
+  bash "${probe}" "${UNINSTALL}" "${report}" "${noise}" || probe_status="$?"
+
+  if [[ "${probe_status}" -ne 0 ]]; then
+    t_fail "sourcing ended the caller (exit ${probe_status}): $(tr '\n' ' ' < "${noise}")"
+    return
+  fi
+
+  local args_line errexit_line
+  args_line="$(grep '^args=' "${report}")"
+  errexit_line="$(grep '^errexit=' "${report}")"
+
+  if [[ "${args_line}" != "args=--greedy --foo" ]]; then
+    t_fail "sourcing parsed the caller arguments, got [${args_line}]"
+  else
+    t_pass "sourcing leaves the caller arguments alone"
+  fi
+
+  if [[ "${errexit_line}" != "errexit=off" ]]; then
+    t_fail "sourcing changed the caller shell options, got [${errexit_line}]"
+  else
+    t_pass "sourcing leaves errexit off in the caller"
+  fi
+
+  if [[ -s "${noise}" ]]; then
+    t_fail "sourcing printed: $(tr '\n' ' ' < "${noise}")"
+  else
+    t_pass "sourcing prints nothing"
+  fi
+}
+
 test_link_dirs_come_from_pkg_config
 test_link_dirs_fall_back_to_the_common_directories
 test_only_our_own_symlink_is_removed
+test_sourcing_has_no_side_effects
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2
