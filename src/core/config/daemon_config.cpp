@@ -194,6 +194,12 @@ DaemonConfig LoadDaemonConfig() {
         if (const auto parsed = studiocast::video::ParsePixelFormat(it->second))
           s.video_output_format = *parsed;
       }
+      if (auto it = kv.find("video.output.backend"); it != kv.end()) {
+        // An unknown name keeps the default, so a typo cannot silently drop
+        // the v4l2loopback output.
+        if (studiocast::pw::ParseVideoOutputPreference(it->second))
+          s.video_output_backend = it->second;
+      }
       if (auto it = kv.find("video.prefer_mjpeg"); it != kv.end()) {
         s.video_prefer_mjpeg = ParseBool(it->second, s.video_prefer_mjpeg);
       }
@@ -693,6 +699,7 @@ bool SaveDaemonConfig(const DaemonConfig &s, std::string *error) {
   out << "video.fps = " << s.video_fps << "\n";
   out << "video.output_format = "
       << studiocast::video::PixelFormatName(s.video_output_format) << "\n";
+  out << "video.output.backend = " << s.video_output_backend << "\n";
   out << "video.prefer_mjpeg = " << (s.video_prefer_mjpeg ? "true" : "false")
       << "\n";
   out << "video.scaling.backend = " << s.video_scaling_backend << "\n";
@@ -761,6 +768,16 @@ ToVideoServiceConfig(const DaemonConfig &s) {
   cfg.pipeline.fps = s.video_fps;
   cfg.pipeline.output_format = s.video_output_format;
   cfg.pipeline.prefer_mjpeg = s.video_prefer_mjpeg;
+  {
+    // v4l2loopback stays the frame source of truth, so the native node is a
+    // mirror. `pipewire` therefore still opens the loopback device.
+    const auto pref = studiocast::pw::ParseVideoOutputPreference(
+                          s.video_output_backend)
+                          .value_or(studiocast::pw::VideoOutputPreference::kAuto);
+    const auto decision = studiocast::pw::ResolveVideoOutputBackends(
+        pref, studiocast::pw::ProbePipeWire());
+    cfg.pipeline.pipewire_output = decision.backends.pipewire;
+  }
   cfg.pipeline.scaling_backend = ParseScalingBackendPreference(
       s.video_scaling_backend,
       studiocast::video::ScalingBackendPreference::auto_select);

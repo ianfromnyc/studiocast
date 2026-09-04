@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "core/video/effects/broadcast_effects.h"
+#include "core/video/pipewire/pipewire_camera_node.h"
 #include "core/video/v4l2_capture.h"
 #include "core/video/v4l2_writer.h"
 
@@ -63,6 +65,10 @@ struct CameraPipelineConfig {
   // spending tens of milliseconds per frame.
   bool allow_cpu_resize = true;
 
+  // Mirror every processed frame onto a native PipeWire Video/Source node
+  // named "studiocast_camera", beside the v4l2loopback output.
+  bool pipewire_output = false;
+
   studiocast::video::effects::BroadcastCameraEffects effects{};
 };
 
@@ -80,6 +86,11 @@ struct CameraPipelineStatus {
   // "raw_after_mjpeg_decode_failure".
   std::string capture_fallback_state = "none";
   std::string capture_fallback_reason;
+
+  // Native PipeWire camera node: "off", "running", or an error text.
+  std::string pipewire_output_state = "off";
+  std::uint32_t pipewire_node_id = 0;
+  int pipewire_consumer_count = 0;
 
   // Active output-scaling backend.
   // Common values: "cpu", "gpu:maxine", "gpu:open_cuda" (empty when idle)
@@ -262,6 +273,14 @@ public:
                         std::string *error) override;
   void CloseOutput() override;
 
+  // Brings the native PipeWire camera node in line with the negotiated output
+  // format, and takes it down when the configuration turns it off.
+  void SyncPipeWireOutput();
+
+  // Hands one processed frame to the native camera node. It never blocks and
+  // never fails the pipeline.
+  void PublishToPipeWire(const std::uint8_t *data, std::size_t bytes);
+
   CameraPipelineStatus Status() const override;
 
   // Live update of effects while running.
@@ -329,6 +348,19 @@ private:
   // camera visible to apps even when we're idle.
   V4l2Writer writer_;
   std::string writer_device_;
+
+  // Optional second output. It carries the same buffer that goes to
+  // v4l2loopback, so it costs one memory copy a frame.
+  std::unique_ptr<studiocast::video::pw_backend::PipeWireCameraNode> pw_node_;
+  std::string pw_node_error_;
+  bool pw_output_wanted_ = false;
+
+  // Format the running node negotiated, so a renegotiated v4l2loopback format
+  // restarts the node instead of sending frames of the wrong size.
+  int pw_node_width_ = 0;
+  int pw_node_height_ = 0;
+  int pw_node_fps_ = 0;
+  PixelFormat pw_node_format_ = PixelFormat::rgb24;
 
   // Idle keepalive frames: while the heavy pipeline is stopped, periodically
   // write a black frame to keep consumers from closing/re-opening due to a

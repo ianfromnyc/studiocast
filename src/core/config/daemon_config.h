@@ -32,6 +32,10 @@ struct DaemonConfig {
       studiocast::video::PixelFormat::rgb24;
   bool video_prefer_mjpeg = true;
 
+  // Where the processed frames go: "auto" (v4l2loopback alone),
+  // "v4l2loopback", "pipewire" or "both". See docs/PIPEWIRE.md.
+  std::string video_output_backend = "auto";
+
   // Output scaling backend preference: "cpu" | "gpu" | "auto".
   // "auto" = use GPU scaling when available; otherwise CPU.
   std::string video_scaling_backend = "auto";

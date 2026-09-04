@@ -452,6 +452,16 @@ CameraPipelineStatus CameraPipeline::Status() const {
   s.starting = starting_;
   s.input_device = input_device_;
   s.output_device = output_device_;
+  if (!pw_output_wanted_) {
+    s.pipewire_output_state = "off";
+  } else if (pw_node_) {
+    s.pipewire_output_state = "running";
+    s.pipewire_node_id = pw_node_->NodeId();
+    s.pipewire_consumer_count = pw_node_->ConsumerCount();
+  } else {
+    s.pipewire_output_state =
+        pw_node_error_.empty() ? std::string("starting") : pw_node_error_;
+  }
   if (running_ || starting_) {
     s.capture = capture_;
     s.output = output_;
@@ -497,6 +507,7 @@ CameraPipelineStatus CameraPipeline::Status() const {
 
 bool CameraPipeline::Start(const CameraPipelineConfig &cfg,
                            std::string *error) {
+  pw_output_wanted_ = cfg.pipewire_output;
   const bool w_set = cfg.width > 0;
   const bool h_set = cfg.height > 0;
   if (cfg.capture_mode == CaptureMode::requested) {
@@ -759,11 +770,63 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
   writer_device_ = outDev;
   output_ = writer_.Actual();
   output_device_ = outDev;
+  SyncPipeWireOutput();
   return true;
+}
+
+void CameraPipeline::SyncPipeWireOutput() {
+  if (!pw_output_wanted_) {
+    pw_node_.reset();
+    pw_node_error_.clear();
+    return;
+  }
+
+  const ActualFormat a = writer_.Actual();
+  if (a.width <= 0 || a.height <= 0)
+    return;
+
+  const int fps = a.fps > 0 ? a.fps : 30;
+  if (pw_node_ && pw_node_->IsRunning() && pw_node_width_ == a.width &&
+      pw_node_height_ == a.height && pw_node_fps_ == fps &&
+      pw_node_format_ == a.format) {
+    return;
+  }
+
+  studiocast::video::pw_backend::CameraNodeConfig node;
+  node.width = a.width;
+  node.height = a.height;
+  node.fps = fps;
+  node.format = a.format;
+
+  auto fresh =
+      std::make_unique<studiocast::video::pw_backend::PipeWireCameraNode>();
+  std::string err;
+  if (!fresh->Start(node, &err)) {
+    pw_node_error_ = err;
+    pw_node_.reset();
+    return;
+  }
+
+  pw_node_ = std::move(fresh);
+  pw_node_error_.clear();
+  pw_node_width_ = a.width;
+  pw_node_height_ = a.height;
+  pw_node_fps_ = fps;
+  pw_node_format_ = a.format;
+}
+
+void CameraPipeline::PublishToPipeWire(const std::uint8_t *data,
+                                       std::size_t bytes) {
+  if (!pw_node_ || !data || bytes == 0)
+    return;
+  std::string err;
+  if (!pw_node_->WriteFrame(data, bytes, &err) && !err.empty())
+    pw_node_error_ = err;
 }
 
 bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig &cfg,
                                       std::string *error) {
+  pw_output_wanted_ = cfg.pipewire_output;
   const bool w_set = cfg.width > 0;
   const bool h_set = cfg.height > 0;
   if (cfg.capture_mode == CaptureMode::requested) {
@@ -922,6 +985,8 @@ void CameraPipeline::CloseOutput() {
   writer_device_.clear();
   output_device_.clear();
   output_ = ActualFormat{};
+  pw_node_.reset();
+  pw_node_error_.clear();
 }
 
 void CameraPipeline::Stop() {
@@ -9205,6 +9270,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
 
       if (outA.bytes_per_line == wantRow && outA.size_image == rgbOutBytes) {
         std::string werr;
+        PublishToPipeWire(rgbOut, rgbOutBytes);
         if (!writer_.WriteFrame(rgbOut, rgbOutBytes, &werr)) {
           // Best-effort recovery: consumers may renegotiate global loopback
           // caps via VIDIOC_S_FMT (common in Zoom/Teams). Refresh and drop this
@@ -9230,6 +9296,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
 
         std::string werr;
+        PublishToPipeWire(outBuf.data(), outBuf.size());
         if (!writer_.WriteFrame(outBuf.data(), outBuf.size(), &werr)) {
           // See note above: allow consumer-driven renegotiation without
           // restart.
@@ -9252,6 +9319,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
           yuyvConversionScratch.size());
 
       std::string werr;
+      PublishToPipeWire(outBuf.data(), outBuf.size());
       if (!writer_.WriteFrame(outBuf.data(), outBuf.size(), &werr)) {
         // See note above: allow consumer-driven renegotiation without restart.
         if (RefreshOutputActual("write_fail", /*force=*/true)) {
