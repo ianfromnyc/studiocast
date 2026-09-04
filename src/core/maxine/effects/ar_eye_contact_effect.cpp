@@ -1,5 +1,7 @@
 #include "core/maxine/effects/ar_eye_contact_effect.h"
 
+#include "core/maxine/paths.h"
+
 #include <algorithm>
 #include <sstream>
 
@@ -59,6 +61,18 @@ bool ArEyeContactEffect::EnsureCreated(std::string *error) {
       *error = MakeStatusError(*ar_, "NvAR_Create(GazeRedirection)", st);
     return false;
   }
+  // The AR features read their TensorRT packages from ModelDir. Best effort:
+  // older builds may not know the selector.
+  if (ar_->f().NvAR_SetString) {
+    const auto models =
+        studiocast::maxine::ModelsDirForLibrary(ar_->library_path());
+    if (!models.empty()) {
+      const auto s = models.string();
+      (void)ar_->f().NvAR_SetString(handle_, NvAR_Parameter_Config(ModelDir),
+                                    s.c_str());
+    }
+  }
+
   loaded_ = false;
   return true;
 }

@@ -61,4 +61,11 @@ struct MaxinePathsReport {
 // The returned report contains precise missing-piece diagnostics.
 MaxinePathsReport ResolveMaxinePaths();
 
+// Derives the models directory from the path of an SDK library. It looks for a
+// `models` directory beside the library (SDK Core 1.x: `<root>/lib/models`) and
+// then in the directories above it (legacy: `<root>/models`). Returns an empty
+// path when there is none. Effects use it because they only know the library
+// they loaded.
+fs::path ModelsDirForLibrary(const fs::path &library);
+
 } // namespace studiocast::maxine

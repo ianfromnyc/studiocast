@@ -219,6 +219,23 @@ ResolveComponent(const std::string &component, const char *env_var,
 }
 } // namespace
 
+fs::path ModelsDirForLibrary(const fs::path &library) {
+  if (library.empty())
+    return {};
+
+  fs::path dir = library.parent_path();
+  for (int i = 0; i < 5 && !dir.empty(); ++i) {
+    const auto cand = dir / "models";
+    if (DirExists(cand)) {
+      return cand;
+    }
+    if (dir == dir.root_path())
+      break;
+    dir = dir.parent_path();
+  }
+  return {};
+}
+
 MaxinePathsReport ResolveMaxinePaths() {
   MaxinePathsReport rep;
 

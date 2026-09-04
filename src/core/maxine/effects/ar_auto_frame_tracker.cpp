@@ -1,5 +1,7 @@
 #include "core/maxine/effects/ar_auto_frame_tracker.h"
 
+#include "core/maxine/paths.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -61,6 +63,18 @@ bool ArAutoFrameTracker::EnsureFeatureInitialized(
       *error_out = "NvAR_Create(" + std::string(feature_id) +
                    ") failed: " + ar_->StatusToString(st);
     return false;
+  }
+
+  // The AR features read their TensorRT packages from ModelDir. Best effort:
+  // older builds may not know the selector.
+  if (ar_->f().NvAR_SetString) {
+    const auto models =
+        studiocast::maxine::ModelsDirForLibrary(ar_->library_path());
+    if (!models.empty()) {
+      const auto s = models.string();
+      (void)ar_->f().NvAR_SetString(h, NvAR_Parameter_Config(ModelDir),
+                                    s.c_str());
+    }
   }
 
   if (!ar_->f().NvAR_Load) {
@@ -145,7 +159,7 @@ bool ArAutoFrameTracker::EnsureInitialized(NvCVImage *input_bgr_gpu,
 
   // Optional body fallback.
   (void)EnsureFeatureInitialized(
-      studiocast::maxine::ar::NVAR_FEATURE_BODY_BOX_DETECTION, &body_handle_,
+      studiocast::maxine::ar::NVAR_FEATURE_BODY_DETECTION, &body_handle_,
       nullptr);
 
   // Bind input image.

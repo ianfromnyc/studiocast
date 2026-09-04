@@ -21,13 +21,13 @@
 
 namespace studiocast::maxine::ar {
 
-// Feature selector strings.
+// Feature selector strings. The values come from the per-feature headers of
+// the AR SDK, e.g. `features/nvargazeredirection/include/nvARGazeRedirection.h`.
 inline constexpr const char *NVAR_FEATURE_GAZE_REDIRECTION = "GazeRedirection";
 inline constexpr const char *NVAR_FEATURE_FACE_BOX_DETECTION =
     "FaceBoxDetection";
 // Optional (may not be present in all Maxine AR builds).
-inline constexpr const char *NVAR_FEATURE_BODY_BOX_DETECTION =
-    "BodyBoxDetection";
+inline constexpr const char *NVAR_FEATURE_BODY_DETECTION = "BodyDetection";
 
 using NvAR_ParameterSelector = const char *;
 using NvAR_FeatureID = const char *;
