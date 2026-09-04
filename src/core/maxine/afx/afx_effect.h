@@ -88,6 +88,9 @@ public:
 
   const AfxEffectConfig &config() const { return cfg_; }
   const fs::path &resolved_model_path() const { return resolved_model_path_; }
+  const fs::path &resolved_feature_lib_path() const {
+    return resolved_feature_lib_path_;
+  }
 
   // Validates config and resolves the model path (if not explicitly provided).
   bool Configure(const AfxEffectConfig &cfg, std::string *error_out);

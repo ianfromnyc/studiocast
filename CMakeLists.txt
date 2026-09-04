@@ -925,6 +925,29 @@ if (BUILD_TESTING)
     add_test(NAME studiocast-maxine-features-tests
             COMMAND studiocast-maxine-features-tests)
 
+    add_executable(studiocast-afx-effect-tests
+            tests/afx_effect_tests.cpp
+    )
+
+    target_link_libraries(studiocast-afx-effect-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-afx-effect-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-afx-effect-tests)
+    studiocast_enable_sanitizers(studiocast-afx-effect-tests)
+
+    set_target_properties(studiocast-afx-effect-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-afx-effect-tests
+            COMMAND studiocast-afx-effect-tests)
+
     add_executable(studiocast-nvcv-validation-tests
             tests/nvcv_validation_tests.cpp
     )
