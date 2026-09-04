@@ -58,9 +58,14 @@ Config key `audio.backend`, or the command-line flag `--audio-backend`:
 
 | Value | Result |
 | --- | --- |
-| `auto` (default) | native PipeWire when the option is compiled in and a PipeWire server is reachable, else PulseAudio |
-| `pulse` | always PulseAudio |
-| `pipewire` | native PipeWire; the daemon reports an error when it is not available |
+| `pulse` (default) | always PulseAudio |
+| `auto` | native PipeWire when the option is compiled in and a PipeWire server is reachable, else PulseAudio |
+| `pipewire` | native PipeWire, with a fall back to PulseAudio and a note when it is not available |
+
+PulseAudio is the default because it works on a PulseAudio server and on a
+PipeWire server through `pipewire-pulse`. An upgrade therefore changes nothing
+on a machine that already works. Set `auto` or `pipewire` to move to the native
+nodes.
 
 A server is "reachable" when a PipeWire socket exists. StudioCast looks for
 `$PIPEWIRE_RUNTIME_DIR`, then `$XDG_RUNTIME_DIR`, then `$USERPROFILE`, and

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/audio/pipewire/pipewire_audio_devices.h"
+#include "core/audio/virtual_audio_service.h"
 #include "core/pipewire/pipewire_audio_node.h"
 
 #include "core/pipewire/pipewire_support.h"
@@ -364,6 +365,32 @@ bool TestLiveNativeVirtualMicRoundTrip() {
                 "consumer detection reported an error: " + consumers.error);
 }
 
+bool TestServiceTransportFollowsTheConfiguredPreference() {
+  studiocast::audio::VirtualAudioServiceConfig cfg;
+  cfg.transport = AudioTransportPreference::kPulse;
+  const auto pulse = studiocast::audio::ResolveServiceAudioTransport(cfg);
+
+  cfg.transport = AudioTransportPreference::kPipeWire;
+  const auto native = studiocast::audio::ResolveServiceAudioTransport(cfg);
+
+  const bool nativeUsable = studiocast::pw::PipeWireCompiledIn() &&
+                            studiocast::pw::ProbePipeWireSocket().found;
+
+  return Expect(pulse.transport == AudioTransport::kPulse,
+                "a pulse preference must stay on PulseAudio") &&
+         Expect(native.transport == (nativeUsable ? AudioTransport::kPipeWire
+                                                  : AudioTransport::kPulse),
+                "a pipewire preference must follow real availability");
+}
+
+bool TestServiceTransportDefaultsToPulse() {
+  // PulseAudio stays the default so an upgrade changes nothing on a machine
+  // that already works, PipeWire hosts included.
+  const studiocast::audio::VirtualAudioServiceConfig cfg;
+  return Expect(cfg.transport == AudioTransportPreference::kPulse,
+                "the service default preference must be pulse");
+}
+
 } // namespace
 
 int main() {
@@ -404,6 +431,10 @@ int main() {
        &TestPipeWireIoRefusesToOpenWithoutTheVirtualMic},
       {"live native virtual mic round trip",
        &TestLiveNativeVirtualMicRoundTrip},
+      {"service transport follows the configured preference",
+       &TestServiceTransportFollowsTheConfiguredPreference},
+      {"service transport defaults to pulse",
+       &TestServiceTransportDefaultsToPulse},
       {"canonical node names", &TestCanonicalNodeNames},
   };
 

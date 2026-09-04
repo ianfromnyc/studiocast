@@ -13,6 +13,7 @@
 #include "core/audio/audio_device_safety.h"
 #include "core/audio/audio_pipeline.h"
 #include "core/audio/audio_processor.h"
+#include "core/audio/pipewire/pipewire_audio_devices.h"
 #include "core/audio/mic_monitor.h"
 #include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_mic.h"
@@ -456,6 +457,11 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
     monitor_output_lost_ = false;
     monitor_route_may_exist_ = false;
     consumer_detector_.reset();
+
+    const auto decision = ResolveServiceAudioTransport(cfg);
+    transport_active_ = decision.transport;
+    st_.transport_backend_active = std::string(ToString(decision.transport));
+    st_.transport_note = decision.note;
   }
 
   stop_.store(false, std::memory_order_release);
@@ -567,12 +573,26 @@ void VirtualAudioService::SleepFor(std::chrono::milliseconds d) const {
   std::this_thread::sleep_for(d);
 }
 
+studiocast::pw::AudioTransportDecision
+ResolveServiceAudioTransport(const VirtualAudioServiceConfig &cfg) {
+  return studiocast::pw::ResolveAudioTransport(cfg.transport,
+                                               studiocast::pw::ProbePipeWire());
+}
+
 std::unique_ptr<AudioPipelineRunner>
 VirtualAudioService::CreatePipeline(AudioProcessor *processor) const {
   if (hooks_.create_pipeline) {
     return hooks_.create_pipeline(processor);
   }
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
+  if (transport_active_ == studiocast::pw::AudioTransport::kPipeWire) {
+    AudioPipelineHooks hooks;
+    hooks.create_io = [] {
+      return studiocast::audio::pw_backend::CreatePipeWireAudioIo();
+    };
+    return std::make_unique<studiocast::audio::AudioPipeline>(processor,
+                                                              std::move(hooks));
+  }
   return std::make_unique<studiocast::audio::AudioPipeline>(processor);
 #else
   (void)processor;
@@ -580,9 +600,17 @@ VirtualAudioService::CreatePipeline(AudioProcessor *processor) const {
 #endif
 }
 
+// True when the service must talk to PipeWire directly instead of PulseAudio.
+bool VirtualAudioService::UseNativePipeWire() const {
+  return transport_active_ == studiocast::pw::AudioTransport::kPipeWire;
+}
+
 bool VirtualAudioService::CreateVirtualMicDevice(std::string *error) const {
   if (hooks_.create_virtual_mic) {
     return hooks_.create_virtual_mic(error);
+  }
+  if (UseNativePipeWire()) {
+    return pw_backend::NativeAudioDevices::Instance().CreateVirtualMic(error);
   }
   return studiocast::audio::CreateVirtualMic(error);
 }
@@ -590,6 +618,10 @@ bool VirtualAudioService::CreateVirtualMicDevice(std::string *error) const {
 bool VirtualAudioService::CreateVirtualSpeakerDevice(std::string *error) const {
   if (hooks_.create_virtual_speaker) {
     return hooks_.create_virtual_speaker(error);
+  }
+  if (UseNativePipeWire()) {
+    return pw_backend::NativeAudioDevices::Instance().CreateVirtualSpeaker(
+        error);
   }
   return studiocast::audio::CreateVirtualSpeaker(error);
 }
@@ -600,6 +632,13 @@ bool VirtualAudioService::StartSpeakerLoopbackRoute(
   if (hooks_.start_speaker_loopback) {
     return hooks_.start_speaker_loopback(target_sink_name, latency_ms, error);
   }
+  if (UseNativePipeWire()) {
+    // PipeWire sets the route latency from the graph quantum, so the Pulse
+    // latency argument has no meaning here.
+    (void)latency_ms;
+    return pw_backend::NativeAudioDevices::Instance().StartSpeakerLoopback(
+        target_sink_name, error);
+  }
   return studiocast::audio::StartSpeakerLoopback(target_sink_name, latency_ms,
                                                  error);
 }
@@ -608,6 +647,10 @@ bool VirtualAudioService::StopSpeakerLoopbackRoute(std::string *error) const {
   if (hooks_.stop_speaker_loopback) {
     return hooks_.stop_speaker_loopback(error);
   }
+  if (UseNativePipeWire()) {
+    return pw_backend::NativeAudioDevices::Instance().StopSpeakerLoopback(
+        error);
+  }
   return studiocast::audio::StopSpeakerLoopback(error);
 }
 
@@ -615,6 +658,10 @@ bool VirtualAudioService::DestroyVirtualSpeakerDevice(
     std::string *error) const {
   if (hooks_.destroy_virtual_speaker) {
     return hooks_.destroy_virtual_speaker(error);
+  }
+  if (UseNativePipeWire()) {
+    return pw_backend::NativeAudioDevices::Instance().DestroyVirtualSpeaker(
+        error);
   }
   return studiocast::audio::DestroyVirtualSpeaker(error);
 }
@@ -681,6 +728,10 @@ AudioConsumerSnapshot VirtualAudioService::DetectMicrophoneConsumers() const {
   if (hooks_.detect_microphone_consumers) {
     return hooks_.detect_microphone_consumers();
   }
+  if (UseNativePipeWire()) {
+    return pw_backend::NativeAudioDevices::Instance()
+        .DetectMicrophoneConsumers();
+  }
   if (!consumer_detector_) {
     consumer_detector_ = CreateDefaultAudioConsumerDetector();
   }
@@ -690,6 +741,9 @@ AudioConsumerSnapshot VirtualAudioService::DetectMicrophoneConsumers() const {
 AudioConsumerSnapshot VirtualAudioService::DetectSpeakerConsumers() const {
   if (hooks_.detect_speaker_consumers) {
     return hooks_.detect_speaker_consumers();
+  }
+  if (UseNativePipeWire()) {
+    return pw_backend::NativeAudioDevices::Instance().DetectSpeakerConsumers();
   }
   if (!consumer_detector_) {
     consumer_detector_ = CreateDefaultAudioConsumerDetector();
