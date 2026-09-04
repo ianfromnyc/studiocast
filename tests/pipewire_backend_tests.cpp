@@ -101,6 +101,17 @@ bool TestAudioTransportPreferenceParsing() {
          Expect(!bad.has_value(), "an unknown name must not parse");
 }
 
+bool TestCompiledInFlagMatchesTheBuildOption() {
+#if STUDIOCAST_HAVE_PIPEWIRE
+  return Expect(studiocast::pw::PipeWireCompiledIn(),
+                "STUDIOCAST_HAVE_PIPEWIRE=1 must report a PipeWire build");
+#else
+  return Expect(!studiocast::pw::PipeWireCompiledIn(),
+                "STUDIOCAST_HAVE_PIPEWIRE=0 must report a build without "
+                "PipeWire");
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -120,6 +131,8 @@ int main() {
        &TestPipeWirePreferenceFallsBackAndExplainsWhy},
       {"audio transport preference parsing",
        &TestAudioTransportPreferenceParsing},
+      {"compiled-in flag matches the build option",
+       &TestCompiledInFlagMatchesTheBuildOption},
   };
 
   int failed = 0;

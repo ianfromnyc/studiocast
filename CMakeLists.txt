@@ -49,6 +49,26 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PULSE_SIMPLE QUIET IMPORTED_TARGET libpulse-simple)
 
+# PipeWire (optional) for the native audio and video graph backends.
+#
+# The option default follows detection: ON when pkg-config finds the library,
+# OFF otherwise. A build with the option OFF must behave exactly like a build
+# from before the native backends existed, so no PipeWire header is included
+# and no PipeWire library is linked.
+pkg_check_modules(PIPEWIRE QUIET IMPORTED_TARGET libpipewire-0.3)
+option(STUDIOCAST_ENABLE_PIPEWIRE
+        "Enable the native PipeWire backends (needs libpipewire-0.3)"
+        ${PIPEWIRE_FOUND})
+
+set(_studiocast_have_pipewire FALSE)
+if (STUDIOCAST_ENABLE_PIPEWIRE)
+    if (TARGET PkgConfig::PIPEWIRE)
+        set(_studiocast_have_pipewire TRUE)
+    else()
+        message(WARNING "STUDIOCAST_ENABLE_PIPEWIRE is ON but pkg-config did not find libpipewire-0.3. Install pipewire-devel (Fedora) or libpipewire-0.3-dev (Ubuntu). The native PipeWire backends stay disabled.")
+    endif()
+endif()
+
 # libyuv (optional) for SIMD-optimized RGB/YUV conversions. Keep a scalar
 # fallback so StudioCast still builds on minimal systems.
 #
@@ -464,6 +484,15 @@ if (TARGET PNG::PNG)
 else()
     target_include_directories(studiocast_core PUBLIC ${PNG_INCLUDE_DIRS})
     target_link_libraries(studiocast_core PUBLIC ${PNG_LIBRARIES})
+endif()
+
+if (_studiocast_have_pipewire)
+    target_link_libraries(studiocast_core PUBLIC PkgConfig::PIPEWIRE)
+    target_compile_definitions(studiocast_core PUBLIC STUDIOCAST_HAVE_PIPEWIRE=1)
+    message(STATUS "libpipewire-0.3 found (${PIPEWIRE_VERSION}); native PipeWire backends enabled.")
+else()
+    target_compile_definitions(studiocast_core PUBLIC STUDIOCAST_HAVE_PIPEWIRE=0)
+    message(STATUS "Native PipeWire backends disabled; StudioCast uses PulseAudio and v4l2loopback only.")
 endif()
 
 if (PULSE_SIMPLE_FOUND)

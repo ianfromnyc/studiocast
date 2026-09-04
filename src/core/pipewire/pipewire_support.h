@@ -4,7 +4,16 @@
 #include <string>
 #include <string_view>
 
+// Set by CMake from the STUDIOCAST_ENABLE_PIPEWIRE option. Guard every
+// PipeWire header and every PipeWire call with it.
+#ifndef STUDIOCAST_HAVE_PIPEWIRE
+#define STUDIOCAST_HAVE_PIPEWIRE 0
+#endif
+
 namespace studiocast::pw {
+
+// True when this build has the native PipeWire code.
+constexpr bool PipeWireCompiledIn() { return STUDIOCAST_HAVE_PIPEWIRE != 0; }
 
 // Which audio transport carries capture and playback for the real-time
 // pipeline.
