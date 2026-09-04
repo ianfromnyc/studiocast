@@ -857,6 +857,13 @@ if (BUILD_TESTING)
                 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         )
 
+        add_test(NAME studiocast-fedora-setup-tests
+                COMMAND "${STUDIOCAST_BASH_PROGRAM}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fedora_setup_tests.sh")
+        set_tests_properties(studiocast-fedora-setup-tests PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+
         add_test(NAME studiocast-uninstall-pkgconfig-tests
                 COMMAND "${STUDIOCAST_BASH_PROGRAM}"
                         "${CMAKE_CURRENT_SOURCE_DIR}/tests/uninstall_pkgconfig_tests.sh")

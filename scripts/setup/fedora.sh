@@ -341,10 +341,19 @@ ensure_cudnn_available() {
 
   local tmpdir
   tmpdir="$(mktemp -d)"
-  # Expand tmpdir now. It is local to this function, so it is gone by the time
-  # the trap runs.
-  # shellcheck disable=SC2064
-  trap "rm -rf '${tmpdir}'" EXIT
+
+  # Clean up with RETURN and ERR, never with EXIT. An EXIT trap here would
+  # replace the trap of the caller, and a second call would drop the trap of
+  # the first and leak its directory.
+  #
+  # RETURN covers a normal return, ERR covers the paths where set -e ends the
+  # script. Both run while the frame of this function is still live, so they
+  # can read the local tmpdir. The handler takes itself off again and puts the
+  # ERR trap of the caller back, so nothing of this call outlives it. This is
+  # the same shape as sc_ort_install_tarball in scripts/_lib/onnxruntime.sh.
+  local prev_err_trap
+  prev_err_trap="$(trap -p ERR)"
+  trap 'rm -rf "${tmpdir}"; trap - RETURN ERR; eval "${prev_err_trap}"' RETURN ERR
 
   curl --fail --silent --show-error --location --retry 3 "${url}" -o "${tmpdir}/${archive}.tar.xz"
 
@@ -353,7 +362,7 @@ ensure_cudnn_available() {
   if [[ -n "${sha256}" ]]; then
     log "Checking the SHA-256 of ${archive}.tar.xz..."
     echo "${sha256}  ${tmpdir}/${archive}.tar.xz" | sha256sum --check --status - \
-      || { echo "[setup] ERROR: SHA-256 mismatch for ${archive}.tar.xz" >&2; exit 1; }
+      || { echo "[setup] ERROR: SHA-256 mismatch for ${archive}.tar.xz" >&2; return 1; }
   else
     log "The NVIDIA redistributable index has no SHA-256 for this archive; skipping the check."
   fi
@@ -364,16 +373,13 @@ ensure_cudnn_available() {
   local libdir="${root}/lib"
   if [[ ! -e "${libdir}/libcudnn.so.9" ]]; then
     echo "[setup] ERROR: libcudnn.so.9 not found under ${libdir}" >&2
-    exit 1
+    return 1
   fi
 
   run_priv tee /etc/ld.so.conf.d/studiocast-cudnn.conf >/dev/null <<EOF
 ${libdir}
 EOF
   run_priv ldconfig
-
-  rm -rf "${tmpdir}"
-  trap - EXIT
 
   log "cuDNN installed at ${root}."
 }
@@ -701,6 +707,13 @@ EOF
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
+
+# Everything above is definitions and read-only detection. Stop here when the
+# file is sourced, so that tests/fedora_setup_tests.sh can call single
+# functions without running a setup.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
 
 while [[ $# -gt 0 ]]; do
   if [[ "$PARSE_PASSTHRU_ARGS" -eq 1 ]]; then
