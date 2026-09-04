@@ -6,6 +6,7 @@
 #include <dlfcn.h>
 #include <elf.h>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <set>
@@ -38,9 +39,20 @@ bool ReadFile(const fs::path &p, std::vector<char> *out) {
   const std::streamoff size = in.tellg();
   if (size <= 0)
     return false;
+  // tellg gives a std::streamoff, but read takes a std::streamsize and resize
+  // takes a size_t. Either can be narrower, so refuse a file that does not fit
+  // in both instead of converting past their range.
+  const auto want = static_cast<std::uintmax_t>(size);
+  if (want > static_cast<std::uintmax_t>(
+                 std::numeric_limits<std::streamsize>::max()) ||
+      want > static_cast<std::uintmax_t>(
+                 std::numeric_limits<std::size_t>::max())) {
+    return false;
+  }
+
   in.seekg(0, std::ios::beg);
-  out->resize(static_cast<size_t>(size));
-  in.read(out->data(), size);
+  out->resize(static_cast<std::size_t>(size));
+  in.read(out->data(), static_cast<std::streamsize>(size));
   return in.good() || in.eof();
 }
 
