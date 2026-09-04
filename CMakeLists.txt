@@ -848,6 +848,18 @@ if (BUILD_TESTING)
         message(STATUS "Skipping studiocast-embedded-ptx-freshness because Python3 was not found.")
     endif()
 
+    find_program(STUDIOCAST_BASH_PROGRAM bash)
+    if (STUDIOCAST_BASH_PROGRAM)
+        add_test(NAME studiocast-onnxruntime-lib-tests
+                COMMAND "${STUDIOCAST_BASH_PROGRAM}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/onnxruntime_lib_tests.sh")
+        set_tests_properties(studiocast-onnxruntime-lib-tests PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+    else()
+        message(STATUS "Skipping studiocast-onnxruntime-lib-tests because bash was not found.")
+    endif()
+
     add_executable(studiocast-maxine-paths-tests
             tests/maxine_paths_tests.cpp
     )

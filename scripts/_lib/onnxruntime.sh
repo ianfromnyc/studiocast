@@ -70,6 +70,9 @@ sc_ort_installed_root() {
 # GitHub release API does report a digest per asset, so the callers pass it when
 # they know it. Without it the download is still fetched over HTTPS with
 # --fail --location --retry 3.
+#
+# Returns non-zero when the download or the layout check fails, which ends the
+# caller under set -e. The temporary directory goes either way.
 sc_ort_install_tarball() {
   local version="$1"
   local asset_name="$2"
@@ -83,25 +86,33 @@ sc_ort_install_tarball() {
 
   local tmpdir
   tmpdir="$(mktemp -d)"
-  # Expand tmpdir now. It is local to this function, so it is gone by the time
-  # the trap runs.
-  # shellcheck disable=SC2064
-  trap "rm -rf '${tmpdir}'" EXIT
+
+  # Clean up with RETURN and ERR, never with EXIT. An EXIT trap here would
+  # replace the trap of the caller, and a second call would drop the trap of
+  # the first and leak its directory.
+  #
+  # RETURN covers a normal return, ERR covers the paths where set -e ends the
+  # script. Both run while the frame of this function is still live, so they
+  # can read the local tmpdir. The handler takes itself off again and puts the
+  # ERR trap of the caller back, so nothing of this call outlives it.
+  local prev_err_trap
+  prev_err_trap="$(trap -p ERR)"
+  trap 'rm -rf "${tmpdir}"; trap - RETURN ERR; eval "${prev_err_trap}"' RETURN ERR
 
   curl --fail --silent --show-error --location --retry 3 "${url}" -o "${tmpdir}/${tgz}"
 
   if [[ -n "${sha256}" ]]; then
     sc_ort_log "Checking the SHA-256 of ${tgz}..."
     echo "${sha256}  ${tmpdir}/${tgz}" | sha256sum --check --status - \
-      || { echo "[setup] ERROR: SHA-256 mismatch for ${tgz}" >&2; exit 1; }
+      || { echo "[setup] ERROR: SHA-256 mismatch for ${tgz}" >&2; return 1; }
   fi
 
   sc_ort_priv mkdir -p "${prefix}"
   sc_ort_priv tar -xzf "${tmpdir}/${tgz}" -C "${prefix}"
 
   if [[ ! -f "${root}/include/onnxruntime_cxx_api.h" ]]; then
-    echo "[setup] ERROR: ONNX Runtime headers not found at ${root}/include/onnxruntime_cxx_api.h"
-    exit 1
+    echo "[setup] ERROR: ONNX Runtime headers not found at ${root}/include/onnxruntime_cxx_api.h" >&2
+    return 1
   fi
 
   local libdir="${root}/lib"
@@ -114,8 +125,8 @@ sc_ort_install_tarball() {
     # shellcheck disable=SC2012  # The upstream names have no spaces.
     sofile="$(ls -1 "${libdir}"/libonnxruntime.so.* 2>/dev/null | head -n 1 || true)"
     if [[ -z "${sofile}" ]]; then
-      echo "[setup] ERROR: libonnxruntime.so not found under ${libdir}"
-      exit 1
+      echo "[setup] ERROR: libonnxruntime.so not found under ${libdir}" >&2
+      return 1
     fi
     sc_ort_priv ln -sf "$(basename "${sofile}")" "${libdir}/libonnxruntime.so"
   fi
