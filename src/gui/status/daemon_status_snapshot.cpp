@@ -1167,6 +1167,18 @@ DaemonStatusSnapshot DaemonStatusSnapshot::FromJson(const QString &json) {
       ObjectValue(audio, QStringLiteral("pipeline"))
           .value(QStringLiteral("backend_active"))
           .toString();
+  out.audioTransportBackend =
+      audio.value(QStringLiteral("transport_backend")).toString();
+  out.audioTransportNote =
+      audio.value(QStringLiteral("transport_backend_note")).toString();
+  {
+    const QJsonObject pwOut =
+        ObjectValue(video, QStringLiteral("pipewire_output"));
+    out.videoPipeWireOutputState =
+        pwOut.value(QStringLiteral("state")).toString();
+    out.videoPipeWireConsumerCount =
+        pwOut.value(QStringLiteral("consumer_count")).toInt();
+  }
   out.microphoneOpenAudioRuntime =
       ParseOpenAudioRuntime(ObjectValue(audio, QStringLiteral("pipeline")));
   const QJsonObject speakers = ObjectValue(audio, QStringLiteral("speakers"));

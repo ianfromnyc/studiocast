@@ -221,6 +221,10 @@ struct DaemonVideoStatus {
   int consumer_count = 0;
   QString consumer_error;
 
+  // Native PipeWire camera node: "off", "starting", "running", or an error.
+  QString pipewire_output_state;
+  int pipewire_consumer_count = 0;
+
   bool pipeline_running = false;
   bool pipeline_starting = false;
   bool pipeline_active_needed = false;
@@ -340,6 +344,12 @@ bool ParseDaemonStatusJson(const std::string &json, DaemonVideoStatus *out,
       video.value("virtual_device_error").toString();
   out->consumer_present = video.value("consumer_present").toBool(false);
   out->consumer_count = video.value("consumer_count").toInt(0);
+  {
+    const QJsonObject pwOut =
+        video.value("pipewire_output").toObject();
+    out->pipewire_output_state = pwOut.value("state").toString();
+    out->pipewire_consumer_count = pwOut.value("consumer_count").toInt(0);
+  }
   out->consumer_error = video.value("consumer_error").toString();
 
   out->width = video.value("width").toInt(0);
@@ -3794,6 +3804,18 @@ void VideoPage::UpdateStatusText() {
     }
 
     details << QStringLiteral("Apps using camera: %1").arg(st.consumer_count);
+    // The PipeWire node is off unless the user asks for it, so only a live
+    // node or a failure is worth a line.
+    if (st.pipewire_output_state == QStringLiteral("running")) {
+      details << QStringLiteral(
+                     "PipeWire camera node: running, %1 app(s) linked")
+                     .arg(st.pipewire_consumer_count);
+    } else if (!st.pipewire_output_state.isEmpty() &&
+               st.pipewire_output_state != QStringLiteral("off") &&
+               st.pipewire_output_state != QStringLiteral("starting")) {
+      details << QStringLiteral("PipeWire camera node: %1")
+                     .arg(st.pipewire_output_state);
+    }
     if (!st.last_error.isEmpty()) {
       if (!inputError)
         statusProperty = QStringLiteral("error");
