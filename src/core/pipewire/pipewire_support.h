@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -48,6 +49,31 @@ struct AudioTransportDecision {
   // Human-friendly note for the daemon status and the GUI banners.
   std::string note;
 };
+
+// Injection points for the socket probe, so the rules are testable without a
+// server. `get_env` returns an empty string for a variable that is not set.
+struct PipeWireProbeEnv {
+  std::function<std::string(const char *)> get_env;
+  std::function<bool(const std::string &)> path_exists;
+};
+
+// Where the PipeWire socket should be, and whether it is there.
+struct PipeWireSocketProbe {
+  bool found = false;
+  std::string path;
+  std::string reason;
+};
+
+// Looks for the server socket. It reads PIPEWIRE_RUNTIME_DIR, then
+// XDG_RUNTIME_DIR, then USERPROFILE, and takes the socket name from
+// PIPEWIRE_REMOTE, or "pipewire-0" when that variable is not set.
+PipeWireSocketProbe ProbePipeWireSocket(const PipeWireProbeEnv &env);
+
+// The same probe against the real process environment and file system.
+PipeWireSocketProbe ProbePipeWireSocket();
+
+// Combines the build option with the socket probe.
+PipeWireAvailability ProbePipeWire();
 
 std::string_view ToString(AudioTransport t);
 

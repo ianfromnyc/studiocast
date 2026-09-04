@@ -1,4 +1,5 @@
 #include <iostream>
+#include <map>
 #include <string>
 
 #include "core/pipewire/pipewire_support.h"
@@ -9,6 +10,9 @@ using studiocast::pw::AudioTransport;
 using studiocast::pw::AudioTransportPreference;
 using studiocast::pw::ParseAudioTransportPreference;
 using studiocast::pw::PipeWireAvailability;
+using studiocast::pw::PipeWireProbeEnv;
+using studiocast::pw::PipeWireSocketProbe;
+using studiocast::pw::ProbePipeWireSocket;
 using studiocast::pw::ResolveAudioTransport;
 
 bool Expect(bool condition, const std::string &message) {
@@ -112,6 +116,65 @@ bool TestCompiledInFlagMatchesTheBuildOption() {
 #endif
 }
 
+// Builds a probe environment from a fake variable map and a fake set of
+// existing paths.
+PipeWireProbeEnv FakeEnv(std::map<std::string, std::string> vars,
+                         std::string existing_path) {
+  PipeWireProbeEnv env;
+  env.get_env = [vars = std::move(vars)](const char *name) -> std::string {
+    const auto it = vars.find(name ? name : "");
+    return it == vars.end() ? std::string() : it->second;
+  };
+  env.path_exists = [existing = std::move(existing_path)](
+                        const std::string &path) { return path == existing; };
+  return env;
+}
+
+bool TestSocketProbeUsesTheRuntimeDirectory() {
+  const auto p = ProbePipeWireSocket(FakeEnv(
+      {{"XDG_RUNTIME_DIR", "/run/user/1000"}}, "/run/user/1000/pipewire-0"));
+  return Expect(p.found,
+                "the default socket under XDG_RUNTIME_DIR was missed") &&
+         Expect(p.path == "/run/user/1000/pipewire-0",
+                "unexpected socket path: " + p.path);
+}
+
+bool TestSocketProbePrefersPipeWireRuntimeDir() {
+  const auto p =
+      ProbePipeWireSocket(FakeEnv({{"PIPEWIRE_RUNTIME_DIR", "/custom/pw"},
+                                   {"XDG_RUNTIME_DIR", "/run/user/1000"}},
+                                  "/custom/pw/pipewire-0"));
+  return Expect(p.found,
+                "PIPEWIRE_RUNTIME_DIR must win over XDG_RUNTIME_DIR") &&
+         Expect(p.path == "/custom/pw/pipewire-0",
+                "unexpected socket path: " + p.path);
+}
+
+bool TestSocketProbeHonoursPipeWireRemote() {
+  const auto p =
+      ProbePipeWireSocket(FakeEnv({{"XDG_RUNTIME_DIR", "/run/user/1000"},
+                                   {"PIPEWIRE_REMOTE", "pipewire-1"}},
+                                  "/run/user/1000/pipewire-1"));
+  return Expect(p.found, "PIPEWIRE_REMOTE must name the socket") &&
+         Expect(p.path == "/run/user/1000/pipewire-1",
+                "unexpected socket path: " + p.path);
+}
+
+bool TestSocketProbeReportsAMissingSocket() {
+  const auto p = ProbePipeWireSocket(
+      FakeEnv({{"XDG_RUNTIME_DIR", "/run/user/1000"}}, "/nowhere"));
+  return Expect(!p.found, "a missing socket must not be reported as found") &&
+         Expect(p.reason.find("/run/user/1000/pipewire-0") != std::string::npos,
+                "the reason should name the path it looked for: " + p.reason);
+}
+
+bool TestSocketProbeReportsAMissingRuntimeDirectory() {
+  const auto p = ProbePipeWireSocket(FakeEnv({}, "/nowhere"));
+  return Expect(!p.found, "no runtime directory means no socket") &&
+         Expect(p.reason.find("XDG_RUNTIME_DIR") != std::string::npos,
+                "the reason should name the missing variable: " + p.reason);
+}
+
 } // namespace
 
 int main() {
@@ -133,6 +196,16 @@ int main() {
        &TestAudioTransportPreferenceParsing},
       {"compiled-in flag matches the build option",
        &TestCompiledInFlagMatchesTheBuildOption},
+      {"socket probe uses the runtime directory",
+       &TestSocketProbeUsesTheRuntimeDirectory},
+      {"socket probe prefers PIPEWIRE_RUNTIME_DIR",
+       &TestSocketProbePrefersPipeWireRuntimeDir},
+      {"socket probe honours PIPEWIRE_REMOTE",
+       &TestSocketProbeHonoursPipeWireRemote},
+      {"socket probe reports a missing socket",
+       &TestSocketProbeReportsAMissingSocket},
+      {"socket probe reports a missing runtime directory",
+       &TestSocketProbeReportsAMissingRuntimeDirectory},
   };
 
   int failed = 0;

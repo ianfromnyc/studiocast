@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
+#include <filesystem>
 
 namespace studiocast::pw {
 
@@ -53,6 +55,70 @@ std::string_view ToString(AudioTransportPreference p) {
     return "pipewire";
   }
   return "auto";
+}
+
+PipeWireSocketProbe ProbePipeWireSocket(const PipeWireProbeEnv &env) {
+  PipeWireSocketProbe out;
+  if (!env.get_env || !env.path_exists) {
+    out.reason = "The PipeWire probe has no environment hooks.";
+    return out;
+  }
+
+  // PipeWire itself reads these three variables, in this order.
+  std::string dir = env.get_env("PIPEWIRE_RUNTIME_DIR");
+  if (dir.empty())
+    dir = env.get_env("XDG_RUNTIME_DIR");
+  if (dir.empty())
+    dir = env.get_env("USERPROFILE");
+  if (dir.empty()) {
+    out.reason = "No PipeWire runtime directory: PIPEWIRE_RUNTIME_DIR and "
+                 "XDG_RUNTIME_DIR are not set.";
+    return out;
+  }
+
+  std::string name = env.get_env("PIPEWIRE_REMOTE");
+  if (name.empty())
+    name = "pipewire-0";
+
+  while (!dir.empty() && dir.back() == '/')
+    dir.pop_back();
+  out.path = dir + "/" + name;
+
+  if (!env.path_exists(out.path)) {
+    out.reason = "PipeWire socket " + out.path + " was not found.";
+    return out;
+  }
+
+  out.found = true;
+  return out;
+}
+
+PipeWireSocketProbe ProbePipeWireSocket() {
+  PipeWireProbeEnv env;
+  env.get_env = [](const char *name) -> std::string {
+    const char *v = name ? std::getenv(name) : nullptr;
+    return v ? std::string(v) : std::string();
+  };
+  env.path_exists = [](const std::string &path) {
+    std::error_code ec;
+    return std::filesystem::exists(path, ec);
+  };
+  return ProbePipeWireSocket(env);
+}
+
+PipeWireAvailability ProbePipeWire() {
+  PipeWireAvailability out;
+  out.compiled_in = PipeWireCompiledIn();
+  if (!out.compiled_in) {
+    out.reason = "StudioCast was built without PipeWire support "
+                 "(STUDIOCAST_ENABLE_PIPEWIRE=OFF).";
+    return out;
+  }
+
+  const auto socket = ProbePipeWireSocket();
+  out.server_reachable = socket.found;
+  out.reason = socket.reason;
+  return out;
 }
 
 std::optional<AudioTransportPreference>
