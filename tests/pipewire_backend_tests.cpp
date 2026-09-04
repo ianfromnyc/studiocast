@@ -14,6 +14,7 @@
 #include "core/audio/virtual_audio_service.h"
 #include "core/config/daemon_config.h"
 #include "core/pipewire/pipewire_audio_node.h"
+#include "core/video/pipewire/pipewire_camera_node.h"
 
 #include "core/pipewire/pipewire_support.h"
 
@@ -476,6 +477,72 @@ bool TestVideoOutputBackendSelection() {
          Expect(!nativeMissing.note.empty(), "the fallback must explain itself");
 }
 
+bool TestCameraFrameByteArithmetic() {
+  using studiocast::video::PixelFormat;
+  using studiocast::video::pw_backend::CameraFrameBytes;
+  return Expect(CameraFrameBytes(1280, 720, PixelFormat::rgb24) ==
+                    1280u * 720u * 3u,
+                "rgb24 is three bytes a pixel") &&
+         Expect(CameraFrameBytes(1280, 720, PixelFormat::yuyv) ==
+                    1280u * 720u * 2u,
+                "yuyv is two bytes a pixel");
+}
+
+bool TestLiveVirtualCameraNodeReachesTheGraph() {
+  if (!LiveServerAvailable("live virtual camera node reaches the graph"))
+    return true;
+
+  studiocast::video::pw_backend::CameraNodeConfig cfg;
+  cfg.node_name = "studiocast_camera_selftest";
+  cfg.node_description = "StudioCast Camera Self Test";
+  cfg.width = 320;
+  cfg.height = 240;
+  cfg.fps = 30;
+
+  studiocast::video::pw_backend::PipeWireCameraNode node;
+  std::string error;
+  if (!Expect(node.Start(cfg, &error), "camera node start failed: " + error))
+    return false;
+
+  std::uint32_t id = 0;
+  for (int i = 0; i < 100 && id == 0; ++i) {
+    id = node.NodeId();
+    if (id == 0)
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  std::vector<std::uint8_t> frame(
+      studiocast::video::pw_backend::CameraFrameBytes(
+          cfg.width, cfg.height, cfg.format),
+      0x20);
+  bool wrote = true;
+  for (int i = 0; i < 10 && wrote; ++i)
+    wrote = node.WriteFrame(frame.data(), frame.size(), &error);
+
+  const std::string dump = RunCapture("pw-dump 2>/dev/null");
+  const int consumers = node.ConsumerCount();
+  node.Stop();
+
+  return Expect(id != 0, "the camera node never reached the graph") &&
+         Expect(wrote, "staging a frame failed: " + error) &&
+         Expect(dump.find("studiocast_camera_selftest") != std::string::npos,
+                "pw-dump did not list the camera node") &&
+         Expect(dump.find("\"Video/Source\"") != std::string::npos,
+                "pw-dump listed no Video/Source node") &&
+         Expect(consumers >= 0, "the consumer count must never be negative");
+}
+
+bool TestCameraNodeRejectsAShortFrame() {
+  studiocast::video::pw_backend::CameraNodeConfig cfg;
+  cfg.width = 64;
+  cfg.height = 64;
+  studiocast::video::pw_backend::PipeWireCameraNode node;
+  std::string error;
+  const bool wrote = node.WriteFrame(nullptr, 0, &error);
+  return Expect(!wrote, "a stopped node must refuse a frame") &&
+         Expect(!error.empty(), "the refusal must explain itself");
+}
+
 } // namespace
 
 int main() {
@@ -525,6 +592,11 @@ int main() {
       {"canonical node names", &TestCanonicalNodeNames},
       {"video output backend parsing", &TestVideoOutputBackendParsing},
       {"video output backend selection", &TestVideoOutputBackendSelection},
+      {"camera frame byte arithmetic", &TestCameraFrameByteArithmetic},
+      {"camera node rejects a short frame",
+       &TestCameraNodeRejectsAShortFrame},
+      {"live virtual camera node reaches the graph",
+       &TestLiveVirtualCameraNodeReachesTheGraph},
   };
 
   int failed = 0;

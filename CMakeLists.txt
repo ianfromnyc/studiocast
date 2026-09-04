@@ -339,6 +339,8 @@ add_library(studiocast_core
         src/core/audio/mic_monitor.cpp
         src/core/audio/virtual_audio_service.h
         src/core/audio/virtual_audio_service.cpp
+        src/core/video/pipewire/pipewire_camera_node.h
+        src/core/video/pipewire/pipewire_camera_node.cpp
         src/core/video/v4l2loopback.h
         src/core/video/v4l2loopback.cpp
         src/core/video/v4l2_writer.h

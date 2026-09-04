@@ -1,0 +1,76 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+
+#include "core/pipewire/pipewire_support.h"
+#include "core/video/v4l2_writer.h"
+
+namespace studiocast::video::pw_backend {
+
+struct CameraNodeConfig {
+  // node.name and node.description. Empty values take the canonical
+  // "studiocast_camera" and "StudioCast Camera".
+  std::string node_name;
+  std::string node_description;
+
+  int width = 1280;
+  int height = 720;
+  int fps = 30;
+
+  // rgb24 maps to SPA_VIDEO_FORMAT_RGB, yuyv maps to SPA_VIDEO_FORMAT_YUY2.
+  PixelFormat format = PixelFormat::rgb24;
+};
+
+// A PipeWire Video/Source node fed with the processed camera frames.
+//
+// The pipeline stages a frame and the real-time callback hands the newest one
+// to the server. A slow consumer therefore drops frames instead of holding the
+// pipeline back, which is the latest-frame-wins rule the rest of the video
+// path follows.
+//
+// In a build with STUDIOCAST_HAVE_PIPEWIRE=0, Start always fails and says why.
+class PipeWireCameraNode final {
+public:
+  // Holds the PipeWire objects. The definition stays in the source file, so no
+  // PipeWire header leaks into the rest of StudioCast. It is public only so
+  // the C callbacks can name it.
+  struct Impl;
+
+  PipeWireCameraNode();
+  ~PipeWireCameraNode();
+
+  PipeWireCameraNode(const PipeWireCameraNode &) = delete;
+  PipeWireCameraNode &operator=(const PipeWireCameraNode &) = delete;
+
+  bool Start(const CameraNodeConfig &cfg, std::string *error);
+  void Stop();
+
+  bool IsRunning() const;
+
+  // Stages one frame. It never blocks.
+  bool WriteFrame(const std::uint8_t *data, std::size_t bytes,
+                  std::string *error);
+
+  // PipeWire global id of the node, or 0 before the node reaches the graph.
+  std::uint32_t NodeId() const;
+
+  // Number of graph links that consumers hold on this node.
+  int ConsumerCount() const;
+
+  // Frames the server took, and frames that a newer one replaced.
+  std::uint64_t FramesSent() const;
+  std::uint64_t FramesDropped() const;
+
+  std::string LastError() const;
+
+private:
+  std::unique_ptr<Impl> impl_;
+};
+
+// Bytes one frame of this format needs.
+std::size_t CameraFrameBytes(int width, int height, PixelFormat format);
+
+} // namespace studiocast::video::pw_backend
