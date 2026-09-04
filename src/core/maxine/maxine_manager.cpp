@@ -434,28 +434,29 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
   };
 
   add_feature(&d.vfx, "greenscreen",
-              "missing (run VFX install_feature.sh for greenscreen)");
+              "missing (run VFX install_feature.sh for nvvfxgreenscreen)");
   add_feature(&d.vfx, "bgblur",
-              "missing (run VFX install_feature.sh for bgblur)");
+              "missing (run VFX install_feature.sh for nvvfxbackgroundblur)");
   add_feature(&d.vfx, "denoise",
-              "missing (run VFX install_feature.sh for denoise)");
+              "missing (run VFX install_feature.sh for nvvfxdenoising)");
   add_feature(&d.vfx, "relighting",
-              "missing (run VFX install_feature.sh for relighting)");
+              "missing (run VFX install_feature.sh for nvvfxrelighting)");
   add_feature(&d.ar, "gaze_redirection",
-              "missing (run AR install_feature.sh for gaze_redirection)");
+              "missing (run AR install_feature.sh for nvargazeredirection)");
   add_feature(&d.ar, "face_detection",
-              "missing (run AR install_feature.sh for face_detection)");
+              "missing (run AR install_feature.sh for nvarfaceboxdetection)");
   add_feature(&d.ar, "body_detection",
-              "optional (install AR body detection to improve tracking)");
+              "optional (run AR install_feature.sh for nvarbodydetection to "
+              "improve tracking)");
 
   add_feature(&d.afx, "denoiser",
-              "missing (run AFX install_feature.sh for denoiser)");
+              "missing (run AFX download_features.sh for denoiser)");
   add_feature(&d.afx, "dereverb",
-              "missing (run AFX install_feature.sh for dereverb)");
+              "missing (run AFX download_features.sh for dereverb)");
   add_feature(&d.afx, "dereverb_denoiser",
-              "missing (run AFX install_feature.sh for dereverb_denoiser)");
+              "missing (run AFX download_features.sh for dereverb_denoiser)");
   add_feature(&d.afx, "studio_voice",
-              "missing (run AFX install_feature.sh for studio_voice)");
+              "missing (run AFX download_features.sh for studio_voice)");
 
   // Derive effect availability using stable effect IDs.
   const bool gpu_ok = d.gpu.ok && d.driver.ok;
