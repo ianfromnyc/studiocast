@@ -125,6 +125,10 @@ private:
   bool SetStringAny(NvAFX_Handle handle, const char *what,
                     std::initializer_list<const char *> candidates,
                     const std::string &v, std::string *error_out);
+  // Reads the first parameter of `candidates` that the effect reports.
+  bool GetU32Any(NvAFX_Handle handle,
+                 std::initializer_list<const char *> candidates,
+                 std::uint32_t *out) const;
 
   AfxApi *api_ = nullptr;
   NvAFX_Handle handle_ = nullptr;

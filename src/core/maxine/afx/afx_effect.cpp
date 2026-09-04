@@ -446,6 +446,24 @@ bool AfxEffect::SetStringAny(NvAFX_Handle handle, const char *what,
   return false;
 }
 
+bool AfxEffect::GetU32Any(NvAFX_Handle handle,
+                          std::initializer_list<const char *> candidates,
+                          std::uint32_t *out) const {
+  if (!out || !api_ || !api_->IsInitialized() || !api_->f().NvAFX_GetU32) {
+    return false;
+  }
+  for (const auto *sel : candidates) {
+    if (!sel || std::strlen(sel) == 0)
+      continue;
+    std::uint32_t v = 0;
+    if (api_->f().NvAFX_GetU32(handle, sel, &v) == NVAFX_SUCCESS) {
+      *out = v;
+      return true;
+    }
+  }
+  return false;
+}
+
 bool AfxEffect::Load(std::string *error_out) {
   if (!configured_) {
     if (error_out)
@@ -466,6 +484,7 @@ bool AfxEffect::Load(std::string *error_out) {
   }
 
   Destroy();
+  warnings_.clear();
 
   // Put the feature library directory on LD_LIBRARY_PATH for any process that
   // StudioCast starts later. It does not help this process: glibc reads
@@ -495,70 +514,85 @@ bool AfxEffect::Load(std::string *error_out) {
   }
   handle_ = h;
 
-  // Parameter setup. We intentionally try a small set of plausible selector
-  // names to stay resilient across SDK revisions without proprietary headers.
+  // Parameter setup. The names come from `nvAudioEffects.h` of AFX 2.1.0,
+  // with the v1.0 name kept as a second choice for an older SDK. The model
+  // goes first, then the stream format.
+  //
+  // Every effect needs the model, the sample rate and the frame size. The
+  // other parameters belong to some effects alone: the AFX 2.1.0 microphone
+  // effects all run with one channel and reject a channel count, and studio
+  // voice also rejects the intensity, the effect version and the VAD flag. A
+  // rejected parameter of that kind gives a warning, not a failure.
   std::string set_err;
-  if (!SetStringAny(handle_, "model_path",
-                    {"modelPath", "model_path", "model", "trtModelPath",
-                     "trt_model_path"},
+  if (!SetStringAny(handle_, "model_path", {"model_path", "modelPath"},
                     resolved_model_path_.string(), &set_err)) {
     if (error_out)
       *error_out = set_err;
     Destroy();
     return false;
   }
-  if (!SetU32Any(handle_, "sample_rate",
-                 {"sampleRate", "sample_rate", "samplerate"},
+  if (!SetU32Any(handle_, "sample_rate", {"input_sample_rate", "sample_rate"},
                  static_cast<std::uint32_t>(cfg_.sample_rate), &set_err)) {
     if (error_out)
       *error_out = set_err;
     Destroy();
     return false;
   }
-  if (!SetU32Any(handle_, "channels",
-                 {"numChannels", "num_channels", "channels"}, cfg_.channels,
-                 &set_err)) {
-    if (error_out)
-      *error_out = set_err;
-    Destroy();
-    return false;
-  }
   if (!SetU32Any(handle_, "frame_samples",
-                 {"numSamplesPerFrame", "num_samples_per_frame", "frameSize",
-                  "frame_size", "frameSamples", "frame_samples"},
+                 {"num_samples_per_input_frame", "num_samples_per_frame"},
                  cfg_.frame_samples, &set_err)) {
     if (error_out)
       *error_out = set_err;
     Destroy();
     return false;
   }
-  if (!SetFloatAny(
-          handle_, "intensity",
-          {"intensityRatio", "intensity_ratio", "intensity", "strength"},
-          cfg_.intensity, &set_err)) {
-    if (error_out)
-      *error_out = set_err;
-    Destroy();
-    return false;
-  }
-  if (cfg_.effect_version) {
-    if (!SetU32Any(handle_, "effect_version",
-                   {"effectVersion", "effect_version", "version"},
-                   *cfg_.effect_version, &set_err)) {
-      if (error_out)
-        *error_out = set_err;
+
+  // The channel count is part of the effect. Read the count that the effect
+  // reports when it does not take one, and stop only when that count is not
+  // the one the caller needs.
+  if (!SetU32Any(handle_, "channels", {"num_input_channels", "num_channels"},
+                 cfg_.channels, &set_err)) {
+    std::uint32_t actual = 0;
+    const bool known =
+        GetU32Any(handle_, {"num_input_channels", "num_channels"}, &actual);
+    if (known && actual != cfg_.channels) {
+      if (error_out) {
+        std::ostringstream oss;
+        oss << "AFX effect `" << cfg_.effect_selector << "` runs with "
+            << actual << " channel(s); StudioCast asked for " << cfg_.channels
+            << ".";
+        *error_out = oss.str();
+      }
       Destroy();
       return false;
     }
+    std::ostringstream oss;
+    oss << "Effect `" << cfg_.effect_selector
+        << "` takes no channel count; it runs with ";
+    if (known) {
+      oss << actual << " channel(s).";
+    } else {
+      oss << "its own channel count.";
+    }
+    warnings_.push_back(oss.str());
+  }
+
+  if (!SetFloatAny(handle_, "intensity", {"intensity_ratio"}, cfg_.intensity,
+                   &set_err)) {
+    warnings_.push_back("Effect `" + cfg_.effect_selector +
+                        "` takes no intensity.");
+  }
+  if (cfg_.effect_version) {
+    if (!SetU32Any(handle_, "effect_version", {"effect_version"},
+                   *cfg_.effect_version, &set_err)) {
+      warnings_.push_back("Effect `" + cfg_.effect_selector +
+                          "` takes no effect version.");
+    }
   }
   if (cfg_.vad_enabled) {
-    if (!SetU32Any(handle_, "vad_enabled",
-                   {"enable_vad", "useVAD", "use_vad", "vad", "enableVAD"}, 1u,
-                   &set_err)) {
-      if (error_out)
-        *error_out = set_err;
-      Destroy();
-      return false;
+    if (!SetU32Any(handle_, "vad_enabled", {"enable_vad"}, 1u, &set_err)) {
+      warnings_.push_back("Effect `" + cfg_.effect_selector +
+                          "` takes no VAD flag.");
     }
   }
 
@@ -590,14 +624,13 @@ bool AfxEffect::UpdateIntensity(float intensity, std::string *error_out) {
     return false;
   }
 
+  // Studio voice takes no intensity. Keep that a note, not a failure.
   std::string set_err;
-  if (!SetFloatAny(
-          handle_, "intensity",
-          {"intensityRatio", "intensity_ratio", "intensity", "strength"},
-          intensity, &set_err)) {
-    if (error_out)
-      *error_out = set_err;
-    return false;
+  if (!SetFloatAny(handle_, "intensity", {"intensity_ratio"}, intensity,
+                   &set_err)) {
+    warnings_.push_back("Effect `" + cfg_.effect_selector +
+                        "` takes no intensity.");
+    return true;
   }
 
   cfg_.intensity = intensity;
