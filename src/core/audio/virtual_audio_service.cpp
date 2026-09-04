@@ -13,6 +13,7 @@
 #include "core/audio/audio_device_safety.h"
 #include "core/audio/audio_pipeline.h"
 #include "core/audio/audio_processor.h"
+#include "core/audio/mic_monitor.h"
 #include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_mic.h"
 #include "core/audio/virtual_speaker.h"
@@ -196,8 +197,7 @@ void ApplyOpenAudioRuntimeWarning(OpenAudioRuntimeStatus *status,
   if (!status || pipeline_error.find("Open Audio") == std::string::npos)
     return;
 
-  const std::string warning =
-      StripAudioProcessorWarningPrefix(pipeline_error);
+  const std::string warning = StripAudioProcessorWarningPrefix(pipeline_error);
   status->last_runtime_warning = warning;
 
   if (warning.find("switched to CPU fallback") != std::string::npos) {
@@ -223,9 +223,8 @@ ChooseSpeakerTargetSinkName(const std::string &configured_target,
 
 bool PulseSourceListContains(const std::vector<pulse::PactlSource> &sources,
                              const std::string &name) {
-  return std::any_of(sources.begin(), sources.end(), [&](const auto &source) {
-    return source.name == name;
-  });
+  return std::any_of(sources.begin(), sources.end(),
+                     [&](const auto &source) { return source.name == name; });
 }
 
 MicrophoneSourceStatus
@@ -448,6 +447,10 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
     speakers_loopback_running_ = false;
     speakers_loopback_target_.clear();
     speakers_loopback_latency_ms_ = 0;
+    monitor_running_ = false;
+    monitor_sink_requested_.clear();
+    monitor_latency_ms_ = 0;
+    monitor_volume_ = 0;
     consumer_detector_.reset();
   }
 
@@ -517,6 +520,17 @@ void VirtualAudioService::Stop() {
     st_.speakers_pipeline_pulse_playback_latency_us_last = 0;
     st_.speakers_pipeline_pulse_latency_us_max = 0;
     st_.speakers_pipeline_resync_events = 0;
+    st_.mic_app_consumer_count = 0;
+    st_.mic_monitor_consumer_count = 0;
+    st_.monitor_active = false;
+    st_.monitor_module_id = -1;
+    st_.monitor_sink_active.clear();
+    st_.monitor_latency_ms_active = 0;
+    st_.monitor_volume_active = 0;
+    monitor_running_ = false;
+    monitor_sink_requested_.clear();
+    monitor_latency_ms_ = 0;
+    monitor_volume_ = 0;
     consumer_detector_.reset();
   }
 }
@@ -596,6 +610,30 @@ bool VirtualAudioService::DestroyVirtualSpeakerDevice(
   return studiocast::audio::DestroyVirtualSpeaker(error);
 }
 
+bool VirtualAudioService::StartMicMonitorRoute(
+    const MicMonitorConfig &cfg, const std::string &mic_source_name,
+    MicMonitorState *out, std::string *error) const {
+  if (hooks_.start_mic_monitor) {
+    return hooks_.start_mic_monitor(cfg, mic_source_name, out, error);
+  }
+  return studiocast::audio::StartMicMonitor(cfg, mic_source_name, out, error);
+}
+
+bool VirtualAudioService::StopMicMonitorRoute(std::string *error) const {
+  if (hooks_.stop_mic_monitor) {
+    return hooks_.stop_mic_monitor(error);
+  }
+  return studiocast::audio::StopMicMonitor(error);
+}
+
+MicMonitorState
+VirtualAudioService::DetectMicMonitorRoute(std::string *error) const {
+  if (hooks_.detect_mic_monitor) {
+    return hooks_.detect_mic_monitor(error);
+  }
+  return studiocast::audio::DetectMicMonitor(error);
+}
+
 AudioBackendAvailability
 VirtualAudioService::ProbeMicrophoneBackendAvailability(
     const VirtualAudioServiceConfig &cfg) const {
@@ -647,6 +685,8 @@ void VirtualAudioService::ThreadMain() {
   steady_clock::time_point nextSpeakerLoopbackStartRetry{};
   steady_clock::time_point nextSpeakerLoopbackStopRetry{};
   steady_clock::time_point nextSpeakerDestroyRetry{};
+  steady_clock::time_point nextMonitorStartRetry{};
+  steady_clock::time_point nextMonitorVerify{};
   std::string speakerLoopbackStopRetryError;
   std::string speakerDestroyRetryError;
 
@@ -1154,6 +1194,106 @@ void VirtualAudioService::ThreadMain() {
       }
     }
 
+    // Microphone monitor supervisor.
+    //
+    // The monitor loops the processed microphone feed to an output sink. It is
+    // a Pulse consumer of `studiocast_mic`, so it also starts the microphone
+    // pipeline. The consumer counts below keep it apart from real apps.
+    {
+      const auto monitorCfg = NormalizeMicMonitorConfig(cfg.monitor);
+      const bool wantMonitor = monitorCfg.enabled && cfg.enabled;
+      const auto monitorNow = steady_clock::now();
+
+      auto setMonitorError = [&](std::string msg) {
+        std::lock_guard<std::mutex> lock(mu_);
+        st_.monitor_last_error = std::move(msg);
+      };
+      auto clearMonitorRouteState = [&]() {
+        monitor_running_ = false;
+        monitor_sink_requested_.clear();
+        monitor_latency_ms_ = 0;
+        monitor_volume_ = 0;
+        std::lock_guard<std::mutex> lock(mu_);
+        st_.monitor_active = false;
+        st_.monitor_module_id = -1;
+        st_.monitor_sink_active.clear();
+        st_.monitor_latency_ms_active = 0;
+        st_.monitor_volume_active = 0;
+      };
+
+      if (!wantMonitor) {
+        if (monitor_running_) {
+          std::string err;
+          if (StopMicMonitorRoute(&err)) {
+            clearMonitorRouteState();
+            setMonitorError(std::string());
+          } else {
+            setMonitorError("Failed to stop the microphone monitor: " + err);
+          }
+        }
+        nextMonitorStartRetry = steady_clock::time_point{};
+        if (monitorCfg.enabled && !cfg.enabled) {
+          setMonitorError("Microphone processing is off, so the monitor "
+                          "stays idle. Turn microphone processing on to hear "
+                          "the monitor.");
+        }
+      } else {
+        // The Pulse server unloads the loopback when the sink disappears, for
+        // example when a headset is unplugged. Re-check now and then so the
+        // retry path can bring the monitor back.
+        if (monitor_running_ && monitorNow >= nextMonitorVerify) {
+          std::string detectErr;
+          const auto live = DetectMicMonitorRoute(&detectErr);
+          nextMonitorVerify = monitorNow + seconds(2);
+          if (detectErr.empty() && !live.active) {
+            clearMonitorRouteState();
+            setMonitorError("The microphone monitor stopped. StudioCast is "
+                            "starting it again.");
+          }
+        }
+
+        const bool needRestart = !monitor_running_ ||
+                                 monitor_sink_requested_ != monitorCfg.sink ||
+                                 monitor_latency_ms_ != monitorCfg.latency_ms ||
+                                 monitor_volume_ != monitorCfg.volume;
+
+        if (needRestart && monitorNow >= nextMonitorStartRetry) {
+          MicMonitorState state;
+          std::string err;
+          if (StartMicMonitorRoute(monitorCfg, micSourceStatus.selected_source,
+                                   &state, &err)) {
+            monitor_running_ = true;
+            monitor_sink_requested_ = monitorCfg.sink;
+            monitor_latency_ms_ = monitorCfg.latency_ms;
+            monitor_volume_ = monitorCfg.volume;
+            nextMonitorStartRetry = steady_clock::time_point{};
+            nextMonitorVerify = monitorNow + seconds(2);
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              st_.monitor_active = true;
+              st_.monitor_module_id = state.module_id;
+              st_.monitor_sink_active = state.sink;
+              st_.monitor_latency_ms_active = state.latency_ms;
+              st_.monitor_volume_active = state.volume;
+              st_.monitor_last_error = state.warning;
+            }
+          } else {
+            nextMonitorStartRetry = monitorNow + StartFailureRetryDelay(cfg);
+            clearMonitorRouteState();
+            setMonitorError("Failed to start the microphone monitor: " + err);
+          }
+        }
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        st_.mic_monitor_consumer_count =
+            (monitor_running_ && st_.mic_consumer_count > 0) ? 1 : 0;
+        st_.mic_app_consumer_count = std::max(
+            0, st_.mic_consumer_count - st_.mic_monitor_consumer_count);
+      }
+    }
+
     (void)speakerLoopbackStopError;
 
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
@@ -1494,9 +1634,9 @@ void VirtualAudioService::ThreadMain() {
                   st_.speakers_open_audio_runtime = {};
                   SetOpenAudioRuntimeModel(&st_.speakers_open_audio_runtime,
                                            selected);
-                  MarkOpenAudioRuntimeDisabled(
-                      &st_.speakers_open_audio_runtime,
-                      "Open Audio init failed: " + oerr);
+                  MarkOpenAudioRuntimeDisabled(&st_.speakers_open_audio_runtime,
+                                               "Open Audio init failed: " +
+                                                   oerr);
                   st_.speakers_backend_active = "passthrough";
                   st_.speakers_effects_note =
                       "Open-source speaker backend failed to initialize; using "
@@ -2552,6 +2692,27 @@ void VirtualAudioService::ThreadMain() {
 
     SleepFor(milliseconds(pollMs));
 #endif
+  }
+
+  // The monitor is a listening aid, not a route other apps depend on. Stop it
+  // with the service so no loopback outlives the daemon session.
+  if (monitor_running_) {
+    std::string err;
+    if (StopMicMonitorRoute(&err)) {
+      monitor_running_ = false;
+      monitor_sink_requested_.clear();
+      monitor_latency_ms_ = 0;
+      monitor_volume_ = 0;
+      std::lock_guard<std::mutex> lock(mu_);
+      st_.monitor_active = false;
+      st_.monitor_module_id = -1;
+      st_.monitor_sink_active.clear();
+      st_.monitor_latency_ms_active = 0;
+      st_.monitor_volume_active = 0;
+    } else {
+      std::lock_guard<std::mutex> lock(mu_);
+      st_.monitor_last_error = "Failed to stop the microphone monitor: " + err;
+    }
   }
 
 #if STUDIOCAST_HAVE_PULSE_SIMPLE

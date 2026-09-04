@@ -12,6 +12,7 @@
 
 #include "core/audio/audio_backend_resolver.h"
 #include "core/audio/effects/broadcast_audio_effects.h"
+#include "core/audio/mic_monitor.h"
 
 namespace studiocast::audio {
 
@@ -44,6 +45,10 @@ struct VirtualAudioServiceConfig {
 
   // Selected input source (Pulse source name). Empty = Pulse default source.
   std::string source_name;
+
+  // Microphone monitor: play the processed microphone feed on an output sink
+  // so the user can hear the effects while adjusting them.
+  MicMonitorConfig monitor{};
 
   // Canonical Broadcast-style audio effect settings.
   studiocast::audio::effects::BroadcastAudioEffects effects{};
@@ -82,6 +87,19 @@ struct VirtualAudioServiceStatus {
   bool mic_consumer_present = false;
   int mic_consumer_count = 0;
   std::string mic_consumer_error;
+
+  // The microphone monitor is itself a consumer of `studiocast_mic`. These
+  // fields split the raw consumer count so readiness text can talk about apps.
+  int mic_app_consumer_count = 0;
+  int mic_monitor_consumer_count = 0;
+
+  // Microphone monitor route state.
+  bool monitor_active = false;
+  int monitor_module_id = -1;
+  std::string monitor_sink_active;
+  int monitor_latency_ms_active = 0;
+  int monitor_volume_active = 0;
+  std::string monitor_last_error;
 
   bool speakers_present = false;
   bool speakers_consumer_present = false;
@@ -184,6 +202,11 @@ struct VirtualAudioServiceHooks {
       start_speaker_loopback;
   std::function<bool(std::string *)> stop_speaker_loopback;
   std::function<bool(std::string *)> destroy_virtual_speaker;
+  std::function<bool(const MicMonitorConfig &, const std::string &,
+                     MicMonitorState *, std::string *)>
+      start_mic_monitor;
+  std::function<bool(std::string *)> stop_mic_monitor;
+  std::function<MicMonitorState(std::string *)> detect_mic_monitor;
   std::function<AudioBackendAvailability(const VirtualAudioServiceConfig &)>
       probe_microphone_backend_availability;
   std::function<AudioBackendAvailability(const VirtualAudioServiceConfig &)>
@@ -231,6 +254,11 @@ private:
                                  int latency_ms, std::string *error) const;
   bool StopSpeakerLoopbackRoute(std::string *error) const;
   bool DestroyVirtualSpeakerDevice(std::string *error) const;
+  bool StartMicMonitorRoute(const MicMonitorConfig &cfg,
+                            const std::string &mic_source_name,
+                            MicMonitorState *out, std::string *error) const;
+  bool StopMicMonitorRoute(std::string *error) const;
+  MicMonitorState DetectMicMonitorRoute(std::string *error) const;
   AudioBackendAvailability ProbeMicrophoneBackendAvailability(
       const VirtualAudioServiceConfig &cfg) const;
   AudioBackendAvailability
@@ -250,6 +278,11 @@ private:
   bool speakers_loopback_running_ = false;
   std::string speakers_loopback_target_;
   int speakers_loopback_latency_ms_ = 0;
+
+  bool monitor_running_ = false;
+  std::string monitor_sink_requested_;
+  int monitor_latency_ms_ = 0;
+  int monitor_volume_ = 0;
 
   VirtualAudioServiceHooks hooks_{};
   VirtualAudioServiceConfig cfg_{};
