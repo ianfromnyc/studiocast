@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/maxine/afx/afx_effect.h"
+#include "core/maxine/afx/afx_loader_path.h"
 #include "core/maxine/afx_api.h"
 
 namespace {
@@ -465,6 +466,88 @@ bool TestMissingRequiredParameterFails() {
   return ok;
 }
 
+// The AFX core loads a feature library by its bare name, so every
+// `<features>/<feature>/lib` directory must be on the loader path.
+bool TestFeatureLibDirsAreListed() {
+  const fs::path root = TempRoot("libdirs");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+  // A feature without a lib directory, and the helper files beside them.
+  fs::create_directories(features / "voice_font" / "models", ec);
+  Touch(features / "download_features.sh");
+  Touch(features / "README.md");
+
+  const auto dirs = studiocast::maxine::afx::AfxFeatureLibDirs(features);
+
+  bool ok =
+      Require(dirs.size() == 2, "expected 2 feature lib directories, got " +
+                                    std::to_string(dirs.size()));
+  if (ok) {
+    ok &=
+        Require(dirs[0] == features / "denoiser" / "lib",
+                "expected the denoiser lib dir first, got " + dirs[0].string());
+    ok &= Require(dirs[1] == features / "studio_voice" / "lib",
+                  "expected the studio voice lib dir second, got " +
+                      dirs[1].string());
+  }
+
+  ok &= Require(studiocast::maxine::afx::AfxFeatureLibDirs(fs::path()).empty(),
+                "expected no directories for an empty features path");
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
+// The new LD_LIBRARY_PATH keeps what is there and adds what is missing.
+bool TestLoaderPathValue() {
+  using studiocast::maxine::afx::LdLibraryPathWithDirs;
+
+  const std::vector<fs::path> dirs = {"/afx/denoiser/lib",
+                                      "/afx/studio_voice/lib"};
+
+  bool ok = true;
+
+  const auto from_empty = LdLibraryPathWithDirs("", dirs);
+  ok &= Require(from_empty.has_value(), "expected a value for an empty path");
+  if (from_empty) {
+    ok &= Require(*from_empty == "/afx/denoiser/lib:/afx/studio_voice/lib",
+                  "expected both directories, got " + *from_empty);
+  }
+
+  const auto keeps = LdLibraryPathWithDirs("/opt/lib", dirs);
+  ok &= Require(keeps.has_value(), "expected a value when a directory is new");
+  if (keeps) {
+    ok &= Require(*keeps == "/afx/denoiser/lib:/afx/studio_voice/lib:/opt/lib",
+                  "expected the old value to stay last, got " + *keeps);
+  }
+
+  const auto partial =
+      LdLibraryPathWithDirs("/afx/denoiser/lib:/opt/lib", dirs);
+  ok &= Require(partial.has_value(), "expected a value for a partial path");
+  if (partial) {
+    ok &= Require(
+        *partial == "/afx/studio_voice/lib:/afx/denoiser/lib:/opt/lib",
+        "expected only the missing directory to be added, got " + *partial);
+  }
+
+  const auto complete =
+      LdLibraryPathWithDirs("/afx/studio_voice/lib:/afx/denoiser/lib", dirs);
+  ok &= Require(!complete.has_value(),
+                "expected nothing to do when every directory is there");
+
+  ok &= Require(!LdLibraryPathWithDirs("/opt/lib", {}).has_value(),
+                "expected nothing to do without directories");
+
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -475,6 +558,8 @@ int main() {
   ok = TestLoadsStudioVoiceWithoutTheOptionalParameters() && ok;
   ok = TestChannelCountMismatchFails() && ok;
   ok = TestMissingRequiredParameterFails() && ok;
+  ok = TestFeatureLibDirsAreListed() && ok;
+  ok = TestLoaderPathValue() && ok;
 
   if (!ok)
     return 1;
