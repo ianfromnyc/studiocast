@@ -7,6 +7,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/audio/pipewire/pipewire_audio_devices.h"
 #include "core/pipewire/pipewire_audio_node.h"
 
 #include "core/pipewire/pipewire_support.h"
@@ -313,6 +314,56 @@ bool TestLiveVirtualSourceAcceptsWrites() {
          Expect(consumers >= 0, "the consumer count must never be negative");
 }
 
+bool TestPipeWireIoRefusesToOpenWithoutTheVirtualMic() {
+  auto io = studiocast::audio::pw_backend::CreatePipeWireAudioIo();
+  if (!Expect(io != nullptr, "the PipeWire I/O factory returned nothing"))
+    return false;
+
+  studiocast::audio::AudioPipelineConfig cfg;
+  cfg.sink_name = "studiocast_sink";
+  std::string error;
+  const bool opened = io->Open(cfg, &error);
+  if (opened)
+    io->RequestStop();
+
+  return Expect(!opened, "opening without a virtual microphone must fail") &&
+         Expect(!error.empty(), "the failure must explain itself");
+}
+
+bool TestLiveNativeVirtualMicRoundTrip() {
+  if (!LiveServerAvailable("live native virtual mic round trip"))
+    return true;
+
+  auto &devices = studiocast::audio::pw_backend::NativeAudioDevices::Instance();
+  std::string error;
+  if (!Expect(devices.CreateVirtualMic(&error),
+              "creating the native virtual microphone failed: " + error))
+    return false;
+
+  const std::string dump = RunCapture("pw-dump 2>/dev/null");
+  const auto consumers = devices.DetectMicrophoneConsumers();
+  const bool created = devices.MicNode() != nullptr;
+
+  bool wrote = false;
+  if (created) {
+    std::vector<float> frame(480, 0.0f);
+    wrote = devices.MicNode()->Write(frame.data(), frame.size() * sizeof(float),
+                                     &error);
+  }
+
+  (void)devices.DestroyVirtualMic(&error);
+
+  return Expect(created, "the virtual microphone node was not created") &&
+         Expect(dump.find("studiocast_mic") != std::string::npos,
+                "pw-dump did not list studiocast_mic") &&
+         Expect(dump.find("StudioCast Microphone") != std::string::npos,
+                "pw-dump did not list the canonical description") &&
+         Expect(wrote,
+                "writing into the virtual microphone failed: " + error) &&
+         Expect(consumers.error.empty(),
+                "consumer detection reported an error: " + consumers.error);
+}
+
 } // namespace
 
 int main() {
@@ -349,6 +400,10 @@ int main() {
        &TestLiveVirtualSourceNodeReachesTheGraph},
       {"live virtual source accepts writes",
        &TestLiveVirtualSourceAcceptsWrites},
+      {"pipewire io refuses to open without the virtual mic",
+       &TestPipeWireIoRefusesToOpenWithoutTheVirtualMic},
+      {"live native virtual mic round trip",
+       &TestLiveNativeVirtualMicRoundTrip},
       {"canonical node names", &TestCanonicalNodeNames},
   };
 

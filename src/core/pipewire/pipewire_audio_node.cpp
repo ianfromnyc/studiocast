@@ -82,9 +82,7 @@ public:
     tail_.store(0, std::memory_order_relaxed);
   }
 
-  std::size_t Capacity() const {
-    return buf_.empty() ? 0 : buf_.size() - 1;
-  }
+  std::size_t Capacity() const { return buf_.empty() ? 0 : buf_.size() - 1; }
 
   std::size_t Readable() const {
     const std::size_t h = head_.load(std::memory_order_acquire);
@@ -191,8 +189,8 @@ struct PipeWireAudioNode::Impl {
   struct pw_registry *registry = nullptr;
   struct pw_stream *stream = nullptr;
 
-  struct spa_hook stream_listener {};
-  struct spa_hook registry_listener {};
+  struct spa_hook stream_listener{};
+  struct spa_hook registry_listener{};
 
   // Graph link ids that touch this node, so a remove event can undo a add
   // event.
@@ -224,7 +222,7 @@ void OnStreamStateChanged(void *data, enum pw_stream_state old,
 
 // Publishes a best-effort graph latency for the status fields.
 void UpdateLatency(PipeWireAudioNode::Impl *impl) {
-  struct pw_time t {};
+  struct pw_time t{};
   if (::pw_stream_get_time_n(impl->stream, &t, sizeof(t)) < 0) {
     impl->latency_valid.store(false, std::memory_order_relaxed);
     return;
@@ -289,7 +287,8 @@ void OnStreamProcess(void *data) {
     if (size > 0 && offset + size <= buf->datas[0].maxsize) {
       if (size > impl->ring.Writable())
         impl->ring.DropOldest(size - impl->ring.Writable());
-      (void)impl->ring.Push(bytes + offset, std::min(size, impl->ring.Capacity()));
+      (void)impl->ring.Push(bytes + offset,
+                            std::min(size, impl->ring.Capacity()));
     }
   }
 
@@ -302,7 +301,7 @@ void OnStreamProcess(void *data) {
 // releases and a partial aggregate initializer would warn.
 const struct pw_stream_events &StreamEvents() {
   static const struct pw_stream_events events = [] {
-    struct pw_stream_events e {};
+    struct pw_stream_events e{};
     e.version = PW_VERSION_STREAM_EVENTS;
     e.state_changed = OnStreamStateChanged;
     e.process = OnStreamProcess;
@@ -358,7 +357,7 @@ void OnRegistryGlobalRemove(void *data, std::uint32_t id) {
 
 const struct pw_registry_events &RegistryEvents() {
   static const struct pw_registry_events events = [] {
-    struct pw_registry_events e {};
+    struct pw_registry_events e{};
     e.version = PW_VERSION_REGISTRY_EVENTS;
     e.global = OnRegistryGlobal;
     e.global_remove = OnRegistryGlobalRemove;
@@ -504,8 +503,7 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
     ::pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
   } else if (!cfg.target_object.empty()) {
 #ifdef PW_KEY_TARGET_OBJECT
-    ::pw_properties_set(props, PW_KEY_TARGET_OBJECT,
-                        cfg.target_object.c_str());
+    ::pw_properties_set(props, PW_KEY_TARGET_OBJECT, cfg.target_object.c_str());
 #else
     ::pw_properties_set(props, PW_KEY_NODE_TARGET, cfg.target_object.c_str());
 #endif
@@ -528,7 +526,7 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
   std::uint8_t pod_buffer[1024];
   struct spa_pod_builder builder =
       SPA_POD_BUILDER_INIT(pod_buffer, sizeof(pod_buffer));
-  struct spa_audio_info_raw info {};
+  struct spa_audio_info_raw info{};
   info.format = SPA_AUDIO_FORMAT_F32;
   info.rate = static_cast<std::uint32_t>(cfg.sample_rate);
   info.channels = cfg.channels;
@@ -540,16 +538,16 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
   }
 
   const struct spa_pod *params[1];
-  params[0] = ::spa_format_audio_raw_build(&builder, SPA_PARAM_EnumFormat,
-                                           &info);
+  params[0] =
+      ::spa_format_audio_raw_build(&builder, SPA_PARAM_EnumFormat, &info);
 
   // A virtual device waits for other applications to connect to it, so it must
   // not connect itself.
   auto flags = static_cast<enum pw_stream_flags>(PW_STREAM_FLAG_MAP_BUFFERS |
                                                  PW_STREAM_FLAG_RT_PROCESS);
   if (!IsVirtualDevice(cfg.role)) {
-    flags = static_cast<enum pw_stream_flags>(
-        static_cast<int>(flags) | PW_STREAM_FLAG_AUTOCONNECT);
+    flags = static_cast<enum pw_stream_flags>(static_cast<int>(flags) |
+                                              PW_STREAM_FLAG_AUTOCONNECT);
   }
 
   const enum spa_direction direction =
@@ -560,8 +558,9 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
   ::pw_thread_loop_unlock(impl_->loop);
 
   if (rc < 0) {
-    const std::string msg = std::string("Could not connect the PipeWire node: ") +
-                            ::spa_strerror(rc);
+    const std::string msg =
+        std::string("Could not connect the PipeWire node: ") +
+        ::spa_strerror(rc);
     Stop();
     impl_->SetError(msg);
     if (error)

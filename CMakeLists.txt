@@ -310,6 +310,8 @@ add_library(studiocast_core
         src/core/pipewire/pipewire_audio_node.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
+        src/core/audio/pipewire/pipewire_audio_devices.h
+        src/core/audio/pipewire/pipewire_audio_devices.cpp
         src/core/audio/audio_consumer_detector.h
         src/core/audio/audio_consumer_detector.cpp
         src/core/audio/audio_device_safety.h
