@@ -445,6 +445,64 @@ bool TestSdkRuntimePreloadMakesBundledDepsResolvable() {
   return ok;
 }
 
+// The report depends on the SDK root, not only on the library. Two roots for
+// the same library must each get their own report.
+bool TestSdkRuntimePreloadCachesPerSdkRoot() {
+  const fs::path base =
+      fs::temp_directory_path() /
+      ("studiocast-maxine-preload-roots-" + std::to_string(::getpid()));
+  std::error_code ec;
+  fs::remove_all(base, ec);
+
+  // The target sits outside both roots, so its own directory never holds the
+  // dependency.
+  const fs::path target = base / "target" / "lib" / "libsc_root_target.so";
+  const fs::path empty_root = base / "root-without";
+  const fs::path full_root = base / "root-with";
+  const fs::path dep =
+      full_root / "external" / "cuda" / "lib" / "libsc_root_dep.so";
+
+  fs::create_directories(empty_root / "external" / "cuda" / "lib", ec);
+  if (ec ||
+      !BuildSharedLib(dep, "libsc_root_dep.so", "sc_fake_dep_value", {}) ||
+      !BuildSharedLib(target, "libsc_root_target.so", "sc_root_target_value",
+                      dep)) {
+    fs::remove_all(base, ec);
+    return false;
+  }
+
+  const auto &without =
+      studiocast::maxine::PreloadSdkRuntime(target, empty_root);
+  bool ok = Require(without.sdk_root == empty_root,
+                    "expected the first report to keep the root it was given, "
+                    "got " +
+                        without.sdk_root.string());
+  for (const auto &d : without.dependencies) {
+    if (d.soname == "libsc_root_dep.so") {
+      ok &= Require(!d.loaded,
+                    "expected a root without the dependency not to load it");
+    }
+  }
+
+  const auto &with = studiocast::maxine::PreloadSdkRuntime(target, full_root);
+  ok &= Require(with.sdk_root == full_root,
+                "expected the second root to get its own report, got " +
+                    with.sdk_root.string());
+
+  bool saw_dep = false;
+  for (const auto &d : with.dependencies) {
+    if (d.soname == "libsc_root_dep.so") {
+      saw_dep = true;
+      ok &= Require(d.loaded,
+                    "expected the second root to pre-load the dependency");
+    }
+  }
+  ok &= Require(saw_dep, "expected the second report to name the dependency");
+
+  fs::remove_all(base, ec);
+  return ok;
+}
+
 // Core system libraries must stay with the system loader.
 bool TestSdkRuntimePreloadSkipsSystemLibraries() {
   const fs::path root =
@@ -598,6 +656,12 @@ int main(int argc, char **argv) {
     return 1;
   }
   std::cout << "[PASS] SDK runtime pre-load makes bundled deps resolvable\n";
+
+  if (!TestSdkRuntimePreloadCachesPerSdkRoot()) {
+    std::cout << "[FAIL] SDK runtime pre-load caches per SDK root\n";
+    return 1;
+  }
+  std::cout << "[PASS] SDK runtime pre-load caches per SDK root\n";
 
   if (!TestSdkRuntimePreloadSkipsSystemLibraries()) {
     std::cout << "[FAIL] SDK runtime pre-load skips system libraries\n";

@@ -43,7 +43,8 @@ struct SdkRuntimeReport {
 // SDK does not ship, and any library the process already has open.
 //
 // Handles stay open for the life of the process. Call this before you dlopen
-// `library`. Results are cached per library path, so repeated calls are cheap.
+// `library`. Results are cached per library path and SDK root, so repeated
+// calls are cheap and two roots for the same library keep their own report.
 //
 // `sdk_root` may be empty, in which case it is taken from the library path.
 const SdkRuntimeReport &

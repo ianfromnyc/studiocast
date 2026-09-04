@@ -311,7 +311,9 @@ std::string SdkRuntimeReport::Summary() const {
 
 const SdkRuntimeReport &PreloadSdkRuntime(const fs::path &library,
                                           const fs::path &sdk_root) {
-  const std::string key = library.string();
+  // The report depends on the SDK root as well as on the library, so both go
+  // into the key. A NUL keeps the two parts apart, because no path holds one.
+  const std::string key = library.string() + '\0' + sdk_root.string();
   const std::lock_guard<std::mutex> lock(CacheMutex());
   auto &cache = Cache();
   auto it = cache.find(key);
