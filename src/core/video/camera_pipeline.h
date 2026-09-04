@@ -323,6 +323,9 @@ public:
 
   // Hands one processed frame to the native camera node. It never blocks and
   // never fails the pipeline.
+  //
+  // The caller must NOT hold `mu_`. This takes the mutex only to copy the
+  // node reference out and, if the write fails, to report the error.
   void PublishToPipeWire(const std::uint8_t *data, std::size_t bytes);
 
   CameraPipelineStatus Status() const override;
@@ -395,7 +398,13 @@ private:
 
   // Optional second output. It carries the same buffer that goes to
   // v4l2loopback, so it costs one memory copy a frame.
-  std::unique_ptr<studiocast::video::pw_backend::PipeWireCameraNode> pw_node_;
+  //
+  // The pointer is shared because the frame thread publishes with `mu_`
+  // released. It holds a reference for the length of one write, so a node that
+  // the supervisor thread swaps out lives until that write is done.
+  //
+  // `mu_` guards both the pointer and the error.
+  std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> pw_node_;
   std::string pw_node_error_;
   bool pw_output_wanted_ = false;
 

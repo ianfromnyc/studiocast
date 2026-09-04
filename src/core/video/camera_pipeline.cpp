@@ -841,7 +841,7 @@ void CameraPipeline::ApplyPipeWireOutputPlan(
   // Swap under a short lock. The old node goes out of the member first and is
   // destroyed after the lock, because taking a node down talks to the server
   // too.
-  std::unique_ptr<studiocast::video::pw_backend::PipeWireCameraNode> old;
+  std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> old;
   {
     std::lock_guard<std::mutex> lock(mu_);
     old = std::move(pw_node_);
@@ -863,11 +863,29 @@ void CameraPipeline::ApplyPipeWireOutputPlan(
 
 void CameraPipeline::PublishToPipeWire(const std::uint8_t *data,
                                        std::size_t bytes) {
-  if (!pw_node_ || !data || bytes == 0)
+  if (!data || bytes == 0)
     return;
+
+  // Copy the reference out under a short lock. The supervisor thread can swap
+  // the node at any time, and this reference keeps the node that was current
+  // alive until the frame is staged. The write itself stays outside the lock.
+  std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> node;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    node = pw_node_;
+  }
+  if (!node)
+    return;
+
   std::string err;
-  if (!pw_node_->WriteFrame(data, bytes, &err) && !err.empty())
-    pw_node_error_ = err;
+  if (node->WriteFrame(data, bytes, &err) || err.empty())
+    return;
+
+  // Report the failure only while this node is still the current one, so a
+  // late error cannot overwrite the state of a node that replaced it.
+  std::lock_guard<std::mutex> lock(mu_);
+  if (node == pw_node_)
+    pw_node_error_ = std::move(err);
 }
 
 bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig &cfg,
