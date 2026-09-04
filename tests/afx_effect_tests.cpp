@@ -402,8 +402,48 @@ bool TestLoadsStudioVoiceWithoutTheOptionalParameters() {
   return ok;
 }
 
-// The effect runs with a fixed number of channels. When that is not what the
-// caller asked for, loading must fail and say so.
+// Run hands the SDK a one-element array of channel pointers, so anything but
+// one channel would make the SDK read past it. A caller that asks for two
+// channels must be refused before anything reaches the SDK.
+bool TestNonMonoChannelCountIsRefused() {
+  const fs::path root = TempRoot("nonmono");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  fake_afx::Reset();
+  studiocast::maxine::afx::AfxApi api;
+  fake_afx::Install(&api);
+
+  studiocast::maxine::afx::AfxEffect fx(&api);
+  auto cfg = MakeConfig(features, "denoiser", "denoiser");
+  cfg.channels = 2;
+
+  std::string err;
+  bool ok =
+      Require(!fx.Configure(cfg, &err), "expected two channels to be refused");
+  ok &= Require(err.find("1 channel") != std::string::npos,
+                "expected the error to name the one channel, got: " + err);
+
+  std::vector<float> in(480, 0.25f);
+  std::vector<float> out(480, 0.0f);
+  ok &= Require(!fx.Run(in.data(), out.data(), 480, &err),
+                "expected Run to refuse an effect that did not configure");
+  ok &= Require(fake_afx::g_run_channels == 0,
+                "expected NvAFX_Run never to be called");
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
+// The effect runs with a fixed number of channels. When that is not the one
+// channel StudioCast runs, loading must fail and say so.
 bool TestChannelCountMismatchFails() {
   const fs::path root = TempRoot("channels");
   std::error_code ec;
@@ -418,13 +458,14 @@ bool TestChannelCountMismatchFails() {
 
   fake_afx::Reset();
   fake_afx::g_rejected = fake_afx::StudioVoiceRejects();
-  fake_afx::g_channels_readback = 1;
+  // The effect reports two channels although StudioCast runs one.
+  fake_afx::g_channels_readback = 2;
   studiocast::maxine::afx::AfxApi api;
   fake_afx::Install(&api);
 
   studiocast::maxine::afx::AfxEffect fx(&api);
-  auto cfg = MakeConfig(features, "studio_voice_low_latency", "studio_voice");
-  cfg.channels = 2;
+  const auto cfg =
+      MakeConfig(features, "studio_voice_low_latency", "studio_voice");
 
   std::string err;
   const bool configured = fx.Configure(cfg, &err);
@@ -639,6 +680,7 @@ int main() {
   ok = TestResolvesTheVersionedLibrary() && ok;
   ok = TestMissingLibraryKeepsTheClearError() && ok;
   ok = TestLoadsStudioVoiceWithoutTheOptionalParameters() && ok;
+  ok = TestNonMonoChannelCountIsRefused() && ok;
   ok = TestChannelCountMismatchFails() && ok;
   ok = TestMissingRequiredParameterFails() && ok;
   ok = TestFeatureLibDirsAreListed() && ok;

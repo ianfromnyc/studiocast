@@ -256,9 +256,17 @@ bool AfxEffect::Configure(const AfxEffectConfig &cfg, std::string *error_out) {
           "AFX features_dir is empty (expected `<AFX_ROOT>/features`).";
     return false;
   }
-  if (cfg_.channels == 0) {
-    if (error_out)
-      *error_out = "AFX channels must be >= 1.";
+  // The AFX 2.1.0 effects run one channel, and Run builds a one-element array
+  // of channel pointers for them. Anything else would make the SDK read past
+  // that array, so refuse it here. A stereo caller splits the channels itself
+  // and calls Run once per channel.
+  if (cfg_.channels != 1) {
+    if (error_out) {
+      std::ostringstream oss;
+      oss << "AFX effects run 1 channel; StudioCast asked for " << cfg_.channels
+          << ".";
+      *error_out = oss.str();
+    }
     return false;
   }
   if (cfg_.frame_samples == 0) {
@@ -607,12 +615,25 @@ bool AfxEffect::Run(const float *input, float *output,
     return false;
   }
 
+  // Configure refuses anything but one channel. Check again, because the
+  // arrays below hold one pointer each and a larger count would make the SDK
+  // read past them.
+  if (cfg_.channels != 1) {
+    if (error_out) {
+      std::ostringstream oss;
+      oss << "AFX effects run 1 channel; StudioCast asked for " << cfg_.channels
+          << ".";
+      *error_out = oss.str();
+    }
+    return false;
+  }
+
   // The SDK takes an array of channel pointers. StudioCast runs the AFX
   // effects with one channel; a stereo caller splits the channels itself.
   const float *in_channels[1] = {input};
   float *out_channels[1] = {output};
-  const NvAFX_Status st = api_->f().NvAFX_Run(
-      handle_, in_channels, out_channels, num_samples, cfg_.channels);
+  const NvAFX_Status st =
+      api_->f().NvAFX_Run(handle_, in_channels, out_channels, num_samples, 1u);
   if (st != NVAFX_SUCCESS) {
     if (error_out) {
       std::ostringstream oss;

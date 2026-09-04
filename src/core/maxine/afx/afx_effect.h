@@ -35,6 +35,10 @@ struct AfxEffectConfig {
   // Sample format assumptions for MVP: float PCM.
   int sample_rate = 48000;
   std::uint32_t frame_samples = 480;
+
+  // Must be 1. The AFX 2.1.0 effects run one channel, and Run hands the SDK
+  // one channel pointer. A stereo caller splits the channels and runs the
+  // effect once per channel.
   std::uint32_t channels = 1;
 
   // Effect intensity (implementation-defined by AFX), typically 0..1.
