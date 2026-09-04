@@ -275,21 +275,9 @@ FormatCanonicalMaxineBlockedCopy(const CanonicalMaxineBlockedCopy &c) {
   return oss.str();
 }
 
-bool BackendBuilt() {
-#ifdef STUDIOCAST_WITH_MAXINE
-  return true;
-#else
-  return false;
-#endif
-}
+bool BackendBuilt() { return true; }
 
 bool RuntimeAvailable(std::string *reason) {
-#ifndef STUDIOCAST_WITH_MAXINE
-  if (reason) {
-    *reason = "Maxine unavailable: Maxine support not enabled in this build.";
-  }
-  return false;
-#else
   MaxineManager mgr;
   const auto d = mgr.Diagnose(false);
   if (reason) {
@@ -301,7 +289,6 @@ bool RuntimeAvailable(std::string *reason) {
     }
   }
   return d.ok;
-#endif
 }
 
 } // namespace studiocast::maxine
