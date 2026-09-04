@@ -84,12 +84,21 @@ Config key `video.output.backend`, or the flag `--video-output-backend`:
 | --- | --- |
 | `auto` (default) | v4l2loopback only |
 | `v4l2loopback` | v4l2loopback only |
-| `pipewire` | the `Video/Source` node only |
+| `pipewire` | the `Video/Source` node, beside v4l2loopback |
 | `both` | v4l2loopback and the node together |
+
+v4l2loopback stays the source of truth for the frame format, because the
+pipeline negotiates the output size, rate and pixel format with the loopback
+device. `pipewire` therefore still opens the loopback device today. A
+node-only mode is future work.
 
 `auto` does not select PipeWire because most video conference applications read
 V4L2 devices only. Mirroring the frames to both outputs is cheap: the node
 writes the same buffer that goes to v4l2loopback.
+
+The node is a graph driver. A frame arriving from the pipeline triggers a
+cycle, so the consumer receives frames at the pipeline rate. Without that the
+graph has no clock for the link and a consumer receives nothing.
 
 | Consumer | v4l2loopback | PipeWire node |
 | --- | --- | --- |
@@ -156,11 +165,41 @@ The GUI shows the same values on the Audio page and the Video page.
 
 ## Tests
 
-- `tests/pipewire_backend_tests.cpp` tests the selection rules, the server
-  probe, and the format and quantum arithmetic. It needs no server.
-- The same file holds integration tests. They run only when a PipeWire server
-  is reachable and `pw-dump` is on the path. They are skipped, and reported as
-  passed, in every other case. Continuous integration stays green.
+`tests/pipewire_backend_tests.cpp` holds both kinds of test.
+
+Tests that need no server: the two selection rules, the socket probe with
+injected environment hooks, the node property arithmetic, the canonical names,
+and the refusal to open the pipeline I/O before the virtual microphone exists.
+
+Live tests: they run only when the build has PipeWire, a server socket
+answers, and `pw-dump` is on the path. One of them also needs
+`gst-launch-1.0`. Without those the test prints a `[SKIP]` line and passes, so
+continuous integration and the RPM `%check` stay green.
+
+- The virtual source node reaches the graph and `pw-dump` lists it.
+- The virtual source accepts writes with no consumer attached.
+- The native virtual microphone comes up under its canonical name.
+- The camera node reaches the graph as a `Video/Source`.
+- A real `gst-launch-1.0 pipewiresrc` consumer links to the camera node and
+  receives frames.
+
+Verified on Fedora 44, PipeWire 1.6.8:
+
+    $ pw-dump | ... # application.name == "StudioCast"
+    {"id": 130, "node.name": "studiocast_mic",
+     "node.description": "StudioCast Microphone", "media.class": "Audio/Source",
+     "node.virtual": true, "node.latency": "480/48000", "node.rate": "1/48000"}
+    {"id": 93,  "node.name": "studiocast_speakers",
+     "node.description": "StudioCast Speakers", "media.class": "Audio/Sink",
+     "node.virtual": true, "node.latency": "480/48000", "node.rate": "1/48000"}
+    {"id": 93,  "node.name": "studiocast_camera",
+     "node.description": "StudioCast Camera", "media.class": "Video/Source",
+     "node.virtual": true, "media.role": "Camera"}
+
+    $ pw-cat --record --target 130 cap.wav    # 757804 bytes in 4 s
+    $ gst-launch-1.0 pipewiresrc target-object=studiocast_camera \
+        num-buffers=20 ! videoconvert ! jpegenc ! multifilesink ...
+    # 20 frames written
 
 ## Future work
 
