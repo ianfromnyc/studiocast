@@ -592,6 +592,12 @@ bool TestLiveVirtualCameraFeedsAGstreamerConsumer() {
   // The consumer link disappears when GStreamer exits, so the count has to be
   // sampled while it runs.
   std::atomic<int> peak_consumers{0};
+  // A frame is dropped only when it replaces a frame the callback never took.
+  // The consumer takes one frame per staged frame here, so the count must stay
+  // near zero. It only means something while the consumer runs, so it is
+  // sampled as soon as a few frames have gone out.
+  std::atomic<std::uint64_t> drops_while_streaming{0};
+  std::atomic<bool> drops_sampled{false};
   const std::size_t bytes = studiocast::video::pw_backend::CameraFrameBytes(
       cfg.width, cfg.height, cfg.format);
   std::thread feeder([&] {
@@ -602,6 +608,12 @@ bool TestLiveVirtualCameraFeedsAGstreamerConsumer() {
       const int seen = node.ConsumerCount();
       if (seen > peak_consumers.load(std::memory_order_relaxed))
         peak_consumers.store(seen, std::memory_order_relaxed);
+      if (!drops_sampled.load(std::memory_order_relaxed) &&
+          node.FramesSent() >= 3) {
+        drops_while_streaming.store(node.FramesDropped(),
+                                    std::memory_order_relaxed);
+        drops_sampled.store(true, std::memory_order_relaxed);
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
   });
@@ -615,12 +627,20 @@ bool TestLiveVirtualCameraFeedsAGstreamerConsumer() {
   stop.store(true, std::memory_order_release);
   feeder.join();
   const int consumers = peak_consumers.load(std::memory_order_relaxed);
+  const bool sampled = drops_sampled.load(std::memory_order_relaxed);
+  const std::uint64_t drops =
+      drops_while_streaming.load(std::memory_order_relaxed);
   node.Stop();
+
+  // Two allows for the writer staging a second frame before a cycle runs.
+  const bool drops_ok = !sampled || drops <= 2;
 
   return Expect(out.find("rc=0") != std::string::npos,
                 "the GStreamer consumer did not finish cleanly: " + out) &&
          Expect(sent > 0, "the node handed no frame to a consumer") &&
-         Expect(consumers > 0, "no consumer link was counted");
+         Expect(consumers > 0, "no consumer link was counted") &&
+         Expect(drops_ok, "a consumer that keeps up must not see drops, got " +
+                              std::to_string(drops));
 }
 
 // Restores the real pactl runner when the test ends.

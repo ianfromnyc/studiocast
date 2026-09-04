@@ -82,9 +82,15 @@ struct PipeWireCameraNode::Impl {
 
   // The newest staged frame. The real-time callback takes it under this
   // mutex, which it holds only for one copy.
+  //
+  // `staged_valid` says the buffer holds a frame, so a cycle without a new
+  // frame repeats the last one instead of sending black. `staged_pending`
+  // says the callback has not taken that frame yet, so staging over it loses
+  // a frame. Only that case is a drop.
   std::mutex frame_mu;
   std::vector<std::uint8_t> staged;
   bool staged_valid = false;
+  bool staged_pending = false;
 
   std::atomic<bool> running{false};
   std::atomic<std::uint32_t> node_id{0};
@@ -198,6 +204,7 @@ void OnStreamProcess(void *data) {
     std::lock_guard<std::mutex> lock(impl->frame_mu);
     if (impl->staged_valid && impl->staged.size() >= room) {
       std::memcpy(out, impl->staged.data(), room);
+      impl->staged_pending = false;
       written = room;
     }
   }
@@ -336,6 +343,7 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
     std::lock_guard<std::mutex> lock(impl_->frame_mu);
     impl_->staged.assign(bytes, 0);
     impl_->staged_valid = false;
+    impl_->staged_pending = false;
   }
 
   const std::string name =
@@ -485,6 +493,7 @@ void PipeWireCameraNode::Stop() {
   {
     std::lock_guard<std::mutex> lock(impl_->frame_mu);
     impl_->staged_valid = false;
+    impl_->staged_pending = false;
   }
 }
 
@@ -511,10 +520,11 @@ bool PipeWireCameraNode::WriteFrame(const std::uint8_t *data,
 
   {
     std::lock_guard<std::mutex> lock(impl_->frame_mu);
-    if (impl_->staged_valid)
+    if (impl_->staged_pending)
       impl_->frames_dropped.fetch_add(1, std::memory_order_relaxed);
     std::memcpy(impl_->staged.data(), data, impl_->frame_bytes);
     impl_->staged_valid = true;
+    impl_->staged_pending = true;
   }
 
 #if STUDIOCAST_HAVE_PIPEWIRE
