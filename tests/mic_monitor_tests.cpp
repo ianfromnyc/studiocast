@@ -621,6 +621,44 @@ bool TestServiceRetriesMonitorAndReportsError() {
          starts_after_first_failure;
 }
 
+// A stopped service reports no monitor state at all, so the error that the
+// last failed start left behind must go with the rest of the monitor fields.
+bool TestServiceClearsMonitorErrorWhenItStops() {
+  MonitorRecorder rec;
+  rec.fail_start.store(true, std::memory_order_relaxed);
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  VirtualAudioService service(std::move(hooks));
+  const auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool reported = WaitUntil(
+      [&] { return !service.Status().monitor_last_error.empty(); }, 500ms);
+  if (!reported) {
+    std::cerr << "the monitor start failure was not reported\n";
+    service.Stop();
+    return false;
+  }
+
+  service.Stop();
+
+  const auto st = service.Status();
+  if (!st.monitor_last_error.empty()) {
+    std::cerr << "a stale monitor error survived the stop: '"
+              << st.monitor_last_error << "'\n";
+    return false;
+  }
+  return true;
+}
+
 bool TestMonitorConsumerIsCountedApartFromApps() {
   MonitorRecorder rec;
   std::atomic<int> consumer_count{0};
@@ -839,6 +877,8 @@ int main() {
        &TestServiceStopsMonitorWhenServiceStops},
       {"service retries the monitor and reports the error",
        &TestServiceRetriesMonitorAndReportsError},
+      {"service clears the monitor error when it stops",
+       &TestServiceClearsMonitorErrorWhenItStops},
       {"monitor consumer is counted apart from apps",
        &TestMonitorConsumerIsCountedApartFromApps},
       {"service drives the real helper through pactl",

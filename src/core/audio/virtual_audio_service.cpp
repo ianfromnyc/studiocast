@@ -527,6 +527,7 @@ void VirtualAudioService::Stop() {
     st_.monitor_sink_active.clear();
     st_.monitor_latency_ms_active = 0;
     st_.monitor_volume_active = 0;
+    st_.monitor_last_error.clear();
     monitor_running_ = false;
     monitor_sink_requested_.clear();
     monitor_latency_ms_ = 0;
