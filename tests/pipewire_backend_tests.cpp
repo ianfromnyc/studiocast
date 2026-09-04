@@ -1,6 +1,13 @@
+#include <array>
+#include <chrono>
+#include <cstdio>
 #include <iostream>
 #include <map>
 #include <string>
+#include <thread>
+#include <vector>
+
+#include "core/pipewire/pipewire_audio_node.h"
 
 #include "core/pipewire/pipewire_support.h"
 
@@ -212,6 +219,100 @@ bool TestCanonicalNodeNames() {
                 "the virtual camera description must not change");
 }
 
+// Runs a command and returns its standard output. An empty result means the
+// command failed or printed nothing.
+std::string RunCapture(const std::string &cmd) {
+  std::string out;
+  FILE *p = ::popen(cmd.c_str(), "r");
+  if (!p)
+    return out;
+  std::array<char, 4096> buf{};
+  while (std::fgets(buf.data(), static_cast<int>(buf.size()), p) != nullptr)
+    out.append(buf.data());
+  ::pclose(p);
+  return out;
+}
+
+// The live-server tests need a reachable server and the pw-dump tool. Without
+// both, they report a skip and pass, so continuous integration stays green.
+bool LiveServerAvailable(const char *test_name) {
+  if (!studiocast::pw::PipeWireCompiledIn()) {
+    std::cout << "[SKIP] " << test_name << ": built without PipeWire\n";
+    return false;
+  }
+  if (!studiocast::pw::ProbePipeWireSocket().found) {
+    std::cout << "[SKIP] " << test_name << ": no PipeWire server\n";
+    return false;
+  }
+  if (RunCapture("command -v pw-dump 2>/dev/null").empty()) {
+    std::cout << "[SKIP] " << test_name << ": pw-dump is not installed\n";
+    return false;
+  }
+  return true;
+}
+
+bool TestLiveVirtualSourceNodeReachesTheGraph() {
+  static constexpr const char *kName = "studiocast_pipewire_selftest";
+  if (!LiveServerAvailable("live virtual source node reaches the graph"))
+    return true;
+
+  studiocast::pw::AudioNodeConfig cfg;
+  cfg.role = studiocast::pw::AudioNodeRole::kVirtualSource;
+  cfg.node_name = kName;
+  cfg.node_description = "StudioCast Self Test";
+  cfg.channels = 1;
+
+  studiocast::pw::PipeWireAudioNode node;
+  std::string error;
+  if (!Expect(node.Start(cfg, &error), "node start failed: " + error))
+    return false;
+
+  // The node id appears once the server has the node.
+  std::uint32_t id = 0;
+  for (int i = 0; i < 100 && id == 0; ++i) {
+    id = node.NodeId();
+    if (id == 0)
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  const std::string dump = RunCapture("pw-dump 2>/dev/null");
+  node.Stop();
+
+  return Expect(id != 0, "the node never reached the graph") &&
+         Expect(dump.find(kName) != std::string::npos,
+                "pw-dump did not list the node name") &&
+         Expect(dump.find("StudioCast Self Test") != std::string::npos,
+                "pw-dump did not list the node description") &&
+         Expect(dump.find("\"Audio/Source\"") != std::string::npos,
+                "pw-dump listed no Audio/Source node");
+}
+
+bool TestLiveVirtualSourceAcceptsWrites() {
+  if (!LiveServerAvailable("live virtual source accepts writes"))
+    return true;
+
+  studiocast::pw::AudioNodeConfig cfg;
+  cfg.role = studiocast::pw::AudioNodeRole::kVirtualSource;
+  cfg.node_name = "studiocast_pipewire_selftest_write";
+  cfg.channels = 1;
+
+  studiocast::pw::PipeWireAudioNode node;
+  std::string error;
+  if (!Expect(node.Start(cfg, &error), "node start failed: " + error))
+    return false;
+
+  std::vector<float> frame(cfg.frame_samples, 0.0f);
+  bool ok = true;
+  for (int i = 0; i < 20 && ok; ++i) {
+    ok = node.Write(frame.data(), frame.size() * sizeof(float), &error);
+  }
+  const int consumers = node.ConsumerCount();
+  node.Stop();
+
+  return Expect(ok, "writing into the virtual source failed: " + error) &&
+         Expect(consumers >= 0, "the consumer count must never be negative");
+}
+
 } // namespace
 
 int main() {
@@ -244,6 +345,10 @@ int main() {
       {"socket probe reports a missing runtime directory",
        &TestSocketProbeReportsAMissingRuntimeDirectory},
       {"node property arithmetic", &TestNodePropertyArithmetic},
+      {"live virtual source node reaches the graph",
+       &TestLiveVirtualSourceNodeReachesTheGraph},
+      {"live virtual source accepts writes",
+       &TestLiveVirtualSourceAcceptsWrites},
       {"canonical node names", &TestCanonicalNodeNames},
   };
 

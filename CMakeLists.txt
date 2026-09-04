@@ -306,6 +306,8 @@ add_library(studiocast_core
         src/core/maxine/effects/ar_auto_frame_tracker.cpp
         src/core/pipewire/pipewire_support.h
         src/core/pipewire/pipewire_support.cpp
+        src/core/pipewire/pipewire_audio_node.h
+        src/core/pipewire/pipewire_audio_node.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
         src/core/audio/audio_consumer_detector.h
@@ -487,6 +489,10 @@ else()
 endif()
 
 if (_studiocast_have_pipewire)
+    # PipeWire and SPA headers use macros that trip the project warning set, so
+    # they come in as system includes.
+    set_property(TARGET PkgConfig::PIPEWIRE PROPERTY
+            INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${PIPEWIRE_INCLUDE_DIRS}")
     target_link_libraries(studiocast_core PUBLIC PkgConfig::PIPEWIRE)
     target_compile_definitions(studiocast_core PUBLIC STUDIOCAST_HAVE_PIPEWIRE=1)
     message(STATUS "libpipewire-0.3 found (${PIPEWIRE_VERSION}); native PipeWire backends enabled.")
