@@ -1,5 +1,7 @@
 #include "core/maxine/afx/afx_effect.h"
 
+#include "core/maxine/afx/afx_loader_path.h"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdlib>
@@ -109,63 +111,14 @@ std::vector<fs::path> FeatureLibraryCandidates(const fs::path &lib_dir,
   return out;
 }
 
-bool PrependEnvPath(const char *var, const fs::path &dir,
-                    std::string *error_out) {
-  if (!var || std::strlen(var) == 0) {
-    if (error_out)
-      *error_out = "Internal error: env var name is empty.";
+// True when `dir` is on LD_LIBRARY_PATH of this process.
+bool LoaderPathHasDir(const fs::path &dir) {
+  if (dir.empty())
     return false;
-  }
-  const std::string add = dir.string();
-  if (add.empty()) {
-    if (error_out)
-      *error_out =
-          "Internal error: attempted to prepend an empty directory to env.";
-    return false;
-  }
-
-  const char *old = std::getenv(var);
-  const std::string oldStr = old ? std::string(old) : std::string();
-
-  auto contains_exact = [&](const std::string &list,
-                            const std::string &item) -> bool {
-    if (list.empty())
-      return false;
-    size_t start = 0;
-    while (start <= list.size()) {
-      const size_t end = list.find(':', start);
-      const std::string token = (end == std::string::npos)
-                                    ? list.substr(start)
-                                    : list.substr(start, end - start);
-      if (token == item)
-        return true;
-      if (end == std::string::npos)
-        break;
-      start = end + 1;
-    }
-    return false;
-  };
-
-  if (contains_exact(oldStr, add)) {
-    return true; // idempotent
-  }
-
-  std::string next;
-  if (oldStr.empty()) {
-    next = add;
-  } else {
-    next = add + ":" + oldStr;
-  }
-
-  if (::setenv(var, next.c_str(), 1) != 0) {
-    if (error_out) {
-      std::ostringstream oss;
-      oss << "Failed to set " << var << ": " << std::strerror(errno);
-      *error_out = oss.str();
-    }
-    return false;
-  }
-  return true;
+  const char *current = std::getenv("LD_LIBRARY_PATH");
+  return !LdLibraryPathWithDirs(current ? std::string(current) : std::string(),
+                                {dir})
+              .has_value();
 }
 
 std::optional<fs::path> ResolveModelPath(const AfxEffectConfig &cfg,
@@ -486,17 +439,12 @@ bool AfxEffect::Load(std::string *error_out) {
   Destroy();
   warnings_.clear();
 
-  // Put the feature library directory on LD_LIBRARY_PATH for any process that
-  // StudioCast starts later. It does not help this process: glibc reads
-  // LD_LIBRARY_PATH once, at start, so a later setenv does not change where
-  // dlopen looks. The AFX core loads the feature library by its bare name, so
-  // the directory must already be on the loader path when the daemon starts.
-  std::string env_err;
-  if (!PrependEnvPath("LD_LIBRARY_PATH", resolved_feature_lib_dir_, &env_err)) {
-    if (error_out)
-      *error_out = env_err;
-    return false;
-  }
+  // The AFX core loads the feature library by its bare name, and glibc reads
+  // LD_LIBRARY_PATH only when the process starts. A process that did not get
+  // the directory at start cannot add it, so say that plainly when the effect
+  // does not come up.
+  const bool lib_dir_on_loader_path =
+      LoaderPathHasDir(resolved_feature_lib_dir_);
 
   NvAFX_Handle h = nullptr;
   const NvAFX_Status stCreate =
@@ -505,9 +453,13 @@ bool AfxEffect::Load(std::string *error_out) {
     if (error_out) {
       std::ostringstream oss;
       oss << "NvAFX_CreateEffect failed for effect `" << cfg_.effect_selector
-          << "` (status=" << stCreate
-          << "). Ensure the AFX feature library is installed and discoverable ("
-          << resolved_feature_lib_path_.string() << ").";
+          << "` (status=" << stCreate << "). The feature library is "
+          << resolved_feature_lib_path_.string() << ".";
+      if (!lib_dir_on_loader_path) {
+        oss << " Its directory is not on LD_LIBRARY_PATH, which is how the "
+               "AFX core finds it. Restart StudioCast so that the daemon can "
+               "put it there.";
+      }
       *error_out = oss.str();
     }
     return false;

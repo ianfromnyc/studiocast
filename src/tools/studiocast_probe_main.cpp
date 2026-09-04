@@ -32,6 +32,7 @@
 #include "core/cuda/kernels/preprocess_to_nchw.h"
 #include "core/cuda/kernels/resize_bilinear.h"
 #include "core/maxine/afx/afx_effect.h"
+#include "core/maxine/afx/afx_loader_path.h"
 #include "core/maxine/afx_api.h"
 #include "core/maxine/ar_api.h"
 #include "core/maxine/availability.h"
@@ -4209,6 +4210,13 @@ int RunSelfTest(const SelfTestOptions &self_test_options) {
 
 int main(int argc, char **argv) {
   if (hasArg(argc, argv, "--self-test")) {
+    // The self test loads AFX effects, which need the feature libraries on
+    // the loader path.
+    std::string loader_note;
+    studiocast::maxine::afx::EnsureAfxFeatureLibsOnLoaderPath(argv,
+                                                              &loader_note);
+    if (!loader_note.empty())
+      std::fprintf(stderr, "%s\n", loader_note.c_str());
     return RunSelfTest(ParseSelfTestOptions(argc, argv));
   }
 

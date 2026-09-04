@@ -25,6 +25,7 @@
 #include "core/config/daemon_config.h"
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
+#include "core/maxine/afx/afx_loader_path.h"
 #include "core/maxine/maxine_manager.h"
 #include "core/open_audio/open_audio_diagnose.h"
 #include "core/util/json.h"
@@ -2044,6 +2045,18 @@ int main(int argc, char **argv) {
   if (HasArg(argc, argv, "--help") || HasArg(argc, argv, "-h")) {
     Usage(argv[0]);
     return 0;
+  }
+
+  // The AFX core loads a feature library by its bare name, and glibc reads
+  // LD_LIBRARY_PATH only at start. This puts the AFX feature lib directories
+  // on the loader path and starts the daemon again; it returns here when
+  // nothing was needed.
+  {
+    std::string loader_note;
+    studiocast::maxine::afx::EnsureAfxFeatureLibsOnLoaderPath(argv,
+                                                              &loader_note);
+    if (!loader_note.empty())
+      std::printf("[audio] %s\n", loader_note.c_str());
   }
 
   // Load persisted config and then apply CLI overrides for this run.
