@@ -101,7 +101,10 @@ bool TestPipeWirePreferenceFallsBackAndExplainsWhy() {
                 "an unavailable PipeWire request must fall back to Pulse") &&
          Expect(d.used_fallback, "the fallback flag should be set") &&
          Expect(d.note.find("PipeWire socket") != std::string::npos,
-                "the note should carry the availability reason");
+                "the note should carry the availability reason") &&
+         Expect(d.note.find('\n') == std::string::npos,
+                "a note goes into JSON and into a banner, so it stays one "
+                "line");
 }
 
 bool TestAudioTransportPreferenceParsing() {
@@ -476,7 +479,11 @@ bool TestVideoOutputBackendSelection() {
                     !nativeMissing.backends.pipewire,
                 "an unavailable server must fall back to v4l2loopback") &&
          Expect(nativeMissing.used_fallback, "the fallback flag should be set") &&
-         Expect(!nativeMissing.note.empty(), "the fallback must explain itself");
+         Expect(!nativeMissing.note.empty(),
+                "the fallback must explain itself") &&
+         Expect(nativeMissing.note.find('\n') == std::string::npos,
+                "a note goes into JSON and into a banner, so it stays one "
+                "line");
 }
 
 bool TestCameraFrameByteArithmetic() {

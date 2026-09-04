@@ -25,6 +25,10 @@ std::string Normalize(std::string_view s) {
   return out;
 }
 
+// Joins the reason to the note. A note is one line, so it must not be a
+// newline: the note goes into the status JSON and into a GUI banner.
+constexpr const char *kNoteSeparator = " ";
+
 // Keeps a status note to one line so a GUI banner stays readable.
 std::string FirstLine(const std::string &s) {
   const auto pos = s.find('\n');
@@ -106,7 +110,7 @@ ResolveVideoOutputBackends(VideoOutputPreference pref,
     out.note = "A native PipeWire camera was requested but is unavailable; "
                "using v4l2loopback.";
     if (const auto r = FirstLine(avail.reason); !r.empty())
-      out.note += "\n" + r;
+      out.note += kNoteSeparator + r;
     return out;
 
   case VideoOutputPreference::kBoth:
@@ -119,7 +123,7 @@ ResolveVideoOutputBackends(VideoOutputPreference pref,
     out.note = "A native PipeWire camera was requested but is unavailable; "
                "using v4l2loopback alone.";
     if (const auto r = FirstLine(avail.reason); !r.empty())
-      out.note += "\n" + r;
+      out.note += kNoteSeparator + r;
     return out;
   }
 
@@ -244,7 +248,7 @@ ResolveAudioTransport(AudioTransportPreference pref,
     out.note =
         "Native PipeWire audio requested but unavailable; using PulseAudio.";
     if (const auto r = FirstLine(avail.reason); !r.empty())
-      out.note += "\n" + r;
+      out.note += kNoteSeparator + r;
     return out;
 
   case AudioTransportPreference::kAuto:
