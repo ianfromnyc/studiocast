@@ -16,6 +16,13 @@
 #include <spa/utils/result.h>
 #endif
 
+// The pw_ and spa_ names below stay unqualified. libpipewire 1.0, which Ubuntu
+// 24.04 and Linux Mint 22 ship, gives some of them as macros, among them
+// pw_registry_add_listener and spa_strerror. A :: in front of a macro name is a
+// compile error, so the plain name is the only spelling that works on both
+// libpipewire 1.0 and the inline functions of libpipewire 1.6. All these names
+// are C symbols in the global namespace, so the plain name finds them.
+
 namespace studiocast::video::pw_backend {
 
 std::size_t CameraFrameBytes(int width, int height, PixelFormat format) {
@@ -51,7 +58,7 @@ std::size_t CameraStrideBytes(int width, PixelFormat format) {
 
 void EnsurePipeWireInitialized() {
   static std::once_flag once;
-  std::call_once(once, [] { ::pw_init(nullptr, nullptr); });
+  std::call_once(once, [] { pw_init(nullptr, nullptr); });
 }
 
 std::uint32_t SpaFormatFor(PixelFormat format) {
@@ -127,7 +134,7 @@ void OnStreamStateChanged(void *data, enum pw_stream_state old,
   }
   if (state == PW_STREAM_STATE_STREAMING ||
       state == PW_STREAM_STATE_PAUSED) {
-    const std::uint32_t id = ::pw_stream_get_node_id(impl->stream);
+    const std::uint32_t id = pw_stream_get_node_id(impl->stream);
     if (id != PW_ID_ANY)
       impl->node_id.store(id, std::memory_order_release);
   }
@@ -142,14 +149,14 @@ void OnParamChanged(void *data, std::uint32_t id, const struct spa_pod *param) {
 
   std::uint32_t media_type = 0;
   std::uint32_t media_subtype = 0;
-  if (::spa_format_parse(param, &media_type, &media_subtype) < 0)
+  if (spa_format_parse(param, &media_type, &media_subtype) < 0)
     return;
   if (media_type != SPA_MEDIA_TYPE_video ||
       media_subtype != SPA_MEDIA_SUBTYPE_raw)
     return;
 
   struct spa_video_info_raw raw {};
-  if (::spa_format_video_raw_parse(param, &raw) < 0)
+  if (spa_format_video_raw_parse(param, &raw) < 0)
     return;
 
   const auto stride = static_cast<std::int32_t>(impl->stride_bytes);
@@ -167,18 +174,18 @@ void OnParamChanged(void *data, std::uint32_t id, const struct spa_pod *param) {
       SPA_PARAM_BUFFERS_dataType,
       SPA_POD_CHOICE_FLAGS_Int(1 << SPA_DATA_MemPtr)));
 
-  ::pw_stream_update_params(impl->stream, params, 1);
+  pw_stream_update_params(impl->stream, params, 1);
 }
 
 void OnStreamProcess(void *data) {
   auto *impl = static_cast<PipeWireCameraNode::Impl *>(data);
-  struct pw_buffer *b = ::pw_stream_dequeue_buffer(impl->stream);
+  struct pw_buffer *b = pw_stream_dequeue_buffer(impl->stream);
   if (!b)
     return;
 
   struct spa_buffer *buf = b->buffer;
   if (buf->n_datas == 0 || buf->datas[0].data == nullptr) {
-    ::pw_stream_queue_buffer(impl->stream, b);
+    pw_stream_queue_buffer(impl->stream, b);
     return;
   }
 
@@ -207,7 +214,7 @@ void OnStreamProcess(void *data) {
   buf->datas[0].chunk->stride = static_cast<std::int32_t>(impl->stride_bytes);
   buf->datas[0].chunk->size = static_cast<std::uint32_t>(written);
 
-  ::pw_stream_queue_buffer(impl->stream, b);
+  pw_stream_queue_buffer(impl->stream, b);
 }
 
 const struct pw_stream_events &StreamEvents() {
@@ -224,7 +231,7 @@ const struct pw_stream_events &StreamEvents() {
 
 bool LinkEndpointMatches(const struct spa_dict *props, const char *key,
                          std::uint32_t node_id) {
-  const char *v = ::spa_dict_lookup(props, key);
+  const char *v = spa_dict_lookup(props, key);
   if (!v)
     return false;
   char *end = nullptr;
@@ -340,7 +347,7 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
           ? std::string(studiocast::pw::kVirtualCameraDescription)
           : cfg.node_description;
 
-  impl_->loop = ::pw_thread_loop_new(name.c_str(), nullptr);
+  impl_->loop = pw_thread_loop_new(name.c_str(), nullptr);
   if (!impl_->loop) {
     const std::string msg = "Could not create the PipeWire thread loop.";
     impl_->SetError(msg);
@@ -350,8 +357,8 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
   }
 
   impl_->context =
-      ::pw_context_new(::pw_thread_loop_get_loop(impl_->loop), nullptr, 0);
-  if (!impl_->context || ::pw_thread_loop_start(impl_->loop) < 0) {
+      pw_context_new(pw_thread_loop_get_loop(impl_->loop), nullptr, 0);
+  if (!impl_->context || pw_thread_loop_start(impl_->loop) < 0) {
     Stop();
     const std::string msg = "Could not start the PipeWire thread loop.";
     impl_->SetError(msg);
@@ -360,11 +367,11 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
     return false;
   }
 
-  ::pw_thread_loop_lock(impl_->loop);
+  pw_thread_loop_lock(impl_->loop);
 
-  impl_->core = ::pw_context_connect(impl_->context, nullptr, 0);
+  impl_->core = pw_context_connect(impl_->context, nullptr, 0);
   if (!impl_->core) {
-    ::pw_thread_loop_unlock(impl_->loop);
+    pw_thread_loop_unlock(impl_->loop);
     Stop();
     const std::string msg = "Could not connect to the PipeWire server.";
     impl_->SetError(msg);
@@ -373,22 +380,22 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
     return false;
   }
 
-  impl_->registry = ::pw_core_get_registry(impl_->core, PW_VERSION_REGISTRY, 0);
+  impl_->registry = pw_core_get_registry(impl_->core, PW_VERSION_REGISTRY, 0);
   if (impl_->registry) {
-    ::pw_registry_add_listener(impl_->registry, &impl_->registry_listener,
+    pw_registry_add_listener(impl_->registry, &impl_->registry_listener,
                                &RegistryEvents(), impl_.get());
   }
 
-  struct pw_properties *props = ::pw_properties_new(
+  struct pw_properties *props = pw_properties_new(
       PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Playback",
       PW_KEY_MEDIA_ROLE, "Camera", PW_KEY_MEDIA_CLASS, "Video/Source",
       PW_KEY_NODE_NAME, name.c_str(), PW_KEY_NODE_DESCRIPTION,
       description.c_str(), PW_KEY_NODE_VIRTUAL, "true", PW_KEY_NODE_DRIVER,
       "true", PW_KEY_APP_NAME, "StudioCast", nullptr);
 
-  impl_->stream = ::pw_stream_new(impl_->core, name.c_str(), props);
+  impl_->stream = pw_stream_new(impl_->core, name.c_str(), props);
   if (!impl_->stream) {
-    ::pw_thread_loop_unlock(impl_->loop);
+    pw_thread_loop_unlock(impl_->loop);
     Stop();
     const std::string msg = "Could not create the PipeWire stream.";
     impl_->SetError(msg);
@@ -397,7 +404,7 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
     return false;
   }
 
-  ::pw_stream_add_listener(impl_->stream, &impl_->stream_listener,
+  pw_stream_add_listener(impl_->stream, &impl_->stream_listener,
                            &StreamEvents(), impl_.get());
 
   std::uint8_t pod_buffer[1024];
@@ -412,7 +419,7 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
 
   const struct spa_pod *params[1];
   params[0] =
-      ::spa_format_video_raw_build(&builder, SPA_PARAM_EnumFormat, &info);
+      spa_format_video_raw_build(&builder, SPA_PARAM_EnumFormat, &info);
 
   // A Video/Source node waits for consumers, so it must not connect itself.
   //
@@ -423,14 +430,14 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
       PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS |
       PW_STREAM_FLAG_DRIVER);
 
-  const int rc = ::pw_stream_connect(impl_->stream, SPA_DIRECTION_OUTPUT,
+  const int rc = pw_stream_connect(impl_->stream, SPA_DIRECTION_OUTPUT,
                                      PW_ID_ANY, flags, params, 1);
-  ::pw_thread_loop_unlock(impl_->loop);
+  pw_thread_loop_unlock(impl_->loop);
 
   if (rc < 0) {
     const std::string msg =
         std::string("Could not connect the PipeWire camera node: ") +
-        ::spa_strerror(rc);
+        spa_strerror(rc);
     Stop();
     impl_->SetError(msg);
     if (error)
@@ -446,26 +453,26 @@ void PipeWireCameraNode::Stop() {
   impl_->running.store(false, std::memory_order_release);
 
   if (impl_->loop)
-    ::pw_thread_loop_stop(impl_->loop);
+    pw_thread_loop_stop(impl_->loop);
 
   if (impl_->stream) {
-    ::pw_stream_destroy(impl_->stream);
+    pw_stream_destroy(impl_->stream);
     impl_->stream = nullptr;
   }
   if (impl_->registry) {
-    ::pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(impl_->registry));
+    pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(impl_->registry));
     impl_->registry = nullptr;
   }
   if (impl_->core) {
-    ::pw_core_disconnect(impl_->core);
+    pw_core_disconnect(impl_->core);
     impl_->core = nullptr;
   }
   if (impl_->context) {
-    ::pw_context_destroy(impl_->context);
+    pw_context_destroy(impl_->context);
     impl_->context = nullptr;
   }
   if (impl_->loop) {
-    ::pw_thread_loop_destroy(impl_->loop);
+    pw_thread_loop_destroy(impl_->loop);
     impl_->loop = nullptr;
   }
 
@@ -513,7 +520,7 @@ bool PipeWireCameraNode::WriteFrame(const std::uint8_t *data,
 #if STUDIOCAST_HAVE_PIPEWIRE
   // The node drives the graph, so a new frame starts a cycle.
   if (impl_->stream)
-    ::pw_stream_trigger_process(impl_->stream);
+    pw_stream_trigger_process(impl_->stream);
 #endif
   return true;
 }

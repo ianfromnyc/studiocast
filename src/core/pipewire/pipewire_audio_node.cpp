@@ -17,6 +17,13 @@
 #include <spa/utils/result.h>
 #endif
 
+// The pw_ and spa_ names below stay unqualified. libpipewire 1.0, which Ubuntu
+// 24.04 and Linux Mint 22 ship, gives some of them as macros, among them
+// pw_registry_add_listener and spa_strerror. A :: in front of a macro name is a
+// compile error, so the plain name is the only spelling that works on both
+// libpipewire 1.0 and the inline functions of libpipewire 1.6. All these names
+// are C symbols in the global namespace, so the plain name finds them.
+
 namespace studiocast::pw {
 
 namespace {
@@ -26,7 +33,7 @@ namespace {
 // pw_init must run once per process. Every node shares that one call.
 void EnsurePipeWireInitialized() {
   static std::once_flag once;
-  std::call_once(once, [] { ::pw_init(nullptr, nullptr); });
+  std::call_once(once, [] { pw_init(nullptr, nullptr); });
 }
 
 const char *MediaCategoryFor(AudioNodeRole role) {
@@ -213,7 +220,7 @@ void OnStreamStateChanged(void *data, enum pw_stream_state old,
     impl->SetError(error ? std::string(error) : std::string("stream error"));
   } else if (state == PW_STREAM_STATE_STREAMING ||
              state == PW_STREAM_STATE_PAUSED) {
-    const std::uint32_t id = ::pw_stream_get_node_id(impl->stream);
+    const std::uint32_t id = pw_stream_get_node_id(impl->stream);
     if (id != PW_ID_ANY)
       impl->node_id.store(id, std::memory_order_release);
   }
@@ -223,7 +230,7 @@ void OnStreamStateChanged(void *data, enum pw_stream_state old,
 // Publishes a best-effort graph latency for the status fields.
 void UpdateLatency(PipeWireAudioNode::Impl *impl) {
   struct pw_time t{};
-  if (::pw_stream_get_time_n(impl->stream, &t, sizeof(t)) < 0) {
+  if (pw_stream_get_time_n(impl->stream, &t, sizeof(t)) < 0) {
     impl->latency_valid.store(false, std::memory_order_relaxed);
     return;
   }
@@ -242,13 +249,13 @@ void UpdateLatency(PipeWireAudioNode::Impl *impl) {
 
 void OnStreamProcess(void *data) {
   auto *impl = static_cast<PipeWireAudioNode::Impl *>(data);
-  struct pw_buffer *b = ::pw_stream_dequeue_buffer(impl->stream);
+  struct pw_buffer *b = pw_stream_dequeue_buffer(impl->stream);
   if (!b)
     return;
 
   struct spa_buffer *buf = b->buffer;
   if (buf->n_datas == 0 || buf->datas[0].data == nullptr) {
-    ::pw_stream_queue_buffer(impl->stream, b);
+    pw_stream_queue_buffer(impl->stream, b);
     return;
   }
 
@@ -292,7 +299,7 @@ void OnStreamProcess(void *data) {
     }
   }
 
-  ::pw_stream_queue_buffer(impl->stream, b);
+  pw_stream_queue_buffer(impl->stream, b);
   UpdateLatency(impl);
   impl->Wake();
 }
@@ -313,7 +320,7 @@ const struct pw_stream_events &StreamEvents() {
 // Reads a numeric node id out of a link property.
 bool LinkEndpointMatches(const struct spa_dict *props, const char *key,
                          std::uint32_t node_id) {
-  const char *v = ::spa_dict_lookup(props, key);
+  const char *v = spa_dict_lookup(props, key);
   if (!v)
     return false;
   char *end = nullptr;
@@ -439,7 +446,7 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
   const std::string description =
       cfg.node_description.empty() ? name : cfg.node_description;
 
-  impl_->loop = ::pw_thread_loop_new(name.c_str(), nullptr);
+  impl_->loop = pw_thread_loop_new(name.c_str(), nullptr);
   if (!impl_->loop) {
     const std::string msg = "Could not create the PipeWire thread loop.";
     impl_->SetError(msg);
@@ -449,7 +456,7 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
   }
 
   impl_->context =
-      ::pw_context_new(::pw_thread_loop_get_loop(impl_->loop), nullptr, 0);
+      pw_context_new(pw_thread_loop_get_loop(impl_->loop), nullptr, 0);
   if (!impl_->context) {
     Stop();
     const std::string msg = "Could not create the PipeWire context.";
@@ -459,7 +466,7 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
     return false;
   }
 
-  if (::pw_thread_loop_start(impl_->loop) < 0) {
+  if (pw_thread_loop_start(impl_->loop) < 0) {
     Stop();
     const std::string msg = "Could not start the PipeWire thread loop.";
     impl_->SetError(msg);
@@ -468,11 +475,11 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
     return false;
   }
 
-  ::pw_thread_loop_lock(impl_->loop);
+  pw_thread_loop_lock(impl_->loop);
 
-  impl_->core = ::pw_context_connect(impl_->context, nullptr, 0);
+  impl_->core = pw_context_connect(impl_->context, nullptr, 0);
   if (!impl_->core) {
-    ::pw_thread_loop_unlock(impl_->loop);
+    pw_thread_loop_unlock(impl_->loop);
     Stop();
     const std::string msg = "Could not connect to the PipeWire server.";
     impl_->SetError(msg);
@@ -481,9 +488,9 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
     return false;
   }
 
-  impl_->registry = ::pw_core_get_registry(impl_->core, PW_VERSION_REGISTRY, 0);
+  impl_->registry = pw_core_get_registry(impl_->core, PW_VERSION_REGISTRY, 0);
   if (impl_->registry) {
-    ::pw_registry_add_listener(impl_->registry, &impl_->registry_listener,
+    pw_registry_add_listener(impl_->registry, &impl_->registry_listener,
                                &RegistryEvents(), impl_.get());
   }
 
@@ -491,7 +498,7 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
       NodeLatencyProperty(cfg.frame_samples, cfg.sample_rate);
   const std::string rate = NodeRateProperty(cfg.sample_rate);
 
-  struct pw_properties *props = ::pw_properties_new(
+  struct pw_properties *props = pw_properties_new(
       PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY,
       MediaCategoryFor(cfg.role), PW_KEY_MEDIA_ROLE, "Production",
       PW_KEY_MEDIA_CLASS, MediaClassFor(cfg.role), PW_KEY_NODE_NAME,
@@ -500,18 +507,18 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
       PW_KEY_APP_NAME, "StudioCast", nullptr);
 
   if (IsVirtualDevice(cfg.role)) {
-    ::pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
+    pw_properties_set(props, PW_KEY_NODE_VIRTUAL, "true");
   } else if (!cfg.target_object.empty()) {
 #ifdef PW_KEY_TARGET_OBJECT
-    ::pw_properties_set(props, PW_KEY_TARGET_OBJECT, cfg.target_object.c_str());
+    pw_properties_set(props, PW_KEY_TARGET_OBJECT, cfg.target_object.c_str());
 #else
-    ::pw_properties_set(props, PW_KEY_NODE_TARGET, cfg.target_object.c_str());
+    pw_properties_set(props, PW_KEY_NODE_TARGET, cfg.target_object.c_str());
 #endif
   }
 
-  impl_->stream = ::pw_stream_new(impl_->core, name.c_str(), props);
+  impl_->stream = pw_stream_new(impl_->core, name.c_str(), props);
   if (!impl_->stream) {
-    ::pw_thread_loop_unlock(impl_->loop);
+    pw_thread_loop_unlock(impl_->loop);
     Stop();
     const std::string msg = "Could not create the PipeWire stream.";
     impl_->SetError(msg);
@@ -520,7 +527,7 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
     return false;
   }
 
-  ::pw_stream_add_listener(impl_->stream, &impl_->stream_listener,
+  pw_stream_add_listener(impl_->stream, &impl_->stream_listener,
                            &StreamEvents(), impl_.get());
 
   std::uint8_t pod_buffer[1024];
@@ -539,7 +546,7 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
 
   const struct spa_pod *params[1];
   params[0] =
-      ::spa_format_audio_raw_build(&builder, SPA_PARAM_EnumFormat, &info);
+      spa_format_audio_raw_build(&builder, SPA_PARAM_EnumFormat, &info);
 
   // A virtual device waits for other applications to connect to it, so it must
   // not connect itself.
@@ -553,14 +560,14 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
   const enum spa_direction direction =
       ProducesSamples(cfg.role) ? SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT;
 
-  const int rc = ::pw_stream_connect(impl_->stream, direction, PW_ID_ANY, flags,
+  const int rc = pw_stream_connect(impl_->stream, direction, PW_ID_ANY, flags,
                                      params, 1);
-  ::pw_thread_loop_unlock(impl_->loop);
+  pw_thread_loop_unlock(impl_->loop);
 
   if (rc < 0) {
     const std::string msg =
         std::string("Could not connect the PipeWire node: ") +
-        ::spa_strerror(rc);
+        spa_strerror(rc);
     Stop();
     impl_->SetError(msg);
     if (error)
@@ -575,26 +582,26 @@ void PipeWireAudioNode::Stop() {
   RequestStop();
 
   if (impl_->loop)
-    ::pw_thread_loop_stop(impl_->loop);
+    pw_thread_loop_stop(impl_->loop);
 
   if (impl_->stream) {
-    ::pw_stream_destroy(impl_->stream);
+    pw_stream_destroy(impl_->stream);
     impl_->stream = nullptr;
   }
   if (impl_->registry) {
-    ::pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(impl_->registry));
+    pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(impl_->registry));
     impl_->registry = nullptr;
   }
   if (impl_->core) {
-    ::pw_core_disconnect(impl_->core);
+    pw_core_disconnect(impl_->core);
     impl_->core = nullptr;
   }
   if (impl_->context) {
-    ::pw_context_destroy(impl_->context);
+    pw_context_destroy(impl_->context);
     impl_->context = nullptr;
   }
   if (impl_->loop) {
-    ::pw_thread_loop_destroy(impl_->loop);
+    pw_thread_loop_destroy(impl_->loop);
     impl_->loop = nullptr;
   }
 

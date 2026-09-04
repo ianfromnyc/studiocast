@@ -28,6 +28,13 @@ Install the development package first:
 - Fedora: `pipewire-devel`
 - Ubuntu/Debian: `libpipewire-0.3-dev`
 
+The lowest supported library is libpipewire 1.0, the version on Ubuntu 24.04
+and Linux Mint 22. Fedora 44 has 1.6. The two releases differ in one way that
+matters to the source: 1.0 gives some graph calls, such as
+`pw_registry_add_listener` and `spa_strerror`, as macros, and 1.6 gives them as
+inline functions. So every `pw_` and `spa_` name in the backend sources stays
+unqualified. A `::` in front of a macro name does not compile.
+
 ## The three paths
 
 | Path | Default backend | Native PipeWire backend |
