@@ -194,6 +194,11 @@ the app you want to use.
   the settings page.
 - Audio apps: when StudioCast virtual audio devices are enabled, select
   `StudioCast Microphone` and/or `StudioCast Speakers` in the target app.
+- Microphone monitor: turn on **Monitor processed microphone** on the Microphone
+  page to hear the processed feed on a chosen output while you adjust the
+  effects. Use headphones, because speakers can feed the sound back into the
+  microphone. The command line equivalent is
+  `studiocastctl audio monitor on --sink <name>`.
 - GUI preview: enabling preview can act as a consumer of the virtual camera.
   Leave it off when you only want external apps to consume the output.
 

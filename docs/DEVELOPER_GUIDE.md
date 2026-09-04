@@ -475,6 +475,8 @@ Use `studiocastctl` when possible instead of manually writing socket messages:
 ./build/studiocastctl effects set --file effects.json
 ./build/studiocastctl audio get
 ./build/studiocastctl audio set --file audio.json
+./build/studiocastctl audio monitor on --sink alsa_output.usb_headset
+./build/studiocastctl audio monitor status
 ```
 
 ## Audio pipeline overview
@@ -485,6 +487,8 @@ Important pieces:
 
 - `virtual_mic.*`: StudioCast virtual microphone management.
 - `virtual_speaker.*`: StudioCast virtual speaker management.
+- `mic_monitor.*`: microphone monitor loopback (`studiocast_mic` to a chosen
+  output sink) with its own safety and stale-module rules.
 - `virtual_audio_service.*`: high-level virtual audio service coordination.
 - `audio_pipeline.*`: real-time processing path when libpulse-simple is
   available.
@@ -502,6 +506,31 @@ possible; otherwise status should report an actionable error.
 
 Canonical audio effects are persisted under `audio.effects.json` in the daemon
 config.
+
+### Microphone monitor
+
+The monitor plays the processed microphone feed on an output sink so the user
+can hear the effects while adjusting them. It is a Pulse `module-loopback` from
+`studiocast_mic` into the chosen sink. Both loopback streams carry
+`media.name=StudioCast_Microphone_Monitor`. The name has no spaces because the
+Pulse module argument parser keeps only the text before the first space of a
+property value. StudioCast finds and unloads its own monitor loopback by that
+tag, so a daemon restart never leaves a second monitor behind.
+
+Config lives in the audio config JSON under an additive `monitor` object
+(`enabled`, `sink`, `latency_ms`, `volume`) and in the daemon config under
+`audio.monitor.*`. The audio config JSON carries no schema version of its own,
+so additive fields need no version bump.
+
+Safety reuses the speaker target rules and adds one more: the monitor refuses a
+sink whose monitor source is the selected microphone input, because that is a
+feedback loop.
+
+The monitor is a consumer of `studiocast_mic`, so it starts the microphone
+pipeline on its own. Status reports `mic_app_consumer_count` and
+`mic_monitor_consumer_count` next to `mic_consumer_count` so readiness text can
+still speak about apps, and the microphone readiness detail says when only the
+monitor is listening.
 
 ## Video, effects, and model backends
 

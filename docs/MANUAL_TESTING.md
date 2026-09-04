@@ -404,6 +404,59 @@ Expected:
   pipeline.
 - The error tells the tester to choose a physical microphone/input source.
 
+### Microphone Monitor
+
+- [ ] On the Microphone page, pick a physical input, keep processing on, plug in
+  headphones, then turn on **Monitor processed microphone** and choose the
+  headphone output.
+
+Expected:
+
+- You hear your own processed voice on the selected output.
+- `build/studiocastctl audio monitor status` reports `on (playing)`, the
+  requested sink, and the resolved sink.
+- `pactl list short modules` shows one `module-loopback` from `studiocast_mic`
+  carrying `StudioCast_Microphone_Monitor`.
+- `build/studiocastctl status` reports `audio.mic_monitor_consumer_count=1` and
+  `audio.mic_app_consumer_count=0` while no app uses StudioCast Microphone.
+
+- [ ] Change the monitor output to another sink, then change the delay.
+
+Expected:
+
+- The old loopback is unloaded before the new one is loaded; only one monitor
+  loopback exists at a time.
+- `audio.monitor.sink_resolved` follows the new sink.
+
+- [ ] Try to select a StudioCast sink for the monitor through the CLI:
+
+```bash
+build/studiocastctl audio monitor on --sink studiocast_sink
+```
+
+Expected:
+
+- The daemon refuses the change and says the sink would feed StudioCast audio
+  back into itself.
+- The GUI output list never offers StudioCast virtual sinks.
+
+- [ ] With the monitor playing, unplug the headphones, then plug them back in.
+
+Expected:
+
+- Status reports the monitor stopped and that StudioCast is starting it again.
+- The monitor comes back on its own, or reports an actionable error when no safe
+  output exists.
+
+- [ ] Turn microphone processing off while the monitor is on, then stop the
+  daemon.
+
+Expected:
+
+- Status says the monitor stays idle until microphone processing is on.
+- No `module-loopback` from `studiocast_mic` is left loaded after the daemon
+  stops.
+
 - [ ] Open the Speakers page and inspect the output selector.
 
 Expected:
