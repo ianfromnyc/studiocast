@@ -856,8 +856,15 @@ if (BUILD_TESTING)
         set_tests_properties(studiocast-onnxruntime-lib-tests PROPERTIES
                 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         )
+
+        add_test(NAME studiocast-uninstall-pkgconfig-tests
+                COMMAND "${STUDIOCAST_BASH_PROGRAM}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/uninstall_pkgconfig_tests.sh")
+        set_tests_properties(studiocast-uninstall-pkgconfig-tests PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
     else()
-        message(STATUS "Skipping studiocast-onnxruntime-lib-tests because bash was not found.")
+        message(STATUS "Skipping the shell script tests because bash was not found.")
     endif()
 
     add_executable(studiocast-maxine-paths-tests

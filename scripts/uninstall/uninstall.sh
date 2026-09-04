@@ -174,6 +174,46 @@ greedy_remove_user_data() {
   rm_path "$STUDIOCAST_STATE_DIR"
 }
 
+# Directories that can hold the onnxruntime.pc link the setup helper made.
+#
+# scripts/_lib/onnxruntime.sh links the file into the first directory that
+# pkg-config searches, so ask pkg-config for that list. Without pkg-config,
+# fall back to the two directories that list almost always starts with.
+onnxruntime_pc_link_dirs() {
+  local pc_path=""
+
+  if have_cmd pkg-config; then
+    pc_path="$(pkg-config --variable pc_path pkg-config 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$pc_path" ]]; then
+    printf '%s\n' "$pc_path" | tr ':' '\n' | grep -v '^$' || true
+    return 0
+  fi
+
+  printf '%s\n' /usr/lib64/pkgconfig /usr/lib/pkgconfig
+}
+
+# Remove the onnxruntime.pc links that point at our bootstrap file.
+#
+# Arguments: <bootstrap .pc file> <directory>...
+#
+# Only a symlink whose target is that file is removed, so a file owned by a
+# distribution package is never touched.
+remove_onnxruntime_pc_links() {
+  local pc_file="$1"
+  shift
+
+  local dir pc_link
+  for dir in "$@"; do
+    pc_link="${dir}/onnxruntime.pc"
+    if [[ -L "$pc_link" && "$(readlink -- "$pc_link")" == "$pc_file" ]]; then
+      log "Removing: $pc_link"
+      run sudo rm -f -- "$pc_link"
+    fi
+  done
+}
+
 greedy_remove_system_onnxruntime_bootstrap() {
   # Installed by scripts/setup.sh --deps (scripts/setup/ubuntu.sh and
   # scripts/setup/fedora.sh). The cuDNN tree and the CUDA ld.so.conf.d file come
@@ -211,15 +251,9 @@ greedy_remove_system_onnxruntime_bootstrap() {
     run sudo ldconfig || true
   fi
 
-  # Distributions that do not search /usr/local/lib/pkgconfig get a link in a
-  # directory they do search. Remove it only when it points at our file.
-  local pc_link
-  for pc_link in /usr/lib64/pkgconfig/onnxruntime.pc /usr/lib/pkgconfig/onnxruntime.pc; do
-    if [[ -L "$pc_link" && "$(readlink -- "$pc_link")" == "$pc_file" ]]; then
-      log "Removing: $pc_link"
-      run sudo rm -f -- "$pc_link"
-    fi
-  done
+  local -a pc_dirs=()
+  mapfile -t pc_dirs < <(onnxruntime_pc_link_dirs)
+  remove_onnxruntime_pc_links "$pc_file" "${pc_dirs[@]}"
 
   if [[ -f "$pc_file" ]]; then
     log "Removing: $pc_file"
@@ -318,4 +352,8 @@ main() {
   log "Done."
 }
 
-main
+# Run only when this file is the program. tests/uninstall_pkgconfig_tests.sh
+# sources it to call single functions.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main
+fi
