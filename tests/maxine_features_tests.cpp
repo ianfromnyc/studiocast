@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <vector>
 
+#include "core/maxine/availability.h"
 #include "core/maxine/maxine_manager.h"
 
 namespace {
@@ -180,6 +181,25 @@ bool TestNeighbourNamesDoNotCount() {
   return ok;
 }
 
+// StudioCast loads the Maxine libraries at run time (dlopen), so no build
+// leaves the backend out. The availability check must say so, and it must
+// give the reason that the run-time probe finds, not a build-time one.
+bool TestBackendIsAlwaysBuilt() {
+  bool ok = Require(studiocast::maxine::BackendBuilt(),
+                    "expected the Maxine backend to be built in");
+
+  std::string reason;
+  const bool available = studiocast::maxine::RuntimeAvailable(&reason);
+  ok &= Require(reason.find("not enabled in this build") == std::string::npos,
+                "expected a run-time reason, got: " + reason);
+  if (available) {
+    ok &= Require(reason.empty(),
+                  "expected no reason when Maxine is available, got: " +
+                      reason);
+  }
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -187,6 +207,7 @@ int main() {
   ok = TestSdkOneXFeatureNamesResolve() && ok;
   ok = TestBareFeaturesDirResolvesNothing() && ok;
   ok = TestNeighbourNamesDoNotCount() && ok;
+  ok = TestBackendIsAlwaysBuilt() && ok;
 
   if (!ok)
     return 1;
