@@ -176,9 +176,10 @@ bool Rgb24ToYuyvLibyuv(const std::uint8_t *src, int width, int height,
   if (!src || !dst || width <= 0 || height <= 0)
     return false;
 
-  // An odd width still writes the whole final YUYV pair, so a row shorter than
-  // ceil(width / 2) * 4 bytes cannot hold the result. Decline it and let the
-  // caller fall back rather than write past the row.
+  // Every backend writes ceil(width / 2) * 4 bytes into a row, because an odd
+  // width still fills the final YUYV pair. That row size is a shared input
+  // precondition, so a shorter dst_stride is a caller error: the scalar path
+  // would write past the row too. The false below only guards this backend.
   const std::size_t row_bytes =
       ((static_cast<std::size_t>(width) + 1u) / 2u) * 4u;
   if (dst_stride < row_bytes)
