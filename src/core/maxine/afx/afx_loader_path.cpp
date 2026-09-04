@@ -16,6 +16,10 @@ namespace {
 // Set in the process that a re-exec starts, so it happens one time only.
 constexpr const char *kReexecGuard = "STUDIOCAST_AFX_LOADER_PATH_REEXEC";
 
+// The link to the running program. It always works, but a program started
+// through it takes `exe` as its process name.
+constexpr const char *kSelfExeLink = "/proc/self/exe";
+
 std::vector<std::string> SplitPathList(const std::string &value) {
   std::vector<std::string> out;
   std::string token;
@@ -94,7 +98,22 @@ LdLibraryPathWithDirs(const std::string &current,
   return out;
 }
 
-fs::path ExecPathForRestart(const fs::path &) { return {}; }
+fs::path ExecPathForRestart(const fs::path &self_exe_target) {
+  const std::string target = self_exe_target.string();
+  if (target.empty() || target.front() != '/')
+    return fs::path(kSelfExeLink);
+
+  // The kernel adds this when the program file is no longer there. The link
+  // still opens the running program, so keep it in that case.
+  const std::string kDeleted = " (deleted)";
+  if (target.size() > kDeleted.size() &&
+      target.compare(target.size() - kDeleted.size(), kDeleted.size(),
+                     kDeleted) == 0) {
+    return fs::path(kSelfExeLink);
+  }
+
+  return self_exe_target;
+}
 
 void EnsureAfxFeatureLibsOnLoaderPath(char **argv, std::string *note) {
   if (note)
@@ -132,7 +151,12 @@ void EnsureAfxFeatureLibsOnLoaderPath(char **argv, std::string *note) {
   }
 
   // glibc reads LD_LIBRARY_PATH at start, so start again with the new value.
-  ::execv("/proc/self/exe", argv);
+  // Start the real program file, not the `/proc/self/exe` link, so that the
+  // process keeps its name for `pgrep`, `pkill` and the process views.
+  std::error_code ec;
+  const fs::path self = fs::read_symlink(kSelfExeLink, ec);
+  const fs::path program = ExecPathForRestart(ec ? fs::path() : self);
+  ::execv(program.c_str(), argv);
 
   if (note) {
     *note = std::string("Failed to restart with the AFX feature libraries on "
