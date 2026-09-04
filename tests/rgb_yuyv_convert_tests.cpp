@@ -539,6 +539,85 @@ bool TestRgb24ToYuyvBackendsMatchScalarReference() {
   return true;
 }
 
+// A YUYV row holds ceil(width / 2) * 4 bytes, because an odd width still
+// writes the whole final pair. The test pins both halves of that contract for
+// the libyuv backend: it refuses a row that is too short for the final pair,
+// and with a legal row it gives the same odd-width tail as the scalar path.
+bool TestRgb24ToYuyvLibyuvKeepsTheOddWidthRowContract() {
+  constexpr std::array<int, 4> widths{1, 7, 15, 17};
+  constexpr int height = 3;
+
+  for (const int width : widths) {
+    const std::size_t src_stride = static_cast<std::size_t>(width) * 3u + 5u;
+    const std::size_t dst_stride = ActiveYuyvBytes(width);
+    std::vector<std::uint8_t> src(src_stride *
+                                  static_cast<std::size_t>(height));
+    FillDeterministicRgb(&src, width, height, src_stride,
+                         static_cast<std::uint32_t>(width * 53 + 7));
+
+    const std::size_t scratch_size =
+        video::internal::Rgb24ToYuyvLibyuvScratchBytes(width, height);
+    std::vector<std::uint8_t> scratch(scratch_size);
+
+    // width * 2 bytes stops one pair short for an odd width, so the backend
+    // must decline instead of writing past the row.
+    std::vector<std::uint8_t> guarded(
+        dst_stride * static_cast<std::size_t>(height), 0xcd);
+    if (video::internal::Rgb24ToYuyvLibyuv(
+            src.data(), width, height, src_stride, guarded.data(),
+            static_cast<std::size_t>(width) * 2u, scratch.data(),
+            scratch.size())) {
+      std::cerr << "libyuv accepted a " << (width * 2)
+                << " byte row for width " << width << "\n";
+      return false;
+    }
+
+    if (!video::internal::Rgb24ToYuyvBackendAvailable(
+            video::internal::Rgb24ToYuyvBackend::libyuv)) {
+      continue;
+    }
+
+    std::vector<std::uint8_t> expected(
+        dst_stride * static_cast<std::size_t>(height), 0xcd);
+    video::internal::Rgb24ToYuyvScalar(src.data(), width, height, src_stride,
+                                       expected.data(), dst_stride);
+
+    std::vector<std::uint8_t> actual(
+        dst_stride * static_cast<std::size_t>(height), 0xcd);
+    if (!video::internal::Rgb24ToYuyvLibyuv(src.data(), width, height,
+                                            src_stride, actual.data(),
+                                            dst_stride, scratch.data(),
+                                            scratch.size())) {
+      std::cerr << "libyuv refused a tight " << dst_stride
+                << " byte row for width " << width << "\n";
+      return false;
+    }
+
+    const std::string label =
+        "libyuv tight row " + std::to_string(width) + "x" +
+        std::to_string(height);
+    if (!CompareYuyvToReference(actual, expected, width, height, dst_stride, 1,
+                                label)) {
+      return false;
+    }
+
+    // The final pair repeats the last luma, so the two luma slots match.
+    const std::size_t tail = static_cast<std::size_t>(width - 1) * 2u;
+    for (int y = 0; y < height; ++y) {
+      const std::uint8_t *row =
+          actual.data() + static_cast<std::size_t>(y) * dst_stride;
+      if (row[tail] != row[tail + 2u]) {
+        std::cerr << label << " odd tail luma mismatch at row " << y << ": "
+                  << static_cast<int>(row[tail]) << "/"
+                  << static_cast<int>(row[tail + 2u]) << "\n";
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 bool TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants() {
   constexpr int width = 31;
   constexpr int height = 9;

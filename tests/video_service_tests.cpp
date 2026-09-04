@@ -44,6 +44,7 @@ bool TestYuyvToRgb24MatchesBt601AndPreservesPadding();
 bool TestYuyvToRgb24BackendsMatchScalarReference();
 bool TestRgb24ToYuyvMatchesBt601WithinChromaRounding();
 bool TestRgb24ToYuyvBackendsMatchScalarReference();
+bool TestRgb24ToYuyvLibyuvKeepsTheOddWidthRowContract();
 bool TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants();
 bool TestRgb24Bgr24BackendsMatchScalarAndPreservePadding();
 bool TestRgb24Bgr24PublicPathMatchesScalarInPlace();
@@ -1092,6 +1093,8 @@ int main() {
        &studiocast::tests::TestRgb24ToYuyvMatchesBt601WithinChromaRounding},
       {"RGB24 to YUYV backends match scalar reference",
        &studiocast::tests::TestRgb24ToYuyvBackendsMatchScalarReference},
+      {"RGB24 to YUYV libyuv keeps the odd width row contract",
+       &studiocast::tests::TestRgb24ToYuyvLibyuvKeepsTheOddWidthRowContract},
       {"RGB24 to YUYV public path matches scalar with scratch variants",
        &studiocast::tests::
            TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants},

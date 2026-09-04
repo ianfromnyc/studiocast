@@ -15,8 +15,10 @@ void YuyvToRgb24(const std::uint8_t *src, int width, int height,
                  std::size_t dst_stride);
 
 // Convert RGB24 to YUYV.
-// - src_stride: bytes per line in the RGB buffer
-// - dst_stride: bytes per line in the YUYV buffer
+// - src_stride: bytes per line in the RGB buffer (at least width*3)
+// - dst_stride: bytes per line in the YUYV buffer (at least ceil(width/2)*4).
+//   An odd width still writes the whole final YUYV pair, and repeats the last
+//   luma in its second slot, so a row of only width*2 bytes is too short.
 void Rgb24ToYuyv(const std::uint8_t *src, int width, int height,
                  std::size_t src_stride, std::uint8_t *dst,
                  std::size_t dst_stride);
@@ -27,7 +29,7 @@ std::size_t Rgb24ToYuyvScratchBytes(int width, int height);
 
 // Convert RGB24 to YUYV using caller-owned scratch memory when an optimized
 // backend is available. Falls back to the built-in scalar converter if scratch
-// is absent or insufficient.
+// is absent or insufficient. The stride rules of Rgb24ToYuyv apply here too.
 void Rgb24ToYuyvWithScratch(const std::uint8_t *src, int width, int height,
                             std::size_t src_stride, std::uint8_t *dst,
                             std::size_t dst_stride, std::uint8_t *scratch,
