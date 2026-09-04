@@ -1820,6 +1820,37 @@ AudioConfigToJson(const studiocast::audio::VirtualAudioServiceConfig &cfg) {
   return oss.str();
 }
 
+// Reads one JSON number that must be a whole number in `min`..`max`.
+//
+// JSON has one number type, so 12.5 is a valid number for a field that counts
+// milliseconds. Rounding it would accept a value the caller never asked for,
+// so refuse it and name the field.
+bool ParseIntegerMember(const studiocast::util::json::Value &value,
+                        const char *name, int min, int max, int *out,
+                        std::string *error) {
+  const double *n = value.AsNumber();
+  if (!n) {
+    if (error)
+      *error = std::string(name) + " must be a number";
+    return false;
+  }
+  const int v = static_cast<int>(std::lround(*n));
+  if (std::fabs(*n - static_cast<double>(v)) > 1e-6) {
+    if (error)
+      *error = std::string(name) + " must be an integer";
+    return false;
+  }
+  if (v < min || v > max) {
+    if (error) {
+      *error = std::string(name) + " out of range (expected " +
+               std::to_string(min) + ".." + std::to_string(max) + ")";
+    }
+    return false;
+  }
+  *out = v;
+  return true;
+}
+
 bool ApplyAudioConfigPatchJsonText(
     const std::string &jsonText,
     studiocast::audio::VirtualAudioServiceConfig *cfg,
@@ -1897,21 +1928,9 @@ bool ApplyAudioConfigPatchJsonText(
 
   // speaker_latency_ms
   if (auto it = obj->find("speaker_latency_ms"); it != obj->end()) {
-    const double *n = it->second.AsNumber();
-    if (!n) {
-      if (error)
-        *error = "speaker_latency_ms must be a number";
-      return false;
-    }
-    const int v = static_cast<int>(std::lround(*n));
-    if (std::fabs(*n - static_cast<double>(v)) > 1e-6) {
-      if (error)
-        *error = "speaker_latency_ms must be an integer";
-      return false;
-    }
-    if (v < 1 || v > 5000) {
-      if (error)
-        *error = "speaker_latency_ms out of range (expected 1..5000)";
+    int v = 0;
+    if (!ParseIntegerMember(it->second, "speaker_latency_ms", 1, 5000, &v,
+                            error)) {
       return false;
     }
     cfg->speaker_latency_ms = v;
@@ -1963,38 +1982,19 @@ bool ApplyAudioConfigPatchJsonText(
     }
 
     if (auto m = monitor->find("latency_ms"); m != monitor->end()) {
-      const double *n = m->second.AsNumber();
-      if (!n) {
-        if (error)
-          *error = "monitor.latency_ms must be a number";
-        return false;
-      }
-      const int v = static_cast<int>(std::lround(*n));
-      if (v < studiocast::audio::kMicMonitorMinLatencyMs ||
-          v > studiocast::audio::kMicMonitorMaxLatencyMs) {
-        if (error) {
-          *error = "monitor.latency_ms out of range (expected " +
-                   std::to_string(studiocast::audio::kMicMonitorMinLatencyMs) +
-                   ".." +
-                   std::to_string(studiocast::audio::kMicMonitorMaxLatencyMs) +
-                   ")";
-        }
+      int v = 0;
+      if (!ParseIntegerMember(m->second, "monitor.latency_ms",
+                              studiocast::audio::kMicMonitorMinLatencyMs,
+                              studiocast::audio::kMicMonitorMaxLatencyMs, &v,
+                              error)) {
         return false;
       }
       cfg->monitor.latency_ms = v;
     }
 
     if (auto m = monitor->find("volume"); m != monitor->end()) {
-      const double *n = m->second.AsNumber();
-      if (!n) {
-        if (error)
-          *error = "monitor.volume must be a number";
-        return false;
-      }
-      const int v = static_cast<int>(std::lround(*n));
-      if (v < 0 || v > 100) {
-        if (error)
-          *error = "monitor.volume out of range (expected 0..100)";
+      int v = 0;
+      if (!ParseIntegerMember(m->second, "monitor.volume", 0, 100, &v, error)) {
         return false;
       }
       cfg->monitor.volume = v;

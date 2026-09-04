@@ -512,6 +512,52 @@ bool TestAudioConfigJsonRoundTripsMonitor() {
                 "monitor volume should round trip");
 }
 
+// JSON has one number type, so a fractional value reaches the parser. The
+// monitor fields count whole milliseconds and whole percent, so they must
+// refuse it the way speaker_latency_ms does, instead of rounding it.
+bool TestAudioConfigPatchRejectsFractionalMonitorNumbers() {
+  struct Case {
+    const char *json;
+    const char *field;
+  };
+  const Case cases[] = {
+      {"{\"monitor\":{\"latency_ms\":35.5}}", "monitor.latency_ms"},
+      {"{\"monitor\":{\"volume\":60.5}}", "monitor.volume"},
+      {"{\"speaker_latency_ms\":40.5}", "speaker_latency_ms"},
+  };
+
+  bool ok = true;
+  for (const Case &tc : cases) {
+    studiocast::audio::VirtualAudioServiceConfig cfg;
+    std::vector<std::string> warnings;
+    std::string error;
+    const bool applied =
+        ApplyAudioConfigPatchJsonText(tc.json, &cfg, &warnings, &error);
+    const std::string refused =
+        std::string(tc.field) + " should refuse a fractional number";
+    ok = Expect(!applied, refused.c_str()) && ok;
+
+    const std::string wanted = std::string(tc.field) +
+                               " should say it wants an integer, got: " + error;
+    ok = Expect(error == std::string(tc.field) + " must be an integer",
+                wanted.c_str()) &&
+         ok;
+  }
+
+  // A whole number written with a decimal point is still whole.
+  studiocast::audio::VirtualAudioServiceConfig cfg;
+  std::vector<std::string> warnings;
+  std::string error;
+  const bool applied = ApplyAudioConfigPatchJsonText(
+      "{\"monitor\":{\"volume\":60.0}}", &cfg, &warnings, &error);
+  const std::string whole = "a whole number should still apply: " + error;
+  ok = Expect(applied, whole.c_str()) && ok;
+  ok =
+      Expect(cfg.monitor.volume == 60, "the whole number should be kept") && ok;
+
+  return ok;
+}
+
 bool TestAudioConfigPatchRejectsUnsafeMonitorSink() {
   studiocast::audio::VirtualAudioServiceConfig cfg;
   std::vector<std::string> warnings;
@@ -631,6 +677,7 @@ int main() {
   ok = TestAudioStatusReportsResolvedSourceAndWarnings() && ok;
   ok = TestAudioStatusPropagatesSourceErrorFromService() && ok;
   ok = TestAudioConfigJsonRoundTripsMonitor() && ok;
+  ok = TestAudioConfigPatchRejectsFractionalMonitorNumbers() && ok;
   ok = TestAudioConfigPatchRejectsUnsafeMonitorSink() && ok;
   ok = TestAudioStatusReportsMonitor() && ok;
   ok = TestMicrophoneReadinessNamesMonitorOnlyListener() && ok;
