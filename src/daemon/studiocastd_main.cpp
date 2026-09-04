@@ -1834,20 +1834,27 @@ bool ParseIntegerMember(const studiocast::util::json::Value &value,
       *error = std::string(name) + " must be a number";
     return false;
   }
-  const int v = static_cast<int>(std::lround(*n));
-  if (std::fabs(*n - static_cast<double>(v)) > 1e-6) {
+  // Judge the double before it becomes an int. A NaN, an infinity, or a value
+  // outside the int range makes that conversion undefined, so every check
+  // below stays in double arithmetic.
+  if (!std::isfinite(*n)) {
+    if (error)
+      *error = std::string(name) + " must be a finite number";
+    return false;
+  }
+  if (std::floor(*n) != *n) {
     if (error)
       *error = std::string(name) + " must be an integer";
     return false;
   }
-  if (v < min || v > max) {
+  if (*n < static_cast<double>(min) || *n > static_cast<double>(max)) {
     if (error) {
       *error = std::string(name) + " out of range (expected " +
                std::to_string(min) + ".." + std::to_string(max) + ")";
     }
     return false;
   }
-  *out = v;
+  *out = static_cast<int>(*n);
   return true;
 }
 

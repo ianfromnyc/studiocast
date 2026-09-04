@@ -512,6 +512,46 @@ bool TestAudioConfigJsonRoundTripsMonitor() {
                 "monitor volume should round trip");
 }
 
+// A JSON number can also be far outside the int range, or an infinity when the
+// exponent overflows a double. Converting either one to an int is undefined,
+// so the parser must judge the double first and say what is wrong with it.
+// The grammar has no NaN literal, so no case below can produce one.
+bool TestAudioConfigPatchRejectsExtremeMonitorNumbers() {
+  struct Case {
+    const char *json;
+    const char *want_error;
+  };
+  const Case cases[] = {
+      {"{\"monitor\":{\"latency_ms\":1e300}}",
+       "monitor.latency_ms out of range (expected 1..500)"},
+      {"{\"monitor\":{\"latency_ms\":-1e300}}",
+       "monitor.latency_ms out of range (expected 1..500)"},
+      {"{\"monitor\":{\"volume\":1e400}}",
+       "monitor.volume must be a finite number"},
+      {"{\"monitor\":{\"volume\":-1e400}}",
+       "monitor.volume must be a finite number"},
+      {"{\"speaker_latency_ms\":1e300}",
+       "speaker_latency_ms out of range (expected 1..5000)"},
+  };
+
+  bool ok = true;
+  for (const Case &tc : cases) {
+    studiocast::audio::VirtualAudioServiceConfig cfg;
+    std::vector<std::string> warnings;
+    std::string error;
+    const bool applied =
+        ApplyAudioConfigPatchJsonText(tc.json, &cfg, &warnings, &error);
+    const std::string refused = std::string(tc.json) + " should be refused";
+    ok = Expect(!applied, refused.c_str()) && ok;
+
+    const std::string wanted = std::string(tc.json) + " should say \"" +
+                               tc.want_error + "\", got: " + error;
+    ok = Expect(error == tc.want_error, wanted.c_str()) && ok;
+  }
+
+  return ok;
+}
+
 // JSON has one number type, so a fractional value reaches the parser. The
 // monitor fields count whole milliseconds and whole percent, so they must
 // refuse it the way speaker_latency_ms does, instead of rounding it.
@@ -678,6 +718,7 @@ int main() {
   ok = TestAudioStatusPropagatesSourceErrorFromService() && ok;
   ok = TestAudioConfigJsonRoundTripsMonitor() && ok;
   ok = TestAudioConfigPatchRejectsFractionalMonitorNumbers() && ok;
+  ok = TestAudioConfigPatchRejectsExtremeMonitorNumbers() && ok;
   ok = TestAudioConfigPatchRejectsUnsafeMonitorSink() && ok;
   ok = TestAudioStatusReportsMonitor() && ok;
   ok = TestMicrophoneReadinessNamesMonitorOnlyListener() && ok;
