@@ -770,49 +770,95 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
   writer_device_ = outDev;
   output_ = writer_.Actual();
   output_device_ = outDev;
-  SyncPipeWireOutput();
   return true;
 }
 
-void CameraPipeline::SyncPipeWireOutput() {
-  if (!pw_output_wanted_) {
-    pw_node_.reset();
-    pw_node_error_.clear();
-    return;
+namespace internal {
+
+PipeWireNodePlan PlanPipeWireNode(bool wanted, const ActualFormat &output,
+                                  const PipeWireNodeState &current) {
+  PipeWireNodePlan plan;
+
+  if (!wanted) {
+    plan.action = PipeWireNodePlan::Action::stop;
+    return plan;
   }
 
-  const ActualFormat a = writer_.Actual();
-  if (a.width <= 0 || a.height <= 0)
-    return;
+  if (output.width <= 0 || output.height <= 0)
+    return plan;
 
-  const int fps = a.fps > 0 ? a.fps : 30;
-  if (pw_node_ && pw_node_->IsRunning() && pw_node_width_ == a.width &&
-      pw_node_height_ == a.height && pw_node_fps_ == fps &&
-      pw_node_format_ == a.format) {
-    return;
+  // A loopback that reports no rate still needs a rate on the node, and 30 is
+  // the rate the rest of the pipeline defaults to.
+  const int fps = output.fps > 0 ? output.fps : 30;
+
+  if (current.running && current.width == output.width &&
+      current.height == output.height && current.fps == fps &&
+      current.format == output.format) {
+    return plan;
   }
 
-  studiocast::video::pw_backend::CameraNodeConfig node;
-  node.width = a.width;
-  node.height = a.height;
-  node.fps = fps;
-  node.format = a.format;
+  plan.action = PipeWireNodePlan::Action::restart;
+  plan.node.width = output.width;
+  plan.node.height = output.height;
+  plan.node.fps = fps;
+  plan.node.format = output.format;
+  return plan;
+}
 
-  auto fresh =
-      std::make_unique<studiocast::video::pw_backend::PipeWireCameraNode>();
+} // namespace internal
+
+internal::PipeWireNodePlan CameraPipeline::PlanPipeWireOutputLocked() const {
+  internal::PipeWireNodeState current;
+  current.running = pw_node_ && pw_node_->IsRunning();
+  current.width = pw_node_width_;
+  current.height = pw_node_height_;
+  current.fps = pw_node_fps_;
+  current.format = pw_node_format_;
+  return internal::PlanPipeWireNode(pw_output_wanted_, writer_.Actual(),
+                                    current);
+}
+
+void CameraPipeline::ApplyPipeWireOutputPlan(
+    const internal::PipeWireNodePlan &plan) {
+  using Action = internal::PipeWireNodePlan::Action;
+  if (plan.action == Action::keep)
+    return;
+
+  // Start the replacement first and outside the mutex. The node that runs now
+  // keeps the frames flowing while the server answers, as it did when this
+  // work still happened under the lock.
+  std::unique_ptr<studiocast::video::pw_backend::PipeWireCameraNode> fresh;
   std::string err;
-  if (!fresh->Start(node, &err)) {
-    pw_node_error_ = err;
-    pw_node_.reset();
-    return;
+  bool started = false;
+  if (plan.action == Action::restart) {
+    fresh =
+        std::make_unique<studiocast::video::pw_backend::PipeWireCameraNode>();
+    started = fresh->Start(plan.node, &err);
+    if (!started)
+      fresh.reset();
   }
 
-  pw_node_ = std::move(fresh);
-  pw_node_error_.clear();
-  pw_node_width_ = a.width;
-  pw_node_height_ = a.height;
-  pw_node_fps_ = fps;
-  pw_node_format_ = a.format;
+  // Swap under a short lock. The old node goes out of the member first and is
+  // destroyed after the lock, because taking a node down talks to the server
+  // too.
+  std::unique_ptr<studiocast::video::pw_backend::PipeWireCameraNode> old;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    old = std::move(pw_node_);
+    if (plan.action == Action::stop) {
+      pw_node_error_.clear();
+    } else if (started) {
+      pw_node_ = std::move(fresh);
+      pw_node_error_.clear();
+      pw_node_width_ = plan.node.width;
+      pw_node_height_ = plan.node.height;
+      pw_node_fps_ = plan.node.fps;
+      pw_node_format_ = plan.node.format;
+    } else {
+      pw_node_error_ = err;
+    }
+  }
+  old.reset();
 }
 
 void CameraPipeline::PublishToPipeWire(const std::uint8_t *data,
@@ -959,6 +1005,15 @@ bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig &cfg,
     if (error)
       *error = oerr;
     return false;
+  }
+
+  // Starting or stopping the node talks to the PipeWire server, so decide
+  // under the mutex and do the work with the mutex released.
+  {
+    const auto plan = PlanPipeWireOutputLocked();
+    lock.unlock();
+    ApplyPipeWireOutputPlan(plan);
+    lock.lock();
   }
 
   last_error_.clear();
@@ -1119,6 +1174,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   auto capA = cap.Actual();
 
   // Open (or reuse) writer to v4l2loopback output.
+  internal::PipeWireNodePlan pw_plan;
   {
     std::lock_guard<std::mutex> lock(mu_);
     bool opened_or_renegotiated = false;
@@ -1146,7 +1202,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       cv_.notify_all();
       return;
     }
+    pw_plan = PlanPipeWireOutputLocked();
   }
+
+  // Outside the mutex: the node create, connect and start can block on the
+  // PipeWire server.
+  ApplyPipeWireOutputPlan(pw_plan);
 
   ActualFormat outA = writer_.Actual();
 

@@ -237,6 +237,44 @@ private:
   bool retry_ready_published_ = false;
 };
 
+namespace internal {
+
+// The state of the PipeWire camera node that runs now, as far as the plan
+// below needs it.
+struct PipeWireNodeState {
+  bool running = false;
+  int width = 0;
+  int height = 0;
+  int fps = 0;
+  PixelFormat format = PixelFormat::rgb24;
+};
+
+// What the camera node needs next.
+struct PipeWireNodePlan {
+  enum class Action {
+    // The node already matches the output, or there is no output format yet.
+    keep,
+    // No node is wanted; take down whatever runs.
+    stop,
+    // Start a node for `node`, in place of whatever runs.
+    restart,
+  };
+
+  Action action = Action::keep;
+  studiocast::video::pw_backend::CameraNodeConfig node;
+};
+
+// The rule the pipeline follows for its camera node. It reads state only, so
+// the pipeline can decide under its mutex and do the work without it.
+//
+// `wanted` is the configured output preference, `output` the format the
+// loopback negotiated, and `current` the node that runs now. An output with no
+// size yet gives `keep`, because there is nothing to offer a consumer.
+PipeWireNodePlan PlanPipeWireNode(bool wanted, const ActualFormat &output,
+                                  const PipeWireNodeState &current);
+
+} // namespace internal
+
 class CameraPipelineRunner {
 public:
   virtual ~CameraPipelineRunner() = default;
@@ -273,9 +311,15 @@ public:
                         std::string *error) override;
   void CloseOutput() override;
 
-  // Brings the native PipeWire camera node in line with the negotiated output
-  // format, and takes it down when the configuration turns it off.
-  void SyncPipeWireOutput();
+  // Decides what the native PipeWire camera node needs. The caller must hold
+  // `mu_`, because the answer comes from the negotiated output format and the
+  // node that runs now.
+  internal::PipeWireNodePlan PlanPipeWireOutputLocked() const;
+
+  // Carries out a plan. The caller must NOT hold `mu_`: starting and stopping
+  // a node talks to the PipeWire server, which can block. Only the swap of the
+  // node pointer and its state takes the mutex, and only for that swap.
+  void ApplyPipeWireOutputPlan(const internal::PipeWireNodePlan &plan);
 
   // Hands one processed frame to the native camera node. It never blocks and
   // never fails the pipeline.

@@ -939,6 +939,83 @@ bool TestVideoOutputRecoveryClearsUnavailableError() {
   return true;
 }
 
+// The pipeline decides what its PipeWire camera node needs while it holds its
+// mutex, then starts or stops the node without the mutex, because that work
+// talks to the server. This pins the decision half of that split.
+bool TestPipeWireCameraNodePlanFollowsTheNegotiatedOutput() {
+  using studiocast::video::ActualFormat;
+  using studiocast::video::PixelFormat;
+  using studiocast::video::internal::PipeWireNodePlan;
+  using studiocast::video::internal::PipeWireNodeState;
+  using studiocast::video::internal::PlanPipeWireNode;
+  using Action = PipeWireNodePlan::Action;
+
+  ActualFormat out;
+  out.width = 1280;
+  out.height = 720;
+  out.fps = 30;
+  out.format = PixelFormat::rgb24;
+
+  const PipeWireNodeState no_node;
+
+  if (PlanPipeWireNode(false, out, no_node).action != Action::stop) {
+    std::cerr << "an output nobody wants should stop the node\n";
+    return false;
+  }
+
+  ActualFormat unnegotiated;
+  if (PlanPipeWireNode(true, unnegotiated, no_node).action != Action::keep) {
+    std::cerr << "an output with no size yet has nothing to offer\n";
+    return false;
+  }
+
+  const auto first = PlanPipeWireNode(true, out, no_node);
+  if (first.action != Action::restart || first.node.width != 1280 ||
+      first.node.height != 720 || first.node.fps != 30 ||
+      first.node.format != PixelFormat::rgb24) {
+    std::cerr << "the first node should take the negotiated output\n";
+    return false;
+  }
+
+  PipeWireNodeState running;
+  running.running = true;
+  running.width = 1280;
+  running.height = 720;
+  running.fps = 30;
+  running.format = PixelFormat::rgb24;
+  if (PlanPipeWireNode(true, out, running).action != Action::keep) {
+    std::cerr << "a node that already matches should be kept\n";
+    return false;
+  }
+
+  PipeWireNodeState stopped = running;
+  stopped.running = false;
+  if (PlanPipeWireNode(true, out, stopped).action != Action::restart) {
+    std::cerr << "a node that stopped should be started again\n";
+    return false;
+  }
+
+  ActualFormat other = out;
+  other.format = PixelFormat::yuyv;
+  const auto changed = PlanPipeWireNode(true, other, running);
+  if (changed.action != Action::restart ||
+      changed.node.format != PixelFormat::yuyv) {
+    std::cerr << "a new pixel format should restart the node\n";
+    return false;
+  }
+
+  // A loopback that reports no rate still needs a rate on the node.
+  ActualFormat no_rate = out;
+  no_rate.fps = 0;
+  const auto defaulted = PlanPipeWireNode(true, no_rate, no_node);
+  if (defaulted.action != Action::restart || defaulted.node.fps != 30) {
+    std::cerr << "an output with no rate should give the node 30\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestStandaloneGpuScalerPolicySkipsInactiveBackendTransfers() {
   using studiocast::video::ShouldRunStandaloneGpuScaler;
 
@@ -1018,6 +1095,8 @@ int main() {
        &TestVideoConsumerDetectionErrorSurfacesWithoutStarting},
       {"video output open failure does not start pipeline",
        &TestVideoOutputOpenFailureDoesNotStartPipeline},
+      {"PipeWire camera node plan follows the negotiated output",
+       &TestPipeWireCameraNodePlanFollowsTheNegotiatedOutput},
       {"video start failure backs off", &TestVideoStartFailureBacksOff},
       {"video start failure clears after recovery",
        &TestVideoStartFailureClearsAfterRecovery},
