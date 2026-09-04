@@ -607,8 +607,12 @@ bool AfxEffect::Run(const float *input, float *output,
     return false;
   }
 
-  const NvAFX_Status st =
-      api_->f().NvAFX_Run(handle_, input, output, num_samples);
+  // The SDK takes an array of channel pointers. StudioCast runs the AFX
+  // effects with one channel; a stereo caller splits the channels itself.
+  const float *in_channels[1] = {input};
+  float *out_channels[1] = {output};
+  const NvAFX_Status st = api_->f().NvAFX_Run(
+      handle_, in_channels, out_channels, num_samples, cfg_.channels);
   if (st != NVAFX_SUCCESS) {
     if (error_out) {
       std::ostringstream oss;

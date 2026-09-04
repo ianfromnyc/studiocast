@@ -56,12 +56,12 @@ public:
 
   using NvAFX_Load_t = NvAFX_Status (*)(NvAFX_Handle handle);
 
-  // Signature depends on effect; most AFX effects are frame-based float PCM.
-  // We keep the ABI minimal and will refine the signature once we integrate
-  // actual AFX processing.
-  using NvAFX_Run_t = NvAFX_Status (*)(NvAFX_Handle handle, const float *input,
-                                       float *output,
-                                       std::uint32_t num_samples);
+  // `NvAFX_Run` takes one pointer per channel, the number of samples in each
+  // channel, and the number of channels (nvAudioEffects.h of AFX 2.1.0).
+  using NvAFX_Run_t = NvAFX_Status (*)(NvAFX_Handle handle,
+                                       const float **input, float **output,
+                                       std::uint32_t num_input_samples,
+                                       std::uint32_t num_input_channels);
 
   struct Functions {
     NvAFX_CreateEffect_t NvAFX_CreateEffect = nullptr;

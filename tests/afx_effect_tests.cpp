@@ -299,6 +299,20 @@ int Load(void *) {
   return 0;
 }
 
+const float *g_run_input = nullptr;
+float *g_run_output = nullptr;
+std::uint32_t g_run_samples = 0;
+std::uint32_t g_run_channels = 0;
+
+int Run(void *, const float **input, float **output, std::uint32_t samples,
+        std::uint32_t channels) {
+  g_run_input = input ? input[0] : nullptr;
+  g_run_output = output ? output[0] : nullptr;
+  g_run_samples = samples;
+  g_run_channels = channels;
+  return 0;
+}
+
 // The parameters that AFX 2.1.0 rejects on studio voice.
 std::vector<std::string> StudioVoiceRejects() {
   return {"num_input_channels", "num_output_channels",
@@ -316,6 +330,7 @@ void Install(AfxApi *api) {
   f.NvAFX_SetFloat = &SetFloat;
   f.NvAFX_GetU32 = g_have_get_u32 ? &GetU32 : nullptr;
   f.NvAFX_Load = &Load;
+  f.NvAFX_Run = &Run;
   api->SetFunctionsForTesting(f);
 }
 
@@ -548,6 +563,54 @@ bool TestLoaderPathValue() {
   return ok;
 }
 
+// `NvAFX_Run` takes one pointer per channel and the channel count. Passing a
+// plain buffer, as an earlier ABI did, made the SDK read a sample as a
+// pointer.
+bool TestRunPassesChannelPointers() {
+  const fs::path root = TempRoot("run");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  fake_afx::Reset();
+  studiocast::maxine::afx::AfxApi api;
+  fake_afx::Install(&api);
+
+  studiocast::maxine::afx::AfxEffect fx(&api);
+  const auto cfg = MakeConfig(features, "denoiser", "denoiser");
+
+  std::string err;
+  const bool configured = fx.Configure(cfg, &err);
+  bool ok = Require(configured, "expected the denoiser to configure: " + err);
+  if (!ok) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+  const bool loaded = fx.Load(&err);
+  ok &= Require(loaded, "expected the denoiser to load: " + err);
+
+  std::vector<float> in(480, 0.25f);
+  std::vector<float> out(480, 0.0f);
+  const bool ran = fx.Run(in.data(), out.data(), 480, &err);
+  ok &= Require(ran, "expected one frame to run: " + err);
+  ok &= Require(fake_afx::g_run_input == in.data(),
+                "expected the input buffer as channel 0");
+  ok &= Require(fake_afx::g_run_output == out.data(),
+                "expected the output buffer as channel 0");
+  ok &= Require(fake_afx::g_run_samples == 480,
+                "expected 480 samples per channel");
+  ok &= Require(fake_afx::g_run_channels == 1, "expected one channel");
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -560,6 +623,7 @@ int main() {
   ok = TestMissingRequiredParameterFails() && ok;
   ok = TestFeatureLibDirsAreListed() && ok;
   ok = TestLoaderPathValue() && ok;
+  ok = TestRunPassesChannelPointers() && ok;
 
   if (!ok)
     return 1;
