@@ -99,6 +99,15 @@ public:
   bool InitializeFromLibraryPath(const std::filesystem::path &library_path,
                                  std::string *error_out);
 
+  // Test seam: installs function pointers without loading a library, so the
+  // tests can drive AfxEffect with a stand-in for the SDK.
+  void SetFunctionsForTesting(const Functions &f) {
+    f_ = f;
+    initialized_ = true;
+    library_path_.clear();
+    error_.clear();
+  }
+
   bool IsInitialized() const { return initialized_; }
   const std::filesystem::path &library_path() const { return library_path_; }
   const Functions &f() const { return f_; }

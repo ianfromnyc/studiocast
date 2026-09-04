@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/maxine/afx/afx_effect.h"
+#include "core/maxine/afx_api.h"
 
 namespace {
 namespace fs = std::filesystem;
@@ -239,6 +240,231 @@ bool TestMissingLibraryKeepsTheClearError() {
   return ok;
 }
 
+// A stand-in for the AFX SDK. AFX 2.1.0 takes the model path, the input
+// sample rate and the input frame size on every microphone effect, and it
+// rejects the channel count on all of them. Studio voice also rejects the
+// intensity, the effect version and the VAD flag.
+namespace fake_afx {
+
+using studiocast::maxine::afx::AfxApi;
+
+constexpr int kInvalidParam = 3; // NVAFX_STATUS_INVALID_PARAM
+
+std::vector<std::string> g_set_order;
+std::vector<std::string> g_rejected;
+std::uint32_t g_channels_readback = 1;
+bool g_have_get_u32 = true;
+bool g_loaded = false;
+
+void Reset() {
+  g_set_order.clear();
+  g_rejected.clear();
+  g_channels_readback = 1;
+  g_have_get_u32 = true;
+  g_loaded = false;
+}
+
+bool Rejected(const char *param) {
+  for (const auto &r : g_rejected) {
+    if (r == param)
+      return true;
+  }
+  return false;
+}
+
+int Record(const char *param) {
+  g_set_order.push_back(param);
+  return Rejected(param) ? kInvalidParam : 0;
+}
+
+int CreateEffect(const char *, void **handle) {
+  *handle = reinterpret_cast<void *>(0x1);
+  return 0;
+}
+int DestroyEffect(void *) { return 0; }
+int SetString(void *, const char *param, const char *) { return Record(param); }
+int SetU32(void *, const char *param, std::uint32_t) { return Record(param); }
+int SetFloat(void *, const char *param, float) { return Record(param); }
+int GetU32(void *, const char *param, std::uint32_t *value) {
+  const std::string p = param;
+  if (p == "num_input_channels" || p == "num_channels") {
+    *value = g_channels_readback;
+    return 0;
+  }
+  return kInvalidParam;
+}
+int Load(void *) {
+  g_loaded = true;
+  return 0;
+}
+
+// The parameters that AFX 2.1.0 rejects on studio voice.
+std::vector<std::string> StudioVoiceRejects() {
+  return {"num_input_channels", "num_output_channels",
+          "num_channels",       "output_sample_rate",
+          "intensity_ratio",    "effect_version",
+          "enable_vad",         "num_samples_per_output_frame"};
+}
+
+void Install(AfxApi *api) {
+  AfxApi::Functions f{};
+  f.NvAFX_CreateEffect = &CreateEffect;
+  f.NvAFX_DestroyEffect = &DestroyEffect;
+  f.NvAFX_SetString = &SetString;
+  f.NvAFX_SetU32 = &SetU32;
+  f.NvAFX_SetFloat = &SetFloat;
+  f.NvAFX_GetU32 = g_have_get_u32 ? &GetU32 : nullptr;
+  f.NvAFX_Load = &Load;
+  api->SetFunctionsForTesting(f);
+}
+
+// Index of the first call for `param`, or -1.
+int IndexOf(const std::string &param) {
+  for (size_t i = 0; i < g_set_order.size(); ++i) {
+    if (g_set_order[i] == param)
+      return static_cast<int>(i);
+  }
+  return -1;
+}
+
+} // namespace fake_afx
+
+// Studio voice takes the model, the sample rate and the frame size, and
+// nothing else. A parameter that the effect does not take must not stop the
+// effect from loading.
+bool TestLoadsStudioVoiceWithoutTheOptionalParameters() {
+  const fs::path root = TempRoot("params");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  fake_afx::Reset();
+  fake_afx::g_rejected = fake_afx::StudioVoiceRejects();
+  studiocast::maxine::afx::AfxApi api;
+  fake_afx::Install(&api);
+
+  studiocast::maxine::afx::AfxEffect fx(&api);
+  auto cfg = MakeConfig(features, "studio_voice_low_latency", "studio_voice");
+  cfg.vad_enabled = true;
+  cfg.effect_version = 2u;
+
+  std::string err;
+  const bool configured = fx.Configure(cfg, &err);
+  bool ok = Require(configured, "expected studio voice to configure: " + err);
+  if (!ok) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  const bool loaded = fx.Load(&err);
+  ok &= Require(loaded, "expected studio voice to load: " + err);
+  ok &= Require(fake_afx::g_loaded, "expected NvAFX_Load to be called");
+
+  // The model comes first, then the stream format.
+  const int model = fake_afx::IndexOf("model_path");
+  const int rate = fake_afx::IndexOf("input_sample_rate");
+  const int frame = fake_afx::IndexOf("num_samples_per_input_frame");
+  ok &= Require(model == 0, "expected model_path first");
+  ok &= Require(rate > model, "expected the sample rate after the model");
+  ok &= Require(frame > rate, "expected the frame size after the sample rate");
+
+  bool mentions_channels = false;
+  for (const auto &w : fx.warnings()) {
+    if (w.find("channel") != std::string::npos)
+      mentions_channels = true;
+  }
+  ok &=
+      Require(mentions_channels, "expected a warning about the channel count");
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
+// The effect runs with a fixed number of channels. When that is not what the
+// caller asked for, loading must fail and say so.
+bool TestChannelCountMismatchFails() {
+  const fs::path root = TempRoot("channels");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  fake_afx::Reset();
+  fake_afx::g_rejected = fake_afx::StudioVoiceRejects();
+  fake_afx::g_channels_readback = 1;
+  studiocast::maxine::afx::AfxApi api;
+  fake_afx::Install(&api);
+
+  studiocast::maxine::afx::AfxEffect fx(&api);
+  auto cfg = MakeConfig(features, "studio_voice_low_latency", "studio_voice");
+  cfg.channels = 2;
+
+  std::string err;
+  const bool configured = fx.Configure(cfg, &err);
+  bool ok = Require(configured, "expected the effect to configure: " + err);
+  if (!ok) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  const bool loaded = fx.Load(&err);
+  ok &= Require(!loaded, "expected a channel count mismatch to fail");
+  ok &= Require(err.find("channel") != std::string::npos,
+                "expected the error to name the channel count, got: " + err);
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
+// A parameter that every effect needs must still stop the load.
+bool TestMissingRequiredParameterFails() {
+  const fs::path root = TempRoot("required");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  fake_afx::Reset();
+  fake_afx::g_rejected = {"input_sample_rate", "sample_rate"};
+  studiocast::maxine::afx::AfxApi api;
+  fake_afx::Install(&api);
+
+  studiocast::maxine::afx::AfxEffect fx(&api);
+  const auto cfg = MakeConfig(features, "denoiser", "denoiser");
+
+  std::string err;
+  const bool configured = fx.Configure(cfg, &err);
+  bool ok = Require(configured, "expected the denoiser to configure: " + err);
+  if (!ok) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  const bool loaded = fx.Load(&err);
+  ok &= Require(!loaded, "expected a rejected sample rate to fail");
+  ok &= Require(err.find("sample_rate") != std::string::npos,
+                "expected the error to name the sample rate, got: " + err);
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -246,6 +472,9 @@ int main() {
   ok = TestResolvesTheRealAfxLayout() && ok;
   ok = TestResolvesTheVersionedLibrary() && ok;
   ok = TestMissingLibraryKeepsTheClearError() && ok;
+  ok = TestLoadsStudioVoiceWithoutTheOptionalParameters() && ok;
+  ok = TestChannelCountMismatchFails() && ok;
+  ok = TestMissingRequiredParameterFails() && ok;
 
   if (!ok)
     return 1;

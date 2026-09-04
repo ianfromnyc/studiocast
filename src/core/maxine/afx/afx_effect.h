@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "core/maxine/afx_api.h"
 
@@ -92,6 +93,10 @@ public:
     return resolved_feature_lib_path_;
   }
 
+  // Parameters that the effect did not take, and other notes from the last
+  // Load. Empty when every parameter was set.
+  const std::vector<std::string> &warnings() const { return warnings_; }
+
   // Validates config and resolves the model path (if not explicitly provided).
   bool Configure(const AfxEffectConfig &cfg, std::string *error_out);
 
@@ -131,6 +136,7 @@ private:
   fs::path resolved_model_path_;
   fs::path resolved_feature_lib_dir_;
   fs::path resolved_feature_lib_path_;
+  std::vector<std::string> warnings_;
 };
 
 } // namespace studiocast::maxine::afx
