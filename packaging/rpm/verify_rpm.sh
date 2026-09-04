@@ -100,26 +100,51 @@ rpm_query() {
     die "rpm could not read ${package}"
 }
 
+# Holds the lines that read_package_list read out of the last package.
+PACKAGE_LIST=""
+
+# Read one metadata list out of a package into PACKAGE_LIST. rpm runs on its
+# own, so a package that rpm cannot read stops the script with its own message
+# instead of one that says the metadata is missing.
+read_package_list() {
+  local package="$1"
+  local query="$2"
+  if ! PACKAGE_LIST="$(rpm -qp "${query}" "${package}" 2>&1)"; then
+    die "rpm could not read $(basename "${package}"): ${PACKAGE_LIST}"
+  fi
+}
+
 package_lists_path() {
   local package="$1"
   local path="$2"
-  rpm -qpl "${package}" 2>/dev/null | grep -Fx "${path}" >/dev/null ||
+  read_package_list "${package}" --list
+  grep -Fxq -- "${path}" <<<"${PACKAGE_LIST}" ||
     die "$(basename "${package}") does not contain ${path}"
+}
+
+# True when the package declares the given dependency or provide. Only a
+# missing entry gives false; an unreadable package stops the script.
+package_declares() {
+  local package="$1"
+  local query="$2"
+  local requirement="$3"
+  read_package_list "${package}" "${query}"
+  local names
+  names="$(awk '{ print $1 }' <<<"${PACKAGE_LIST}")"
+  grep -Fxq -- "${requirement}" <<<"${names}"
 }
 
 package_requires() {
   local package="$1"
   local requirement="$2"
-  rpm -qp --requires "${package}" 2>/dev/null |
-    awk '{ print $1 }' | grep -Fx "${requirement}" >/dev/null ||
+  package_declares "${package}" --requires "${requirement}" ||
     die "$(basename "${package}") does not require ${requirement}"
 }
 
 package_recommends() {
   local package="$1"
   local requirement="$2"
-  rpm -qp --recommends "${package}" 2>/dev/null |
-    awk '{ print $1 }' | grep -Fx "${requirement}" >/dev/null ||
+  package_declares "${package}" --recommends "${requirement}" ||
     die "$(basename "${package}") does not recommend ${requirement}"
 }
 
@@ -128,8 +153,7 @@ package_recommends() {
 # one piece of metadata that always tells the two builds apart.
 package_bundles_dlib() {
   local package="$1"
-  rpm -qp --provides "${package}" 2>/dev/null |
-    awk '{ print $1 }' | grep -Fx 'bundled(dlib)' >/dev/null
+  package_declares "${package}" --provides 'bundled(dlib)'
 }
 
 find_container_runtime() {
@@ -321,7 +345,7 @@ package="$(ls -1 ${package} 2>/dev/null | head -n 1 || true)"
 [ -n "${package}" ] || fail "no binary RPM for ${version} in ${dist}"
 
 echo "[verify-rpm] Installing ${package}"
-dnf install -y --setopt=install_weak_deps=True "./${package}"
+dnf install -y --setopt=install_weak_deps=true "./${package}"
 dnf install -y desktop-file-utils
 
 rpm -q studiocast
