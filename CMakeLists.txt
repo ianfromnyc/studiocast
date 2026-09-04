@@ -284,6 +284,8 @@ add_library(studiocast_core
         src/core/maxine/effects/ar_eye_contact_effect.cpp
         src/core/maxine/effects/ar_auto_frame_tracker.h
         src/core/maxine/effects/ar_auto_frame_tracker.cpp
+        src/core/pipewire/pipewire_support.h
+        src/core/pipewire/pipewire_support.cpp
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
         src/core/audio/audio_consumer_detector.h
@@ -1374,4 +1376,26 @@ if (BUILD_TESTING)
 
     add_test(NAME studiocast-v4l2loopback-diagnostics-tests
             COMMAND studiocast-v4l2loopback-diagnostics-tests)
+
+    add_executable(studiocast-pipewire-tests
+            tests/pipewire_backend_tests.cpp
+    )
+
+    target_link_libraries(studiocast-pipewire-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-pipewire-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-pipewire-tests)
+    studiocast_enable_sanitizers(studiocast-pipewire-tests)
+
+    set_target_properties(studiocast-pipewire-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-pipewire-tests COMMAND studiocast-pipewire-tests)
 endif()
