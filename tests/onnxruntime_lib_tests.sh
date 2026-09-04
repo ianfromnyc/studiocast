@@ -155,8 +155,38 @@ CHILD
   fi
 }
 
+# A bootstrap root keeps its libraries in lib or in lib64. Everything that
+# looks inside a root must follow the layout of that root.
+test_libdir_follows_the_layout_of_the_root() {
+  # Hooks the library expects from its caller. Nothing below calls them.
+  sc_ort_log() { :; }
+  sc_ort_priv() { :; }
+  # shellcheck source=../scripts/_lib/onnxruntime.sh
+  source "${ORT_LIB}"
+
+  local root_lib64="${SANDBOX}/root-lib64"
+  local root_lib="${SANDBOX}/root-lib"
+  mkdir -p "${root_lib64}/lib" "${root_lib64}/lib64" "${root_lib}/lib"
+
+  local got
+  got="$(sc_ort_libdir "${root_lib64}")"
+  if [[ "${got}" != "${root_lib64}/lib64" ]]; then
+    t_fail "a root with lib64 should use it, got ${got}"
+  else
+    t_pass "a root with lib64 uses lib64"
+  fi
+
+  got="$(sc_ort_libdir "${root_lib}")"
+  if [[ "${got}" != "${root_lib}/lib" ]]; then
+    t_fail "a root with lib only should use it, got ${got}"
+  else
+    t_pass "a root with lib only uses lib"
+  fi
+}
+
 test_repeated_calls_clean_up_and_keep_the_caller_trap
 test_download_failure_cleans_up_and_runs_the_caller_trap
+test_libdir_follows_the_layout_of_the_root
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2

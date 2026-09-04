@@ -447,11 +447,16 @@ cuda_required_libs() {
     printf 'libnvrtc.so.%s\n' "${CUDA_MAJOR}"
     printf 'libcudnn.so.9\n'
 
-    local root
+    local root provider=""
     root="$(sc_ort_installed_root)"
-    if [[ -n "${root}" && -f "${root}/lib/libonnxruntime_providers_cuda.so" ]] \
+    # The bootstrap root holds its libraries in lib or in lib64, so ask the
+    # shared helper instead of assuming lib.
+    if [[ -n "${root}" ]]; then
+      provider="$(sc_ort_libdir "${root}")/libonnxruntime_providers_cuda.so"
+    fi
+    if [[ -n "${provider}" && -f "${provider}" ]] \
         && command -v objdump >/dev/null 2>&1; then
-      objdump -p "${root}/lib/libonnxruntime_providers_cuda.so" 2>/dev/null \
+      objdump -p "${provider}" 2>/dev/null \
         | sed -n 's/^[[:space:]]*NEEDED[[:space:]]*\(lib\(cu\|nv\)[^[:space:]]*\)$/\1/p'
     fi
   } | sort -u

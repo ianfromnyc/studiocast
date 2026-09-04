@@ -62,6 +62,21 @@ sc_ort_installed_root() {
   printf '%s\n' "${roots[@]}" | sort -V | tail -n 1
 }
 
+# Directory of the shared libraries inside one bootstrap root.
+#
+# The upstream tarballs use lib, but some of them use lib64, so prefer lib64
+# when it is there. Everything that looks inside a bootstrap root must ask this
+# function, or it looks in the wrong place on a lib64 tarball.
+sc_ort_libdir() {
+  local root="$1"
+
+  if [[ -d "${root}/lib64" ]]; then
+    printf '%s/lib64\n' "${root}"
+  else
+    printf '%s/lib\n' "${root}"
+  fi
+}
+
 # Download and install one upstream ONNX Runtime tarball.
 #
 # Arguments: <version> <asset name> <url> [sha256]
@@ -115,10 +130,8 @@ sc_ort_install_tarball() {
     return 1
   fi
 
-  local libdir="${root}/lib"
-  if [[ -d "${root}/lib64" ]]; then
-    libdir="${root}/lib64"
-  fi
+  local libdir
+  libdir="$(sc_ort_libdir "${root}")"
 
   if [[ ! -e "${libdir}/libonnxruntime.so" ]]; then
     local sofile
