@@ -1561,6 +1561,96 @@ bool TestServiceReportsWhyTheSinkQuestionHadNoAnswer() {
   return ok;
 }
 
+// The third arm of the pin rule: no answer about the output keeps the pin and
+// the retry, so a monitor that only waits for the sound server comes back on
+// its own, on the output it played on before.
+bool TestServiceKeepsThePinWhenTheSoundServerGivesNoAnswer() {
+  MonitorRecorder rec;
+  std::atomic<bool> answers{false};
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+  hooks.mic_monitor_sink_present = [&](const std::string &,
+                                       std::string *error) {
+    if (answers.load(std::memory_order_relaxed)) {
+      if (error)
+        error->clear();
+      return std::optional<bool>(true);
+    }
+    if (error)
+      *error = "pactl list short sinks did not answer in time";
+    return std::optional<bool>();
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  const auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+  if (!WaitUntil(
+          [&] {
+            return service.Status().monitor_sink_active == "physical_test_sink";
+          },
+          1000ms)) {
+    std::cerr << "the monitor did not start\n";
+    service.Stop();
+    return false;
+  }
+
+  // The sound server is unreachable: the check and the start fail, and the
+  // sink question has no answer.
+  rec.fail_detect.store(true, std::memory_order_relaxed);
+  rec.fail_start.store(true, std::memory_order_relaxed);
+  const int starts_before = rec.starts.load(std::memory_order_relaxed);
+  bool ok = true;
+  if (!WaitUntil(
+          [&] {
+            return rec.starts.load(std::memory_order_relaxed) >=
+                   starts_before + 2;
+          },
+          6000ms)) {
+    std::cerr << "a sound server that gave no answer ended the retries\n";
+    service.Stop();
+    return false;
+  }
+  if (!service.Status().monitor_note.empty()) {
+    std::cerr << "a sound server that gave no answer reported a lost output: '"
+              << service.Status().monitor_note << "'\n";
+    ok = false;
+  }
+
+  // The sound server comes back, and nothing the user does is needed.
+  answers.store(true, std::memory_order_relaxed);
+  rec.fail_detect.store(false, std::memory_order_relaxed);
+  rec.fail_start.store(false, std::memory_order_relaxed);
+  if (!WaitUntil(
+          [&] {
+            const auto st = service.Status();
+            return st.monitor_active && st.monitor_last_error.empty();
+          },
+          6000ms)) {
+    const auto st = service.Status();
+    std::cerr << "the monitor did not come back on its own: active="
+              << st.monitor_active << " error='" << st.monitor_last_error
+              << "'\n";
+    ok = false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(rec.mu);
+    if (rec.last_sink != "physical_test_sink") {
+      std::cerr << "the monitor came back on '" << rec.last_sink
+                << "' instead of the output it played on\n";
+      ok = false;
+    }
+  }
+
+  service.Stop();
+  return ok;
+}
+
 // A monitor that is on while microphone processing is off is a state the user
 // made one click ago, not a failure. It belongs in the note, so nothing sends
 // the user to Support for it.
@@ -2353,6 +2443,8 @@ int main() {
        &TestServiceCleansUpTheLoopbackAfterALostOutput},
       {"service reports why the sink question had no answer",
        &TestServiceReportsWhyTheSinkQuestionHadNoAnswer},
+      {"service keeps the pin when the sound server gives no answer",
+       &TestServiceKeepsThePinWhenTheSoundServerGivesNoAnswer},
       {"monitor consumer is counted apart from apps",
        &TestMonitorConsumerIsCountedApartFromApps},
       {"service drives the real helper through pactl",
