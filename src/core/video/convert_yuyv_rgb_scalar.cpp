@@ -81,9 +81,15 @@ void YuyvToRgbScalar(const std::uint8_t *src, int width, int height,
     }
 
     if (x < width) {
+      // An odd width leaves the last pixel without its pair. A row padded to
+      // the whole pair still carries that pixel's V byte, but a row the
+      // driver packed to width * 2 bytes stops after the U byte, so reading
+      // the V byte would walk past the row. Neutral chroma keeps the read
+      // inside the row the caller gave.
+      const std::size_t tail = static_cast<std::size_t>(x) * 2u;
       const int y0 = s[0];
       const int u = s[1];
-      const int v = s[3];
+      const int v = (tail + 4u <= src_stride) ? s[3] : 128;
 
       const int r_chroma = kYuvRFromV[static_cast<std::size_t>(v)];
       const int g_chroma = kYuvGFromU[static_cast<std::size_t>(u)] +

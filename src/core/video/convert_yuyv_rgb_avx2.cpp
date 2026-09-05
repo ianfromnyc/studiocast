@@ -122,7 +122,10 @@ void YuyvToRgbAvx2(const std::uint8_t *src, int width, int height,
     }
 
     if (x < width) {
-      YuyvToRgbSse41(s, width - x, 1, src_stride, d, dst_stride);
+      // `s` has already moved over the pixels this row converted, so the tail
+      // gets the bytes that are left in the row, not the whole stride.
+      const std::size_t used = static_cast<std::size_t>(x) * 2u;
+      YuyvToRgbSse41(s, width - x, 1, src_stride - used, d, dst_stride);
     }
   }
 }

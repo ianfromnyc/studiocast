@@ -42,6 +42,7 @@ bool TestV4l2FakeNegotiationUsesOrderedFallback();
 bool TestV4l2MjpegDecodeFailureFallsBackToRawOnce();
 bool TestV4l2CaptureNegotiationKeepsTheDriverRowStride();
 bool TestYuyvToRgb24MatchesBt601AndPreservesPadding();
+bool TestYuyvToRgb24TailStaysInsideAPackedOddWidthRow();
 bool TestYuyvToRgb24BackendsMatchScalarReference();
 bool TestRgb24ToYuyvMatchesBt601WithinChromaRounding();
 bool TestRgb24ToYuyvBackendsMatchScalarReference();
@@ -1127,6 +1128,8 @@ int main() {
        &studiocast::tests::TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair},
       {"V4L2 capture negotiation keeps the driver row stride",
        &studiocast::tests::TestV4l2CaptureNegotiationKeepsTheDriverRowStride},
+      {"YUYV->RGB tail stays inside a packed odd width row",
+       &studiocast::tests::TestYuyvToRgb24TailStaysInsideAPackedOddWidthRow},
   };
 
   int failed = 0;

@@ -14,6 +14,9 @@
 #include <string>
 #include <vector>
 
+#include <sys/mman.h>
+#include <unistd.h>
+
 namespace studiocast::tests {
 namespace {
 
@@ -232,7 +235,129 @@ bool CompareYuyvToReference(const std::vector<std::uint8_t> &actual,
   return true;
 }
 
+// One read-write page with a PROT_NONE page behind it. A frame placed so that
+// it ends at the boundary turns a read past the frame into a fault instead of
+// a silent success, which is what a captured mmap'd buffer does at the end of
+// its last page.
+class GuardedFrame {
+public:
+  explicit GuardedFrame(std::size_t bytes) {
+    const std::size_t page = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+    if (bytes == 0u || bytes > page)
+      return;
+
+    void *base = ::mmap(nullptr, page * 2u, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED)
+      return;
+
+    auto *bytes_base = static_cast<std::uint8_t *>(base);
+    if (::mprotect(bytes_base + page, page, PROT_NONE) != 0) {
+      ::munmap(base, page * 2u);
+      return;
+    }
+
+    base_ = bytes_base;
+    mapped_ = page * 2u;
+    frame_ = bytes_base + page - bytes;
+  }
+
+  ~GuardedFrame() {
+    if (base_)
+      ::munmap(base_, mapped_);
+  }
+
+  GuardedFrame(const GuardedFrame &) = delete;
+  GuardedFrame &operator=(const GuardedFrame &) = delete;
+
+  std::uint8_t *frame() const { return frame_; }
+
+private:
+  std::uint8_t *base_ = nullptr;
+  std::size_t mapped_ = 0u;
+  std::uint8_t *frame_ = nullptr;
+};
+
 } // namespace
+
+// A captured YUYV row is only as long as the driver made it, and a driver
+// that accepts an odd width packs the last pixel into two bytes: it has a Y
+// and a U, but no V. Reading the V of that pixel walks past the row, and on
+// the last row past the frame. The converter must stay inside the row the
+// caller gave it and treat the missing chroma as neutral.
+bool TestYuyvToRgb24TailStaysInsideAPackedOddWidthRow() {
+  using video::internal::YuyvToRgbBackend;
+
+  const std::array<YuyvToRgbBackendCase, 3> backends{{
+      {YuyvToRgbBackend::scalar},
+      {YuyvToRgbBackend::sse41},
+      {YuyvToRgbBackend::avx2},
+  }};
+
+  for (const int width : {1, 3, 7, 9, 15, 17, 33}) {
+    const int height = 3;
+    const std::size_t packed_stride = static_cast<std::size_t>(width) * 2u;
+    const std::size_t frame_bytes =
+        packed_stride * static_cast<std::size_t>(height);
+
+    GuardedFrame guarded(frame_bytes);
+    if (guarded.frame() == nullptr) {
+      std::cerr << "the guarded frame could not be mapped for width " << width
+                << "\n";
+      return false;
+    }
+
+    std::uint32_t state = static_cast<std::uint32_t>(width) * 977u + 0x51edu;
+    for (std::size_t i = 0; i < frame_bytes; ++i) {
+      state = state * 1664525u + 1013904223u;
+      guarded.frame()[i] = static_cast<std::uint8_t>((state >> 24) & 0xffu);
+    }
+
+    // The same frame in a row long enough to hold the final pair, with a
+    // neutral V byte where the packed row has nothing. This is what the
+    // converter must produce from the packed row.
+    const std::size_t padded_stride = ActiveYuyvBytes(width);
+    std::vector<std::uint8_t> padded(
+        padded_stride * static_cast<std::size_t>(height), 0x80u);
+    for (int y = 0; y < height; ++y) {
+      std::copy_n(guarded.frame() + static_cast<std::size_t>(y) * packed_stride,
+                  packed_stride,
+                  padded.data() + static_cast<std::size_t>(y) * padded_stride);
+    }
+
+    const std::size_t dst_stride = ActiveRgbBytes(width);
+    std::vector<std::uint8_t> expected(
+        dst_stride * static_cast<std::size_t>(height), 0xcdu);
+    video::internal::YuyvToRgbScalar(padded.data(), width, height,
+                                     padded_stride, expected.data(),
+                                     dst_stride);
+
+    for (const YuyvToRgbBackendCase &backend : backends) {
+      if (!video::internal::YuyvToRgbBackendAvailable(backend.backend))
+        continue;
+
+      std::vector<std::uint8_t> actual(
+          dst_stride * static_cast<std::size_t>(height), 0xcdu);
+      if (!ConvertWithBackend(backend.backend, guarded.frame(), width, height,
+                              packed_stride, actual.data(), dst_stride)) {
+        std::cerr << "YUYV->RGB backend "
+                  << video::internal::YuyvToRgbBackendName(backend.backend)
+                  << " reported available but conversion failed\n";
+        return false;
+      }
+
+      if (actual != expected) {
+        std::cerr << "YUYV->RGB backend "
+                  << video::internal::YuyvToRgbBackendName(backend.backend)
+                  << " read the missing chroma of the odd-width tail at width "
+                  << width << "\n";
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
 
 bool TestYuyvToRgb24MatchesBt601AndPreservesPadding() {
   const std::array<ConvertCase, 9> cases{{
