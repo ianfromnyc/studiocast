@@ -982,8 +982,10 @@ void CameraPipeline::MaintainPipeWireOutput() {
       const auto started = pw_started_node_.lock();
       same_node = started && started == pw_node_;
       current_running = pw_node_ && pw_node_->IsRunning();
+      // The verdict is given, so the handle goes under the lock it is read
+      // with.
+      pw_started_node_.reset();
     }
-    pw_started_node_.reset();
     pw_restart_backoff_.Settle(
         internal::StartOutcomeOf(same_node, current_running), now);
   }
@@ -1003,18 +1005,19 @@ void CameraPipeline::MaintainPipeWireOutput() {
   // released, the same way the supervisor does it.
   ApplyPipeWireOutputPlan();
 
-  // Remember the node the apply installed. The next tick gives the verdict.
+  // Remember the node the apply installed, under the lock the verdict reads
+  // it with. The next tick gives that verdict.
   std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> installed;
   {
     std::lock_guard<std::mutex> lock(mu_);
     installed = pw_node_;
+    pw_started_node_ = installed;
   }
   if (!installed) {
     // The start failed outright, and there is nothing to wait a tick for.
     pw_restart_backoff_.Failed(now);
     return;
   }
-  pw_started_node_ = installed;
   pw_restart_backoff_.Started();
 }
 
@@ -1331,7 +1334,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   // whole backoff before it first asked for a node.
   next_pw_check_at_ = std::chrono::steady_clock::time_point{};
   pw_restart_backoff_.Reset();
-  pw_started_node_.reset();
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    pw_started_node_.reset();
+  }
 
   // Open (or reuse) writer to v4l2loopback output.
   {

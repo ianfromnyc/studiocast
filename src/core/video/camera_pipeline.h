@@ -587,10 +587,15 @@ private:
   std::chrono::steady_clock::time_point next_pw_check_at_{};
   internal::PipeWireRestartBackoff pw_restart_backoff_;
 
-  // Frame thread only. The node the last tick started, so the next tick can
-  // ask whether that same node is still the one that runs. It is weak because
-  // it must never keep a node alive, and because a node that went is not the
-  // node a new one at the same address would be.
+  // The node the last tick started, so the next tick can ask whether that same
+  // node is still the one that runs. It is weak because it must never keep a
+  // node alive, and because a node that went is not the node a new one at the
+  // same address would be.
+  //
+  // Only the frame thread reads it, and it reads it beside `pw_node_`, which
+  // the supervisor thread writes. Every read and every write of it is
+  // therefore under `mu_`, the lock that answer needs anyway. None of them is
+  // on the frame path: the tick that gives a verdict runs once a second.
   std::weak_ptr<studiocast::video::pw_backend::PipeWireCameraNode>
       pw_started_node_;
 
