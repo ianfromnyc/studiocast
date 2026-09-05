@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -82,6 +83,39 @@ std::string AudioFormatMismatch(const std::string &what,
                                 const studiocast::pw::AudioNodeConfig &node,
                                 int sample_rate, std::uint32_t channels,
                                 std::uint32_t frame_samples);
+
+// Runs a device create so that the device lock is never held while the
+// PipeWire server answers.
+//
+// Starting a node runs pw_thread_loop_start, pw_context_connect and
+// pw_stream_connect, which is a full round trip to the server, and taking a
+// node down is another one. The daemon polls the device status on every tick
+// and takes the same lock, so a create that held it would stall the status
+// for as long as the server takes.
+//
+// `have_device` and `publish` run under `device_mu`; `build` runs with that
+// lock released and is where the server work belongs. `create_mu` holds one
+// create at a time, so two callers never put two nodes of the same name in
+// the graph. The lock order is always `create_mu` first, then `device_mu`.
+//
+// Returns true when `have_device` answers true, or when `build` and `publish`
+// both ran.
+template <class HaveDevice, class Build, class Publish>
+bool CreateDeviceOutsideLock(std::mutex &create_mu, std::mutex &device_mu,
+                             const HaveDevice &have_device, const Build &build,
+                             const Publish &publish) {
+  std::lock_guard<std::mutex> creating(create_mu);
+  {
+    std::lock_guard<std::mutex> lock(device_mu);
+    if (have_device())
+      return true;
+  }
+  if (!build())
+    return false;
+  std::lock_guard<std::mutex> lock(device_mu);
+  publish();
+  return true;
+}
 
 } // namespace internal
 

@@ -9,6 +9,7 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -597,6 +598,56 @@ bool TestAudioFormatMismatchNamesTheDifference() {
                 "a frame mismatch must name both sizes: " + frame) &&
          Expect(rate.find("virtual microphone") != std::string::npos,
                 "the message must name the device: " + rate);
+}
+
+// Starting a node runs pw_context_connect and pw_stream_connect, which is a
+// full round trip to the PipeWire server. The daemon polls the device status
+// on every tick and takes the device lock for it, so a create that held that
+// lock for the trip would stall the status for as long as the server takes.
+bool TestDeviceCreateLeavesTheDeviceLockFreeWhileItBuilds() {
+  using studiocast::audio::pw_backend::internal::CreateDeviceOutsideLock;
+
+  std::mutex create_mu;
+  std::mutex device_mu;
+  bool lock_was_free = false;
+  bool built = false;
+  bool published = false;
+
+  const bool made = CreateDeviceOutsideLock(
+      create_mu, device_mu, [] { return false; },
+      [&] {
+        built = true;
+        // Another thread stands for the daemon status poll. It must be able
+        // to take the device lock while the server is answering.
+        std::thread poll([&] {
+          if (device_mu.try_lock()) {
+            lock_was_free = true;
+            device_mu.unlock();
+          }
+        });
+        poll.join();
+        return true;
+      },
+      [&] { published = true; });
+
+  // A device that is already there answers without building anything.
+  bool built_again = false;
+  const bool had = CreateDeviceOutsideLock(
+      create_mu, device_mu, [] { return true; },
+      [&] {
+        built_again = true;
+        return true;
+      },
+      [] {});
+
+  return Expect(made, "a create that builds a device should answer true") &&
+         Expect(built, "the build step should run") &&
+         Expect(lock_was_free,
+                "the device lock must be free while the node starts") &&
+         Expect(published, "the new device should be published") &&
+         Expect(had, "a device that is already there is the answer") &&
+         Expect(!built_again,
+                "a device that is already there must not be built again");
 }
 
 bool TestPipeWireIoRefusesToOpenWithoutTheVirtualMic() {
@@ -2017,6 +2068,8 @@ int main() {
        &TestLiveStoppedNodeSaysWhyItRefusesWork},
       {"audio format mismatch names the difference",
        &TestAudioFormatMismatchNamesTheDifference},
+      {"device create leaves the device lock free while it builds",
+       &TestDeviceCreateLeavesTheDeviceLockFreeWhileItBuilds},
       {"pipewire io refuses to open without the virtual mic",
        &TestPipeWireIoRefusesToOpenWithoutTheVirtualMic},
       {"node restart delay backs off", &TestNodeRestartDelayBacksOff},

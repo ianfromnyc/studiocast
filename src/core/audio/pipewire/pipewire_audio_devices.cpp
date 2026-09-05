@@ -252,6 +252,11 @@ std::string AudioFormatMismatch(const std::string &what,
 // ---------------------------------------------------------------------------
 
 struct NativeAudioDevices::State {
+  // Holds one device create at a time. It is never taken by the status path,
+  // so a create that waits on the server blocks no poll. The lock order is
+  // always this one first, then `mu`.
+  std::mutex create_mu;
+
   mutable std::mutex mu;
   NativeAudioDeviceOptions options;
   // Shared, so a pipeline or a route that took a reference keeps its node
@@ -293,96 +298,110 @@ NativeAudioDeviceOptions NativeAudioDevices::Options() const {
 }
 
 bool NativeAudioDevices::CreateVirtualMic(std::string *error) {
-  // The node the daemon already has is the answer, as long as it is still in
-  // the graph. The Pulse scan below forks pactl twice, and the supervisor asks
-  // for this device on every poll, so it must not run for a device that is
-  // already there.
-  {
-    std::lock_guard<std::mutex> lock(state_->mu);
-    if (state_->mic && state_->mic->IsRunning())
-      return true;
-  }
-
-  RemoveStalePulseDevices();
-
-  std::lock_guard<std::mutex> lock(state_->mu);
-  if (state_->mic && state_->mic->IsRunning())
-    return true;
-  // A node the server took down never comes back by itself, so let it go and
-  // make a new one below.
-  state_->mic.reset();
-
   AudioNodeConfig cfg;
-  cfg.role = AudioNodeRole::kVirtualSource;
-  cfg.node_name =
-      state_->options.node_name_suffix.empty()
-          ? std::string(studiocast::pw::kVirtualMicNodeName)
-          : std::string(studiocast::pw::kVirtualMicNodeName) +
-                state_->options.node_name_suffix;
-  cfg.node_description = std::string(studiocast::pw::kVirtualMicDescription) +
-                         state_->options.node_name_suffix;
-  cfg.sample_rate = kSampleRate;
-  cfg.channels = kMicChannels;
-  cfg.frame_samples = kFrameSamples;
+  std::shared_ptr<PipeWireAudioNode> node;
+  // A node the server took down never comes back by itself, so it is replaced
+  // and destroyed after the lock is free.
+  std::shared_ptr<PipeWireAudioNode> old;
 
-  auto node = std::make_shared<PipeWireAudioNode>();
-  if (!node->Start(cfg, error))
-    return false;
-  state_->mic = std::move(node);
-  return true;
+  const bool ok = internal::CreateDeviceOutsideLock(
+      state_->create_mu, state_->mu,
+      [&] {
+        // The node the daemon already has is the answer, as long as it is
+        // still in the graph.
+        if (state_->mic && state_->mic->IsRunning())
+          return true;
+        cfg.role = AudioNodeRole::kVirtualSource;
+        cfg.node_name =
+            state_->options.node_name_suffix.empty()
+                ? std::string(studiocast::pw::kVirtualMicNodeName)
+                : std::string(studiocast::pw::kVirtualMicNodeName) +
+                      state_->options.node_name_suffix;
+        cfg.node_description =
+            std::string(studiocast::pw::kVirtualMicDescription) +
+            state_->options.node_name_suffix;
+        cfg.sample_rate = kSampleRate;
+        cfg.channels = kMicChannels;
+        cfg.frame_samples = kFrameSamples;
+        return false;
+      },
+      [&] {
+        // The Pulse scan forks pactl twice and the start is a round trip to
+        // the server. Neither may happen under the device lock.
+        RemoveStalePulseDevices();
+        node = std::make_shared<PipeWireAudioNode>();
+        return node->Start(cfg, error);
+      },
+      [&] {
+        old = std::move(state_->mic);
+        state_->mic = std::move(node);
+      });
+
+  old.reset();
+  return ok;
 }
 
 bool NativeAudioDevices::DestroyVirtualMic(std::string *error) {
   if (error)
     error->clear();
-  std::lock_guard<std::mutex> lock(state_->mu);
-  state_->mic.reset();
+  // The node goes out of the member under the lock and is destroyed after it:
+  // taking a node down talks to the server, and no status poll may wait for
+  // that.
+  std::shared_ptr<PipeWireAudioNode> old;
+  {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    old = std::move(state_->mic);
+  }
+  old.reset();
   return true;
 }
 
 bool NativeAudioDevices::CreateVirtualSpeaker(std::string *error) {
-  // See CreateVirtualMic: no Pulse scan for a device that is already there,
-  // and a node the server dropped is replaced instead of answered with.
-  bool went_down = false;
-  {
-    std::lock_guard<std::mutex> lock(state_->mu);
-    if (state_->speaker && state_->speaker->IsRunning())
-      return true;
-    went_down = state_->speaker != nullptr;
-  }
-
-  if (went_down) {
-    // The route pump reads that node, so it has to end before the node goes.
-    std::string ignored;
-    (void)StopSpeakerLoopback(&ignored);
-  }
-
-  RemoveStalePulseDevices();
-
-  std::lock_guard<std::mutex> lock(state_->mu);
-  if (state_->speaker && state_->speaker->IsRunning())
-    return true;
-  state_->speaker.reset();
-
   AudioNodeConfig cfg;
-  cfg.role = AudioNodeRole::kVirtualSink;
-  cfg.node_name =
-      state_->options.node_name_suffix.empty()
-          ? std::string(studiocast::pw::kVirtualSpeakerNodeName)
-          : std::string(studiocast::pw::kVirtualSpeakerNodeName) +
-                state_->options.node_name_suffix;
-  cfg.node_description =
-      std::string(studiocast::pw::kVirtualSpeakerDescription) +
-      state_->options.node_name_suffix;
-  cfg.sample_rate = kSampleRate;
-  cfg.channels = kSpeakerChannels;
-  cfg.frame_samples = kFrameSamples;
+  bool went_down = false;
+  std::shared_ptr<PipeWireAudioNode> node;
+  std::shared_ptr<PipeWireAudioNode> old;
 
-  auto node = std::make_shared<PipeWireAudioNode>();
-  if (!node->Start(cfg, error))
-    return false;
-  state_->speaker = std::move(node);
-  return true;
+  const bool ok = internal::CreateDeviceOutsideLock(
+      state_->create_mu, state_->mu,
+      [&] {
+        // See CreateVirtualMic: no Pulse scan for a device that is already
+        // there, and a node the server dropped is replaced.
+        if (state_->speaker && state_->speaker->IsRunning())
+          return true;
+        went_down = state_->speaker != nullptr;
+        cfg.role = AudioNodeRole::kVirtualSink;
+        cfg.node_name =
+            state_->options.node_name_suffix.empty()
+                ? std::string(studiocast::pw::kVirtualSpeakerNodeName)
+                : std::string(studiocast::pw::kVirtualSpeakerNodeName) +
+                      state_->options.node_name_suffix;
+        cfg.node_description =
+            std::string(studiocast::pw::kVirtualSpeakerDescription) +
+            state_->options.node_name_suffix;
+        cfg.sample_rate = kSampleRate;
+        cfg.channels = kSpeakerChannels;
+        cfg.frame_samples = kFrameSamples;
+        return false;
+      },
+      [&] {
+        if (went_down) {
+          // The route pump reads that node, so it has to end before the node
+          // goes.
+          std::string ignored;
+          (void)StopSpeakerLoopback(&ignored);
+        }
+        RemoveStalePulseDevices();
+        node = std::make_shared<PipeWireAudioNode>();
+        return node->Start(cfg, error);
+      },
+      [&] {
+        old = std::move(state_->speaker);
+        state_->speaker = std::move(node);
+      });
+
+  old.reset();
+  return ok;
 }
 
 bool NativeAudioDevices::DestroyVirtualSpeaker(std::string *error) {
@@ -390,8 +409,13 @@ bool NativeAudioDevices::DestroyVirtualSpeaker(std::string *error) {
     error->clear();
   std::string ignored;
   (void)StopSpeakerLoopback(&ignored);
-  std::lock_guard<std::mutex> lock(state_->mu);
-  state_->speaker.reset();
+  // Destroyed after the lock is free, as DestroyVirtualMic does.
+  std::shared_ptr<PipeWireAudioNode> old;
+  {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    old = std::move(state_->speaker);
+  }
+  old.reset();
   return true;
 }
 
@@ -410,38 +434,46 @@ bool NativeAudioDevices::StartSpeakerLoopback(
   std::string ignored;
   (void)StopSpeakerLoopback(&ignored);
 
-  std::lock_guard<std::mutex> lock(state_->mu);
-  if (!state_->speaker) {
-    if (error)
-      *error = "The native virtual speakers are not created.";
-    return false;
-  }
+  // One route start at a time, and it keeps the virtual speakers in place
+  // while it runs, because a create takes this lock too.
+  std::lock_guard<std::mutex> creating(state_->create_mu);
 
   AudioNodeConfig cfg;
-  cfg.role = AudioNodeRole::kPlayback;
-  cfg.node_name =
-      "studiocast_speakers_route" + state_->options.node_name_suffix;
-  cfg.node_description =
-      "StudioCast Speakers Route" + state_->options.node_name_suffix;
-  cfg.target_object = target_sink_name;
-  cfg.sample_rate = kSampleRate;
-  cfg.channels = kSpeakerChannels;
-  cfg.frame_samples = kFrameSamples;
+  std::shared_ptr<PipeWireAudioNode> from;
+  {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    if (!state_->speaker) {
+      if (error)
+        *error = "The native virtual speakers are not created.";
+      return false;
+    }
+    // The pump holds its own references, so neither node can go away under it.
+    from = state_->speaker;
+    cfg.role = AudioNodeRole::kPlayback;
+    cfg.node_name =
+        "studiocast_speakers_route" + state_->options.node_name_suffix;
+    cfg.node_description =
+        "StudioCast Speakers Route" + state_->options.node_name_suffix;
+    cfg.target_object = target_sink_name;
+    cfg.sample_rate = kSampleRate;
+    cfg.channels = kSpeakerChannels;
+    cfg.frame_samples = kFrameSamples;
+  }
 
-  auto playback = std::make_shared<PipeWireAudioNode>();
-  if (!playback->Start(cfg, error))
+  // The start is a round trip to the server, so the device lock is released
+  // for it. The daemon polls the device status with that lock.
+  auto to = std::make_shared<PipeWireAudioNode>();
+  if (!to->Start(cfg, error))
     return false;
 
-  state_->loopback_playback = std::move(playback);
+  std::lock_guard<std::mutex> lock(state_->mu);
+  state_->loopback_playback = to;
   state_->loopback_stop.store(false, std::memory_order_release);
 
   // An earlier route woke the shared node to end its pump. The node belongs to
   // the service and carries samples again from here.
-  state_->speaker->ClearStopRequest();
+  from->ClearStopRequest();
 
-  // The pump holds its own references, so neither node can go away under it.
-  std::shared_ptr<PipeWireAudioNode> from = state_->speaker;
-  std::shared_ptr<PipeWireAudioNode> to = state_->loopback_playback;
   state_->loopback_thread = std::thread([this, from, to] {
     // A plain pump. The samples pass through with no processing, which is what
     // the pass-through route means.
