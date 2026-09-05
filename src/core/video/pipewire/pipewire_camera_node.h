@@ -6,6 +6,7 @@
 #include <string>
 
 #include "core/pipewire/pipewire_support.h"
+#include "core/pipewire/triple_frame_buffer.h"
 #include "core/video/v4l2_writer.h"
 
 namespace studiocast::video::pw_backend {
@@ -97,6 +98,25 @@ std::string CameraFormatMismatch(std::uint32_t offered_format, int width,
                                  int height, std::uint32_t negotiated_format,
                                  std::uint32_t negotiated_width,
                                  std::uint32_t negotiated_height);
+
+// What WriteFrame answers for one publish.
+struct FrameWriteAnswer {
+  // What WriteFrame returns.
+  bool ok = true;
+  // True for a frame that replaced one the callback never took.
+  bool dropped = false;
+  // Empty unless the publish was refused.
+  std::string error;
+};
+
+// Turns the answer of the frame hand-off into the answer of a write.
+//
+// A refused publish is a layout error, not a dropped frame: the node copied
+// nothing, and no consumer will ever see that frame. It must reach the
+// pipeline as a failure with a reason, or a node whose row arithmetic went
+// wrong would drop every frame while the status said "running" and the drop
+// count stayed at zero.
+FrameWriteAnswer FrameWriteAnswerOf(studiocast::pw::PublishOutcome outcome);
 
 } // namespace internal
 

@@ -8,6 +8,22 @@
 
 namespace studiocast::pw {
 
+// What a publish did with the frame it was given.
+//
+// A refused frame and a dropped frame are not the same answer. A drop is the
+// latest-frame-wins rule working, and the caller counts it. A refusal is a
+// layout the buffer cannot copy: nothing went in, no consumer will ever see
+// that frame, and the caller must report it.
+enum class PublishOutcome {
+  // The frame is on offer, and the consumer had taken the one before it.
+  published,
+  // The frame is on offer, and it replaced a frame nothing took.
+  replaced,
+  // Nothing was copied, because the frame does not match the layout the
+  // caller described.
+  refused,
+};
+
 // Single-producer single-consumer frame hand-off that never blocks.
 //
 // Three slots hold one frame each. The producer owns one of them, the consumer
@@ -53,11 +69,10 @@ public:
 
   // Producer end. Copies one frame in and offers it to the consumer.
   //
-  // Returns true when the frame it replaced had not been taken yet, which is a
-  // dropped frame.
-  bool Publish(const std::uint8_t *data, std::size_t bytes) {
+  // Refuses a frame smaller than the one the buffer was sized for.
+  PublishOutcome Publish(const std::uint8_t *data, std::size_t bytes) {
     if (!data || frame_bytes_ == 0 || bytes < frame_bytes_)
-      return false;
+      return PublishOutcome::refused;
     std::memcpy(slots_[back_].data(), data, frame_bytes_);
     return Offer();
   }
@@ -70,18 +85,18 @@ public:
   // run would read every row after the first from the wrong offset, which
   // shears the picture a consumer receives.
   //
-  // Returns the same "replaced an untaken frame" answer as Publish, or false
-  // when the source is too small for the rows it says it holds.
-  bool PublishRows(const std::uint8_t *data, std::size_t bytes,
-                   std::size_t source_stride, std::size_t row_bytes,
-                   std::size_t rows) {
+  // Refuses a source that is too small for the rows it says it holds, and a
+  // row layout that does not add up to the frame the buffer was sized for.
+  PublishOutcome PublishRows(const std::uint8_t *data, std::size_t bytes,
+                             std::size_t source_stride, std::size_t row_bytes,
+                             std::size_t rows) {
     if (!data || frame_bytes_ == 0 || rows == 0 || row_bytes == 0)
-      return false;
+      return PublishOutcome::refused;
     if (source_stride < row_bytes || row_bytes * rows != frame_bytes_)
-      return false;
+      return PublishOutcome::refused;
     // The last row needs its own bytes only, not the padding behind it.
     if (bytes < source_stride * (rows - 1) + row_bytes)
-      return false;
+      return PublishOutcome::refused;
 
     std::uint8_t *dst = slots_[back_].data();
     if (source_stride == row_bytes) {
@@ -109,13 +124,14 @@ public:
 
 private:
   // Producer end. Offers the slot the producer just filled and takes the slot
-  // the consumer left. Returns true when the frame it replaced had not been
-  // taken yet.
-  bool Offer() {
+  // the consumer left. The frame it replaced was a dropped frame when the
+  // consumer had not taken it yet.
+  PublishOutcome Offer() {
     const std::uint32_t replaced = handover_.exchange(
         static_cast<std::uint32_t>(back_) | kFresh, std::memory_order_acq_rel);
     back_ = replaced & kIndexMask;
-    return (replaced & kFresh) != 0;
+    return (replaced & kFresh) != 0 ? PublishOutcome::replaced
+                                    : PublishOutcome::published;
   }
 
   // The hand-over word holds a slot index and one bit that says the slot holds

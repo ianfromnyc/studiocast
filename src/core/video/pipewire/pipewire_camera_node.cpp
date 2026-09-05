@@ -47,6 +47,23 @@ std::string CameraFormatMismatch(std::uint32_t offered_format, int width,
          std::to_string(offered_format) + ".";
 }
 
+FrameWriteAnswer FrameWriteAnswerOf(studiocast::pw::PublishOutcome outcome) {
+  FrameWriteAnswer answer;
+  switch (outcome) {
+  case studiocast::pw::PublishOutcome::published:
+    return answer;
+  case studiocast::pw::PublishOutcome::replaced:
+    answer.dropped = true;
+    return answer;
+  case studiocast::pw::PublishOutcome::refused:
+    break;
+  }
+  answer.ok = false;
+  answer.error = "The PipeWire camera node refused the frame: its row layout "
+                 "does not describe the buffer the pipeline handed over.";
+  return answer;
+}
+
 } // namespace internal
 
 std::size_t CameraStrideBytes(int width, PixelFormat format) {
@@ -568,9 +585,20 @@ bool PipeWireCameraNode::WriteFrame(const std::uint8_t *data,
     return false;
   }
 
-  // A frame that replaced one the callback never took is a dropped frame.
-  if (impl_->frames.PublishRows(data, bytes, impl_->source_stride_bytes,
-                                impl_->stride_bytes, impl_->rows))
+  // A frame that replaced one the callback never took is a dropped frame. A
+  // frame the hand-off refused is a layout error, and the write fails with the
+  // reason, so the status carries it.
+  const internal::FrameWriteAnswer answer =
+      internal::FrameWriteAnswerOf(impl_->frames.PublishRows(
+          data, bytes, impl_->source_stride_bytes, impl_->stride_bytes,
+          impl_->rows));
+  if (!answer.ok) {
+    impl_->SetError(answer.error);
+    if (error)
+      *error = answer.error;
+    return false;
+  }
+  if (answer.dropped)
     impl_->frames_dropped.fetch_add(1, std::memory_order_relaxed);
 
 #if STUDIOCAST_HAVE_PIPEWIRE

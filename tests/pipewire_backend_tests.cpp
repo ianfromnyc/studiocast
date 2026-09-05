@@ -1141,10 +1141,14 @@ bool TestFrameBufferReportsAFrameThatWasNeverTaken() {
   const auto second = FrameOf(4, 0x55);
   const auto third = FrameOf(4, 0x66);
 
-  const bool lostOnFirst = buffer.Publish(first.data(), first.size());
-  const bool lostOnSecond = buffer.Publish(second.data(), second.size());
+  using studiocast::pw::PublishOutcome;
+  const bool lostOnFirst =
+      buffer.Publish(first.data(), first.size()) == PublishOutcome::replaced;
+  const bool lostOnSecond =
+      buffer.Publish(second.data(), second.size()) == PublishOutcome::replaced;
   const std::uint8_t taken = *buffer.Acquire();
-  const bool lostOnThird = buffer.Publish(third.data(), third.size());
+  const bool lostOnThird =
+      buffer.Publish(third.data(), third.size()) == PublishOutcome::replaced;
 
   return Expect(!lostOnFirst, "the first frame replaced nothing") &&
          Expect(lostOnSecond,
@@ -1170,7 +1174,8 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
     for (int i = 0; i < kFrames; ++i) {
       const auto value = static_cast<std::uint8_t>(i % 251);
       std::fill(frame.begin(), frame.end(), value);
-      if (buffer.Publish(frame.data(), frame.size()))
+      if (buffer.Publish(frame.data(), frame.size()) ==
+          studiocast::pw::PublishOutcome::replaced)
         dropped.fetch_add(1, std::memory_order_relaxed);
     }
     done.store(true, std::memory_order_release);
@@ -1245,6 +1250,72 @@ bool TestFrameBufferDropsTheRowPadding() {
                            kSourceStride, kRowBytes, kRows);
   return Expect(buffer.Acquire()[0] == 1,
                 "a frame shorter than the last row must be refused");
+}
+
+// A publish that refuses a frame and a publish that replaced a frame nothing
+// took are two different answers. One is a layout error the caller must
+// report, the other is the drop counter of the latest-frame-wins rule. One
+// `false` for both hides the error behind a counter.
+bool TestRowPublishSaysWhenItRefusesAFrame() {
+  using studiocast::pw::PublishOutcome;
+
+  constexpr std::size_t kRowBytes = 6;
+  constexpr std::size_t kRows = 4;
+  constexpr std::size_t kSourceStride = kRowBytes + 5;
+
+  std::vector<std::uint8_t> source(kSourceStride * kRows, 0x11);
+
+  studiocast::pw::TripleFrameBuffer buffer;
+  buffer.Reset(kRowBytes * kRows);
+
+  const PublishOutcome first = buffer.PublishRows(
+      source.data(), source.size(), kSourceStride, kRowBytes, kRows);
+  const PublishOutcome again = buffer.PublishRows(
+      source.data(), source.size(), kSourceStride, kRowBytes, kRows);
+
+  // The three layout guards. Each one copies nothing.
+  const PublishOutcome short_frame =
+      buffer.PublishRows(source.data(), kSourceStride * (kRows - 1) +
+                                            kRowBytes - 1,
+                         kSourceStride, kRowBytes, kRows);
+  const PublishOutcome narrow_stride = buffer.PublishRows(
+      source.data(), source.size(), kRowBytes - 1, kRowBytes, kRows);
+  const PublishOutcome wrong_size = buffer.PublishRows(
+      source.data(), source.size(), kSourceStride, kRowBytes, kRows - 1);
+
+  return Expect(first == PublishOutcome::published,
+                "the first frame took a free slot") &&
+         Expect(again == PublishOutcome::replaced,
+                "a frame that replaced an untaken one is a drop") &&
+         Expect(short_frame == PublishOutcome::refused,
+                "a frame shorter than its rows must be refused") &&
+         Expect(narrow_stride == PublishOutcome::refused,
+                "a source stride under the row size must be refused") &&
+         Expect(wrong_size == PublishOutcome::refused,
+                "rows that do not fill the frame must be refused");
+}
+
+// A refused frame is a layout error, not a dropped frame. A write that
+// answered true for it would leave the node dropping every frame while the
+// status said "running" and the drop count stayed at zero.
+bool TestARefusedFrameFailsTheCameraWrite() {
+  using studiocast::pw::PublishOutcome;
+  using studiocast::video::pw_backend::internal::FrameWriteAnswerOf;
+
+  const auto published = FrameWriteAnswerOf(PublishOutcome::published);
+  const auto replaced = FrameWriteAnswerOf(PublishOutcome::replaced);
+  const auto refused = FrameWriteAnswerOf(PublishOutcome::refused);
+
+  return Expect(published.ok && !published.dropped &&
+                    published.error.empty(),
+                "a staged frame is a write that worked") &&
+         Expect(replaced.ok && replaced.dropped && replaced.error.empty(),
+                "a frame that replaced an untaken one is a drop, not a "
+                "failure") &&
+         Expect(!refused.ok && !refused.dropped,
+                "a refused frame must fail the write") &&
+         Expect(refused.error.find("layout") != std::string::npos,
+                "a refused frame must say why: " + refused.error);
 }
 
 // The node offers one format only, so a negotiated format that differs is a
@@ -2169,6 +2240,10 @@ int main() {
        &TestFrameBufferSurvivesAProducerAndAConsumer},
       {"frame buffer drops the row padding",
        &TestFrameBufferDropsTheRowPadding},
+      {"a row publish says when it refuses a frame",
+       &TestRowPublishSaysWhenItRefusesAFrame},
+      {"a refused frame fails the camera write",
+       &TestARefusedFrameFailsTheCameraWrite},
       {"camera negotiated format mismatch names the difference",
        &TestCameraNegotiatedFormatMismatchNamesTheDifference},
       {"camera frame byte arithmetic", &TestCameraFrameByteArithmetic},
