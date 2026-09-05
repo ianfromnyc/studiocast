@@ -103,34 +103,49 @@ checksum_contains() {
     die "checksum file does not reference $(basename "${artifact}")"
 }
 
-# Compare one metadata field of a package with the expected value. rpm runs on
-# its own line, outside a command substitution, so a package that rpm cannot
-# read stops the script here instead of turning into an empty field and a
-# misleading message about the field itself.
+# Holds the standard output of the last run_rpm_query call.
+RPM_QUERY_OUT=""
+
+# Read one piece of metadata out of a package. The standard error of rpm goes
+# to its own file, because rpm exits 0 while it warns about a package whose
+# signing key is not in the rpmdb, and such a warning must not become part of
+# the value the checks compare. rpm runs on its own line, outside a command
+# substitution, so a package that rpm cannot read stops the script here
+# instead of turning into an empty value and a misleading message about the
+# metadata itself.
+run_rpm_query() {
+  local package="$1"
+  shift
+  local err_file
+  err_file="$(mktemp)"
+  if ! RPM_QUERY_OUT="$(rpm -qp "$@" "${package}" 2>"${err_file}")"; then
+    local err
+    err="$(cat "${err_file}")"
+    rm -f "${err_file}"
+    die "rpm could not read $(basename "${package}"): ${err}"
+  fi
+  rm -f "${err_file}"
+}
+
+# Compare one metadata field of a package with the expected value.
 require_query_equal() {
   local package="$1"
   local format="$2"
   local expected="$3"
   local context="$4"
-  local actual
-  if ! actual="$(rpm -qp --qf "${format}" "${package}" 2>&1)"; then
-    die "rpm could not read $(basename "${package}"): ${actual}"
-  fi
-  require_equal "${actual}" "${expected}" "${context}"
+  run_rpm_query "${package}" --qf "${format}"
+  require_equal "${RPM_QUERY_OUT}" "${expected}" "${context}"
 }
 
 # Holds the lines that read_package_list read out of the last package.
 PACKAGE_LIST=""
 
-# Read one metadata list out of a package into PACKAGE_LIST. rpm runs on its
-# own, so a package that rpm cannot read stops the script with its own message
-# instead of one that says the metadata is missing.
+# Read one metadata list out of a package into PACKAGE_LIST.
 read_package_list() {
   local package="$1"
   local query="$2"
-  if ! PACKAGE_LIST="$(rpm -qp "${query}" "${package}" 2>&1)"; then
-    die "rpm could not read $(basename "${package}"): ${PACKAGE_LIST}"
-  fi
+  run_rpm_query "${package}" "${query}"
+  PACKAGE_LIST="${RPM_QUERY_OUT}"
 }
 
 package_lists_path() {
