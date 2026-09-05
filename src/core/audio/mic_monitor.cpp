@@ -35,6 +35,12 @@ std::string Trimmed(std::string s) { return studiocast::util::TrimCopy(s); }
 
 // The monitor source is the sink monitor of `sink`, so capturing from that
 // monitor while playing into the sink would create a feedback loop.
+//
+// This rule is belt and braces: `IsUnsafeInputSourceName` already refuses
+// every source name that carries ".monitor", so a microphone the daemon
+// resolved can never be "<sink>.monitor". Only a caller that passes an
+// unchecked source name, such as a test, reaches it. Keep it anyway, because
+// it is the rule that names the failure.
 bool SinkFeedsCaptureSource(const std::string &sink,
                             const std::string &mic_source_name) {
   if (sink.empty() || mic_source_name.empty())
