@@ -213,6 +213,38 @@ void RunSpeakerLoopbackPump(const SpeakerLoopbackPumpHooks &hooks) {
   }
 }
 
+std::string AudioFormatMismatch(const std::string &what,
+                                const studiocast::pw::AudioNodeConfig &node,
+                                int sample_rate, std::uint32_t channels,
+                                std::uint32_t frame_samples) {
+  auto differs = [](const std::string &field, long long wanted,
+                    long long have) {
+    return field + " " + std::to_string(wanted) + " where the node uses " +
+           std::to_string(have);
+  };
+
+  std::vector<std::string> problems;
+  if (sample_rate != node.sample_rate)
+    problems.push_back(differs("sample rate", sample_rate, node.sample_rate));
+  if (channels != node.channels)
+    problems.push_back(differs("channel count", channels, node.channels));
+  if (frame_samples != node.frame_samples) {
+    problems.push_back(
+        differs("frame size", frame_samples, node.frame_samples));
+  }
+  if (problems.empty())
+    return {};
+
+  std::string out = "The audio pipeline asks the StudioCast " + what + " for ";
+  for (std::size_t i = 0; i < problems.size(); ++i) {
+    if (i > 0)
+      out += i + 1 == problems.size() ? " and " : ", ";
+    out += problems[i];
+  }
+  out += ".";
+  return out;
+}
+
 } // namespace internal
 
 // ---------------------------------------------------------------------------
@@ -546,6 +578,15 @@ public:
           *error = "The native PipeWire virtual speakers are not created.";
         return false;
       }
+      const std::string mismatch = internal::AudioFormatMismatch(
+          "virtual speakers", read_node_->Format(), cfg.sample_rate,
+          cfg.channels, cfg.frame_samples);
+      if (!mismatch.empty()) {
+        if (error)
+          *error = mismatch;
+        read_node_.reset();
+        return false;
+      }
       // A node the service owns may still carry the stop request of whoever
       // woke it last. It carries samples for this pipeline from here.
       read_node_->ClearStopRequest();
@@ -575,6 +616,15 @@ public:
     if (!write_node_) {
       if (error)
         *error = "The native PipeWire virtual microphone is not created.";
+      return false;
+    }
+    const std::string mismatch = internal::AudioFormatMismatch(
+        "virtual microphone", write_node_->Format(), cfg.sample_rate,
+        cfg.channels, cfg.frame_samples);
+    if (!mismatch.empty()) {
+      if (error)
+        *error = mismatch;
+      write_node_.reset();
       return false;
     }
     // See the speakers path: the service owns this node, so a stop request

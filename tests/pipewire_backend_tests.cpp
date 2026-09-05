@@ -538,6 +538,44 @@ bool TestLiveStoppedNodeSaysWhyItRefusesWork() {
          Expect(!writeError.empty(), "the refused write explained nothing");
 }
 
+// The service pins the format of its virtual devices, and the pipeline brings
+// its own. A mismatch would push stereo bytes through a mono ring and produce
+// garbled audio with no complaint, so the pipeline must be refused instead.
+bool TestAudioFormatMismatchNamesTheDifference() {
+  studiocast::pw::AudioNodeConfig node;
+  node.sample_rate = 48000;
+  node.channels = 1;
+  node.frame_samples = 480;
+
+  const std::string same =
+      studiocast::audio::pw_backend::internal::AudioFormatMismatch(
+          "virtual microphone", node, 48000, 1, 480);
+  const std::string rate =
+      studiocast::audio::pw_backend::internal::AudioFormatMismatch(
+          "virtual microphone", node, 44100, 1, 480);
+  const std::string channels =
+      studiocast::audio::pw_backend::internal::AudioFormatMismatch(
+          "virtual microphone", node, 48000, 2, 480);
+  const std::string frame =
+      studiocast::audio::pw_backend::internal::AudioFormatMismatch(
+          "virtual microphone", node, 48000, 1, 960);
+
+  auto names = [](const std::string &message, const char *a, const char *b) {
+    return message.find(a) != std::string::npos &&
+           message.find(b) != std::string::npos;
+  };
+
+  return Expect(same.empty(), "a matching format must be accepted: " + same) &&
+         Expect(names(rate, "44100", "48000"),
+                "a rate mismatch must name both rates: " + rate) &&
+         Expect(names(channels, "2", "1"),
+                "a channel mismatch must name both counts: " + channels) &&
+         Expect(names(frame, "960", "480"),
+                "a frame mismatch must name both sizes: " + frame) &&
+         Expect(rate.find("virtual microphone") != std::string::npos,
+                "the message must name the device: " + rate);
+}
+
 bool TestPipeWireIoRefusesToOpenWithoutTheVirtualMic() {
   auto io = studiocast::audio::pw_backend::CreatePipeWireAudioIo();
   if (!Expect(io != nullptr, "the PipeWire I/O factory returned nothing"))
@@ -1622,6 +1660,8 @@ int main() {
        &TestSpeakerLoopbackPumpPassesOnTheFrameItRead},
       {"live stopped node says why it refuses work",
        &TestLiveStoppedNodeSaysWhyItRefusesWork},
+      {"audio format mismatch names the difference",
+       &TestAudioFormatMismatchNamesTheDifference},
       {"pipewire io refuses to open without the virtual mic",
        &TestPipeWireIoRefusesToOpenWithoutTheVirtualMic},
       {"live native virtual mic round trip",

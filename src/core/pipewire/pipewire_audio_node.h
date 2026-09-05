@@ -110,6 +110,10 @@ public:
   // Best-effort graph latency in microseconds.
   bool GetLatencyUs(std::uint64_t *latency_us) const;
 
+  // The format the node was started with. A caller that moves samples through
+  // it must bring the same one. Only meaningful after a Start that succeeded.
+  AudioNodeConfig Format() const;
+
   // PipeWire global id of the node, or 0 before the node reaches the graph.
   std::uint32_t NodeId() const;
 

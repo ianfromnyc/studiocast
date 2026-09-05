@@ -70,6 +70,19 @@ struct SpeakerLoopbackPumpHooks {
 // reason for a failure is that nothing plays into the virtual speakers.
 void RunSpeakerLoopbackPump(const SpeakerLoopbackPumpHooks &hooks);
 
+// Compares the format a pipeline brings with the format a service node was
+// created with. Returns an empty string when they match, and a message that
+// names both values otherwise.
+//
+// The node's ring counts bytes, not samples, so a pipeline with a different
+// channel count or rate would push samples through it and the audio would
+// come out garbled with nothing to explain it. `what` names the device in the
+// message.
+std::string AudioFormatMismatch(const std::string &what,
+                                const studiocast::pw::AudioNodeConfig &node,
+                                int sample_rate, std::uint32_t channels,
+                                std::uint32_t frame_samples);
+
 } // namespace internal
 
 // What a process wants from the native device owner.

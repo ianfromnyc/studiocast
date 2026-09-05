@@ -709,6 +709,8 @@ std::uint64_t PipeWireAudioNode::OverflowCount() const {
   return impl_->overflow_count.load(std::memory_order_relaxed);
 }
 
+AudioNodeConfig PipeWireAudioNode::Format() const { return impl_->cfg; }
+
 std::uint32_t PipeWireAudioNode::NodeId() const {
   return impl_->links.NodeId();
 }
