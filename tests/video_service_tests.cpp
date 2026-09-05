@@ -44,6 +44,7 @@ bool TestV4l2CaptureNegotiationKeepsTheDriverRowStride();
 bool TestV4l2CaptureNegotiationRefusesRowsTheFrameSizeCannotHold();
 bool TestV4l2CaptureNegotiationRefusesAnMplaneReportWithoutOnePlane();
 bool TestV4l2CaptureBufferMustHoldTheNegotiatedFrame();
+bool TestV4l2CaptureFramePayloadStaysInsideTheMapping();
 bool TestYuyvToRgb24MatchesBt601AndPreservesPadding();
 bool TestYuyvToRgb24TailStaysInsideAPackedOddWidthRow();
 bool TestYuyvToRgb24BackendsMatchScalarReference();
@@ -1139,6 +1140,8 @@ int main() {
            TestV4l2CaptureNegotiationRefusesAnMplaneReportWithoutOnePlane},
       {"V4L2 capture buffer must hold the negotiated frame",
        &studiocast::tests::TestV4l2CaptureBufferMustHoldTheNegotiatedFrame},
+      {"V4L2 capture frame payload stays inside the mapping",
+       &studiocast::tests::TestV4l2CaptureFramePayloadStaysInsideTheMapping},
       {"YUYV->RGB tail stays inside a packed odd width row",
        &studiocast::tests::TestYuyvToRgb24TailStaysInsideAPackedOddWidthRow},
   };

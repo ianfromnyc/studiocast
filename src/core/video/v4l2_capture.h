@@ -84,6 +84,21 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
 bool CaptureBufferHoldsFrame(std::size_t mapped_length,
                              const CaptureFormat &fmt, std::string *outErr);
 
+// Resolves where the image sits in a buffer VIDIOC_DQBUF just returned.
+// `bytesused` is the driver's own count of the bytes it wrote, and it is the
+// length the compressed read path walks, so the mapping has to bound it like
+// every other walk: a count above `mapped_length` is clamped to it.
+//
+// On a multi-planar buffer `bytesused` also includes `data_offset`, so the
+// image starts that many bytes into the plane and is that much shorter. The
+// single-plane buffer has no such field and passes 0. An offset the payload
+// does not reach describes no image at all, so the frame is refused.
+//
+// Exposed for tests; `V4l2Capture::AcquireFrame()` is the only other caller.
+bool CaptureFramePayload(std::size_t mapped_length, std::size_t bytesused,
+                         std::size_t data_offset, std::size_t *out_offset,
+                         std::size_t *out_bytes, std::string *outErr);
+
 struct CapturedFrameView {
   const std::uint8_t *data = nullptr;
   std::size_t bytes = 0;

@@ -597,10 +597,10 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
     // answers EINVAL and the user is told nothing about the layout.
     if (f.fmt.pix_mp.num_planes != 1) {
       if (outErr)
-        *outErr = "mplane format returned num_planes=" +
-                  std::to_string(static_cast<unsigned>(
-                      f.fmt.pix_mp.num_planes)) +
-                  ", only one plane is supported";
+        *outErr =
+            "mplane format returned num_planes=" +
+            std::to_string(static_cast<unsigned>(f.fmt.pix_mp.num_planes)) +
+            ", only one plane is supported";
       return false;
     }
     bpl = static_cast<std::size_t>(f.fmt.pix_mp.plane_fmt[0].bytesperline);
@@ -688,6 +688,31 @@ bool CaptureBufferHoldsFrame(std::size_t mapped_length,
               std::to_string(mapped_length) + " bytes for a frame of " +
               std::to_string(fmt.size_image) + " bytes";
   return false;
+}
+
+bool CaptureFramePayload(std::size_t mapped_length, std::size_t bytesused,
+                         std::size_t data_offset, std::size_t *out_offset,
+                         std::size_t *out_bytes, std::string *outErr) {
+  if (!out_offset || !out_bytes)
+    return false;
+
+  // `bytesused` is the one number the driver gives per frame that negotiation
+  // never saw, so the mapping is the only bound it has. A count below the
+  // mapping is a frame with less in it; a count above it is a walk past the
+  // end of the mapping on that frame.
+  const std::size_t used = std::min(bytesused, mapped_length);
+
+  if (data_offset > used) {
+    if (outErr)
+      *outErr = "Driver reported a plane data_offset of " +
+                std::to_string(data_offset) + " bytes in a payload of " +
+                std::to_string(used) + " bytes";
+    return false;
+  }
+
+  *out_offset = data_offset;
+  *out_bytes = used - data_offset;
+  return true;
 }
 
 bool ShouldPreferMjpegForResolution(int width, int height) {
@@ -1372,8 +1397,18 @@ bool V4l2Capture::AcquireFrame(CapturedFrameView *out, int timeout_ms,
         (static_cast<std::uint64_t>(b.timestamp.tv_usec) * 1000ULL);
     out->timestamp_monotonic =
         (b.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0;
-    out->bytes = static_cast<std::size_t>(b.bytesused);
-    out->data = static_cast<const std::uint8_t *>(buffers_[idx].start);
+
+    // A single-plane buffer has no `data_offset`, so the image starts at the
+    // beginning of the mapping.
+    std::size_t off = 0;
+    std::size_t bytes = 0;
+    if (!CaptureFramePayload(buffers_[idx].length,
+                             static_cast<std::size_t>(b.bytesused),
+                             /*data_offset=*/0u, &off, &bytes, error))
+      return false;
+
+    out->bytes = bytes;
+    out->data = static_cast<const std::uint8_t *>(buffers_[idx].start) + off;
     return true;
   }
 
@@ -1405,8 +1440,18 @@ bool V4l2Capture::AcquireFrame(CapturedFrameView *out, int timeout_ms,
       (static_cast<std::uint64_t>(b.timestamp.tv_sec) * 1000000000ULL) +
       (static_cast<std::uint64_t>(b.timestamp.tv_usec) * 1000ULL);
   out->timestamp_monotonic = (b.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0;
-  out->bytes = static_cast<std::size_t>(planes[0].bytesused);
-  out->data = static_cast<const std::uint8_t *>(buffers_[idx].start);
+
+  // On a multi-planar buffer the image starts `data_offset` bytes into the
+  // plane, and `bytesused` counts those bytes as well.
+  std::size_t off = 0;
+  std::size_t bytes = 0;
+  if (!CaptureFramePayload(
+          buffers_[idx].length, static_cast<std::size_t>(planes[0].bytesused),
+          static_cast<std::size_t>(planes[0].data_offset), &off, &bytes, error))
+    return false;
+
+  out->bytes = bytes;
+  out->data = static_cast<const std::uint8_t *>(buffers_[idx].start) + off;
   return true;
 #else
   if (error)

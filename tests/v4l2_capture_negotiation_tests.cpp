@@ -427,7 +427,66 @@ bool TestCaptureBufferMustHoldTheNegotiatedFrame() {
                 "a frame of no bytes must not refuse an empty buffer");
 }
 
+// `bytesused` is the driver's own count of the bytes it put in the buffer,
+// and it is the length the MJPEG walk uses, so it must be bounded by the
+// mapping like every other walk. On a multi-planar buffer it also includes
+// `data_offset`: the image starts that many bytes into the plane and is that
+// much shorter.
+bool TestCaptureFramePayloadStaysInsideTheMapping() {
+  using studiocast::video::CaptureFramePayload;
+
+  std::size_t off = 0;
+  std::size_t bytes = 0;
+
+  if (!Expect(CaptureFramePayload(4096u, 1024u, /*data_offset=*/0u, &off,
+                                  &bytes, nullptr) &&
+                  off == 0u && bytes == 1024u,
+              "a payload inside the mapping must be taken as reported"))
+    return false;
+
+  // A driver that says it wrote more than the buffer holds is outside the
+  // V4L2 contract. The mapping is the length the walk has to stay inside.
+  if (!Expect(CaptureFramePayload(4096u, 9000u, /*data_offset=*/0u, &off,
+                                  &bytes, nullptr) &&
+                  off == 0u && bytes == 4096u,
+              "a payload longer than the mapping must be clamped to it"))
+    return false;
+
+  // `data_offset` is included in `bytesused`, so the image is both later and
+  // shorter than the plane count alone says.
+  if (!Expect(CaptureFramePayload(4096u, 1024u, /*data_offset=*/64u, &off,
+                                  &bytes, nullptr) &&
+                  off == 64u && bytes == 960u,
+              "a plane data_offset must move and shorten the image"))
+    return false;
+
+  if (!Expect(CaptureFramePayload(4096u, 1024u, /*data_offset=*/1024u, &off,
+                                  &bytes, nullptr) &&
+                  off == 1024u && bytes == 0u,
+              "an offset at the end of the payload must give no image"))
+    return false;
+
+  std::string err;
+  if (!Expect(!CaptureFramePayload(4096u, 1024u, /*data_offset=*/1025u, &off,
+                                   &bytes, &err),
+              "an offset past the payload must refuse the frame"))
+    return false;
+
+  if (!Expect(!err.empty(), "the refusal must name the reason"))
+    return false;
+
+  // The clamp runs first, so an offset inside an overstated payload but
+  // outside the mapping is still refused.
+  return Expect(!CaptureFramePayload(4096u, 9000u, /*data_offset=*/8192u, &off,
+                                     &bytes, nullptr),
+                "an offset outside the mapping must refuse the frame");
+}
+
 } // namespace
+
+bool TestV4l2CaptureFramePayloadStaysInsideTheMapping() {
+  return TestCaptureFramePayloadStaysInsideTheMapping();
+}
 
 bool TestV4l2CapturePreferenceTreats720pAsMjpegWorthy() {
   return TestCapturePreferenceTreats720pAsMjpegWorthy();
