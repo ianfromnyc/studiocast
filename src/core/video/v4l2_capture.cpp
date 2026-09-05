@@ -1,5 +1,7 @@
 #include "v4l2_capture.h"
 
+#include "v4l2_writer.h"
+
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
@@ -601,8 +603,7 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
     a.size_image = size;
   } else {
     // Provide conservative minima for uncompressed formats.
-    const std::size_t bpp = (a.format == CapturePixelFormat::rgb24) ? 3u : 2u;
-    const std::size_t minBpl = static_cast<std::size_t>(a.width) * bpp;
+    const std::size_t minBpl = CaptureMinBytesPerLine(a.width, a.format);
     if (bpl < minBpl)
       bpl = minBpl;
     a.bytes_per_line = bpl;
@@ -618,6 +619,19 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
 }
 
 } // namespace
+
+std::size_t CaptureMinBytesPerLine(int width, CapturePixelFormat fmt) {
+  switch (fmt) {
+  case CapturePixelFormat::yuyv:
+    return MinBytesPerLine(width, PixelFormat::yuyv);
+  case CapturePixelFormat::rgb24:
+    return MinBytesPerLine(width, PixelFormat::rgb24);
+  case CapturePixelFormat::mjpeg:
+    // Compressed: the driver reports no meaningful row size.
+    return 0u;
+  }
+  return 0u;
+}
 
 bool ShouldPreferMjpegForResolution(int width, int height) {
   // Heuristic: uncompressed YUYV at 720p+ tends to be unsupported, unstable,

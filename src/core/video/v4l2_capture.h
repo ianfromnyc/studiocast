@@ -34,6 +34,12 @@ CaptureFormatTryOrderForRequest(CapturePixelFormat requested,
                                 bool prefer_mjpeg, int width, int height,
                                 CaptureFormatSupport support);
 
+// Smallest bytes_per_line an uncompressed capture frame of this width needs.
+// This is the same rule the writer uses, so a YUYV row keeps the whole final
+// pixel pair when the width is odd. MJPEG is compressed and has no meaningful
+// row size, so it gives 0.
+std::size_t CaptureMinBytesPerLine(int width, CapturePixelFormat fmt);
+
 struct CaptureFormat {
   int width = 0;
   int height = 0;

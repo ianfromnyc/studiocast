@@ -40,6 +40,7 @@ bool TestV4l2UnsupportedFormatsAreSkippedWithoutDuplicates();
 bool TestV4l2ExplicitMjpegRequestDoesNotFallBackToYuyvInsideOpenOrder();
 bool TestV4l2FakeNegotiationUsesOrderedFallback();
 bool TestV4l2MjpegDecodeFailureFallsBackToRawOnce();
+bool TestV4l2CaptureRowSizeMatchesTheSharedRowRule();
 bool TestYuyvToRgb24MatchesBt601AndPreservesPadding();
 bool TestYuyvToRgb24BackendsMatchScalarReference();
 bool TestRgb24ToYuyvMatchesBt601WithinChromaRounding();
@@ -1124,6 +1125,8 @@ int main() {
            TestBackgroundBlurCpuMatchesReferenceAndPreservesPadding},
       {"V4L2 writer row size holds the odd width YUYV pair",
        &studiocast::tests::TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair},
+      {"V4L2 capture row size matches the shared row rule",
+       &studiocast::tests::TestV4l2CaptureRowSizeMatchesTheSharedRowRule},
   };
 
   int failed = 0;

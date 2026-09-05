@@ -1,6 +1,8 @@
 #include "core/video/v4l2_capture.h"
 #include "core/video/capture_error_policy.h"
+#include "core/video/v4l2_writer.h"
 
+#include <cstddef>
 #include <initializer_list>
 #include <iostream>
 #include <optional>
@@ -165,6 +167,44 @@ bool TestMjpegDecodeFailureFallsBackToRawOnce() {
              "raw capture failures should not re-enter MJPEG fallback policy");
 }
 
+// The capture path reads a row with the same converters the writer path
+// writes one with, so both must agree on the row size. A YUYV row packs
+// pixels in pairs: an odd width still fills the whole final pair, and a row
+// of width * 2 bytes makes the odd-width tail read past the frame.
+bool TestCaptureRowSizeMatchesTheSharedRowRule() {
+  using studiocast::video::CaptureMinBytesPerLine;
+  using studiocast::video::MinBytesPerLine;
+  using studiocast::video::PixelFormat;
+
+  for (const int width : {1, 2, 3, 7, 16, 17, 640}) {
+    const std::size_t yuyv =
+        CaptureMinBytesPerLine(width, CapturePixelFormat::yuyv);
+    const std::size_t expected_yuyv = MinBytesPerLine(width, PixelFormat::yuyv);
+    if (!Expect(yuyv == expected_yuyv,
+                "captured YUYV row size must hold the whole final pair")) {
+      std::cerr << "  width " << width << ": expected " << expected_yuyv
+                << ", got " << yuyv << "\n";
+      return false;
+    }
+
+    const std::size_t rgb24 =
+        CaptureMinBytesPerLine(width, CapturePixelFormat::rgb24);
+    const std::size_t expected_rgb24 =
+        MinBytesPerLine(width, PixelFormat::rgb24);
+    if (!Expect(rgb24 == expected_rgb24,
+                "captured RGB24 row size must be three bytes per pixel")) {
+      std::cerr << "  width " << width << ": expected " << expected_rgb24
+                << ", got " << rgb24 << "\n";
+      return false;
+    }
+  }
+
+  return Expect(CaptureMinBytesPerLine(640, CapturePixelFormat::mjpeg) == 0u,
+                "MJPEG is compressed and has no row size") &&
+         Expect(CaptureMinBytesPerLine(0, CapturePixelFormat::yuyv) == 0u,
+                "a width of zero has no row");
+}
+
 } // namespace
 
 bool TestV4l2CapturePreferenceTreats720pAsMjpegWorthy() {
@@ -197,6 +237,10 @@ bool TestV4l2FakeNegotiationUsesOrderedFallback() {
 
 bool TestV4l2MjpegDecodeFailureFallsBackToRawOnce() {
   return TestMjpegDecodeFailureFallsBackToRawOnce();
+}
+
+bool TestV4l2CaptureRowSizeMatchesTheSharedRowRule() {
+  return TestCaptureRowSizeMatchesTheSharedRowRule();
 }
 
 } // namespace studiocast::tests
