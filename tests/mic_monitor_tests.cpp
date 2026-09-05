@@ -399,6 +399,37 @@ bool TestStopReportsAFailureWhenPactlTimesOut() {
   return true;
 }
 
+// The sink question has three answers, and the pin rule depends on all three.
+// A `pactl list short sinks` that runs out of time prints nothing at all, so
+// an empty list must not read as "the sink is gone": the monitor would stop
+// for good and blame an output that never moved.
+bool TestSinkPresentGivesNoAnswerWhenTheSinkListTimesOut() {
+  ScopedPactlExecHook hook([](const std::string &command) {
+    if (command == "pactl --version 2>&1")
+      return ExecResult(0, "pactl 17.0\n");
+    if (command == "pactl list short sinks 2>&1") {
+      auto result = ExecResult(-1);
+      result.timed_out = true;
+      return result;
+    }
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  std::string error;
+  const auto present =
+      studiocast::audio::MicMonitorSinkPresent("headset_test_sink", &error);
+  if (present.has_value()) {
+    std::cerr << "a timed-out sink list answered '"
+              << (*present ? "present" : "gone") << "'\n";
+    return false;
+  }
+  if (error.empty()) {
+    std::cerr << "the unanswered sink question said nothing about why\n";
+    return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Service lifecycle
 // ---------------------------------------------------------------------------
@@ -2020,6 +2051,8 @@ int main() {
        &TestStopReportsNothingToCleanWithoutPactl},
       {"monitor stop reports a failure when pactl times out",
        &TestStopReportsAFailureWhenPactlTimesOut},
+      {"monitor sink question gives no answer when the sink list times out",
+       &TestSinkPresentGivesNoAnswerWhenTheSinkListTimesOut},
       {"service starts and stops the monitor with config",
        &TestServiceStartsAndStopsMonitorWithConfig},
       {"service restarts the monitor on a sink change",

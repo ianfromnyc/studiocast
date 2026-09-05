@@ -48,6 +48,19 @@ std::string FirstLineOrEmpty(const std::string &s) {
   return util::FirstNonEmptyLine(s);
 }
 
+// Why a listing command failed. A pactl that was killed at its deadline
+// prints nothing at all, and an empty error beside an empty list reads as "the
+// list is empty", which is a different answer. Every listing therefore says
+// something, so a caller can tell a failure from an empty list.
+std::string ListFailureMessage(const util::ExecResult &res,
+                               const std::string &command_name) {
+  const std::string out = util::TrimCopy(res.stdout_str);
+  if (!out.empty())
+    return out;
+  return res.timed_out ? (command_name + " did not answer in time")
+                       : (command_name + " failed");
+}
+
 std::string ShellQuoteSingle(const std::string &s) {
   // Safe single-quote for /bin/sh -c
   std::string out;
@@ -208,7 +221,7 @@ std::vector<PactlModule> ListModules(std::string *error) {
   auto res = RunPactlCommand("pactl list short modules 2>&1");
   if (res.exit_code != 0) {
     if (error)
-      *error = util::TrimCopy(res.stdout_str);
+      *error = ListFailureMessage(res, "pactl list short modules");
     return {};
   }
 
@@ -236,7 +249,7 @@ std::vector<PactlSource> ListSources(std::string *error) {
   auto res = RunPactlCommand("pactl list short sources 2>&1");
   if (res.exit_code != 0) {
     if (error)
-      *error = util::TrimCopy(res.stdout_str);
+      *error = ListFailureMessage(res, "pactl list short sources");
     return {};
   }
 
@@ -263,7 +276,7 @@ std::vector<PactlSink> ListSinks(std::string *error) {
   auto res = RunPactlCommand("pactl list short sinks 2>&1");
   if (res.exit_code != 0) {
     if (error)
-      *error = util::TrimCopy(res.stdout_str);
+      *error = ListFailureMessage(res, "pactl list short sinks");
     return {};
   }
 
@@ -290,7 +303,7 @@ std::vector<PactlSourceOutput> ListSourceOutputs(std::string *error) {
   auto res = RunPactlCommand("pactl list short source-outputs 2>&1");
   if (res.exit_code != 0) {
     if (error)
-      *error = util::TrimCopy(res.stdout_str);
+      *error = ListFailureMessage(res, "pactl list short source-outputs");
     return {};
   }
 
@@ -317,7 +330,7 @@ std::vector<PactlSinkInput> ListSinkInputs(std::string *error) {
   auto res = RunPactlCommand("pactl list short sink-inputs 2>&1");
   if (res.exit_code != 0) {
     if (error)
-      *error = util::TrimCopy(res.stdout_str);
+      *error = ListFailureMessage(res, "pactl list short sink-inputs");
     return {};
   }
 
@@ -348,7 +361,7 @@ std::vector<PactlSourceInfo> ListSourcesDetailed(std::string *error) {
   auto res = RunPactlCommand("pactl list sources 2>&1");
   if (res.exit_code != 0) {
     if (error)
-      *error = util::TrimCopy(res.stdout_str);
+      *error = ListFailureMessage(res, "pactl list sources");
     return {};
   }
 
@@ -566,7 +579,7 @@ std::vector<PactlSinkInputInfo> ListSinkInputsDetailed(std::string *error) {
   auto res = RunPactlCommand("pactl list sink-inputs 2>&1");
   if (res.exit_code != 0) {
     if (error)
-      *error = util::TrimCopy(res.stdout_str);
+      *error = ListFailureMessage(res, "pactl list sink-inputs");
     return {};
   }
 
