@@ -480,6 +480,36 @@ cuda_required_libs() {
   } | sort -u
 }
 
+# One preflight line for the pkg-config state. Returns non-zero on a failure.
+#
+# Arguments: [bootstrap .pc file]
+#
+# CMake reads the bootstrap through pkg-config, so the file alone says nothing:
+# on Fedora it lies outside the pkg-config search path, and the link that fixes
+# that is only made when pkg-config was there at install time.
+report_pkgconfig_check() {
+  local pc_file="${1:-/usr/local/lib/pkgconfig/onnxruntime.pc}"
+
+  if [[ ! -f "${pc_file}" ]]; then
+    log "  FAIL  ${pc_file} (missing)"
+    return 1
+  fi
+
+  if ! command -v pkg-config >/dev/null 2>&1; then
+    log "  FAIL  pkg-config (not installed, so nothing reads ${pc_file})"
+    return 1
+  fi
+
+  if ! pkg-config --exists onnxruntime; then
+    log "  FAIL  pkg-config does not find onnxruntime, though ${pc_file} is"
+    log "        there (the link into a directory pkg-config searches is gone)"
+    return 1
+  fi
+
+  log "  PASS  pkg-config finds onnxruntime $(pkg-config --modversion onnxruntime 2>/dev/null)"
+  return 0
+}
+
 # Print a pass/fail line per check. Returns non-zero when any check failed.
 report_cuda_preflight() {
   local failures=0
@@ -522,13 +552,7 @@ report_cuda_preflight() {
     failures=$((failures + 1))
   fi
 
-  local pc_file="/usr/local/lib/pkgconfig/onnxruntime.pc"
-  if [[ -f "${pc_file}" ]]; then
-    log "  PASS  ${pc_file}"
-  else
-    log "  FAIL  ${pc_file} (missing)"
-    failures=$((failures + 1))
-  fi
+  report_pkgconfig_check || failures=$((failures + 1))
 
   if [[ "${failures}" -eq 0 ]]; then
     log "CUDA preflight: PASS"

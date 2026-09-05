@@ -498,6 +498,72 @@ test_an_option_without_a_value_says_so() {
   done
 }
 
+# CMake reads the bootstrap through pkg-config, so the preflight must ask
+# pkg-config. On Fedora the .pc file lies outside the pkg-config search path,
+# so the file alone says nothing about whether a build can find it.
+test_the_preflight_asks_pkg_config() {
+  local casedir mode out rc
+  for mode in resolves missing_module missing_file; do
+    casedir="${SANDBOX}/pkgconfig-preflight-${mode}"
+    mkdir -p "${casedir}/bin" "${casedir}/pkgconfig"
+
+    local pc_file="${casedir}/pkgconfig/onnxruntime.pc"
+    if [[ "${mode}" != "missing_file" ]]; then
+      printf 'Name: onnxruntime\n' > "${pc_file}"
+    fi
+
+    cat > "${casedir}/bin/pkg-config" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == "--exists" ]]; then
+  [[ "${mode}" == "resolves" ]]
+  exit \$?
+fi
+if [[ "\$1" == "--modversion" ]]; then
+  echo 1.29.0
+fi
+exit 0
+STUB
+    chmod +x "${casedir}/bin/pkg-config"
+
+    local child="${SANDBOX}/pkgconfig-preflight-child.sh"
+    cat > "${child}" <<'CHILD'
+set -uo pipefail
+export ORT_FLAVOR=cpu
+export CUDA_MAJOR=13
+export ORT_ARCH=x64
+# shellcheck source=/dev/null
+source "$1"
+report_pkgconfig_check "$2"
+echo "CHECK_RETURNED_$?"
+CHILD
+
+    rc=0
+    out="$(PATH="${casedir}/bin:${PATH}" bash "${child}" "${FEDORA_SETUP}" \
+      "${pc_file}" 2>&1)" || rc=$?
+
+    case "${mode}" in
+      resolves)
+        if [[ "${out}" != *"PASS"* || "${out}" != *CHECK_RETURNED_0* ]]; then
+          t_fail "a pkg-config that resolves onnxruntime should pass, got: ${out}"
+        else
+          t_pass "a pkg-config that resolves onnxruntime passes"
+        fi ;;
+      missing_module)
+        if [[ "${out}" != *"FAIL"* || "${out}" != *CHECK_RETURNED_1* ]]; then
+          t_fail "a .pc file pkg-config cannot see should fail, got: ${out}"
+        else
+          t_pass "a .pc file pkg-config cannot see fails"
+        fi ;;
+      missing_file)
+        if [[ "${out}" != *"FAIL"* || "${out}" != *CHECK_RETURNED_1* ]]; then
+          t_fail "a missing .pc file should fail, got: ${out}"
+        else
+          t_pass "a missing .pc file fails"
+        fi ;;
+    esac
+  done
+}
+
 # The source guard promises definitions only. A shell that sources the helper
 # must keep its own shell options, and must see no output.
 test_sourcing_keeps_the_caller_shell_options() {
@@ -536,6 +602,7 @@ test_a_failing_objdump_keeps_the_fixed_lib_list
 test_the_options_pick_the_bootstrap_root
 test_only_an_explicit_cuda_major_is_an_option_error
 test_an_option_without_a_value_says_so
+test_the_preflight_asks_pkg_config
 test_sourcing_keeps_the_caller_shell_options
 
 if [[ "${FAILURES}" -ne 0 ]]; then
