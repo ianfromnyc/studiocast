@@ -388,7 +388,7 @@ test_the_options_pick_the_bootstrap_root() {
   local child="${SANDBOX}/root-choice-child.sh"
   cat > "${child}" <<'CHILD'
 set -uo pipefail
-export ORT_FLAVOR=cpu
+export ORT_FLAVOR=gpu
 export ORT_ARCH=x64
 export CUDA_MAJOR=12
 # shellcheck source=/dev/null
@@ -451,6 +451,36 @@ CHILD
     t_fail "the default version should name its own root, got: ${out}"
   else
     t_pass "the default version picks its own root"
+  fi
+}
+
+# The cpu flavor installs no bootstrap root at all, so no option of a cpu run
+# asks for one. A gpu asset name would only give the build step advice about a
+# root that this run never creates.
+test_the_cpu_flavor_asks_for_no_bootstrap_root() {
+  local child="${SANDBOX}/root-cpu-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+export ORT_FLAVOR=cpu
+export ORT_ARCH=x64
+export CUDA_MAJOR=13
+# shellcheck source=/dev/null
+source "$1"
+log() { :; }
+warn() { :; }
+run_priv() { :; }
+ORT_VERSION=1.28.0
+echo "REQUESTED_[$(requested_onnxruntime_root)]"
+CHILD
+
+  local out
+  out="$(STUDIOCAST_ORT_INSTALL_DIR="${SANDBOX}/root-cpu" \
+    bash "${child}" "${FEDORA_SETUP}" 2>/dev/null)"
+
+  if [[ "${out}" != *"REQUESTED_[]"* ]]; then
+    t_fail "the cpu flavor should ask for no bootstrap root, got: ${out}"
+  else
+    t_pass "the cpu flavor asks for no bootstrap root"
   fi
 }
 
@@ -792,6 +822,7 @@ test_cuda_required_libs_follows_the_root_layout
 test_a_failing_objdump_keeps_the_fixed_lib_list
 test_the_options_pick_the_bootstrap_root
 test_the_default_version_picks_its_own_root
+test_the_cpu_flavor_asks_for_no_bootstrap_root
 test_only_an_explicit_cuda_major_is_an_option_error
 test_an_option_without_a_value_says_so
 test_the_preflight_asks_pkg_config

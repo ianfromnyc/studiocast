@@ -228,7 +228,11 @@ onnxruntime_known_sha256() {
 # The default version, arch and CUDA major name a root as much as the matching
 # options do: the install path uses them, so the build path must read the same
 # root. A run that installs nothing still gets the root it would install.
+#
+# Only the gpu flavor installs a bootstrap root, so a cpu run asks for none.
 requested_onnxruntime_root() {
+  [[ "${ORT_FLAVOR}" == "gpu" ]] || return 0
+
   local asset
   # The warning about a version with no CUDA asset belongs to the install path,
   # which prints it once. This is only a name lookup.
