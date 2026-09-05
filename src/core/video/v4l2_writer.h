@@ -15,6 +15,13 @@ enum class PixelFormat {
 std::string PixelFormatName(PixelFormat fmt);
 std::optional<PixelFormat> ParsePixelFormat(const std::string &s);
 
+// Smallest bytes_per_line a frame of this width needs, which is also the row
+// size the writer asks the driver for and the size the pipeline gives its
+// output buffer. YUYV packs pixels in pairs, so an odd width still fills the
+// whole final pair: the row is ceil(width / 2) * 4 bytes, not width * 2. That
+// matches what every RGB24 to YUYV converter writes.
+std::size_t MinBytesPerLine(int width, PixelFormat fmt);
+
 struct ActualFormat {
   int width = 0;
   int height = 0;

@@ -30,7 +30,12 @@ bool Rgb24ToYuyvBackendAvailable(Rgb24ToYuyvBackend backend);
 // The source rows need width * 3 bytes.
 
 std::size_t Rgb24ToYuyvDispatchScratchBytes(int width, int height);
-void Rgb24ToYuyvDispatchWithScratch(const std::uint8_t *src, int width,
+// Checks the shared preconditions once, for whichever backend runs, and
+// returns false without writing when they do not hold: a null buffer, a width
+// or height that is not positive, or a dst_stride under the row size above.
+// The scratch buffer is the one recoverable input: a backend that cannot use
+// it converts with the scalar path instead.
+bool Rgb24ToYuyvDispatchWithScratch(const std::uint8_t *src, int width,
                                     int height, std::size_t src_stride,
                                     std::uint8_t *dst, std::size_t dst_stride,
                                     std::uint8_t *scratch,
@@ -54,9 +59,10 @@ bool Rgb24ToYuyvLibyuvAvailable();
 std::size_t Rgb24ToYuyvLibyuvScratchBytes(int width, int height);
 // Returns false, and writes nothing, when the build has no libyuv or when the
 // scratch buffer is too small. The caller then falls back to another
-// converter. A dst_stride under the row size above gives the same false, but
-// that row size is an input precondition every converter shares, so the false
-// is only a guard: no fallback can hold the result either.
+// converter. It also returns false for a dst_stride under the row size above,
+// which is a caller error rather than a recoverable one: the dispatch entry
+// point rejects that input before any backend sees it, so this is only a
+// guard for a direct call.
 bool Rgb24ToYuyvLibyuv(const std::uint8_t *src, int width, int height,
                        std::size_t src_stride, std::uint8_t *dst,
                        std::size_t dst_stride, std::uint8_t *scratch,

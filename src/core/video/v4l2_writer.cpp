@@ -63,17 +63,6 @@ std::optional<PixelFormat> PixelFormatFromFourcc(std::uint32_t f) {
   return std::nullopt;
 }
 
-std::size_t MinBytesPerLine(int width, PixelFormat fmt) {
-  const auto w = static_cast<std::size_t>(width);
-  switch (fmt) {
-  case PixelFormat::yuyv:
-    return w * 2u;
-  case PixelFormat::rgb24:
-    return w * 3u;
-  }
-  return w * 2u;
-}
-
 bool IsOutputBufType(__u32 t) {
   if (t == V4L2_BUF_TYPE_VIDEO_OUTPUT)
     return true;
@@ -683,6 +672,21 @@ bool TryOpenNegotiate(const std::string &device, int openFlags, int width,
 }
 
 } // namespace
+
+std::size_t MinBytesPerLine(int width, PixelFormat fmt) {
+  if (width <= 0)
+    return 0u;
+  const auto w = static_cast<std::size_t>(width);
+  switch (fmt) {
+  case PixelFormat::yuyv:
+    // Round the width up to the next pixel pair: the last pair is written
+    // whole even when the width is odd.
+    return ((w + 1u) / 2u) * 4u;
+  case PixelFormat::rgb24:
+    return w * 3u;
+  }
+  return ((w + 1u) / 2u) * 4u;
+}
 
 std::string PixelFormatName(PixelFormat fmt) {
   switch (fmt) {

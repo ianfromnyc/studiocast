@@ -30,8 +30,11 @@ void Rgb24ToYuyvWithScratch(const std::uint8_t *src, int width, int height,
                             std::size_t src_stride, std::uint8_t *dst,
                             std::size_t dst_stride, std::uint8_t *scratch,
                             std::size_t scratch_size) {
-  internal::Rgb24ToYuyvDispatchWithScratch(src, width, height, src_stride, dst,
-                                           dst_stride, scratch, scratch_size);
+  // The dispatch reports a caller error, such as a row too short for the final
+  // pixel pair, by writing nothing. There is no return value to pass on here,
+  // so the frame simply stays as the caller left it.
+  (void)internal::Rgb24ToYuyvDispatchWithScratch(
+      src, width, height, src_stride, dst, dst_stride, scratch, scratch_size);
 }
 
 void MirrorRgb24InPlace(std::uint8_t *rgb, int width, int height,

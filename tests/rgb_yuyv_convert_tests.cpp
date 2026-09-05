@@ -638,6 +638,60 @@ bool TestRgb24ToYuyvLibyuvRefusesTheWidestRow() {
   return true;
 }
 
+// Every backend writes the whole final YUYV pair, so a row shorter than
+// ceil(width / 2) * 4 bytes has no converter that fits. The dispatch entry
+// point checks it once for all of them: it writes nothing and says so, instead
+// of letting a backend run into the short row.
+bool TestRgb24ToYuyvDispatchRefusesARowShorterThanTheFinalPair() {
+  constexpr std::array<int, 3> widths{1, 7, 17};
+  constexpr int height = 4;
+
+  for (const int width : widths) {
+    const std::size_t src_stride = static_cast<std::size_t>(width) * 3u;
+    const std::size_t short_stride = static_cast<std::size_t>(width) * 2u;
+    std::vector<std::uint8_t> src(src_stride *
+                                  static_cast<std::size_t>(height));
+    FillDeterministicRgb(&src, width, height, src_stride,
+                         static_cast<std::uint32_t>(width * 17 + 3));
+
+    const std::size_t scratch_size =
+        video::Rgb24ToYuyvScratchBytes(width, height);
+    std::vector<std::uint8_t> scratch(scratch_size);
+
+    std::vector<std::uint8_t> dst(
+        short_stride * static_cast<std::size_t>(height), 0xcd);
+    if (video::internal::Rgb24ToYuyvDispatchWithScratch(
+            src.data(), width, height, src_stride, dst.data(), short_stride,
+            scratch.empty() ? nullptr : scratch.data(), scratch.size())) {
+      std::cerr << "dispatch accepted a " << short_stride
+                << " byte row for width " << width << "\n";
+      return false;
+    }
+
+    for (const std::uint8_t byte : dst) {
+      if (byte != 0xcd) {
+        std::cerr << "dispatch wrote into a short row for width " << width
+                  << "\n";
+        return false;
+      }
+    }
+
+    // The next size up is the shortest legal row, so the same call must work.
+    const std::size_t legal_stride = ActiveYuyvBytes(width);
+    std::vector<std::uint8_t> ok(
+        legal_stride * static_cast<std::size_t>(height), 0xcd);
+    if (!video::internal::Rgb24ToYuyvDispatchWithScratch(
+            src.data(), width, height, src_stride, ok.data(), legal_stride,
+            scratch.empty() ? nullptr : scratch.data(), scratch.size())) {
+      std::cerr << "dispatch refused a legal " << legal_stride
+                << " byte row for width " << width << "\n";
+      return false;
+    }
+  }
+
+  return true;
+}
+
 bool TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants() {
   constexpr int width = 31;
   constexpr int height = 9;

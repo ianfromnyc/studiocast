@@ -1203,6 +1203,7 @@ if (BUILD_TESTING)
             tests/frame_artifact_cache_tests.cpp
             tests/cuda_kernel_cache_tests.cpp
             tests/v4l2_capture_negotiation_tests.cpp
+            tests/v4l2_writer_layout_tests.cpp
             tests/video_effect_cpu_tests.cpp
             tests/rgb_yuyv_convert_tests.cpp
     )

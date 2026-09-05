@@ -46,6 +46,7 @@ bool TestRgb24ToYuyvMatchesBt601WithinChromaRounding();
 bool TestRgb24ToYuyvBackendsMatchScalarReference();
 bool TestRgb24ToYuyvLibyuvKeepsTheOddWidthRowContract();
 bool TestRgb24ToYuyvLibyuvRefusesTheWidestRow();
+bool TestRgb24ToYuyvDispatchRefusesARowShorterThanTheFinalPair();
 bool TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants();
 bool TestRgb24Bgr24BackendsMatchScalarAndPreservePadding();
 bool TestRgb24Bgr24PublicPathMatchesScalarInPlace();
@@ -53,6 +54,7 @@ bool TestResizeRgb24BilinearPreservesActivePixelsAndZerosPadding();
 bool TestResizeRgb24BilinearHandlesDegenerateAxesAndPlanReuse();
 bool TestBackgroundRemoveCpuMatchesReferenceAndPreservesPadding();
 bool TestBackgroundBlurCpuMatchesReferenceAndPreservesPadding();
+bool TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair();
 } // namespace studiocast::tests
 
 namespace {
@@ -1098,6 +1100,9 @@ int main() {
        &studiocast::tests::TestRgb24ToYuyvLibyuvKeepsTheOddWidthRowContract},
       {"RGB24 to YUYV libyuv refuses the widest row",
        &studiocast::tests::TestRgb24ToYuyvLibyuvRefusesTheWidestRow},
+      {"RGB24 to YUYV dispatch refuses a row shorter than the final pair",
+       &studiocast::tests::
+           TestRgb24ToYuyvDispatchRefusesARowShorterThanTheFinalPair},
       {"RGB24 to YUYV public path matches scalar with scratch variants",
        &studiocast::tests::
            TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants},
@@ -1117,6 +1122,8 @@ int main() {
       {"Background blur CPU matches reference and preserves padding",
        &studiocast::tests::
            TestBackgroundBlurCpuMatchesReferenceAndPreservesPadding},
+      {"V4L2 writer row size holds the odd width YUYV pair",
+       &studiocast::tests::TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair},
   };
 
   int failed = 0;

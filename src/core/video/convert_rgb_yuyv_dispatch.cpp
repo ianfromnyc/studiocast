@@ -26,6 +26,15 @@ bool FitsInt(std::size_t value) {
 }
 #endif
 
+// Bytes one YUYV row needs for this width. An odd width still fills the whole
+// final pixel pair, so the row rounds up to ceil(width / 2) * 4. The width is
+// widened first, because (width + 1) would overflow int at the largest width.
+std::size_t Rgb24ToYuyvRowBytes(int width) {
+  if (width <= 0)
+    return 0u;
+  return ((static_cast<std::size_t>(width) + 1u) / 2u) * 4u;
+}
+
 struct Rgb24ToYuyvDispatchPlan {
   Rgb24ToYuyvBackend backend;
   Rgb24ToYuyvWithScratchFn convert;
@@ -135,16 +144,24 @@ std::size_t Rgb24ToYuyvDispatchScratchBytes(int width, int height) {
   return 0;
 }
 
-void Rgb24ToYuyvDispatchWithScratch(const std::uint8_t *src, int width,
+bool Rgb24ToYuyvDispatchWithScratch(const std::uint8_t *src, int width,
                                     int height, std::size_t src_stride,
                                     std::uint8_t *dst, std::size_t dst_stride,
                                     std::uint8_t *scratch,
                                     std::size_t scratch_size) {
   if (!src || !dst || width <= 0 || height <= 0)
-    return;
+    return false;
+
+  // Every backend writes ceil(width / 2) * 4 bytes into a row, because an odd
+  // width still fills the final YUYV pair. Check that shared precondition once
+  // here: a shorter row has no converter that fits it, so refuse the frame
+  // instead of letting a backend write past the row.
+  if (dst_stride < Rgb24ToYuyvRowBytes(width))
+    return false;
 
   kDispatchPlan.convert(src, width, height, src_stride, dst, dst_stride,
                         scratch, scratch_size);
+  return true;
 }
 
 bool Rgb24ToYuyvLibyuvAvailable() {
@@ -176,13 +193,10 @@ bool Rgb24ToYuyvLibyuv(const std::uint8_t *src, int width, int height,
   if (!src || !dst || width <= 0 || height <= 0)
     return false;
 
-  // Every backend writes ceil(width / 2) * 4 bytes into a row, because an odd
-  // width still fills the final YUYV pair. That row size is a shared input
-  // precondition, so a shorter dst_stride is a caller error: the scalar path
-  // would write past the row too. The false below only guards this backend.
-  const std::size_t row_bytes =
-      ((static_cast<std::size_t>(width) + 1u) / 2u) * 4u;
-  if (dst_stride < row_bytes)
+  // The dispatch entry point already refused a row this short, so this only
+  // guards a direct call. A shorter dst_stride is a caller error either way:
+  // the scalar path would write past the row too.
+  if (dst_stride < Rgb24ToYuyvRowBytes(width))
     return false;
 
   const std::size_t argb_stride = static_cast<std::size_t>(width) * 4u;
