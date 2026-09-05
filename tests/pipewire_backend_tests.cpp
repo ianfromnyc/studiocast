@@ -650,6 +650,61 @@ bool TestDeviceCreateLeavesTheDeviceLockFreeWhileItBuilds() {
                 "a device that is already there must not be built again");
 }
 
+// The create gives the device lock up while the server answers. A destroy that
+// took the device lock alone could run in that window: it would move a null
+// pointer out, answer true, and then be undone by the publish step, which
+// installs the node the caller was told had gone.
+bool TestDeviceDestroyWaitsForACreateInFlight() {
+  using studiocast::audio::pw_backend::internal::CreateDeviceOutsideLock;
+  using studiocast::audio::pw_backend::internal::DestroyDeviceOutsideLock;
+
+  std::mutex create_mu;
+  std::mutex device_mu;
+  std::mutex order_mu;
+  std::string order;
+  const auto note = [&](const char *what) {
+    std::lock_guard<std::mutex> lock(order_mu);
+    order += what;
+  };
+
+  bool device = false;
+  std::atomic<bool> entered{false};
+  std::thread destroyer;
+
+  const bool made = CreateDeviceOutsideLock(
+      create_mu, device_mu, [&] { return device; },
+      [&] {
+        // Stands for the server round trip of a node start. A destroy that
+        // arrives now must not finish before the create it interleaves with.
+        destroyer = std::thread([&] {
+          entered.store(true, std::memory_order_release);
+          DestroyDeviceOutsideLock(create_mu, device_mu, [&] {
+            device = false;
+            note("destroy ");
+          });
+        });
+        while (!entered.load(std::memory_order_acquire))
+          std::this_thread::yield();
+        // The window the destroy needs to get in. It gives the other thread
+        // time; it is not a bound on how long any step may take.
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        note("build ");
+        return true;
+      },
+      [&] {
+        device = true;
+        note("publish ");
+      });
+
+  destroyer.join();
+
+  return Expect(made, "a create that builds a device should answer true") &&
+         Expect(order == "build publish destroy ",
+                "a destroy must not land inside a create; the order was: " +
+                    order) &&
+         Expect(!device, "the destroy must leave the device gone");
+}
+
 bool TestPipeWireIoRefusesToOpenWithoutTheVirtualMic() {
   auto io = studiocast::audio::pw_backend::CreatePipeWireAudioIo();
   if (!Expect(io != nullptr, "the PipeWire I/O factory returned nothing"))
@@ -2070,6 +2125,8 @@ int main() {
        &TestAudioFormatMismatchNamesTheDifference},
       {"device create leaves the device lock free while it builds",
        &TestDeviceCreateLeavesTheDeviceLockFreeWhileItBuilds},
+      {"device destroy waits for a create in flight",
+       &TestDeviceDestroyWaitsForACreateInFlight},
       {"pipewire io refuses to open without the virtual mic",
        &TestPipeWireIoRefusesToOpenWithoutTheVirtualMic},
       {"node restart delay backs off", &TestNodeRestartDelayBacksOff},

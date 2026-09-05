@@ -117,6 +117,25 @@ bool CreateDeviceOutsideLock(std::mutex &create_mu, std::mutex &device_mu,
   return true;
 }
 
+// Runs a device destroy so that it can never land inside a create.
+//
+// The create gives `device_mu` up while the server answers. A destroy that
+// took `device_mu` alone could run in that window: it would move a null
+// pointer out, answer true, and then be undone by the `publish` step of that
+// create, which installs the node the caller was told had gone. So a destroy
+// takes `create_mu` as well, in the same order the create takes it.
+//
+// `take` runs under `device_mu` and moves the device out. The caller destroys
+// what it took after both locks are free, because taking a node down talks to
+// the server too.
+template <class Take>
+void DestroyDeviceOutsideLock(std::mutex &create_mu, std::mutex &device_mu,
+                              const Take &take) {
+  std::lock_guard<std::mutex> creating(create_mu);
+  std::lock_guard<std::mutex> lock(device_mu);
+  take();
+}
+
 } // namespace internal
 
 // What a process wants from the native device owner.

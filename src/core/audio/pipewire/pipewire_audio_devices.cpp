@@ -344,14 +344,13 @@ bool NativeAudioDevices::CreateVirtualMic(std::string *error) {
 bool NativeAudioDevices::DestroyVirtualMic(std::string *error) {
   if (error)
     error->clear();
-  // The node goes out of the member under the lock and is destroyed after it:
-  // taking a node down talks to the server, and no status poll may wait for
-  // that.
+  // The node goes out of the member under the locks and is destroyed after
+  // them: taking a node down talks to the server, and no status poll may wait
+  // for that. The create lock comes too, or a destroy that arrives while a
+  // create builds its node is undone by that create.
   std::shared_ptr<PipeWireAudioNode> old;
-  {
-    std::lock_guard<std::mutex> lock(state_->mu);
-    old = std::move(state_->mic);
-  }
+  internal::DestroyDeviceOutsideLock(state_->create_mu, state_->mu,
+                                     [&] { old = std::move(state_->mic); });
   old.reset();
   return true;
 }
@@ -409,12 +408,10 @@ bool NativeAudioDevices::DestroyVirtualSpeaker(std::string *error) {
     error->clear();
   std::string ignored;
   (void)StopSpeakerLoopback(&ignored);
-  // Destroyed after the lock is free, as DestroyVirtualMic does.
+  // Destroyed after the locks are free, as DestroyVirtualMic does.
   std::shared_ptr<PipeWireAudioNode> old;
-  {
-    std::lock_guard<std::mutex> lock(state_->mu);
-    old = std::move(state_->speaker);
-  }
+  internal::DestroyDeviceOutsideLock(state_->create_mu, state_->mu,
+                                     [&] { old = std::move(state_->speaker); });
   old.reset();
   return true;
 }
