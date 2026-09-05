@@ -67,6 +67,10 @@ FAKE_CUDNN_VERSION="0.0.0.0-studiocast-test"
 
 # The preamble every child shares: no server probes, no privileged commands,
 # and a cuDNN that never resolves so the install path runs.
+#
+# This text is a script for the child shell, so the quotes must keep "$1" as
+# it is. The child expands it against its own arguments.
+# shellcheck disable=SC2016  # the child shell expands this, not this shell
 CHILD_PREAMBLE='export ORT_FLAVOR=cpu
 export CUDA_MAJOR=13
 export ORT_ARCH=x64

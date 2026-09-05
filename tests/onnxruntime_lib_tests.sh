@@ -220,6 +220,7 @@ test_libdir_follows_the_layout_of_the_root() {
   # Hooks the library expects from its caller. Nothing below calls them.
   sc_ort_log() { :; }
   sc_ort_priv() { :; }
+  # shellcheck source-path=SCRIPTDIR
   # shellcheck source=../scripts/_lib/onnxruntime.sh
   source "${ORT_LIB}"
 

@@ -46,6 +46,7 @@ chmod +x "${STUB_BIN}/sudo"
 
 export PATH="${STUB_BIN}:${PATH}"
 
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=../scripts/uninstall/uninstall.sh
 source "${UNINSTALL}"
 
