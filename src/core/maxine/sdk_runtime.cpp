@@ -326,13 +326,27 @@ const SdkRuntimeReport &PreloadSdkRuntime(const fs::path &library,
   // The report depends on the SDK root as well as on the library, so both go
   // into the key. A NUL keeps the two parts apart, because no path holds one.
   const std::string key = library.string() + '\0' + sdk_root.string();
-  const std::lock_guard<std::mutex> lock(CacheMutex());
-  auto &cache = Cache();
-  auto it = cache.find(key);
-  if (it == cache.end()) {
-    it = cache.emplace(key, Compute(library, sdk_root)).first;
+
+  {
+    const std::lock_guard<std::mutex> lock(CacheMutex());
+    auto &cache = Cache();
+    const auto it = cache.find(key);
+    if (it != cache.end())
+      return it->second;
   }
-  return it->second;
+
+  // Compute outside the lock. Compute() reads files and calls dlopen, so it
+  // can take a long time, and the lock would stop every other caller, even one
+  // that asks for another key.
+  SdkRuntimeReport report = Compute(library, sdk_root);
+
+  // The first writer wins. Another thread can have written the same key while
+  // this one computed; its report is the result of the same work, and the
+  // handles this thread opened stay valid, because dlopen counts references
+  // and this code keeps every handle for the life of the process. The map
+  // never drops an entry, so the reference stays good.
+  const std::lock_guard<std::mutex> lock(CacheMutex());
+  return Cache().emplace(key, std::move(report)).first->second;
 }
 
 void PreloadSdkRuntimeIfLocal(const fs::path &library) {

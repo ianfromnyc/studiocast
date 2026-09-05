@@ -7,6 +7,7 @@
 #include <sstream>
 #include <string>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 #include "core/maxine/afx_api.h"
@@ -503,6 +504,58 @@ bool TestSdkRuntimePreloadCachesPerSdkRoot() {
   return ok;
 }
 
+// Two threads that pre-load the same library and root must end with one
+// report. The pre-load computes outside the cache lock, so the first writer
+// wins and every caller gets that entry.
+bool TestSdkRuntimePreloadIsSharedAcrossThreads() {
+  const fs::path base =
+      fs::temp_directory_path() /
+      ("studiocast-maxine-preload-threads-" + std::to_string(::getpid()));
+  std::error_code ec;
+  fs::remove_all(base, ec);
+
+  const fs::path root = base / "root";
+  const fs::path target = base / "target" / "lib" / "libsc_thread_target.so";
+  const fs::path dep =
+      root / "external" / "cuda" / "lib" / "libsc_thread_dep.so";
+
+  if (!BuildSharedLib(dep, "libsc_thread_dep.so", "sc_fake_dep_value", {}) ||
+      !BuildSharedLib(target, "libsc_thread_target.so",
+                      "sc_thread_target_value", dep)) {
+    fs::remove_all(base, ec);
+    return false;
+  }
+
+  const studiocast::maxine::SdkRuntimeReport *first = nullptr;
+  const studiocast::maxine::SdkRuntimeReport *second = nullptr;
+  std::thread a(
+      [&] { first = &studiocast::maxine::PreloadSdkRuntime(target, root); });
+  std::thread b(
+      [&] { second = &studiocast::maxine::PreloadSdkRuntime(target, root); });
+  a.join();
+  b.join();
+
+  bool ok = Require(first != nullptr && first == second,
+                    "expected both threads to get the same cached report");
+  ok &= Require(first != nullptr && first->sdk_root == root,
+                "expected the shared report to keep the root it was given");
+
+  bool saw_dep = false;
+  if (first != nullptr) {
+    for (const auto &d : first->dependencies) {
+      if (d.soname == "libsc_thread_dep.so") {
+        saw_dep = true;
+        ok &= Require(d.loaded, "expected the shared report to pre-load the "
+                                "bundled dependency");
+      }
+    }
+  }
+  ok &= Require(saw_dep, "expected the shared report to name the dependency");
+
+  fs::remove_all(base, ec);
+  return ok;
+}
+
 // Core system libraries must stay with the system loader.
 bool TestSdkRuntimePreloadSkipsSystemLibraries() {
   const fs::path root =
@@ -662,6 +715,12 @@ int main(int argc, char **argv) {
     return 1;
   }
   std::cout << "[PASS] SDK runtime pre-load caches per SDK root\n";
+
+  if (!TestSdkRuntimePreloadIsSharedAcrossThreads()) {
+    std::cout << "[FAIL] SDK runtime pre-load is shared across threads\n";
+    return 1;
+  }
+  std::cout << "[PASS] SDK runtime pre-load is shared across threads\n";
 
   if (!TestSdkRuntimePreloadSkipsSystemLibraries()) {
     std::cout << "[FAIL] SDK runtime pre-load skips system libraries\n";
