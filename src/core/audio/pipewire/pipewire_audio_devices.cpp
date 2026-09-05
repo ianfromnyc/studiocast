@@ -226,6 +226,15 @@ NativeAudioDevices &NativeAudioDevices::Instance() {
 }
 
 bool NativeAudioDevices::CreateVirtualMic(std::string *error) {
+  // The node the daemon already has is the answer. The Pulse scan below forks
+  // pactl twice, and the supervisor asks for this device on every poll, so it
+  // must not run for a device that is already there.
+  {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    if (state_->mic)
+      return true;
+  }
+
   RemoveStalePulseDevices();
 
   std::lock_guard<std::mutex> lock(state_->mu);
@@ -256,6 +265,13 @@ bool NativeAudioDevices::DestroyVirtualMic(std::string *error) {
 }
 
 bool NativeAudioDevices::CreateVirtualSpeaker(std::string *error) {
+  // See CreateVirtualMic: no Pulse scan for a device that already exists.
+  {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    if (state_->speaker)
+      return true;
+  }
+
   RemoveStalePulseDevices();
 
   std::lock_guard<std::mutex> lock(state_->mu);
