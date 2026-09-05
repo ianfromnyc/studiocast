@@ -145,7 +145,9 @@ Options:
                         otherwise downloads the same packs from NGC over REST.
   --install-features    Install the VFX/AR feature packs (needs NGC_API_KEY). Same as
                         --download-features vfx,ar, but both SDK roots must exist.
-  --install-afx-features  Download AFX features needed for the MVP (needs NGC_API_KEY)
+  --install-afx-features  Download AFX features needed for the MVP (needs NGC_API_KEY).
+                        Same as --download-features afx: the SDK's own script when it
+                        is there, and the NGC REST API when it is not.
   --afx-effects CSV     AFX effect list (default: the four the microphone effects use,
                         denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k).
                         AEC and Superres are optional; name them here to add them.
@@ -1269,15 +1271,17 @@ fi
 
 if [[ "$DO_INSTALL_AFX_FEATURES" -eq 1 ]]; then
   require_key "--install-afx-features"
+  sc_ngc_require_tools || exit 2
 
   if [[ ! -d "${AFX_ROOT}/features" ]]; then
-    err "AFX features directory not found at ${AFX_ROOT}/features"
-    err "Make sure you extracted the Audio Effects SDK so that ${AFX_ROOT} exists,"
-    err "for example with: $0 --download afx"
-    exit 1
+    log "No AFX features directory at ${AFX_ROOT}/features; the NGC REST API makes it."
+    log "Extract the Audio Effects SDK first if you want the SDK's own script,"
+    log "for example with: $0 --download afx"
   fi
 
-  run_sdk_download_features || exit 1
+  # The same path as --download-features afx: the SDK's own script first, and
+  # the NGC REST API when that script is not there.
+  download_features_component afx || exit 1
 
   log "AFX feature download complete."
   log "You can now verify with:"

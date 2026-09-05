@@ -148,9 +148,46 @@ test_a_dry_run_makes_no_directory() {
   fi
 }
 
+# --download-features afx falls back to the NGC REST API when the SDK's own
+# features/download_features.sh is not there. docs/SETUP.md documents
+# --install-afx-features as the normal route, so it must take the same path
+# instead of dying on a missing script.
+test_install_afx_features_falls_back_to_the_rest_api() {
+  local base="${SANDBOX}/afxfallback"
+  rm -rf "${base}"
+
+  # An AFX root with a features directory, but without the SDK script.
+  mkdir -p "${base}/Audio_Effects_SDK/features"
+
+  # A curl that answers nothing, so the call stops before it asks NGC for
+  # anything. The check only reads which path the script took.
+  local stub="${SANDBOX}/afxfallback-bin"
+  mkdir -p "${stub}"
+  printf '#!/usr/bin/env bash\nexit 7\n' > "${stub}/curl"
+  chmod +x "${stub}/curl"
+
+  local out
+  out="$(PATH="${stub}:${PATH}" NGC_API_KEY="not-a-real-key" \
+    bash "${MAXINE_SH}" --base "${base}" --cache-dir "${SANDBOX}/afxcache" \
+    --sm 86 --install-afx-features --dry-run 2>&1)"
+
+  if [[ "${out}" == *"No such file or directory"* ]]; then
+    t_fail "--install-afx-features died on the missing SDK script: ${out}"
+  else
+    t_pass "--install-afx-features does not die on the missing SDK script"
+  fi
+
+  if [[ "${out}" != *"NGC REST API"* ]]; then
+    t_fail "--install-afx-features did not take the REST fallback: ${out}"
+  else
+    t_pass "--install-afx-features takes the REST fallback"
+  fi
+}
+
 test_pinning_a_root_with_special_characters
 test_pinning_a_root_that_looks_like_a_pattern
 test_a_dry_run_makes_no_directory
+test_install_afx_features_falls_back_to_the_rest_api
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2

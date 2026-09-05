@@ -164,7 +164,7 @@ The core SDK alone runs nothing. Each effect needs a feature pack: a feature lib
 ./scripts/setup/maxine.sh --download-features all   # both, with a fallback (see below)
 ```
 
-All three commands prefer the scripts that NVIDIA ships inside each SDK. Those scripts need only `curl` or `wget` and the API key, so no `ngc` command line tool is needed. When the core SDK is not extracted, `--download-features` fetches the same NGC packs itself over the REST API and writes the same layout.
+All three commands prefer the scripts that NVIDIA ships inside each SDK. Those scripts need only `curl` or `wget` and the API key, so no `ngc` command line tool is needed. When the core SDK is not extracted, they fetch the same NGC packs themselves over the REST API and write the same layout: `--install-afx-features` and `--download-features afx` take the same path.
 
 A feature install puts:
 
