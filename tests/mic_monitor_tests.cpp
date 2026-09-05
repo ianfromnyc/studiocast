@@ -1504,6 +1504,63 @@ bool TestServiceCleansUpTheLoopbackAfterALostOutput() {
   return ok;
 }
 
+// The sink question is the one place that knows why the sound server could not
+// answer, and "no answer" is the arm a monitor sits in while the sound server
+// is unwell. A monitor stuck on a pinned start must leave that reason where a
+// support case can read it.
+bool TestServiceReportsWhyTheSinkQuestionHadNoAnswer() {
+  MonitorRecorder rec;
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+  hooks.mic_monitor_sink_present = [](const std::string &,
+                                      std::string *error) {
+    if (error)
+      *error = "pactl list short sinks did not answer in time";
+    return std::optional<bool>();
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  const auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+  if (!WaitUntil([&] { return service.Status().monitor_active; }, 1000ms)) {
+    std::cerr << "the monitor did not start\n";
+    service.Stop();
+    return false;
+  }
+
+  // The sound server goes wrong, so the pinned start fails and asks about the
+  // output it names.
+  rec.fail_detect.store(true, std::memory_order_relaxed);
+  rec.fail_start.store(true, std::memory_order_relaxed);
+  const bool reported = WaitUntil(
+      [&] {
+        return service.Status().monitor_last_error.find("did not answer in "
+                                                        "time") !=
+               std::string::npos;
+      },
+      6000ms);
+  bool ok = true;
+  if (!reported) {
+    std::cerr << "the unanswered sink question left no trace: '"
+              << service.Status().monitor_last_error << "'\n";
+    ok = false;
+  }
+  if (!service.Status().monitor_note.empty()) {
+    std::cerr << "a sound server that gave no answer reported a lost output: '"
+              << service.Status().monitor_note << "'\n";
+    ok = false;
+  }
+
+  service.Stop();
+  return ok;
+}
+
 // A monitor that is on while microphone processing is off is a state the user
 // made one click ago, not a failure. It belongs in the note, so nothing sends
 // the user to Support for it.
@@ -2294,6 +2351,8 @@ int main() {
        &TestServiceStopsAMonitorItCanNoLongerSee},
       {"service cleans up the loopback after a lost output",
        &TestServiceCleansUpTheLoopbackAfterALostOutput},
+      {"service reports why the sink question had no answer",
+       &TestServiceReportsWhyTheSinkQuestionHadNoAnswer},
       {"monitor consumer is counted apart from apps",
        &TestMonitorConsumerIsCountedApartFromApps},
       {"service drives the real helper through pactl",

@@ -1308,9 +1308,18 @@ void VirtualAudioService::ThreadMain() {
       // and then the monitor keeps its pin and retries: a monitor that waits
       // for the sound server comes back on its own, while a lost output needs
       // the user.
+      //
+      // Why the sound server could not answer is known here and nowhere else,
+      // so it is kept for the error of the failed start. A monitor that
+      // retries a pinned start would otherwise leave no trace of whether the
+      // sink list timed out, failed, or was never asked.
+      std::string monitorSinkQuestionError;
       auto monitorOutputIsGone = [&](const std::string &sink) {
+        monitorSinkQuestionError.clear();
         std::string presentErr;
         const auto present = MicMonitorSinkPresentRoute(sink, &presentErr);
+        if (!present.has_value() && !presentErr.empty())
+          monitorSinkQuestionError = presentErr;
         return present.has_value() && !*present;
       };
       // The output the monitor played on is gone, for example because the
@@ -1554,7 +1563,16 @@ void VirtualAudioService::ThreadMain() {
             nextMonitorStartRetry =
                 monitorNow + StartFailureRetryDelay(cfg) * monitorStartFailures;
             clearMonitorRouteState();
-            setMonitorError("Failed to start the microphone monitor: " + err);
+            std::string message =
+                "Failed to start the microphone monitor: " + err;
+            if (!monitorSinkQuestionError.empty()) {
+              // The pin holds, so say why the sound server could not say
+              // whether the output is still there.
+              message += " The sound server did not say whether the output '" +
+                         startCfg.sink +
+                         "' is still there: " + monitorSinkQuestionError;
+            }
+            setMonitorError(message);
           }
         }
       }
