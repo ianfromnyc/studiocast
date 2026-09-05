@@ -430,10 +430,14 @@ cuda_required_libs() {
     if [[ -n "${root}" ]]; then
       provider="$(sc_ort_libdir "${root}")/libonnxruntime_providers_cuda.so"
     fi
+    # The probe only adds to the fixed list, so it must never end the caller.
+    # Without the || true, an objdump that cannot read the provider makes the
+    # pipeline fail under pipefail, and set -e then ends --deps or --check-cuda.
     if [[ -n "${provider}" && -f "${provider}" ]] \
         && command -v objdump >/dev/null 2>&1; then
       objdump -p "${provider}" 2>/dev/null \
-        | sed -n 's/^[[:space:]]*NEEDED[[:space:]]*\(lib\(cu\|nv\)[^[:space:]]*\)$/\1/p'
+        | sed -n 's/^[[:space:]]*NEEDED[[:space:]]*\(lib\(cu\|nv\)[^[:space:]]*\)$/\1/p' \
+        || true
     fi
   } | sort -u
 }

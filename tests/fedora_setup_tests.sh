@@ -321,6 +321,60 @@ STUB
   rm -f "${STUB_BIN}/objdump"
 }
 
+# The objdump probe only adds to the fixed list, so a provider objdump cannot
+# read must not end the caller. Under set -e the call must return 0 and give
+# back the fixed list.
+test_a_failing_objdump_keeps_the_fixed_lib_list() {
+  local child="${SANDBOX}/objdump-failure-child.sh"
+  {
+    echo 'set -euo pipefail'
+    echo "${CHILD_PREAMBLE}"
+    cat <<'CHILD'
+fake_root="$2"
+sc_ort_installed_root() { printf '%s\n' "${fake_root}"; }
+libs="$(cuda_required_libs)"
+echo PROBE_RETURNED_0
+printf '%s\n' "${libs}"
+CHILD
+  } > "${child}"
+
+  # A stub objdump that reports a file it cannot read.
+  cat > "${STUB_BIN}/objdump" <<'STUB'
+#!/usr/bin/env bash
+echo "stub objdump: unrecognized file format" >&2
+exit 1
+STUB
+  chmod +x "${STUB_BIN}/objdump"
+
+  local root="${SANDBOX}/ort-root-objdump-failure"
+  mkdir -p "${root}/lib"
+  : > "${root}/lib/libonnxruntime_providers_cuda.so"
+
+  local out rc=0
+  out="$(bash "${child}" "${FEDORA_SETUP}" "${root}" 2>/dev/null)" || rc=$?
+
+  rm -f "${STUB_BIN}/objdump"
+
+  if [[ "${rc}" -ne 0 ]]; then
+    t_fail "a failing objdump ended the script with status ${rc}"
+    return
+  fi
+  if [[ "${out}" != *PROBE_RETURNED_0* ]]; then
+    t_fail "the probe did not return 0, got: $(first_line "${out}")"
+    return
+  fi
+
+  local soname
+  for soname in libcuda.so.1 libcudart.so.13 libcublas.so.13 libcublasLt.so.13 \
+    libcurand.so.10 libnvrtc.so.13 libcudnn.so.9; do
+    if [[ "${out}" != *"${soname}"* ]]; then
+      t_fail "a failing objdump dropped ${soname} from the fixed list"
+      return
+    fi
+  done
+  t_pass "a failing objdump keeps the fixed library list"
+}
+
 # The source guard promises definitions only. A shell that sources the helper
 # must keep its own shell options, and must see no output.
 test_sourcing_keeps_the_caller_shell_options() {
@@ -355,6 +409,7 @@ test_download_failure_cleans_up_and_runs_the_caller_trap
 test_a_caller_return_trap_survives_the_call
 test_a_missing_index_entry_gives_an_empty_sha256
 test_cuda_required_libs_follows_the_root_layout
+test_a_failing_objdump_keeps_the_fixed_lib_list
 test_sourcing_keeps_the_caller_shell_options
 
 if [[ "${FAILURES}" -ne 0 ]]; then
