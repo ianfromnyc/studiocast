@@ -49,8 +49,11 @@ struct RgbBgrBackendCase {
   video::internal::Rgb24Bgr24Backend backend;
 };
 
+// Bytes a YUYV row uses for this width. The width widens first, because
+// (width + 1) overflows int at the largest width, which is exactly the
+// arithmetic the production code has to avoid.
 constexpr std::size_t ActiveYuyvBytes(int width) {
-  return static_cast<std::size_t>((width + 1) / 2) * 4u;
+  return ((static_cast<std::size_t>(width) + 1u) / 2u) * 4u;
 }
 
 constexpr std::size_t ActiveRgbBytes(int width) {
@@ -619,18 +622,24 @@ bool TestRgb24ToYuyvLibyuvKeepsTheOddWidthRowContract() {
   return true;
 }
 
-// The row size is ceil(width / 2) * 4 bytes. Computed as (width + 1) / 2 in
-// int, that addition overflows at the largest width, so the backend must size
-// the row in std::size_t. It still has to refuse a row that cannot hold the
-// result, and it must do so before it touches the buffers.
-bool TestRgb24ToYuyvLibyuvRefusesTheWidestRow() {
+// The row size is ceil(width / 2) * 4 bytes. Computed as (width + 1) / 2 * 4
+// in int, that arithmetic overflows at the largest width and lands on zero, so
+// the guard would accept any row at all. The dispatch must therefore size the
+// row in std::size_t, and refuse this one before it touches the buffers.
+//
+// The dispatch checks the row size only against the buffers and the geometry,
+// which are all valid here, so nothing else can refuse this call. The scratch
+// buffer is real, but the dispatch never looks at it.
+bool TestRgb24ToYuyvDispatchRefusesTheWidestRow() {
   constexpr int width = std::numeric_limits<int>::max();
   std::array<std::uint8_t, 8> src{};
   std::array<std::uint8_t, 8> dst{};
+  std::array<std::uint8_t, 8> scratch{};
 
-  if (video::internal::Rgb24ToYuyvLibyuv(src.data(), width, 1, src.size(),
-                                         dst.data(), dst.size(), nullptr, 0)) {
-    std::cerr << "libyuv accepted an " << dst.size() << " byte row for width "
+  if (video::internal::Rgb24ToYuyvDispatchWithScratch(
+          src.data(), width, 1, src.size(), dst.data(), dst.size(),
+          scratch.data(), scratch.size())) {
+    std::cerr << "dispatch accepted an " << dst.size() << " byte row for width "
               << width << "\n";
     return false;
   }
