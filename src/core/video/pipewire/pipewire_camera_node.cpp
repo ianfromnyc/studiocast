@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #if STUDIOCAST_HAVE_PIPEWIRE
@@ -197,6 +198,22 @@ void OnParamChanged(void *data, std::uint32_t id, const struct spa_pod *param) {
   struct spa_video_info_raw raw {};
   if (spa_format_video_raw_parse(param, &raw) < 0)
     return;
+
+  // The node offers exactly one format, so the server can only pick that one.
+  // Check it anyway: the buffer answer below is built from the configured
+  // size, and a negotiated size that differed would make the callback send
+  // truncated frames with nothing to explain them.
+  if (raw.format != static_cast<enum spa_video_format>(
+                        SpaFormatFor(impl->cfg.format)) ||
+      raw.size.width != static_cast<std::uint32_t>(impl->cfg.width) ||
+      raw.size.height != static_cast<std::uint32_t>(impl->cfg.height)) {
+    impl->SetError("The PipeWire server picked a camera format StudioCast did "
+                   "not offer: " +
+                   std::to_string(raw.size.width) + "x" +
+                   std::to_string(raw.size.height) + " format " +
+                   std::to_string(static_cast<int>(raw.format)) + ".");
+    return;
+  }
 
   const auto stride = static_cast<std::int32_t>(impl->stride_bytes);
   const auto size = static_cast<std::int32_t>(impl->frame_bytes);
@@ -530,8 +547,10 @@ bool PipeWireCameraNode::WriteFrame(const std::uint8_t *data,
     impl_->frames_dropped.fetch_add(1, std::memory_order_relaxed);
 
 #if STUDIOCAST_HAVE_PIPEWIRE
-  // The node drives the graph, so a new frame starts a cycle.
-  if (impl_->stream)
+  // The node drives the graph once it streams, and a new frame is what starts
+  // a cycle. Before that it is not the driver yet, so ask first: the call is
+  // safe either way, but the check says what this line means.
+  if (impl_->stream && pw_stream_is_driving(impl_->stream))
     pw_stream_trigger_process(impl_->stream);
 #endif
   return true;
