@@ -49,7 +49,9 @@ struct SdkRuntimeReport {
 // `library`. Results are cached per library path and SDK root, so repeated
 // calls are cheap and two roots for the same library keep their own report.
 //
-// `sdk_root` may be empty, in which case it is taken from the library path.
+// `sdk_root` may be empty, in which case it is taken from the library path
+// before the cache is read, so a call without a root and a call that names
+// that same root share one report.
 const SdkRuntimeReport &
 PreloadSdkRuntime(const std::filesystem::path &library,
                   const std::filesystem::path &sdk_root = {});

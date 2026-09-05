@@ -457,6 +457,45 @@ bool TestSdkRuntimePreloadMakesBundledDepsResolvable() {
   return ok;
 }
 
+// The loader asks for a library without a root; `doctor` asks for the same
+// library with the root it resolved. When that root is the one the library
+// implies, both must land on the same cache entry, or the work is done twice
+// and the second report says it pre-loaded nothing.
+bool TestSdkRuntimePreloadSharesOneEntryForTheInferredRoot() {
+  const fs::path root =
+      fs::temp_directory_path() /
+      ("studiocast-maxine-preload-same-" + std::to_string(::getpid()));
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path dep = root / "external" / "cuda" / "lib" / "libsc_same_dep.so";
+  const fs::path target = root / "lib" / "libsc_same_target.so";
+  if (!BuildSharedLib(dep, "libsc_same_dep.so", "sc_same_dep_value", {}) ||
+      !BuildSharedLib(target, "libsc_same_target.so", "sc_same_target_value",
+                      dep)) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  // The loader's call: no root, so the root comes from the library path.
+  const fs::path no_root;
+  const auto &implied = studiocast::maxine::PreloadSdkRuntime(target, no_root);
+  // The doctor's call: the same root, named.
+  const auto &named = studiocast::maxine::PreloadSdkRuntime(target, root);
+
+  bool ok = true;
+  ok &= Require(&implied == &named,
+                "expected one cache entry for the implied and the named root");
+  ok &= Require(named.Summary().find("pre-loaded 1 bundled library") !=
+                    std::string::npos,
+                "expected the second call to report the pre-load of the first,"
+                " got: " +
+                    named.Summary());
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 // The report depends on the SDK root, not only on the library. Two roots for
 // the same library must each get their own report.
 bool TestSdkRuntimePreloadCachesPerSdkRoot() {
@@ -916,6 +955,14 @@ int main(int argc, char **argv) {
     return 1;
   }
   std::cout << "[PASS] SDK runtime pre-load makes bundled deps resolvable\n";
+
+  if (!TestSdkRuntimePreloadSharesOneEntryForTheInferredRoot()) {
+    std::cout << "[FAIL] SDK runtime pre-load shares one entry for the "
+                 "inferred root\n";
+    return 1;
+  }
+  std::cout << "[PASS] SDK runtime pre-load shares one entry for the inferred "
+               "root\n";
 
   if (!TestSdkRuntimePreloadCachesPerSdkRoot()) {
     std::cout << "[FAIL] SDK runtime pre-load caches per SDK root\n";

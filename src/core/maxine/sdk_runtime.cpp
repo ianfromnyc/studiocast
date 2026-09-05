@@ -399,9 +399,18 @@ std::string SdkRuntimeReport::Summary() const {
 
 const SdkRuntimeReport &PreloadSdkRuntime(const fs::path &library,
                                           const fs::path &sdk_root) {
+  // Work out the root before the key, so that the loader's call, which names
+  // no root, and the doctor's call, which names the root the loader would have
+  // inferred, share one entry. Two entries would run the same work twice, and
+  // the second report would say it pre-loaded nothing, because the first one
+  // already did.
+  const fs::path root =
+      (sdk_root.empty() ? InferSdkRoot(library) : sdk_root).lexically_normal();
+
   // The report depends on the SDK root as well as on the library, so both go
   // into the key. A NUL keeps the two parts apart, because no path holds one.
-  const std::string key = library.string() + '\0' + sdk_root.string();
+  const std::string key =
+      library.lexically_normal().string() + '\0' + root.string();
 
   {
     const std::lock_guard<std::mutex> lock(CacheMutex());
@@ -414,7 +423,7 @@ const SdkRuntimeReport &PreloadSdkRuntime(const fs::path &library,
   // Compute outside the lock. Compute() reads files and calls dlopen, so it
   // can take a long time, and the lock would stop every other caller, even one
   // that asks for another key.
-  SdkRuntimeReport report = Compute(library, sdk_root);
+  SdkRuntimeReport report = Compute(library, root);
 
   // The first writer wins. Another thread can have written the same key while
   // this one computed; its report is the result of the same work, and the
