@@ -610,9 +610,31 @@ bool TestAudioConfigPatchRejectsUnsafeMonitorSink() {
   }
 
   error.clear();
-  const bool safe = ValidateAudioConfigSafetyForDaemon(cfg, &warnings, &error);
+  const bool safe = ValidateAudioConfigSafetyForDaemon(
+      cfg, /*resolvedSource=*/"", &warnings, &error);
   return Expect(!safe, "a StudioCast sink should be refused for the monitor") &&
          Expect(!error.empty(), "the refusal should carry a reason");
+}
+
+// On "auto" the configured source names no input, so the feedback check must
+// use the source the service resolved instead.
+bool TestAudioConfigSafetyUsesTheResolvedMicSource() {
+  // The service stays disabled, so the check does not need a sound server to
+  // resolve "auto" into a real input name.
+  studiocast::audio::VirtualAudioServiceConfig cfg;
+  cfg.source_name = "auto";
+  cfg.monitor.enabled = true;
+  cfg.monitor.sink = "alsa_output.usb_headset";
+
+  std::vector<std::string> warnings;
+  std::string error;
+  const bool safe = ValidateAudioConfigSafetyForDaemon(
+      cfg, "alsa_output.usb_headset.monitor", &warnings, &error);
+
+  return Expect(!safe,
+                "a sink the resolved microphone monitors should be refused") &&
+         Expect(error.find("feedback") != std::string::npos,
+                "the refusal should name the feedback loop");
 }
 
 bool TestAudioStatusReportsMonitor() {
@@ -680,6 +702,56 @@ bool TestAudioStatusReportsMonitor() {
                 "status should report the monitor consumer count");
 }
 
+// The same feedback check runs in the status. With the source on "auto" the
+// configured name is empty, so the check must read the resolved name.
+bool TestAudioStatusFlagsMonitorFeedbackOnTheResolvedSource() {
+  studiocast::video::VirtualCameraServiceStatus videoStatus;
+  studiocast::video::VirtualCameraServiceConfig videoConfig;
+
+  studiocast::audio::VirtualAudioServiceStatus audioStatus;
+  audioStatus.selected_source = "alsa_output.usb_headset.monitor";
+  audioStatus.monitor_active = true;
+  audioStatus.monitor_sink_active = "alsa_output.usb_headset";
+
+  studiocast::audio::VirtualAudioServiceConfig audioConfig;
+  audioConfig.enabled = true;
+  audioConfig.source_name = "auto";
+  audioConfig.monitor.enabled = true;
+  audioConfig.monitor.sink = "alsa_output.usb_headset";
+
+  studiocast::util::json::Value rootValue;
+  std::string error;
+  if (!studiocast::util::json::Parse(
+          StatusToJson(videoStatus, videoConfig, audioStatus, audioConfig,
+                       std::filesystem::path("/tmp/studiocastd-test.sock"),
+                       /*maxineJson=*/"", /*openCudaJson=*/"",
+                       /*openAudioJson=*/"", /*loopbackJson=*/""),
+          &rootValue, &error)) {
+    std::cerr << "status JSON should parse: " << error << "\n";
+    return false;
+  }
+
+  const JsonObject *root = rootValue.AsObject();
+  if (!root)
+    return false;
+  const JsonObject *audio = ObjectAt(*root, "audio", "audio should exist");
+  if (!audio)
+    return false;
+  const JsonObject *monitor =
+      ObjectAt(*audio, "monitor", "audio.monitor should exist");
+  if (!monitor)
+    return false;
+  const std::string *sinkError =
+      StringAt(*monitor, "sink_error", "monitor sink_error should exist");
+  if (!sinkError)
+    return false;
+
+  return Expect(!sinkError->empty(),
+                "a sink the resolved microphone monitors should be flagged") &&
+         Expect(sinkError->find("feedback") != std::string::npos,
+                "the sink error should name the feedback loop");
+}
+
 bool TestMicrophoneReadinessNamesMonitorOnlyListener() {
   studiocast::audio::VirtualAudioServiceStatus ast;
   ast.mic_present = true;
@@ -721,6 +793,8 @@ int main() {
   ok = TestAudioConfigPatchRejectsExtremeMonitorNumbers() && ok;
   ok = TestAudioConfigPatchRejectsUnsafeMonitorSink() && ok;
   ok = TestAudioStatusReportsMonitor() && ok;
+  ok = TestAudioConfigSafetyUsesTheResolvedMicSource() && ok;
+  ok = TestAudioStatusFlagsMonitorFeedbackOnTheResolvedSource() && ok;
   ok = TestMicrophoneReadinessNamesMonitorOnlyListener() && ok;
   return ok ? 0 : 1;
 }

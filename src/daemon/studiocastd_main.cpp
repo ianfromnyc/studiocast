@@ -1510,9 +1510,11 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
                                           : ast.monitor_sink_active;
     std::string monitorSinkError;
     {
+      // A source of "auto" names no input, so the feedback check reads the
+      // source the service resolved instead of the configured name.
       std::string reason;
       if (studiocast::audio::IsUnsafeMicMonitorSinkName(
-              acfg.monitor.sink, acfg.source_name, &reason)) {
+              acfg.monitor.sink, audioSourceResolved, &reason)) {
         monitorSinkError = reason;
       }
     }
@@ -2042,7 +2044,16 @@ bool ApplyAudioConfigPatchJsonText(
 
 bool ValidateAudioConfigSafetyForDaemon(
     const studiocast::audio::VirtualAudioServiceConfig &cfg,
-    std::vector<std::string> *warnings, std::string *error) {
+    const std::string &resolved_source_name, std::vector<std::string> *warnings,
+    std::string *error) {
+  // A source of "auto" names no input. The feedback checks below need the
+  // input the service really captures, so read the resolved name and keep the
+  // configured one for the case where the service has not resolved one yet.
+  const std::string micSource =
+      (cfg.source_name.empty() || cfg.source_name == "auto") &&
+              !resolved_source_name.empty()
+          ? resolved_source_name
+          : cfg.source_name;
   std::string reason;
   if (studiocast::audio::IsUnsafeInputSourceName(cfg.source_name, &reason)) {
     if (error) {
@@ -2077,8 +2088,8 @@ bool ValidateAudioConfigSafetyForDaemon(
     }
   }
 
-  if (studiocast::audio::IsUnsafeMicMonitorSinkName(cfg.monitor.sink,
-                                                    cfg.source_name, &reason)) {
+  if (studiocast::audio::IsUnsafeMicMonitorSinkName(cfg.monitor.sink, micSource,
+                                                    &reason)) {
     if (error) {
       *error = "Unsafe microphone monitor output: " + reason +
                " Select a physical output sink or use monitor.sink=\"auto\".";
@@ -2089,7 +2100,7 @@ bool ValidateAudioConfigSafetyForDaemon(
   if (cfg.monitor.enabled && cfg.enabled) {
     std::string monitorErr;
     if (!studiocast::audio::ChooseSafeMicMonitorSinkName(
-            cfg.monitor.sink, cfg.source_name, &monitorErr)) {
+            cfg.monitor.sink, micSource, &monitorErr)) {
       if (error) {
         *error = "Unsafe microphone monitor configuration: " +
                  (monitorErr.empty() ? "no safe physical output sink was found"
@@ -2465,8 +2476,9 @@ int main(int argc, char **argv) {
 
               std::vector<std::string> warnings;
               std::string verr;
-              if (!ValidateAudioConfigSafetyForDaemon(newCfg, &warnings,
-                                                      &verr)) {
+              if (!ValidateAudioConfigSafetyForDaemon(
+                      newCfg, audioSvc.Status().selected_source, &warnings,
+                      &verr)) {
                 return std::string("ERR ") +
                        ErrorJson(verr.empty() ? "invalid audio config" : verr);
               }
@@ -2518,8 +2530,9 @@ int main(int argc, char **argv) {
                        ErrorJson(jerr.empty() ? "invalid audio config JSON"
                                               : jerr);
               }
-              if (!ValidateAudioConfigSafetyForDaemon(newCfg, &warnings,
-                                                      &jerr)) {
+              if (!ValidateAudioConfigSafetyForDaemon(
+                      newCfg, audioSvc.Status().selected_source, &warnings,
+                      &jerr)) {
                 return std::string("ERR ") +
                        ErrorJson(jerr.empty() ? "invalid audio config" : jerr);
               }
