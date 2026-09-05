@@ -222,11 +222,13 @@ void RunSpeakerLoopbackPump(const SpeakerLoopbackPumpHooks &hooks) {
 struct NativeAudioDevices::State {
   mutable std::mutex mu;
   NativeAudioDeviceOptions options;
-  std::unique_ptr<PipeWireAudioNode> mic;
-  std::unique_ptr<PipeWireAudioNode> speaker;
+  // Shared, so a pipeline or a route that took a reference keeps its node
+  // alive even when the supervisor destroys the device on another thread.
+  std::shared_ptr<PipeWireAudioNode> mic;
+  std::shared_ptr<PipeWireAudioNode> speaker;
 
   // Pass-through route from the virtual speakers to a real sink.
-  std::unique_ptr<PipeWireAudioNode> loopback_playback;
+  std::shared_ptr<PipeWireAudioNode> loopback_playback;
   std::thread loopback_thread;
   std::atomic<bool> loopback_stop{false};
 
@@ -287,7 +289,7 @@ bool NativeAudioDevices::CreateVirtualMic(std::string *error) {
   cfg.channels = kMicChannels;
   cfg.frame_samples = kFrameSamples;
 
-  auto node = std::make_unique<PipeWireAudioNode>();
+  auto node = std::make_shared<PipeWireAudioNode>();
   if (!node->Start(cfg, error))
     return false;
   state_->mic = std::move(node);
@@ -330,7 +332,7 @@ bool NativeAudioDevices::CreateVirtualSpeaker(std::string *error) {
   cfg.channels = kSpeakerChannels;
   cfg.frame_samples = kFrameSamples;
 
-  auto node = std::make_unique<PipeWireAudioNode>();
+  auto node = std::make_shared<PipeWireAudioNode>();
   if (!node->Start(cfg, error))
     return false;
   state_->speaker = std::move(node);
@@ -379,7 +381,7 @@ bool NativeAudioDevices::StartSpeakerLoopback(
   cfg.channels = kSpeakerChannels;
   cfg.frame_samples = kFrameSamples;
 
-  auto playback = std::make_unique<PipeWireAudioNode>();
+  auto playback = std::make_shared<PipeWireAudioNode>();
   if (!playback->Start(cfg, error))
     return false;
 
@@ -390,8 +392,9 @@ bool NativeAudioDevices::StartSpeakerLoopback(
   // the service and carries samples again from here.
   state_->speaker->ClearStopRequest();
 
-  PipeWireAudioNode *from = state_->speaker.get();
-  PipeWireAudioNode *to = state_->loopback_playback.get();
+  // The pump holds its own references, so neither node can go away under it.
+  std::shared_ptr<PipeWireAudioNode> from = state_->speaker;
+  std::shared_ptr<PipeWireAudioNode> to = state_->loopback_playback;
   state_->loopback_thread = std::thread([this, from, to] {
     // A plain pump. The samples pass through with no processing, which is what
     // the pass-through route means.
@@ -423,7 +426,7 @@ bool NativeAudioDevices::StopSpeakerLoopback(std::string *error) {
     error->clear();
 
   std::thread worker;
-  PipeWireAudioNode *speaker = nullptr;
+  std::shared_ptr<PipeWireAudioNode> speaker;
   {
     std::lock_guard<std::mutex> lock(state_->mu);
     if (!state_->loopback_thread.joinable() && !state_->loopback_playback)
@@ -431,7 +434,7 @@ bool NativeAudioDevices::StopSpeakerLoopback(std::string *error) {
     state_->loopback_stop.store(true, std::memory_order_release);
     // The pump can sit in a read of the shared node for the whole read
     // timeout, so wake it. The wake-up is taken back below.
-    speaker = state_->speaker.get();
+    speaker = state_->speaker;
     if (speaker)
       speaker->RequestStop();
     if (state_->loopback_playback)
@@ -447,7 +450,7 @@ bool NativeAudioDevices::StopSpeakerLoopback(std::string *error) {
   // request that stayed on them would make every later read and write of the
   // node fail at once: the next pump would spin, and the processed speaker
   // pipeline, which reads the same node, would never carry a sample again.
-  if (speaker && speaker == state_->speaker.get())
+  if (speaker && speaker == state_->speaker)
     speaker->ClearStopRequest();
   state_->loopback_playback.reset();
   return true;
@@ -494,14 +497,14 @@ AudioConsumerSnapshot NativeAudioDevices::DetectSpeakerConsumers() const {
   return SnapshotFrom(state_->speaker.get());
 }
 
-PipeWireAudioNode *NativeAudioDevices::MicNode() const {
+std::shared_ptr<PipeWireAudioNode> NativeAudioDevices::MicNode() const {
   std::lock_guard<std::mutex> lock(state_->mu);
-  return state_->mic.get();
+  return state_->mic;
 }
 
-PipeWireAudioNode *NativeAudioDevices::SpeakerNode() const {
+std::shared_ptr<PipeWireAudioNode> NativeAudioDevices::SpeakerNode() const {
   std::lock_guard<std::mutex> lock(state_->mu);
-  return state_->speaker.get();
+  return state_->speaker;
 }
 
 void ShutdownNativeAudioDevices() {
@@ -556,13 +559,13 @@ public:
       out.channels = cfg.channels;
       out.frame_samples = cfg.frame_samples;
 
-      owned_playback_ = std::make_unique<PipeWireAudioNode>();
+      owned_playback_ = std::make_shared<PipeWireAudioNode>();
       if (!owned_playback_->Start(out, error)) {
         owned_playback_.reset();
-        read_node_ = nullptr;
+        read_node_.reset();
         return false;
       }
-      write_node_ = owned_playback_.get();
+      write_node_ = owned_playback_;
       return true;
     }
 
@@ -582,7 +585,7 @@ public:
     if (!resolution.ok) {
       if (error)
         *error = resolution.error;
-      write_node_ = nullptr;
+      write_node_.reset();
       return false;
     }
 
@@ -595,13 +598,13 @@ public:
     in.channels = cfg.channels;
     in.frame_samples = cfg.frame_samples;
 
-    owned_capture_ = std::make_unique<PipeWireAudioNode>();
+    owned_capture_ = std::make_shared<PipeWireAudioNode>();
     if (!owned_capture_->Start(in, error)) {
       owned_capture_.reset();
-      write_node_ = nullptr;
+      write_node_.reset();
       return false;
     }
-    read_node_ = owned_capture_.get();
+    read_node_ = owned_capture_;
     return true;
   }
 
@@ -660,10 +663,10 @@ private:
   }
 
   void Close() {
+    read_node_.reset();
+    write_node_.reset();
     owned_capture_.reset();
     owned_playback_.reset();
-    read_node_ = nullptr;
-    write_node_ = nullptr;
     stop_.store(false, std::memory_order_release);
   }
 
@@ -672,12 +675,14 @@ private:
   bool speakers_path_ = false;
 
   // Nodes this object created and must destroy.
-  std::unique_ptr<PipeWireAudioNode> owned_capture_;
-  std::unique_ptr<PipeWireAudioNode> owned_playback_;
+  std::shared_ptr<PipeWireAudioNode> owned_capture_;
+  std::shared_ptr<PipeWireAudioNode> owned_playback_;
 
-  // Borrowed pointers. One of them names a node the service owns.
-  PipeWireAudioNode *read_node_ = nullptr;
-  PipeWireAudioNode *write_node_ = nullptr;
+  // The ends of the pipeline. One of them is a node the service owns, and the
+  // reference kept here holds it up for as long as this I/O reads or writes
+  // it, whatever the supervisor does to the device meanwhile.
+  std::shared_ptr<PipeWireAudioNode> read_node_;
+  std::shared_ptr<PipeWireAudioNode> write_node_;
 };
 
 } // namespace

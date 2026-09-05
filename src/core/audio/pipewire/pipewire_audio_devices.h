@@ -121,8 +121,13 @@ public:
 
   // The node the microphone pipeline writes processed audio into, and the node
   // the speaker pipeline reads from. Null when the device is not created.
-  studiocast::pw::PipeWireAudioNode *MicNode() const;
-  studiocast::pw::PipeWireAudioNode *SpeakerNode() const;
+  //
+  // Both hand out a shared reference, not a borrowed pointer: the caller keeps
+  // the node alive for as long as it holds one, whatever the supervisor does
+  // to the device on another thread. The camera pipeline answers the same
+  // question the same way.
+  std::shared_ptr<studiocast::pw::PipeWireAudioNode> MicNode() const;
+  std::shared_ptr<studiocast::pw::PipeWireAudioNode> SpeakerNode() const;
 
 private:
   NativeAudioDevices();
