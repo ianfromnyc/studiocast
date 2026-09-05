@@ -6,6 +6,15 @@
 # package ships no extra shared object.
 #
 # Keep the URL on a fixed upstream release tag, never on a branch.
+#
+# The URL is a GitHub tag tarball, which GitHub makes on request rather than
+# storing. dlib publishes no release asset for this tag, so there is nothing
+# byte-stable to point at. GitHub has changed the compression of these tarballs
+# before and invalidated pinned checksums everywhere, and a fetch cannot tell
+# that case from tampering. If a checksum mismatch appears with no upstream
+# change, compare the file with a known good copy before you change the pin,
+# and prefer a real release asset if dlib starts publishing one.
+#
 # To update:
 # 1. Pick the new dlib release tag.
 # 2. Download the tarball:
