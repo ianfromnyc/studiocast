@@ -289,6 +289,43 @@ CHILD
   fi
 }
 
+# The .so symlink must point at the newest library in the directory. Version
+# order is not text order: 1.10.0 is newer than 1.9.0, and comes first in a
+# plain sort.
+test_the_newest_so_is_picked_by_version() {
+  local child="${SANDBOX}/newest-so-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+sc_ort_log() { :; }
+sc_ort_priv() { :; }
+# shellcheck source=/dev/null
+source "$1"
+echo "NEWEST_[$(sc_ort_newest_so "$2")]"
+echo "EMPTY_[$(sc_ort_newest_so "$3")]"
+CHILD
+
+  local libdir="${SANDBOX}/so-versions"
+  local emptydir="${SANDBOX}/so-none"
+  mkdir -p "${libdir}" "${emptydir}"
+  : > "${libdir}/libonnxruntime.so.1.9.0"
+  : > "${libdir}/libonnxruntime.so.1.10.0"
+
+  local out
+  out="$(bash "${child}" "${ORT_LIB}" "${libdir}" "${emptydir}" 2>/dev/null)"
+
+  if [[ "${out}" != *"NEWEST_[${libdir}/libonnxruntime.so.1.10.0]"* ]]; then
+    t_fail "the newest library should be picked by version, got: ${out}"
+  else
+    t_pass "the newest library is picked by version"
+  fi
+
+  if [[ "${out}" != *'EMPTY_[]'* ]]; then
+    t_fail "a directory without a library should give nothing, got: ${out}"
+  else
+    t_pass "a directory without a library gives nothing"
+  fi
+}
+
 # Linking onnxruntime.pc is best effort. A pkg-config that fails, and a
 # pkg-config that names no search path, must both leave the caller running
 # under set -e.
@@ -349,6 +386,7 @@ test_download_failure_cleans_up_and_runs_the_caller_trap
 test_a_caller_return_trap_survives_the_call
 test_libdir_follows_the_layout_of_the_root
 test_a_preferred_root_wins_over_the_newest_root
+test_the_newest_so_is_picked_by_version
 test_pkgconfig_link_survives_a_broken_pkg_config
 
 if [[ "${FAILURES}" -ne 0 ]]; then

@@ -95,6 +95,25 @@ sc_ort_libdir() {
   fi
 }
 
+# Newest libonnxruntime.so.<version> in one directory, or nothing when the
+# directory holds none.
+#
+# sort -V puts 1.9.0 before 1.10.0; a plain sort puts 1.10.0 first, which would
+# make the .so symlink point at the older library.
+sc_ort_newest_so() {
+  local libdir="$1"
+
+  local candidate
+  local -a sofiles=()
+  for candidate in "${libdir}"/libonnxruntime.so.*; do
+    [[ -e "${candidate}" ]] || continue
+    sofiles+=("${candidate}")
+  done
+
+  [[ "${#sofiles[@]}" -gt 0 ]] || return 0
+  printf '%s\n' "${sofiles[@]}" | sort -V | tail -n 1
+}
+
 # Download and install one upstream ONNX Runtime tarball.
 #
 # Arguments: <version> <asset name> <url> [sha256]
@@ -155,8 +174,7 @@ sc_ort_install_tarball() {
 
   if [[ ! -e "${libdir}/libonnxruntime.so" ]]; then
     local sofile
-    # shellcheck disable=SC2012  # The upstream names have no spaces.
-    sofile="$(ls -1 "${libdir}"/libonnxruntime.so.* 2>/dev/null | head -n 1 || true)"
+    sofile="$(sc_ort_newest_so "${libdir}")"
     if [[ -z "${sofile}" ]]; then
       echo "[setup] ERROR: libonnxruntime.so not found under ${libdir}" >&2
       return 1
