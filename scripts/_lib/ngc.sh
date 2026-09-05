@@ -54,6 +54,12 @@ SC_NGC_TEAM="${SC_NGC_TEAM:-maxine}"
 SC_NGC_DRY_RUN="${SC_NGC_DRY_RUN:-0}"
 SC_NGC_RETRIES="${SC_NGC_RETRIES:-3}"
 
+# The most pages of a file list to ask for. The page count comes from the
+# server, and a version of a Maxine pack holds a few files, so a count near
+# this limit means the answer is wrong. Without a limit, a server that reports
+# a very large count makes the listing ask for hours.
+SC_NGC_MAX_PAGES="${SC_NGC_MAX_PAGES:-200}"
+
 # Resource names the caller wants listed when NGC answers 402.
 if ! declare -p SC_NGC_ALT_RESOURCES >/dev/null 2>&1; then
   declare -a SC_NGC_ALT_RESOURCES=()
@@ -446,7 +452,7 @@ sc_ngc_list_kind_files() {
   local kind="$1"
   local resource="$2"
   local version="$3"
-  local base url out page pages
+  local base url out page pages merged
   local rc=0
   local listing=""
 
@@ -500,12 +506,26 @@ PY
 
     pages="$(printf '%s\n' "${chunk}" | head -n 1)"
     [[ "${pages}" =~ ^[0-9]+$ ]] || pages=1
-    listing+="$(printf '%s\n' "${chunk}" | tail -n +2)"$'\n'
+    if [[ "${pages}" -gt "${SC_NGC_MAX_PAGES}" ]]; then
+      sc_ngc_err "'${resource}' version ${version} reports ${pages} pages of files, which is more than the limit of ${SC_NGC_MAX_PAGES}."
+      sc_ngc_err "Raise SC_NGC_MAX_PAGES if that count is right."
+      return 2
+    fi
+
+    # Join this page onto what the earlier pages gave, without blank lines and
+    # without repeats. An API that ignores the page number serves page 0 every
+    # time, so a page that adds nothing means there is no more to get. Stop
+    # there, or a large totalPages makes this loop ask for hours.
+    merged="$(printf '%s\n%s\n' "${listing}" \
+      "$(printf '%s\n' "${chunk}" | tail -n +2)" | awk 'NF && !seen[$0]++')"
+    if [[ "${merged}" == "${listing}" ]]; then
+      break
+    fi
+    listing="${merged}"
     page=$((page + 1))
   done
 
-  # Drop blank lines and repeats; a repeat means the API ignored the page number.
-  printf '%s' "${listing}" | awk 'NF && !seen[$0]++'
+  [[ -z "${listing}" ]] || printf '%s\n' "${listing}"
 }
 
 sc_ngc_list_files() {

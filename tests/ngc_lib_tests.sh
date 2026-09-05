@@ -777,6 +777,109 @@ CHILD
   fi
 }
 
+# totalPages comes from the server. An API that ignores the page number and
+# serves the same page every time must not make the helper ask for all of
+# them. The loop stops at the first page that adds no new file. The count here
+# is under SC_NGC_MAX_PAGES, so only the repeat can stop the loop.
+test_a_page_that_adds_nothing_stops_the_listing() {
+  local listing="${SANDBOX}/repeat.json"
+  cat > "${listing}" <<'JSON'
+{
+  "modelFiles": [{"path": "only.trtpkg", "sizeInBytes": 1}],
+  "paginationInfo": {"totalPages": 150}
+}
+JSON
+
+  local child="${SANDBOX}/repeat-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+unset NGC_API_KEY NGC_CLI_API_KEY
+sc_ngc_log() { :; }
+sc_ngc_err() { :; }
+# shellcheck source=/dev/null
+source "$1"
+export SC_NGC_API_KEY="$2"
+export SC_NGC_AUTHN_HOST="https://authn.invalid"
+export SC_NGC_HOST="https://api.invalid"
+export SC_NGC_RETRIES=1
+sc_ngc_list_model_files test-model 1.0
+CHILD
+
+  local log="${SANDBOX}/repeat.log"
+  : > "${log}"
+  local out
+  out="$(timeout 30 env NGC_CURL_LOG="${log}" NGC_STUB_LISTING="${listing}" \
+    bash "${child}" "${NGC_LIB}" "${MODERN_KEY}" 2>/dev/null)"
+
+  local requests
+  requests="$(grep -c '^argv:' "${log}")"
+  if [[ "${requests}" -gt 3 ]]; then
+    t_fail "a repeated page was asked for ${requests} times"
+  else
+    t_pass "a page that adds nothing stops the listing"
+  fi
+
+  if [[ "${out}" != *only.trtpkg* ]]; then
+    t_fail "the listing lost the only file: ${out}"
+  else
+    t_pass "the listing keeps what the pages did hold"
+  fi
+}
+
+# A page count no answer can justify must end the call with a message, not
+# with a loop that runs until the user stops it.
+test_an_absurd_page_count_is_refused() {
+  local listing="${SANDBOX}/toomany.json"
+  cat > "${listing}" <<'JSON'
+{
+  "modelFiles": [{"path": "first.trtpkg", "sizeInBytes": 1}],
+  "paginationInfo": {"totalPages": 100000}
+}
+JSON
+  # Each page holds one new file, so nothing stops the loop but the cap.
+  local page
+  for page in 1 2 3; do
+    cat > "${listing}.page${page}" <<JSON
+{
+  "modelFiles": [{"path": "file${page}.trtpkg", "sizeInBytes": 1}],
+  "paginationInfo": {"totalPages": 100000}
+}
+JSON
+  done
+
+  local child="${SANDBOX}/toomany-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+unset NGC_API_KEY NGC_CLI_API_KEY
+# shellcheck source=/dev/null
+source "$1"
+export SC_NGC_API_KEY="$2"
+export SC_NGC_AUTHN_HOST="https://authn.invalid"
+export SC_NGC_HOST="https://api.invalid"
+export SC_NGC_RETRIES=1
+export SC_NGC_MAX_PAGES=2
+sc_ngc_list_model_files test-model 1.0 >/dev/null
+echo "RC=$?"
+CHILD
+
+  local out
+  out="$(timeout 30 env NGC_CURL_LOG="${SANDBOX}/toomany.log" \
+    NGC_STUB_LISTING="${listing}" \
+    bash "${child}" "${NGC_LIB}" "${MODERN_KEY}" 2>&1)"
+
+  if [[ "${out}" != *"RC=2"* ]]; then
+    t_fail "a page count over the limit should end the call: ${out}"
+  else
+    t_pass "a page count over the limit ends the call"
+  fi
+
+  if [[ "${out}" != *SC_NGC_MAX_PAGES* ]]; then
+    t_fail "the refusal did not name the setting that raises the limit: ${out}"
+  else
+    t_pass "the refusal names the setting that raises the limit"
+  fi
+}
+
 # Every HTTP status NGC answers with must turn into a line the user can act
 # on, not a bare number.
 test_each_refusal_is_explained() {
@@ -848,6 +951,8 @@ test_a_size_only_check_is_named_a_size_check
 test_an_unrelated_md5_in_the_destination_is_left_alone
 test_a_refused_resume_starts_over
 test_a_failed_download_names_the_partial_file
+test_a_page_that_adds_nothing_stops_the_listing
+test_an_absurd_page_count_is_refused
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2
