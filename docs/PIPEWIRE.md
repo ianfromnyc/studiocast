@@ -74,6 +74,11 @@ PipeWire server through `pipewire-pulse`. An upgrade therefore changes nothing
 on a machine that already works. Set `auto` or `pipewire` to move to the native
 nodes.
 
+The flag holds for one run only. Neither `--audio-backend` nor
+`--video-output-backend` is written back into the config file when a setting is
+saved from the GUI, so a run with a flag never changes what the next run does.
+Edit the config file to make a backend permanent.
+
 A server is "reachable" when a PipeWire socket exists and a client can open
 it. StudioCast looks for `$PIPEWIRE_RUNTIME_DIR`, then `$XDG_RUNTIME_DIR`,
 then `$USERPROFILE`, and tests for the socket named by `$PIPEWIRE_REMOTE`, or

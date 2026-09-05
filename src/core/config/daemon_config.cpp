@@ -853,7 +853,11 @@ void ApplyAudioServiceConfigToDaemonConfig(
   out->audio_speaker_target_sink = cfg.speaker_target_sink;
   out->audio_speaker_latency_ms = cfg.speaker_latency_ms;
   out->audio_source = cfg.source_name;
-  out->audio_backend = std::string(ToString(cfg.transport));
+  // `audio.backend` is not written back. The value in the running service can
+  // come from the `--audio-backend` flag, which is meant for one run, and this
+  // function runs whenever any audio setting is saved from the GUI, so writing
+  // it would make that flag permanent. The matching video preference is not
+  // written back either. Change the file to change the backend.
   out->audio_monitor_enabled = cfg.monitor.enabled;
   out->audio_monitor_sink = cfg.monitor.sink;
   out->audio_monitor_latency_ms = cfg.monitor.latency_ms;

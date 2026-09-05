@@ -1271,6 +1271,26 @@ const char *kStaleModuleList =
     "source_output_properties=media.name=StudioCast_Microphone_Monitor\n"
     "536870922\tmodule-null-sink\tsink_name=other_app_sink\n";
 
+// `--audio-backend` is a flag for one run. Saving an audio setting from the
+// GUI must not turn it into the value in the config file, the way the matching
+// video flag never does.
+bool TestSavingAudioSettingsLeavesTheBackendKeyAlone() {
+  studiocast::config::DaemonConfig cfg;
+  cfg.audio_backend = "pulse";
+
+  studiocast::audio::VirtualAudioServiceConfig service;
+  service.transport = studiocast::pw::AudioTransportPreference::kPipeWire;
+  service.source_name = "physical_test_mic";
+
+  studiocast::config::ApplyAudioServiceConfigToDaemonConfig(service, &cfg);
+
+  return Expect(cfg.audio_backend == "pulse",
+                "a run-time transport must not reach the config file; got " +
+                    cfg.audio_backend) &&
+         Expect(cfg.audio_source == "physical_test_mic",
+                "the settings the user really changed must be saved");
+}
+
 bool TestStalePulseModuleDetectionSkipsTheMonitorAndOtherApps() {
   ScopedPactlHook hook([](const std::string &command) {
     if (command == "pactl --version 2>&1")
@@ -1793,6 +1813,8 @@ int main() {
        &TestServiceTransportDefaultsToPulse},
       {"daemon config round trips the audio backend key",
        &TestDaemonConfigRoundTripsTheAudioBackendKey},
+      {"saving audio settings leaves the backend key alone",
+       &TestSavingAudioSettingsLeavesTheBackendKeyAlone},
       {"stale pulse module detection skips the monitor and other apps",
        &TestStalePulseModuleDetectionSkipsTheMonitorAndOtherApps},
       {"stale pulse module detection matches whole argument values",
