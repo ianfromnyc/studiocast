@@ -536,6 +536,31 @@ bool TrySetFmtCapture(int fd, const TypeSpec &t, int width, int height,
   return false;
 }
 
+// Bytes a captured row of this width holds when the driver packs it with no
+// padding. This is not the writer's `MinBytesPerLine`: the writer asks the
+// driver for a row and must fit the whole final YUYV pair the converters
+// write, while the driver has already filled a captured row and puts only two
+// bytes there for the last pixel of an odd width. The only use here is a
+// floor for a driver that reports a row too short to hold the pixels at all.
+std::size_t CapturePackedBytesPerLine(int width, CapturePixelFormat fmt) {
+  if (width <= 0)
+    return 0u;
+
+  const std::size_t w = static_cast<std::size_t>(width);
+  switch (fmt) {
+  case CapturePixelFormat::yuyv:
+    return w * 2u;
+  case CapturePixelFormat::rgb24:
+    return w * 3u;
+  case CapturePixelFormat::mjpeg:
+    // Compressed: the driver reports no meaningful row size.
+    return 0u;
+  }
+  return 0u;
+}
+
+} // namespace
+
 bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
                            int fps_num, int fps_den, CaptureFormat *out,
                            std::string *outErr) {
@@ -602,10 +627,13 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
     a.bytes_per_line = bpl;
     a.size_image = size;
   } else {
-    // Provide conservative minima for uncompressed formats.
-    const std::size_t minBpl = CaptureMinBytesPerLine(a.width, a.format);
-    if (bpl < minBpl)
-      bpl = minBpl;
+    // Keep the stride the driver laid the frame out with. Raising it above
+    // the driver's value does not make the row longer, it only makes the read
+    // path walk the frame at a stride the data does not use. Only a row too
+    // short to hold the pixels, which no driver can have filled, is raised.
+    const std::size_t packedBpl = CapturePackedBytesPerLine(a.width, a.format);
+    if (bpl < packedBpl)
+      bpl = packedBpl;
     a.bytes_per_line = bpl;
 
     const std::size_t minSize = bpl * static_cast<std::size_t>(a.height);
@@ -616,21 +644,6 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
 
   *out = a;
   return true;
-}
-
-} // namespace
-
-std::size_t CaptureMinBytesPerLine(int width, CapturePixelFormat fmt) {
-  switch (fmt) {
-  case CapturePixelFormat::yuyv:
-    return MinBytesPerLine(width, PixelFormat::yuyv);
-  case CapturePixelFormat::rgb24:
-    return MinBytesPerLine(width, PixelFormat::rgb24);
-  case CapturePixelFormat::mjpeg:
-    // Compressed: the driver reports no meaningful row size.
-    return 0u;
-  }
-  return 0u;
 }
 
 bool ShouldPreferMjpegForResolution(int width, int height) {

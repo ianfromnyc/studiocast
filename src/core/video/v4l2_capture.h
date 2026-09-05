@@ -6,6 +6,10 @@
 #include <string>
 #include <vector>
 
+// V4L2 format the driver reports back from VIDIOC_S_FMT. Only a reference to
+// one crosses this header, so it stays free of <linux/videodev2.h>.
+struct v4l2_format;
+
 namespace studiocast::video {
 
 enum class CapturePixelFormat {
@@ -34,12 +38,6 @@ CaptureFormatTryOrderForRequest(CapturePixelFormat requested,
                                 bool prefer_mjpeg, int width, int height,
                                 CaptureFormatSupport support);
 
-// Smallest bytes_per_line an uncompressed capture frame of this width needs.
-// This is the same rule the writer uses, so a YUYV row keeps the whole final
-// pixel pair when the width is odd. MJPEG is compressed and has no meaningful
-// row size, so it gives 0.
-std::size_t CaptureMinBytesPerLine(int width, CapturePixelFormat fmt);
-
 struct CaptureFormat {
   int width = 0;
   int height = 0;
@@ -56,6 +54,21 @@ struct CaptureFormat {
   std::size_t bytes_per_line = 0;
   std::size_t size_image = 0;
 };
+
+// Reads the format the driver reported after VIDIOC_S_FMT into a
+// `CaptureFormat`. `mplane` says which union arm of `f` holds the answer.
+//
+// The driver has already laid the frame out, so `bytes_per_line` keeps the
+// stride the driver reported: a larger row size does not make the row longer,
+// it only makes the reader walk the frame at a stride the data does not use.
+// A row too short to hold the pixels, or a stride of 0, is raised to the
+// packed row size, and `size_image` is raised to the row size times the
+// height. Compressed MJPEG has no row size, so both values stay as reported.
+//
+// Exposed for tests; `V4l2Capture::Open()` is the only other caller.
+bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
+                           int fps_num, int fps_den, CaptureFormat *out,
+                           std::string *outErr);
 
 struct CapturedFrameView {
   const std::uint8_t *data = nullptr;

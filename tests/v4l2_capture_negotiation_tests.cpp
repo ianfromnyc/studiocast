@@ -1,12 +1,14 @@
 #include "core/video/v4l2_capture.h"
 #include "core/video/capture_error_policy.h"
-#include "core/video/v4l2_writer.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <initializer_list>
 #include <iostream>
 #include <optional>
 #include <vector>
+
+#include <linux/videodev2.h>
 
 namespace studiocast::tests {
 namespace {
@@ -167,42 +169,85 @@ bool TestMjpegDecodeFailureFallsBackToRawOnce() {
              "raw capture failures should not re-enter MJPEG fallback policy");
 }
 
-// The capture path reads a row with the same converters the writer path
-// writes one with, so both must agree on the row size. A YUYV row packs
-// pixels in pairs: an odd width still fills the whole final pair, and a row
-// of width * 2 bytes makes the odd-width tail read past the frame.
-bool TestCaptureRowSizeMatchesTheSharedRowRule() {
-  using studiocast::video::CaptureMinBytesPerLine;
-  using studiocast::video::MinBytesPerLine;
-  using studiocast::video::PixelFormat;
+struct RowLayoutCase {
+  const char *name;
+  std::uint32_t fourcc;
+  int width;
+  int height;
 
-  for (const int width : {1, 2, 3, 7, 16, 17, 640}) {
-    const std::size_t yuyv =
-        CaptureMinBytesPerLine(width, CapturePixelFormat::yuyv);
-    const std::size_t expected_yuyv = MinBytesPerLine(width, PixelFormat::yuyv);
-    if (!Expect(yuyv == expected_yuyv,
-                "captured YUYV row size must hold the whole final pair")) {
-      std::cerr << "  width " << width << ": expected " << expected_yuyv
-                << ", got " << yuyv << "\n";
+  // What the driver reported after VIDIOC_S_FMT.
+  std::uint32_t driver_bytesperline;
+  std::uint32_t driver_sizeimage;
+
+  // What the capture format must carry into the read path.
+  std::size_t bytes_per_line;
+  std::size_t size_image;
+};
+
+// The driver fills the capture buffer before the program reads it, so the
+// stride the driver reports is the stride the frame really uses. Raising it
+// does not make the row longer: it makes the reader walk the mmap'd frame at
+// a stride the data does not use, which misreads every row after the first
+// and runs past the end of the frame. v4l2loopback accepts an odd YUYV width
+// and reports a packed `bytesperline`, so this case is reachable.
+//
+// A stride below the packed row size is the one that cannot be believed. The
+// row must at least hold the pixels, so that value alone is raised.
+bool TestCaptureNegotiationKeepsTheDriverRowStride() {
+  using studiocast::video::CaptureFormat;
+  using studiocast::video::ParseChosenCaptureFmt;
+
+  const RowLayoutCase cases[] = {
+      {"odd YUYV width, packed driver stride", V4L2_PIX_FMT_YUYV, 3, 4, 6, 24,
+       6u, 24u},
+      {"even YUYV width, packed driver stride", V4L2_PIX_FMT_YUYV, 640, 480,
+       1280, 614400, 1280u, 614400u},
+      {"YUYV padded row is kept", V4L2_PIX_FMT_YUYV, 640, 480, 1536, 737280,
+       1536u, 737280u},
+      {"YUYV stride below the packed row is raised", V4L2_PIX_FMT_YUYV, 3, 4, 4,
+       16, 6u, 24u},
+      {"YUYV stride of zero is raised", V4L2_PIX_FMT_YUYV, 640, 480, 0, 0,
+       1280u, 614400u},
+      {"odd RGB24 width, packed driver stride", V4L2_PIX_FMT_RGB24, 3, 4, 9, 36,
+       9u, 36u},
+      {"MJPEG keeps the reported values", V4L2_PIX_FMT_MJPEG, 640, 480, 0,
+       100000, 0u, 100000u},
+  };
+
+  for (const RowLayoutCase &c : cases) {
+    v4l2_format f{};
+    f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    f.fmt.pix.width = static_cast<__u32>(c.width);
+    f.fmt.pix.height = static_cast<__u32>(c.height);
+    f.fmt.pix.pixelformat = c.fourcc;
+    f.fmt.pix.bytesperline = c.driver_bytesperline;
+    f.fmt.pix.sizeimage = c.driver_sizeimage;
+
+    CaptureFormat got{};
+    if (!Expect(ParseChosenCaptureFmt(f, /*mplane=*/false, /*fps=*/30,
+                                      /*fps_num=*/1, /*fps_den=*/30, &got,
+                                      nullptr),
+                "the reported capture format must parse")) {
+      std::cerr << "  case " << c.name << "\n";
       return false;
     }
 
-    const std::size_t rgb24 =
-        CaptureMinBytesPerLine(width, CapturePixelFormat::rgb24);
-    const std::size_t expected_rgb24 =
-        MinBytesPerLine(width, PixelFormat::rgb24);
-    if (!Expect(rgb24 == expected_rgb24,
-                "captured RGB24 row size must be three bytes per pixel")) {
-      std::cerr << "  width " << width << ": expected " << expected_rgb24
-                << ", got " << rgb24 << "\n";
+    if (!Expect(got.bytes_per_line == c.bytes_per_line,
+                "the capture row stride must be the one the frame uses")) {
+      std::cerr << "  case " << c.name << ": expected " << c.bytes_per_line
+                << ", got " << got.bytes_per_line << "\n";
+      return false;
+    }
+
+    if (!Expect(got.size_image == c.size_image,
+                "the capture frame size must follow the row stride")) {
+      std::cerr << "  case " << c.name << ": expected " << c.size_image
+                << ", got " << got.size_image << "\n";
       return false;
     }
   }
 
-  return Expect(CaptureMinBytesPerLine(640, CapturePixelFormat::mjpeg) == 0u,
-                "MJPEG is compressed and has no row size") &&
-         Expect(CaptureMinBytesPerLine(0, CapturePixelFormat::yuyv) == 0u,
-                "a width of zero has no row");
+  return true;
 }
 
 } // namespace
@@ -239,8 +284,8 @@ bool TestV4l2MjpegDecodeFailureFallsBackToRawOnce() {
   return TestMjpegDecodeFailureFallsBackToRawOnce();
 }
 
-bool TestV4l2CaptureRowSizeMatchesTheSharedRowRule() {
-  return TestCaptureRowSizeMatchesTheSharedRowRule();
+bool TestV4l2CaptureNegotiationKeepsTheDriverRowStride() {
+  return TestCaptureNegotiationKeepsTheDriverRowStride();
 }
 
 } // namespace studiocast::tests
