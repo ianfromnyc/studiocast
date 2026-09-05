@@ -231,7 +231,9 @@ detected major is reported and leaves the `cpu` flavor running.
 
 `./scripts/uninstall.sh --greedy` removes `/opt/studiocast/onnxruntime`,
 `/opt/studiocast/cudnn` and the StudioCast files under `/etc/ld.so.conf.d/`. It
-never removes the NVIDIA rpms.
+never removes the NVIDIA rpms. Like the setup helper, it uses `sudo` in a user
+shell and runs the commands directly in a root shell, so a system without
+`sudo` still cleans up.
 
 See `docs/open_source_video_models_install.md` for the Open CUDA backend.
 

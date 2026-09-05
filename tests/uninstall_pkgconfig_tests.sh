@@ -113,6 +113,77 @@ test_only_our_own_symlink_is_removed() {
   fi
 }
 
+# scripts/setup/fedora.sh writes the system files without sudo when it runs as
+# root, and docs/SETUP.md says the greedy uninstall removes them again. A root
+# shell often has no sudo (containers, rescue systems), so the clean-up must
+# run its commands directly there instead of skipping the whole step.
+#
+# Dry-run mode prints the commands instead of running them, so nothing here
+# removes anything.
+test_a_root_shell_cleans_up_without_sudo() {
+  local casedir="${SANDBOX}/priv"
+  mkdir -p "${casedir}/bin"
+
+  cat > "${casedir}/bin/id" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "${STUB_UID:-0}"
+STUB
+  chmod +x "${casedir}/bin/id"
+
+  # A PATH with no sudo in it. The uninstall needs nothing else in dry-run
+  # mode, apart from the few tools linked here.
+  local tool
+  for tool in bash grep wc readlink; do
+    ln -sf "$(command -v "${tool}")" "${casedir}/bin/${tool}"
+  done
+
+  local work="${SANDBOX}/priv-links"
+  local pc_file="${work}/bootstrap/onnxruntime.pc"
+  mkdir -p "${work}/bootstrap" "${work}/ours"
+  : > "${pc_file}"
+  ln -s "${pc_file}" "${work}/ours/onnxruntime.pc"
+
+  local child="${SANDBOX}/priv-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+# shellcheck source=/dev/null
+source "$1"
+DRY_RUN=1
+resolve_priv
+remove_onnxruntime_pc_links "$2" "$3"
+CHILD
+
+  local out
+  out="$(PATH="${casedir}/bin" STUB_UID=0 bash "${child}" "${UNINSTALL}" \
+    "${pc_file}" "${work}/ours" 2>&1)"
+  if [[ "${out}" == *sudo* ]]; then
+    t_fail "a root shell should remove the link without sudo, got: ${out}"
+  elif [[ "${out}" != *"rm -f"* ]]; then
+    t_fail "a root shell should remove the link, got: ${out}"
+  else
+    t_pass "a root shell removes the link without sudo"
+  fi
+
+  out="$(PATH="${casedir}/bin" STUB_UID=1000 bash "${child}" "${UNINSTALL}" \
+    "${pc_file}" "${work}/ours" 2>&1)"
+  if [[ "${out}" != *"sudo rm -f"* ]]; then
+    t_fail "a user shell should remove the link with sudo, got: ${out}"
+  else
+    t_pass "a user shell removes the link with sudo"
+  fi
+
+  local rc=0
+  out="$(PATH="${casedir}/bin" STUB_UID=0 HOME="${SANDBOX}/priv-home" \
+    bash "${UNINSTALL}" --greedy --yes --dry-run 2>&1)" || rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    t_fail "the greedy dry run ended with status ${rc}: ${out}"
+  elif [[ "${out}" == *"skipping system-level cleanup"* ]]; then
+    t_fail "a root shell without sudo skipped the system clean-up"
+  else
+    t_pass "a root shell without sudo runs the system clean-up"
+  fi
+}
+
 # Sourcing the file must only define things. A caller that sources it keeps its
 # own arguments and its own shell options, and sees no output.
 test_sourcing_has_no_side_effects() {
@@ -176,6 +247,7 @@ PROBE
 test_link_dirs_come_from_pkg_config
 test_link_dirs_fall_back_to_the_common_directories
 test_only_our_own_symlink_is_removed
+test_a_root_shell_cleans_up_without_sudo
 test_sourcing_has_no_side_effects
 
 if [[ "${FAILURES}" -ne 0 ]]; then

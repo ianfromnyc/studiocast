@@ -18,7 +18,8 @@ Usage:
 Modes:
   (default)          Simple uninstall: remove user-level artifacts only.
   --greedy           Also remove most local StudioCast data/config/state and attempt to
-                     remove/purge common system dependencies (requires sudo).
+                     remove/purge common system dependencies (needs root: a root
+                     shell, or sudo).
 
 Options:
   --dry-run          Print actions without executing.
@@ -49,6 +50,22 @@ parse_args() {
       *) die "Unknown argument: $1 (use --help)" ;;
     esac
   done
+}
+
+# Command prefix for the steps that need root. A root shell gets none: a
+# container or a rescue system often has no sudo, and scripts/setup/fedora.sh
+# writes the same system files without sudo when it runs as root.
+#
+# main() calls resolve_priv. The default covers a caller that sources this file
+# and calls one helper without it.
+PRIV=(sudo)
+
+resolve_priv() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    PRIV=()
+  else
+    PRIV=(sudo)
+  fi
 }
 
 run() {
@@ -217,7 +234,7 @@ remove_onnxruntime_pc_links() {
     pc_link="${dir}/onnxruntime.pc"
     if [[ -L "$pc_link" && "$(readlink -- "$pc_link")" == "$pc_file" ]]; then
       log "Removing: $pc_link"
-      run sudo rm -f -- "$pc_link"
+      run "${PRIV[@]}" rm -f -- "$pc_link"
     fi
   done
 }
@@ -241,7 +258,7 @@ greedy_remove_system_onnxruntime_bootstrap() {
   for tree in "${trees[@]}"; do
     if [[ -d "$tree" ]]; then
       log "Removing: $tree"
-      run sudo rm -rf -- "$tree"
+      run "${PRIV[@]}" rm -rf -- "$tree"
     fi
   done
 
@@ -250,13 +267,13 @@ greedy_remove_system_onnxruntime_bootstrap() {
   for ld_conf in "${ld_confs[@]}"; do
     if [[ -f "$ld_conf" ]]; then
       log "Removing: $ld_conf"
-      run sudo rm -f -- "$ld_conf"
+      run "${PRIV[@]}" rm -f -- "$ld_conf"
       removed_ld_conf=1
     fi
   done
 
   if [[ "$removed_ld_conf" -eq 1 ]]; then
-    run sudo ldconfig || true
+    run "${PRIV[@]}" ldconfig || true
   fi
 
   local -a pc_dirs=()
@@ -265,7 +282,7 @@ greedy_remove_system_onnxruntime_bootstrap() {
 
   if [[ -f "$pc_file" ]]; then
     log "Removing: $pc_file"
-    run sudo rm -f -- "$pc_file"
+    run "${PRIV[@]}" rm -f -- "$pc_file"
   fi
 }
 
@@ -277,19 +294,19 @@ greedy_remove_v4l2loopback_persistence() {
   log "Greedy mode: removing v4l2loopback persistence (if created for StudioCast)"
 
   if have_cmd modprobe; then
-    run_quiet sudo modprobe -r v4l2loopback || true
+    run_quiet "${PRIV[@]}" modprobe -r v4l2loopback || true
   fi
 
   if [[ -f "$modprobe_conf" ]]; then
     log "Removing: $modprobe_conf"
-    run sudo rm -f -- "$modprobe_conf"
+    run "${PRIV[@]}" rm -f -- "$modprobe_conf"
   fi
 
   if [[ -f "$modules_load_conf" ]]; then
     # Be conservative: only remove if it's a single-line file containing exactly 'v4l2loopback'.
     if [[ "$(wc -l < "$modules_load_conf" | tr -d ' ')" == "1" ]] && grep -qx 'v4l2loopback' "$modules_load_conf"; then
       log "Removing: $modules_load_conf"
-      run sudo rm -f -- "$modules_load_conf"
+      run "${PRIV[@]}" rm -f -- "$modules_load_conf"
     else
       warn "Not removing $modules_load_conf (contents don't match expected single-line 'v4l2loopback')."
     fi
@@ -321,11 +338,11 @@ greedy_purge_apt_dependencies() {
   )
 
   log "Greedy mode: attempting to purge apt dependencies (best-effort)"
-  run sudo apt-get update
+  run "${PRIV[@]}" apt-get update
   # Intentionally allow failures (packages may not be installed).
-  run sudo apt-get remove --purge -y "${pkgs[@]}" || true
-  run sudo apt-get autoremove --purge -y || true
-  run sudo apt-get -f install -y || true
+  run "${PRIV[@]}" apt-get remove --purge -y "${pkgs[@]}" || true
+  run "${PRIV[@]}" apt-get autoremove --purge -y || true
+  run "${PRIV[@]}" apt-get -f install -y || true
 }
 
 main() {
@@ -333,6 +350,7 @@ main() {
 
   parse_args "$@"
   resolve_user_paths
+  resolve_priv
 
   log "Mode: $([[ "$GREEDY" -eq 1 ]] && echo greedy || echo simple)"
   log "Dry-run: $([[ "$DRY_RUN" -eq 1 ]] && echo yes || echo no)"
@@ -353,7 +371,8 @@ main() {
   if [[ "$GREEDY" -eq 1 ]]; then
     greedy_remove_user_data
 
-    if ! have_cmd sudo; then
+    # A root shell needs no sudo, so only a user shell without it must stop.
+    if [[ "${#PRIV[@]}" -gt 0 ]] && ! have_cmd sudo; then
       warn "sudo not found; skipping system-level cleanup (onnxruntime/v4l2loopback/apt purge)"
     else
       greedy_remove_system_onnxruntime_bootstrap
