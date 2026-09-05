@@ -8,7 +8,6 @@
 
 #if STUDIOCAST_HAVE_PIPEWIRE
 #include <cstdlib>
-#include <map>
 
 #include <pipewire/pipewire.h>
 #include <spa/param/video/format-utils.h>
@@ -93,8 +92,9 @@ struct PipeWireCameraNode::Impl {
   bool staged_pending = false;
 
   std::atomic<bool> running{false};
-  std::atomic<std::uint32_t> node_id{0};
-  std::atomic<int> consumer_count{0};
+  // The camera node hands out frames, so it is the output end of every
+  // consumer link.
+  studiocast::pw::NodeLinkCounter links;
   std::atomic<std::uint64_t> frames_sent{0};
   std::atomic<std::uint64_t> frames_dropped{0};
 
@@ -120,9 +120,6 @@ struct PipeWireCameraNode::Impl {
 
   struct spa_hook stream_listener {};
   struct spa_hook registry_listener {};
-
-  std::map<std::uint32_t, bool> counted_links;
-  std::mutex links_mu;
 #endif
 };
 
@@ -138,12 +135,12 @@ void OnStreamStateChanged(void *data, enum pw_stream_state old,
     impl->SetError(error ? std::string(error) : std::string("stream error"));
     return;
   }
-  if (state == PW_STREAM_STATE_STREAMING ||
-      state == PW_STREAM_STATE_PAUSED) {
-    const std::uint32_t id = pw_stream_get_node_id(impl->stream);
-    if (id != PW_ID_ANY)
-      impl->node_id.store(id, std::memory_order_release);
-  }
+  // The server gives the node an id while the stream is still connecting. Take
+  // it at the first state that has one, so a consumer that links right away is
+  // counted.
+  const std::uint32_t id = pw_stream_get_node_id(impl->stream);
+  if (id != PW_ID_ANY)
+    impl->links.SetNodeId(id);
 }
 
 // The server picked a format. Answer with the buffer layout StudioCast wants,
@@ -236,16 +233,17 @@ const struct pw_stream_events &StreamEvents() {
   return events;
 }
 
-bool LinkEndpointMatches(const struct spa_dict *props, const char *key,
-                         std::uint32_t node_id) {
+// Reads a numeric node id out of a link property. Returns zero when the
+// property is absent or is not a plain number.
+std::uint32_t LinkEndpointNode(const struct spa_dict *props, const char *key) {
   const char *v = spa_dict_lookup(props, key);
   if (!v)
-    return false;
+    return 0;
   char *end = nullptr;
   const unsigned long parsed = std::strtoul(v, &end, 10);
   if (!end || *end != '\0')
-    return false;
-  return static_cast<std::uint32_t>(parsed) == node_id;
+    return 0;
+  return static_cast<std::uint32_t>(parsed);
 }
 
 void OnRegistryGlobal(void *data, std::uint32_t id, std::uint32_t permissions,
@@ -257,25 +255,13 @@ void OnRegistryGlobal(void *data, std::uint32_t id, std::uint32_t permissions,
   if (!type || std::strcmp(type, PW_TYPE_INTERFACE_Link) != 0 || !props)
     return;
 
-  const std::uint32_t self = impl->node_id.load(std::memory_order_acquire);
-  if (self == 0)
-    return;
-
-  // The camera node produces frames, so it is the output end of a consumer
-  // link.
-  if (!LinkEndpointMatches(props, PW_KEY_LINK_OUTPUT_NODE, self))
-    return;
-
-  std::lock_guard<std::mutex> lock(impl->links_mu);
-  if (impl->counted_links.emplace(id, true).second)
-    impl->consumer_count.fetch_add(1, std::memory_order_relaxed);
+  impl->links.OnLinkAdded(id, LinkEndpointNode(props, PW_KEY_LINK_OUTPUT_NODE),
+                          LinkEndpointNode(props, PW_KEY_LINK_INPUT_NODE));
 }
 
 void OnRegistryGlobalRemove(void *data, std::uint32_t id) {
   auto *impl = static_cast<PipeWireCameraNode::Impl *>(data);
-  std::lock_guard<std::mutex> lock(impl->links_mu);
-  if (impl->counted_links.erase(id) > 0)
-    impl->consumer_count.fetch_sub(1, std::memory_order_relaxed);
+  impl->links.OnGlobalRemoved(id);
 }
 
 const struct pw_registry_events &RegistryEvents() {
@@ -334,8 +320,7 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
   impl_->cfg = cfg;
   impl_->frame_bytes = bytes;
   impl_->stride_bytes = CameraStrideBytes(cfg.width, cfg.format);
-  impl_->node_id.store(0, std::memory_order_release);
-  impl_->consumer_count.store(0, std::memory_order_relaxed);
+  impl_->links.Reset(studiocast::pw::LinkEnd::kOutput);
   impl_->frames_sent.store(0, std::memory_order_relaxed);
   impl_->frames_dropped.store(0, std::memory_order_relaxed);
   impl_->SetError({});
@@ -484,12 +469,7 @@ void PipeWireCameraNode::Stop() {
     impl_->loop = nullptr;
   }
 
-  {
-    std::lock_guard<std::mutex> lock(impl_->links_mu);
-    impl_->counted_links.clear();
-  }
-  impl_->consumer_count.store(0, std::memory_order_relaxed);
-  impl_->node_id.store(0, std::memory_order_release);
+  impl_->links.Reset(studiocast::pw::LinkEnd::kOutput);
   {
     std::lock_guard<std::mutex> lock(impl_->frame_mu);
     impl_->staged_valid = false;
@@ -536,11 +516,11 @@ bool PipeWireCameraNode::WriteFrame(const std::uint8_t *data,
 }
 
 std::uint32_t PipeWireCameraNode::NodeId() const {
-  return impl_->node_id.load(std::memory_order_acquire);
+  return impl_->links.NodeId();
 }
 
 int PipeWireCameraNode::ConsumerCount() const {
-  return impl_->consumer_count.load(std::memory_order_relaxed);
+  return impl_->links.ConsumerCount();
 }
 
 std::uint64_t PipeWireCameraNode::FramesSent() const {
