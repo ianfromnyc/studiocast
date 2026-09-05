@@ -413,6 +413,13 @@ private:
   // released. It holds a reference for the length of one write, so a node that
   // the supervisor thread swaps out lives until that write is done.
   //
+  // Held for the whole of ApplyPipeWireOutputPlan, so two plans never start a
+  // node at the same time. The plan itself is decided under `mu_` and the node
+  // work happens with `mu_` released, which leaves a window where a second
+  // caller could start a second node of the same name. The lock order is
+  // always this one first, then `mu_`.
+  mutable std::mutex pw_apply_mu_;
+
   // `mu_` guards both the pointer and the error.
   std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> pw_node_;
   std::string pw_node_error_;

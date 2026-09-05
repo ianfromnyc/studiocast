@@ -833,6 +833,12 @@ void CameraPipeline::ApplyPipeWireOutputPlan(
   if (plan.action == Action::keep)
     return;
 
+  // One plan at a time. Both the supervisor thread and the frame thread ask
+  // for one, and two overlapping restarts would put two nodes of the same name
+  // in the graph until the second swap, where a consumer could bind the one
+  // that is about to go.
+  std::lock_guard<std::mutex> applying(pw_apply_mu_);
+
   // Start the replacement first and outside the mutex. The node that runs now
   // keeps the frames flowing while the server answers, as it did when this
   // work still happened under the lock.
