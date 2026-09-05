@@ -530,7 +530,6 @@ void VirtualAudioService::Stop() {
     st_.monitor_module_id = -1;
     st_.monitor_sink_active.clear();
     st_.monitor_latency_ms_active = 0;
-    st_.monitor_volume_active = 0;
     st_.monitor_note.clear();
     st_.monitor_last_error.clear();
     monitor_running_ = false;
@@ -1256,7 +1255,6 @@ void VirtualAudioService::ThreadMain() {
         st_.monitor_module_id = -1;
         st_.monitor_sink_active.clear();
         st_.monitor_latency_ms_active = 0;
-        st_.monitor_volume_active = 0;
       };
       auto forgetMonitorRequest = [&]() {
         monitor_sink_requested_.clear();
@@ -1355,8 +1353,6 @@ void VirtualAudioService::ThreadMain() {
                                        &volumeErr)) {
             monitor_volume_ = monitorCfg.volume;
             nextMonitorVolumeRetry = steady_clock::time_point{};
-            std::lock_guard<std::mutex> lock(mu_);
-            st_.monitor_volume_active = monitorCfg.volume;
           } else {
             nextMonitorVolumeRetry = monitorNow + StartFailureRetryDelay(cfg);
             setMonitorError("Failed to set the microphone monitor volume: " +
@@ -1364,9 +1360,8 @@ void VirtualAudioService::ThreadMain() {
           }
         }
 
-        const bool needRestart =
-            !monitor_output_lost_ &&
-            (!monitor_running_ || monitorSettingsChanged);
+        const bool needRestart = !monitor_output_lost_ &&
+                                 (!monitor_running_ || monitorSettingsChanged);
 
         if (needRestart && monitorNow >= nextMonitorStartRetry) {
           MicMonitorState state;
@@ -1389,7 +1384,6 @@ void VirtualAudioService::ThreadMain() {
               st_.monitor_module_id = state.module_id;
               st_.monitor_sink_active = state.sink;
               st_.monitor_latency_ms_active = state.latency_ms;
-              st_.monitor_volume_active = state.volume;
               st_.monitor_last_error = state.warning;
             }
           } else {
@@ -2829,7 +2823,6 @@ void VirtualAudioService::ThreadMain() {
       st_.monitor_module_id = -1;
       st_.monitor_sink_active.clear();
       st_.monitor_latency_ms_active = 0;
-      st_.monitor_volume_active = 0;
     } else {
       std::lock_guard<std::mutex> lock(mu_);
       st_.monitor_last_error = "Failed to stop the microphone monitor: " + err;

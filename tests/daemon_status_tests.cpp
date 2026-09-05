@@ -772,7 +772,6 @@ bool TestAudioStatusReportsMonitor() {
   audioStatus.monitor_module_id = 551;
   audioStatus.monitor_sink_active = "alsa_output.usb_headset";
   audioStatus.monitor_latency_ms_active = 20;
-  audioStatus.monitor_volume_active = 100;
   audioStatus.mic_consumer_count = 2;
   audioStatus.mic_app_consumer_count = 1;
   audioStatus.mic_monitor_consumer_count = 1;

@@ -1052,7 +1052,10 @@ bool TestServiceAppliesAVolumeChangeWithoutReloading() {
     cfg.monitor.volume = volume;
     service.UpdateConfig(cfg);
     if (!WaitUntil(
-            [&] { return service.Status().monitor_volume_active == volume; },
+            [&] {
+              std::lock_guard<std::mutex> lock(rec.mu);
+              return rec.last_volume == volume;
+            },
             1000ms)) {
       std::cerr << "the monitor volume did not follow " << volume << "\n";
       service.Stop();
@@ -1060,7 +1063,8 @@ bool TestServiceAppliesAVolumeChangeWithoutReloading() {
     }
   }
 
-  const int reloads = rec.starts.load(std::memory_order_relaxed) - starts_before;
+  const int reloads =
+      rec.starts.load(std::memory_order_relaxed) - starts_before;
   const int applied = rec.volume_calls.load(std::memory_order_relaxed);
   service.Stop();
 
