@@ -131,6 +131,13 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "[setup] Missing required command: $1"; exit 1; }
 }
 
+# Stop with a message when an option that takes a value is the last argument.
+# Call it with the arguments that are left: "$1" is the option itself. Without
+# this, "shift 2" fails and set -e ends the script with no output at all.
+need_value() {
+  [[ "$#" -ge 2 ]] || { echo "[setup] ERROR: $1 needs a value" >&2; exit 2; }
+}
+
 # Run a command as root. Root shells (containers, rescue systems) have no sudo.
 run_priv() {
   if [[ "$(id -u)" -eq 0 ]]; then
@@ -791,20 +798,25 @@ while [[ $# -gt 0 ]]; do
     --v4l2loopback) DO_V4L2=1; shift ;;
     --load-loopback) DO_LOAD_LOOP=1; shift ;;
     --persist-loopback) DO_PERSIST_LOOP=1; shift ;;
-    --video-nr) VIDEO_NR="${2:-}"; shift 2 ;;
-    --label) LABEL="${2:-}"; shift 2 ;;
-    --exclusive-caps) EXCLUSIVE_CAPS="${2:-}"; shift 2 ;;
-    --onnxruntime-version) ORT_VERSION="${2:-}"; ORT_SELECTION_EXPLICIT=1; shift 2 ;;
-    --onnxruntime-flavor) ORT_FLAVOR="${2:-}"; shift 2 ;;
-    --onnxruntime-arch) ORT_ARCH="${2:-}"; ORT_SELECTION_EXPLICIT=1; shift 2 ;;
-    --cuda-major)
-      CUDA_MAJOR="${2:-}"; CUDA_MAJOR_EXPLICIT=1; ORT_SELECTION_EXPLICIT=1
+    --video-nr) need_value "$@"; VIDEO_NR="$2"; shift 2 ;;
+    --label) need_value "$@"; LABEL="$2"; shift 2 ;;
+    --exclusive-caps) need_value "$@"; EXCLUSIVE_CAPS="$2"; shift 2 ;;
+    --onnxruntime-version)
+      need_value "$@"; ORT_VERSION="$2"; ORT_SELECTION_EXPLICIT=1
       shift 2 ;;
-    --cudnn-version) CUDNN_VERSION="${2:-}"; shift 2 ;;
+    --onnxruntime-flavor) need_value "$@"; ORT_FLAVOR="$2"; shift 2 ;;
+    --onnxruntime-arch)
+      need_value "$@"; ORT_ARCH="$2"; ORT_SELECTION_EXPLICIT=1
+      shift 2 ;;
+    --cuda-major)
+      need_value "$@"; CUDA_MAJOR="$2"; CUDA_MAJOR_EXPLICIT=1
+      ORT_SELECTION_EXPLICIT=1
+      shift 2 ;;
+    --cudnn-version) need_value "$@"; CUDNN_VERSION="$2"; shift 2 ;;
     --check-cuda) DO_CHECK_CUDA=1; shift ;;
     --build) DO_BUILD=1; shift ;;
-    --build-dir) BUILD_DIR="${2:-}"; shift 2 ;;
-    --build-type) BUILD_TYPE="${2:-}"; shift 2 ;;
+    --build-dir) need_value "$@"; BUILD_DIR="$2"; shift 2 ;;
+    --build-type) need_value "$@"; BUILD_TYPE="$2"; shift 2 ;;
     --rpm) DO_RPM=1; shift ;;
     --maxine) DO_MAXINE=1; shift ;;
     -y|--yes) YES=1; shift ;;

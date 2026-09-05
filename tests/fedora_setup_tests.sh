@@ -480,6 +480,24 @@ RELEASE
   fi
 }
 
+# An option that takes a value must say so when the value is missing. Without
+# a check, "shift 2" on the last argument fails and set -e ends the script with
+# no output at all.
+test_an_option_without_a_value_says_so() {
+  local option out rc
+  for option in --video-nr --build-type --cuda-major; do
+    rc=0
+    out="$(bash "${FEDORA_SETUP}" "${option}" 2>&1)" || rc=$?
+    if [[ "${rc}" -ne 2 ]]; then
+      t_fail "${option} without a value should end with status 2, got ${rc}"
+    elif [[ "${out}" != *"${option} needs a value"* ]]; then
+      t_fail "${option} without a value should say so, got: $(first_line "${out}")"
+    else
+      t_pass "${option} without a value says so"
+    fi
+  done
+}
+
 # The source guard promises definitions only. A shell that sources the helper
 # must keep its own shell options, and must see no output.
 test_sourcing_keeps_the_caller_shell_options() {
@@ -517,6 +535,7 @@ test_cuda_required_libs_follows_the_root_layout
 test_a_failing_objdump_keeps_the_fixed_lib_list
 test_the_options_pick_the_bootstrap_root
 test_only_an_explicit_cuda_major_is_an_option_error
+test_an_option_without_a_value_says_so
 test_sourcing_keeps_the_caller_shell_options
 
 if [[ "${FAILURES}" -ne 0 ]]; then
