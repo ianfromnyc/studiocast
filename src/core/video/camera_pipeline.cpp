@@ -1072,15 +1072,23 @@ bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig &cfg,
 }
 
 void CameraPipeline::CloseOutput() {
-  std::lock_guard<std::mutex> lock(mu_);
-  if (running_ || starting_)
-    return;
-  writer_.Close();
-  writer_device_.clear();
-  output_device_.clear();
-  output_ = ActualFormat{};
-  pw_node_.reset();
-  pw_node_error_.clear();
+  // The node goes out of the member under the lock and is destroyed after it,
+  // as the apply path does. Taking a node down talks to the server, which can
+  // block, and no other thread may wait on the mutex for that. The writer
+  // still closes first, the way it did when both happened under the lock.
+  std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> old;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (running_ || starting_)
+      return;
+    writer_.Close();
+    writer_device_.clear();
+    output_device_.clear();
+    output_ = ActualFormat{};
+    old = std::move(pw_node_);
+    pw_node_error_.clear();
+  }
+  old.reset();
 }
 
 void CameraPipeline::Stop() {
