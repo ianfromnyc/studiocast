@@ -321,8 +321,9 @@ jobs:
     name: shellcheck (packaging scripts)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # The same image the packages are built in, so the ShellCheck version is
-    # the one the packaging targets.
+    # The same image the packages are built in, so the ShellCheck is the one
+    # the packaging targets. Which release that is moves with the image, so
+    # the step below prints it and the log says what actually ran.
     container:
       image: registry.fedoraproject.org/fedora:44
 
@@ -331,6 +332,7 @@ jobs:
         # git is needed by the checkout action; it is not in the base image.
         run: |
           dnf install -y --setopt=install_weak_deps=false ShellCheck git
+          shellcheck --version
 
       - name: Checkout
         uses: actions/checkout@v4
