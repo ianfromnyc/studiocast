@@ -978,6 +978,41 @@ bool TestPipeWireOutputStateReportsAWriteFailure() {
   return ok;
 }
 
+// The three status fields of the camera node come from one rule, so they can
+// never drift apart: a node that is down has no id and no consumers, whatever
+// the numbers the node last held say.
+bool TestPipeWireOutputStatusHidesTheNumbersOfADownNode() {
+  using studiocast::video::internal::PipeWireOutputStatusOf;
+
+  const auto off = PipeWireOutputStatusOf(false, false, "", 42u, 2);
+  if (off.state != "off" || off.node_id != 0 || off.consumer_count != 0) {
+    std::cerr << "an output nobody wants reports nothing\n";
+    return false;
+  }
+
+  const auto up = PipeWireOutputStatusOf(true, true, "", 42u, 2);
+  if (up.state != "running" || up.node_id != 42u || up.consumer_count != 2) {
+    std::cerr << "a node that is up reports its id and its consumers\n";
+    return false;
+  }
+
+  const auto starting = PipeWireOutputStatusOf(true, false, "", 42u, 2);
+  if (starting.state != "starting" || starting.node_id != 0 ||
+      starting.consumer_count != 0) {
+    std::cerr << "a node that is not up yet has no id and no consumers\n";
+    return false;
+  }
+
+  const auto failed = PipeWireOutputStatusOf(true, false, "start failed", 42u,
+                                             2);
+  if (failed.state != "start failed" || failed.node_id != 0 ||
+      failed.consumer_count != 0) {
+    std::cerr << "a node that is down has no id and no consumers\n";
+    return false;
+  }
+  return true;
+}
+
 // The pipeline decides what its PipeWire camera node needs while it holds its
 // mutex, then starts or stops the node without the mutex, because that work
 // talks to the server. This pins the decision half of that split.
@@ -1285,6 +1320,8 @@ int main() {
        &TestCameraNodeRestartBackoffStartsFreshOnEveryRun},
       {"PipeWire output state reports a write failure",
        &TestPipeWireOutputStateReportsAWriteFailure},
+      {"pipewire output status hides the numbers of a down node",
+       &TestPipeWireOutputStatusHidesTheNumbersOfADownNode},
       {"video start failure backs off", &TestVideoStartFailureBacksOff},
       {"video start failure clears after recovery",
        &TestVideoStartFailureClearsAfterRecovery},

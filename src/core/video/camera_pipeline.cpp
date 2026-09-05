@@ -464,12 +464,12 @@ CameraPipelineStatus CameraPipeline::Status() const {
     node_error = pw_node_->LastError();
   if (node_error.empty())
     node_error = pw_node_error_;
-  s.pipewire_output_state =
-      internal::PipeWireOutputStateText(wanted, node_up, node_error);
-  if (wanted && pw_node_) {
-    s.pipewire_node_id = pw_node_->NodeId();
-    s.pipewire_consumer_count = pw_node_->ConsumerCount();
-  }
+  const auto pw_status = internal::PipeWireOutputStatusOf(
+      wanted, node_up, node_error, pw_node_ ? pw_node_->NodeId() : 0u,
+      pw_node_ ? pw_node_->ConsumerCount() : 0);
+  s.pipewire_output_state = pw_status.state;
+  s.pipewire_node_id = pw_status.node_id;
+  s.pipewire_consumer_count = pw_status.consumer_count;
   if (running_ || starting_) {
     s.capture = capture_;
     s.output = output_;
@@ -827,6 +827,19 @@ std::string PipeWireOutputStateText(bool wanted, bool has_node,
   if (!error.empty())
     return error;
   return has_node ? std::string("running") : std::string("starting");
+}
+
+PipeWireOutputStatus PipeWireOutputStatusOf(bool wanted, bool node_up,
+                                            const std::string &error,
+                                            std::uint32_t node_id,
+                                            int consumer_count) {
+  PipeWireOutputStatus s;
+  s.state = PipeWireOutputStateText(wanted, node_up, error);
+  if (!wanted || !node_up)
+    return s;
+  s.node_id = node_id;
+  s.consumer_count = consumer_count;
+  return s;
 }
 
 } // namespace internal

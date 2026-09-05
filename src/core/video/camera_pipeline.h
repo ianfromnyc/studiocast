@@ -344,6 +344,23 @@ PipeWireNodePlan PlanPipeWireNode(bool wanted, const ActualFormat &output,
 std::string PipeWireOutputStateText(bool wanted, bool has_node,
                                     const std::string &error);
 
+// The three `pipewire_output` fields of the pipeline status.
+struct PipeWireOutputStatus {
+  std::string state = "off";
+  std::uint32_t node_id = 0;
+  int consumer_count = 0;
+};
+
+// The whole `pipewire_output` part of the status, from one rule.
+//
+// The id and the consumer count belong to a node that is in the graph. A node
+// that is down has neither, whatever the numbers it last held say, and one
+// rule for all three keeps them from drifting apart.
+PipeWireOutputStatus PipeWireOutputStatusOf(bool wanted, bool node_up,
+                                            const std::string &error,
+                                            std::uint32_t node_id,
+                                            int consumer_count);
+
 } // namespace internal
 
 class CameraPipelineRunner {
