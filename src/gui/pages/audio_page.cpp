@@ -2365,9 +2365,19 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
               "another output.");
         }
         if (!monitorError.isEmpty()) {
-          monitorLines << QStringLiteral(
-              "The monitor needs attention. Open Support for technical "
-              "details.");
+          // A machine with no usable output is the most likely first-run
+          // failure of the monitor, and the answer is one click away. It gets
+          // the advice, not a request to report it.
+          if (monitorError.contains(QString::fromLatin1(
+                  studiocast::audio::kNoSafeMicMonitorSinkMessage))) {
+            monitorLines << QStringLiteral(
+                "No output can be used for the microphone monitor. Choose a "
+                "physical output sink, or plug one in.");
+          } else {
+            monitorLines << QStringLiteral(
+                "The monitor needs attention. Open Support for technical "
+                "details.");
+          }
         }
         monitorStatusLabel_->setText(monitorLines.join(QStringLiteral("\n")));
         monitorStatusLabel_->setVisible(!monitorLines.isEmpty());

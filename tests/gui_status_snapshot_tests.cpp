@@ -22,6 +22,7 @@
 #include <QTimer>
 #include <unistd.h>
 
+#include "core/audio/mic_monitor.h"
 #include "core/audio/pulse/pactl.h"
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
@@ -1854,6 +1855,72 @@ bool TestAudioPageShowsTheMonitorNoteWithoutSendingUserToSupport() {
   return ok;
 }
 
+// A machine with no usable output is the most likely first-run failure of the
+// monitor, and the answer is to select or plug in an output. The page must say
+// so instead of asking the user to open Support.
+bool TestAudioPageShowsTheNoSafeOutputAdviceForTheMonitor() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-no-sink");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *statusLabel =
+      page.findChild<QLabel *>(QStringLiteral("monitorStatusLabel"));
+  if (!Expect(statusLabel != nullptr, "the monitor status label is findable"))
+    return false;
+
+  // The sentence the service writes when the sink choice found nothing safe,
+  // wrapped by the supervisor the way the daemon reports it.
+  const QString lastError =
+      QStringLiteral("Failed to start the microphone monitor: ") +
+      QString::fromLatin1(studiocast::audio::kNoSafeMicMonitorSinkMessage) +
+      QStringLiteral(" Choose a physical output sink.");
+
+  const QString status =
+      QStringLiteral(R"({
+        "service_running":true,
+        "audio":{
+          "enabled":true,
+          "mic_present":true,
+          "source_error":"",
+          "monitor":{
+            "enabled":true,
+            "active":false,
+            "sink":"auto",
+            "latency_ms":20,
+            "volume":100,
+            "note":"",
+            "last_error":"%1"
+          },
+          "pipeline":{"running":true,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })")
+          .arg(lastError);
+
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(status));
+
+  const QString text = statusLabel->text();
+  bool ok = Expect(text.contains(QStringLiteral("output")) &&
+                       text.contains(QStringLiteral("Choose")),
+                   "the page should say which output to choose");
+  ok = Expect(!text.contains(QStringLiteral("Open Support")),
+              "a missing output is not a Support case") &&
+       ok;
+  if (!ok)
+    std::cerr << "monitor status was: " << text.toStdString() << "\n";
+  return ok;
+}
+
 // Every step of the monitor volume used to be its own blocking daemon write,
 // and each write costs the daemon two more pactl runs. The steps must coalesce
 // into one debounced write, the way the rest of this page writes.
@@ -2243,6 +2310,7 @@ int main(int argc, char **argv) {
   ok = TestAudioPageWaitsForItsDeviceListings() && ok;
   ok = TestAudioPageStopsItsListingsBetweenPactlCalls() && ok;
   ok = TestAudioPageShowsTheMonitorNoteWithoutSendingUserToSupport() && ok;
+  ok = TestAudioPageShowsTheNoSafeOutputAdviceForTheMonitor() && ok;
   ok = TestAudioPageDebouncesTheMonitorWrites() && ok;
   ok = TestAudioPageKeepsTheMonitorControlsWhileAWriteIsPending() && ok;
   ok = TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() && ok;

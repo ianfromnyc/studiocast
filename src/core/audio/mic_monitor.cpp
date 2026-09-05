@@ -135,7 +135,7 @@ ChooseSafeMicMonitorSinkName(const std::string &configured_sink,
   }
 
   if (error) {
-    *error = "No safe output sink was found for the microphone monitor. ";
+    *error = std::string(kNoSafeMicMonitorSinkMessage) + " ";
     if (!rejected.empty()) {
       *error += "The Pulse default sink '" + rejected +
                 "' is unsafe: " + reason + " ";

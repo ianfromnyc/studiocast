@@ -51,6 +51,13 @@ bool IsUnsafeMicMonitorSinkName(const std::string &sink,
                                 const std::string &mic_source_name,
                                 std::string *reason);
 
+// First sentence of the message `ChooseSafeMicMonitorSinkName` writes when it
+// finds no safe output at all. The GUI matches on it to show what to do about
+// it instead of asking the user to open Support, so both sides use this one
+// text and cannot drift apart.
+inline constexpr char kNoSafeMicMonitorSinkMessage[] =
+    "No safe output sink was found for the microphone monitor.";
+
 // Resolves the configured sink ("auto" = Pulse default) to a safe output sink.
 // Returns no value when no safe sink is available; `error` says why.
 std::optional<std::string>
