@@ -375,6 +375,59 @@ STUB
   t_pass "a failing objdump keeps the fixed library list"
 }
 
+# More than one bootstrap root can be installed at a time. When the options
+# name a version, a CUDA major or an architecture, the helper must use the root
+# of those options, not the newest root on disk.
+test_the_options_pick_the_bootstrap_root() {
+  local base="${SANDBOX}/root-choice"
+  local older="${base}/1.28.0/onnxruntime-linux-x64-gpu_cuda12-1.28.0"
+  local newer="${base}/1.29.0/onnxruntime-linux-x64-gpu_cuda13-1.29.0"
+  mkdir -p "${older}/include" "${newer}/include"
+  : > "${older}/include/onnxruntime_cxx_api.h"
+  : > "${newer}/include/onnxruntime_cxx_api.h"
+
+  local child="${SANDBOX}/root-choice-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+export ORT_FLAVOR=cpu
+export ORT_ARCH=x64
+export CUDA_MAJOR=12
+# shellcheck source=/dev/null
+source "$1"
+log() { :; }
+warn() { :; }
+run_priv() { :; }
+ORT_VERSION=1.28.0
+ORT_SELECTION_EXPLICIT=1
+echo "REQUESTED_[$(requested_onnxruntime_root)]"
+echo "SELECTED_[$(installed_onnxruntime_root)]"
+ORT_SELECTION_EXPLICIT=0
+echo "DEFAULTS_[$(installed_onnxruntime_root)]"
+CHILD
+
+  local out
+  out="$(STUDIOCAST_ORT_INSTALL_DIR="${base}" bash "${child}" "${FEDORA_SETUP}" \
+    2>/dev/null)"
+
+  if [[ "${out}" != *"REQUESTED_[${older}]"* ]]; then
+    t_fail "the options should name the 1.28.0 cuda12 root, got: ${out}"
+  else
+    t_pass "the options name the root they ask for"
+  fi
+
+  if [[ "${out}" != *"SELECTED_[${older}]"* ]]; then
+    t_fail "the root of the options should win over the newest root, got: ${out}"
+  else
+    t_pass "the root of the options wins over the newest root"
+  fi
+
+  if [[ "${out}" != *"DEFAULTS_[${newer}]"* ]]; then
+    t_fail "without options the newest root should win, got: ${out}"
+  else
+    t_pass "without options the newest root wins"
+  fi
+}
+
 # The source guard promises definitions only. A shell that sources the helper
 # must keep its own shell options, and must see no output.
 test_sourcing_keeps_the_caller_shell_options() {
@@ -410,6 +463,7 @@ test_a_caller_return_trap_survives_the_call
 test_a_missing_index_entry_gives_an_empty_sha256
 test_cuda_required_libs_follows_the_root_layout
 test_a_failing_objdump_keeps_the_fixed_lib_list
+test_the_options_pick_the_bootstrap_root
 test_sourcing_keeps_the_caller_shell_options
 
 if [[ "${FAILURES}" -ne 0 ]]; then

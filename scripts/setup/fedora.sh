@@ -202,6 +202,30 @@ onnxruntime_known_sha256() {
   esac
 }
 
+# The bootstrap root the options ask for, or nothing when they are all
+# defaults.
+#
+# ORT_SELECTION_EXPLICIT says whether the user named a version, a CUDA major or
+# an architecture. Without that, every root on disk is as good as any other and
+# the newest one is the right answer.
+requested_onnxruntime_root() {
+  [[ "${ORT_SELECTION_EXPLICIT:-0}" -eq 1 ]] || return 0
+
+  local asset
+  # The warning about a version with no CUDA asset belongs to the install path,
+  # which prints it once. This is only a name lookup.
+  asset="$(onnxruntime_gpu_asset_name "${ORT_ARCH}" "${CUDA_MAJOR}" \
+    "${ORT_VERSION}" 2>/dev/null)"
+  sc_ort_root "${ORT_VERSION}" "${asset}"
+}
+
+# The bootstrap root to read: the one the options ask for when it is installed,
+# else the newest one. Everything that looks at the installed bootstrap goes
+# through here, so a run that asks for one version never reads another one.
+installed_onnxruntime_root() {
+  sc_ort_installed_root "$(requested_onnxruntime_root)"
+}
+
 warn_if_distro_onnxruntime_installed() {
   rpm -q onnxruntime-devel >/dev/null 2>&1 || return 0
 
@@ -425,7 +449,7 @@ cuda_required_libs() {
     printf 'libcudnn.so.9\n'
 
     local root provider=""
-    root="$(sc_ort_installed_root)"
+    root="$(installed_onnxruntime_root)"
     # The bootstrap root holds its libraries in lib or in lib64, so ask the
     # shared helper instead of assuming lib.
     if [[ -n "${root}" ]]; then
@@ -469,7 +493,7 @@ report_cuda_preflight() {
   done < <(cuda_required_libs)
 
   local ort_root
-  ort_root="$(sc_ort_installed_root)"
+  ort_root="$(installed_onnxruntime_root)"
   if [[ -n "${ort_root}" ]]; then
     log "  PASS  ONNX Runtime bootstrap -> ${ort_root}"
   else
@@ -711,6 +735,10 @@ DO_RPM=0
 PASSTHRU_ARGS=()
 PARSE_PASSTHRU_ARGS=0
 
+# Did the user name a version, a CUDA major or an architecture? Only then is
+# one installed bootstrap root a better answer than another.
+ORT_SELECTION_EXPLICIT=0
+
 if [[ -z "${ORT_ARCH:-}" ]]; then
   case "$(uname -m)" in
     x86_64|amd64) ORT_ARCH="x64" ;;
@@ -749,10 +777,10 @@ while [[ $# -gt 0 ]]; do
     --video-nr) VIDEO_NR="${2:-}"; shift 2 ;;
     --label) LABEL="${2:-}"; shift 2 ;;
     --exclusive-caps) EXCLUSIVE_CAPS="${2:-}"; shift 2 ;;
-    --onnxruntime-version) ORT_VERSION="${2:-}"; shift 2 ;;
+    --onnxruntime-version) ORT_VERSION="${2:-}"; ORT_SELECTION_EXPLICIT=1; shift 2 ;;
     --onnxruntime-flavor) ORT_FLAVOR="${2:-}"; shift 2 ;;
-    --onnxruntime-arch) ORT_ARCH="${2:-}"; shift 2 ;;
-    --cuda-major) CUDA_MAJOR="${2:-}"; shift 2 ;;
+    --onnxruntime-arch) ORT_ARCH="${2:-}"; ORT_SELECTION_EXPLICIT=1; shift 2 ;;
+    --cuda-major) CUDA_MAJOR="${2:-}"; ORT_SELECTION_EXPLICIT=1; shift 2 ;;
     --cudnn-version) CUDNN_VERSION="${2:-}"; shift 2 ;;
     --check-cuda) DO_CHECK_CUDA=1; shift ;;
     --build) DO_BUILD=1; shift ;;
@@ -882,8 +910,14 @@ if [[ "$DO_BUILD" -eq 1 ]]; then
 
   # Without this, the distro CMake config file for onnxruntime-devel would win
   # and the build would silently use the CPU-only ONNX Runtime.
-  ORT_BOOTSTRAP_ROOT="$(sc_ort_installed_root)"
+  REQUESTED_ORT_ROOT="$(requested_onnxruntime_root)"
+  ORT_BOOTSTRAP_ROOT="$(installed_onnxruntime_root)"
   if [[ -n "${ORT_BOOTSTRAP_ROOT}" ]]; then
+    if [[ -n "${REQUESTED_ORT_ROOT}" &&
+      "${REQUESTED_ORT_ROOT}" != "${ORT_BOOTSTRAP_ROOT}" ]]; then
+      warn "The options ask for ${REQUESTED_ORT_ROOT}, which is not installed."
+      warn "Building against the newest installed bootstrap instead."
+    fi
     log "Using the ONNX Runtime bootstrap at ${ORT_BOOTSTRAP_ROOT}"
     CMAKE_ARGS+=(-DONNXRUNTIME_ROOT="${ORT_BOOTSTRAP_ROOT}")
   fi

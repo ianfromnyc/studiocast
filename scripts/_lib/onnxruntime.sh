@@ -38,22 +38,40 @@ sc_ort_legacy_asset_name() {
   fi
 }
 
+# Directory that holds every bootstrap install. Tests can point this at a
+# sandbox; everything else uses the real directory.
+SC_ORT_INSTALL_DIR="${STUDIOCAST_ORT_INSTALL_DIR:-/opt/studiocast/onnxruntime}"
+
 # Directory that holds the extracted tarball for one version.
 sc_ort_prefix() {
-  printf '/opt/studiocast/onnxruntime/%s\n' "$1"
+  printf '%s/%s\n' "${SC_ORT_INSTALL_DIR}" "$1"
 }
 
 # Directory of the extracted tarball itself.
 sc_ort_root() {
-  printf '/opt/studiocast/onnxruntime/%s/%s\n' "$1" "$2"
+  printf '%s/%s/%s\n' "${SC_ORT_INSTALL_DIR}" "$1" "$2"
 }
 
-# Print the newest installed bootstrap root, or nothing when there is none.
+# Print one installed bootstrap root, or nothing when there is none.
+#
+# Arguments: [preferred root]
+#
+# More than one version, CUDA major or architecture can be installed side by
+# side. A preferred root wins when it holds an install, so a caller that knows
+# which one it wants does not get another one. Without a preferred root, or
+# when that root holds no install, the newest one wins.
 sc_ort_installed_root() {
+  local preferred="${1:-}"
   local root
   local -a roots=()
 
-  for root in /opt/studiocast/onnxruntime/*/*/; do
+  if [[ -n "${preferred}" ]] &&
+    [[ -f "${preferred%/}/include/onnxruntime_cxx_api.h" ]]; then
+    printf '%s\n' "${preferred%/}"
+    return 0
+  fi
+
+  for root in "${SC_ORT_INSTALL_DIR}"/*/*/; do
     [[ -f "${root}include/onnxruntime_cxx_api.h" ]] || continue
     roots+=("${root%/}")
   done

@@ -243,6 +243,52 @@ test_libdir_follows_the_layout_of_the_root() {
   fi
 }
 
+# More than one bootstrap root can be installed at a time. A caller that names
+# the root it wants must get that one, and a caller that names none must get
+# the newest one.
+test_a_preferred_root_wins_over_the_newest_root() {
+  local base="${SANDBOX}/installed-roots"
+  local older="${base}/1.28.0/onnxruntime-linux-x64-gpu_cuda12-1.28.0"
+  local newer="${base}/1.29.0/onnxruntime-linux-x64-gpu_cuda13-1.29.0"
+  mkdir -p "${older}/include" "${newer}/include"
+  : > "${older}/include/onnxruntime_cxx_api.h"
+  : > "${newer}/include/onnxruntime_cxx_api.h"
+
+  local child="${SANDBOX}/installed-root-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+sc_ort_log() { :; }
+sc_ort_priv() { :; }
+# shellcheck source=/dev/null
+source "$1"
+echo "PREFERRED_[$(sc_ort_installed_root "$2")]"
+echo "NEWEST_[$(sc_ort_installed_root)]"
+echo "MISSING_[$(sc_ort_installed_root "$3")]"
+CHILD
+
+  local out
+  out="$(STUDIOCAST_ORT_INSTALL_DIR="${base}" bash "${child}" "${ORT_LIB}" \
+    "${older}" "${base}/9.9.9/not-installed" 2>/dev/null)"
+
+  if [[ "${out}" != *"PREFERRED_[${older}]"* ]]; then
+    t_fail "a preferred root should win, got: ${out}"
+  else
+    t_pass "a preferred root wins over the newest root"
+  fi
+
+  if [[ "${out}" != *"NEWEST_[${newer}]"* ]]; then
+    t_fail "without a preferred root the newest one should win, got: ${out}"
+  else
+    t_pass "without a preferred root the newest one wins"
+  fi
+
+  if [[ "${out}" != *"MISSING_[${newer}]"* ]]; then
+    t_fail "a preferred root that is not installed should fall back to the newest one, got: ${out}"
+  else
+    t_pass "a preferred root that is not installed falls back to the newest one"
+  fi
+}
+
 # Linking onnxruntime.pc is best effort. A pkg-config that fails, and a
 # pkg-config that names no search path, must both leave the caller running
 # under set -e.
@@ -302,6 +348,7 @@ test_repeated_calls_clean_up_and_keep_the_caller_trap
 test_download_failure_cleans_up_and_runs_the_caller_trap
 test_a_caller_return_trap_survives_the_call
 test_libdir_follows_the_layout_of_the_root
+test_a_preferred_root_wins_over_the_newest_root
 test_pkgconfig_link_survives_a_broken_pkg_config
 
 if [[ "${FAILURES}" -ne 0 ]]; then
