@@ -149,13 +149,19 @@ std::optional<double> ParseDouble(std::string_view s) {
 std::optional<int> ParseIntArg(std::string_view s, int min, int max,
                                const char *what, std::string *error) {
   const std::string tmp(s);
+  // strtol skips leading blanks and accepts a leading '+', so the first
+  // character is checked here to keep the promise above.
+  const bool startsWithNumber =
+      !tmp.empty() && (tmp.front() == '-' ||
+                       std::isdigit(static_cast<unsigned char>(tmp.front())));
   const char *begin = tmp.c_str();
   char *end = nullptr;
   errno = 0;
   const long v = std::strtol(begin, &end, 10);
 
   const bool wholeString = !tmp.empty() && end && *end == '\0';
-  if (!wholeString || errno == ERANGE || v < min || v > max) {
+  if (!startsWithNumber || !wholeString || errno == ERANGE || v < min ||
+      v > max) {
     if (error) {
       *error = std::string(what) + " needs a whole number in " +
                std::to_string(min) + ".." + std::to_string(max) + ", got '" +
@@ -1489,15 +1495,25 @@ int main(int argc, char **argv) {
         return 2;
       }
 
-      std::string sink;
+      std::optional<std::string> sink;
       std::optional<int> latency;
       std::optional<int> volume;
       for (int i = 4; i < argc; ++i) {
         const std::string_view a =
             argv[i] ? std::string_view(argv[i]) : std::string_view();
         const bool hasValue = (i + 1 < argc) && argv[i + 1];
-        if (a == "--sink" && hasValue) {
-          sink = argv[++i];
+        const bool takesValue =
+            a == "--sink" || a == "--latency-ms" || a == "--volume";
+        if (takesValue && !hasValue) {
+          // The option is known; only the value is missing. Say which.
+          std::cerr << a << " requires a value\n";
+          return 2;
+        }
+        if (a == "--sink") {
+          // An empty value means the system default, which the daemon reads
+          // as "auto".
+          const std::string value = argv[++i];
+          sink = value.empty() ? std::string("auto") : value;
           continue;
         }
         if (a == "--latency-ms" && hasValue) {
@@ -1527,9 +1543,9 @@ int main(int argc, char **argv) {
 
       std::string patch = "{\"monitor\":{\"enabled\":";
       patch += (action == "on") ? "true" : "false";
-      if (!sink.empty()) {
+      if (sink) {
         patch +=
-            ",\"sink\":\"" + studiocast::util::json::EscapeString(sink) + "\"";
+            ",\"sink\":\"" + studiocast::util::json::EscapeString(*sink) + "\"";
       }
       if (latency)
         patch += ",\"latency_ms\":" + std::to_string(*latency);
