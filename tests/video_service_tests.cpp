@@ -1223,9 +1223,67 @@ bool TestCameraNodeRestartBackoffStartsFreshOnEveryRun() {
 
   // A node that came up ends the backoff the same way.
   backoff.Failed(now);
-  backoff.Succeeded();
+  backoff.Started();
+  backoff.Settle(true, now);
   if (!backoff.Ready(now)) {
     std::cerr << "a node that came up should end the wait\n";
+    return false;
+  }
+  return true;
+}
+
+// A camera node counts as running before pw_stream_connect, and the server
+// takes it down later, on the node's own loop thread, when the format it
+// negotiates differs. A tick that judged the node it had just started would
+// call every such start a success, and a format mismatch would churn a node
+// once a second for ever with the wait never growing.
+bool TestCameraNodeRestartBackoffWaitsATickBeforeItTrustsAStart() {
+  using studiocast::video::internal::PipeWireRestartBackoff;
+  using Clock = std::chrono::steady_clock;
+
+  PipeWireRestartBackoff backoff;
+  const auto now = Clock::now();
+
+  if (backoff.Pending()) {
+    std::cerr << "a backoff that started nothing has no verdict to give\n";
+    return false;
+  }
+
+  // A settle with no start behind it must change nothing.
+  backoff.Settle(false, now);
+  if (!backoff.Ready(now)) {
+    std::cerr << "a verdict for a start that never happened must not wait\n";
+    return false;
+  }
+
+  // The tick that starts a node only records it.
+  backoff.Started();
+  if (!backoff.Pending()) {
+    std::cerr << "a start that began should wait for its verdict\n";
+    return false;
+  }
+  if (!backoff.Ready(now)) {
+    std::cerr << "a start that began must not hold the next try back yet\n";
+    return false;
+  }
+
+  // The node went down before the next tick, so the start failed and the wait
+  // grows. A mismatch that repeats therefore backs off instead of churning.
+  backoff.Settle(false, now);
+  if (backoff.Pending()) {
+    std::cerr << "a verdict must be given once only\n";
+    return false;
+  }
+  if (backoff.Ready(now)) {
+    std::cerr << "a node that went down again should hold the next try back\n";
+    return false;
+  }
+
+  const auto first_wait_over = now + std::chrono::seconds(30);
+  backoff.Started();
+  backoff.Settle(false, first_wait_over);
+  if (backoff.Ready(first_wait_over + std::chrono::milliseconds(1))) {
+    std::cerr << "a second failed start should wait longer than the first\n";
     return false;
   }
   return true;
@@ -1318,6 +1376,8 @@ int main() {
        &TestCameraNodePlanApplierDecidesInsideItsLock},
       {"camera node restart backoff starts fresh on every run",
        &TestCameraNodeRestartBackoffStartsFreshOnEveryRun},
+      {"camera node restart backoff waits a tick before it trusts a start",
+       &TestCameraNodeRestartBackoffWaitsATickBeforeItTrustsAStart},
       {"PipeWire output state reports a write failure",
        &TestPipeWireOutputStateReportsAWriteFailure},
       {"pipewire output status hides the numbers of a down node",

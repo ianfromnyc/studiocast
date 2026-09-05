@@ -967,6 +967,24 @@ void CameraPipeline::MaintainPipeWireOutput() {
     return;
   next_pw_check_at_ = now + std::chrono::seconds(1);
 
+  // The verdict for the start the last tick began. A node counts as running
+  // from before pw_stream_connect, so the tick that starts one cannot judge
+  // it: the server takes a node whose format differs down later, on the node's
+  // own loop thread. This tick asks whether the node that start installed is
+  // still the node that runs. A node that went down, or that something
+  // replaced, is a failed start, and the wait grows, which is what stops a
+  // format mismatch from churning a node once a second for ever.
+  if (pw_restart_backoff_.Pending()) {
+    bool held = false;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      const auto started = pw_started_node_.lock();
+      held = started && started == pw_node_ && started->IsRunning();
+    }
+    pw_started_node_.reset();
+    pw_restart_backoff_.Settle(held, now);
+  }
+
   // A cheap look first, so a node that is up costs one short lock a second and
   // nothing else. The apply decides the plan again for itself.
   {
@@ -982,16 +1000,19 @@ void CameraPipeline::MaintainPipeWireOutput() {
   // released, the same way the supervisor does it.
   ApplyPipeWireOutputPlan();
 
-  bool up = false;
+  // Remember the node the apply installed. The next tick gives the verdict.
+  std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> installed;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    up = pw_node_ && pw_node_->IsRunning();
+    installed = pw_node_;
   }
-  if (up) {
-    pw_restart_backoff_.Succeeded();
+  if (!installed) {
+    // The start failed outright, and there is nothing to wait a tick for.
+    pw_restart_backoff_.Failed(now);
     return;
   }
-  pw_restart_backoff_.Failed(now);
+  pw_started_node_ = installed;
+  pw_restart_backoff_.Started();
 }
 
 bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig &cfg,
@@ -1307,6 +1328,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   // whole backoff before it first asked for a node.
   next_pw_check_at_ = std::chrono::steady_clock::time_point{};
   pw_restart_backoff_.Reset();
+  pw_started_node_.reset();
 
   // Open (or reuse) writer to v4l2loopback output.
   {

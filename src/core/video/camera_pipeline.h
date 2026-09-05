@@ -283,14 +283,43 @@ public:
   void Reset() {
     attempts_ = 0;
     next_at_ = std::chrono::steady_clock::time_point{};
+    pending_ = false;
   }
 
   bool Ready(std::chrono::steady_clock::time_point now) const {
     return now >= next_at_;
   }
 
-  // The node came up. The next failure starts from the shortest wait again.
-  void Succeeded() { Reset(); }
+  // A start began, and its verdict is still to come.
+  //
+  // The node counts as running from before pw_stream_connect, and the server
+  // takes it down later, on the node's own loop thread, when the format it
+  // negotiates differs. A caller that asked the node in the same tick would
+  // call every such start a success and reset the wait, so a mismatch that
+  // repeats would churn a node once a second for ever. The caller therefore
+  // records the start here and gives the verdict on its next tick.
+  void Started() { pending_ = true; }
+
+  // True while a start waits for its verdict.
+  bool Pending() const { return pending_; }
+
+  // The verdict for the start that Started recorded. `up` must be true only
+  // for the node that start installed, and only while it still runs: a node
+  // that went down, or that something replaced, is a failed start.
+  //
+  // Does nothing when no start is waiting.
+  void Settle(bool up, std::chrono::steady_clock::time_point now) {
+    if (!pending_)
+      return;
+    pending_ = false;
+    if (up) {
+      // The node came up. The next failure starts from the shortest wait
+      // again.
+      Reset();
+      return;
+    }
+    Failed(now);
+  }
 
   // The node did not come up. Holds the next try back for a growing wait.
   void Failed(std::chrono::steady_clock::time_point now) {
@@ -300,6 +329,7 @@ public:
 
 private:
   int attempts_ = 0;
+  bool pending_ = false;
   std::chrono::steady_clock::time_point next_at_{};
 };
 
@@ -524,6 +554,13 @@ private:
   // one.
   std::chrono::steady_clock::time_point next_pw_check_at_{};
   internal::PipeWireRestartBackoff pw_restart_backoff_;
+
+  // Frame thread only. The node the last tick started, so the next tick can
+  // ask whether that same node is still the one that runs. It is weak because
+  // it must never keep a node alive, and because a node that went is not the
+  // node a new one at the same address would be.
+  std::weak_ptr<studiocast::video::pw_backend::PipeWireCameraNode>
+      pw_started_node_;
 
   // Format the running node negotiated, so a renegotiated v4l2loopback format
   // restarts the node instead of sending frames of the wrong size.
