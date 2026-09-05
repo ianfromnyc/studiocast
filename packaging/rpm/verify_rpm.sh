@@ -417,6 +417,13 @@ grep -Fxq 'ExecStart=/usr/bin/studiocastd' \
 #     N4dlib5errorE, in the read-only data;
 #   - without dlib those names are gone and the program holds the literal
 #     message that dlib_face_landmarks.cpp emits under !STUDIOCAST_HAVE_DLIB.
+#
+# Both checks read the compiled program, so they pin the implementation, not
+# the behaviour. A comment in src/core/open_video/dlib_face_landmarks.cpp says
+# the message text is load-bearing here. The dlib type names would also
+# disappear under -fno-rtti or an aggressive --gc-sections, so if this check
+# ever gives a false alarm, expose the flag through studiocast-probe --json and
+# read that instead.
 if [ "${has_dlib}" = "1" ]; then
   echo "[verify-rpm] Checking that dlib is compiled into studiocastd"
   rpm -q --provides studiocast | grep -Fq 'bundled(dlib)' ||
