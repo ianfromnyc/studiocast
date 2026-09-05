@@ -79,8 +79,13 @@ A server is "reachable" when a PipeWire socket exists. StudioCast looks for
 tests for the socket named by `$PIPEWIRE_REMOTE`, or `pipewire-0` when that
 variable is not set.
 
-If the native backend fails to start, the daemon falls back to PulseAudio and
-puts the reason in the status note. To pin the old behaviour, set
+The fallback to PulseAudio happens on availability alone. The daemon probes
+for a server before the audio service starts, and it selects PulseAudio and
+puts the reason in `audio.transport_backend_note` when the option is not
+compiled in or no socket answers. A backend that is available but then fails
+to connect or to create its nodes has no fallback: the daemon keeps the native
+backend, reports the failure in `audio.pipeline.last_error`, and the service
+tries the start again after a delay. To pin the old behaviour, set
 `audio.backend = pulse`.
 
 ### Video output
@@ -281,3 +286,10 @@ seam is `studiocast::video::CameraPipeline::Start`, which opens a
 
 The portal path also needs a D-Bus dependency, which the daemon does not have
 today.
+
+Other gaps:
+
+- Fall back to PulseAudio when an available native backend fails to start, not
+  only when no server answers the probe.
+- Node-only camera output, so `video.output.backend = pipewire` can leave
+  v4l2loopback closed.
