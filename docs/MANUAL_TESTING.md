@@ -417,8 +417,10 @@ Expected:
   requested sink, and the resolved sink.
 - `pactl list short modules` shows one `module-loopback` from `studiocast_mic`
   carrying `StudioCast_Microphone_Monitor`.
-- `build/studiocastctl status` reports `audio.mic_monitor_consumer_count=1` and
-  `audio.mic_app_consumer_count=0` while no app uses StudioCast Microphone.
+- `build/studiocastctl status` prints the raw status JSON. Its `audio` object
+  has `"mic_monitor_consumer_count":1` and `"mic_app_consumer_count":0` while
+  no app uses StudioCast Microphone. (`studiocastctl audio monitor status`
+  prints the monitor block in plain words, but not these two counts.)
 
 - [ ] Change the monitor output to another sink, then change the delay.
 
