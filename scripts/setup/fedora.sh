@@ -2,8 +2,9 @@
 
 # StudioCast Fedora setup helper.
 #
-# This script is invoked via ./scripts/setup.sh on Fedora 44.
-# It installs build/runtime prerequisites and configures v4l2loopback.
+# This script is invoked via ./scripts/setup.sh on a Fedora-family
+# distribution, and is tested on Fedora 44. It installs build/runtime
+# prerequisites and configures v4l2loopback.
 #
 # Everything down to the source guard is definitions only. The shell options,
 # the system probes and the option defaults come after the guard, so that a

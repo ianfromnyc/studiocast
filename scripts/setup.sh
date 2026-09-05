@@ -12,7 +12,7 @@ This script dispatches to the appropriate distro-family helper.
 
 Currently supported:
   - Ubuntu-family (Ubuntu, Linux Mint, Pop!_OS, etc.) -> scripts/setup/ubuntu.sh
-  - Fedora 44 -> scripts/setup/fedora.sh
+  - Fedora-family (tested on Fedora 44) -> scripts/setup/fedora.sh
 
 Examples:
   ./scripts/setup.sh --deps --v4l2loopback --load-loopback --persist-loopback
@@ -46,7 +46,7 @@ fi
 
 if [[ -z "$distro_family" ]]; then
   echo "[setup] ERROR: Unsupported distro for helper script." >&2
-  echo "[setup] This repo helper currently supports Ubuntu-family distributions and Fedora 44." >&2
+  echo "[setup] This repo helper currently supports Ubuntu-family and Fedora-family distributions (tested on Fedora 44)." >&2
   echo "[setup] You can still run distro-specific scripts directly under: scripts/setup/" >&2
   exit 2
 fi

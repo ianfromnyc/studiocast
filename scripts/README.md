@@ -6,7 +6,7 @@ Top-level scripts are intended to be stable entrypoints. Implementation lives in
 
 ## Entry points
 
-- `./scripts/setup.sh` — setup helper (distro dispatcher: Ubuntu-family -> `setup/ubuntu.sh`, Fedora 44 -> `setup/fedora.sh`)
+- `./scripts/setup.sh` — setup helper (distro dispatcher: Ubuntu-family -> `setup/ubuntu.sh`, Fedora-family (tested on Fedora 44) -> `setup/fedora.sh`)
 - `./scripts/install.sh` — installer helper (subcommands)
 - `./scripts/installer.sh` — GUI/CLI installer backend entrypoint
 - `./scripts/uninstall.sh` — uninstall helper
