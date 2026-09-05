@@ -608,7 +608,13 @@ EOF
 }
 
 # Newest <major>-<minor> package suffix the enabled repositories offer.
+#
+# A system without dnf offers none. Report that as an empty suffix, so that the
+# caller prints the repository hint instead of ending the script on a command
+# that is not there.
 cuda_package_suffix() {
+  command -v dnf >/dev/null 2>&1 || return 0
+
   dnf repoquery --qf '%{name}\n' "cuda-cudart-${CUDA_MAJOR}-*" 2>/dev/null \
     | sed -n "s/^cuda-cudart-\(${CUDA_MAJOR}-[0-9]\+\)$/\1/p" \
     | sort -t- -k2 -V \

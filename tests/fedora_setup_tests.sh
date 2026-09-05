@@ -683,6 +683,52 @@ CHILD
   fi
 }
 
+# A system without dnf cannot get the CUDA rpms. The helper must say so and
+# stop with status 2, not end the whole script on a command that is not there.
+test_a_missing_dnf_prints_the_repo_hint() {
+  local casedir="${SANDBOX}/no-dnf"
+  mkdir -p "${casedir}/bin"
+
+  # A PATH with the tools the helper needs, but with no dnf on it.
+  local tool
+  for tool in bash cat cut dirname grep head mkdir mktemp printf rm sed sort \
+    tail tr uname; do
+    if command -v "${tool}" >/dev/null 2>&1; then
+      ln -sf "$(command -v "${tool}")" "${casedir}/bin/${tool}"
+    fi
+  done
+
+  local child="${SANDBOX}/no-dnf-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+export ORT_FLAVOR=gpu
+export CUDA_MAJOR=13
+export ORT_ARCH=x64
+# shellcheck source=/dev/null
+source "$1"
+log() { :; }
+run_priv() { :; }
+cuda_required_libs() { printf 'libcublas.so.13\n'; }
+lib_resolves() { return 1; }
+# The helper turns these on after the source guard, so the call must run
+# under them.
+set -euo pipefail
+ensure_cuda_runtime
+echo "CALL_RETURNED_$?"
+CHILD
+
+  local out rc=0
+  out="$(PATH="${casedir}/bin" bash "${child}" "${FEDORA_SETUP}" 2>&1)" || rc=$?
+
+  if [[ "${rc}" -ne 2 ]]; then
+    t_fail "a missing dnf should stop with status 2, got ${rc}: ${out}"
+  elif [[ "${out}" != *"config-manager addrepo"* ]]; then
+    t_fail "a missing dnf should print the repository hint, got: ${out}"
+  else
+    t_pass "a missing dnf prints the repository hint"
+  fi
+}
+
 # The source guard promises definitions only. A shell that sources the helper
 # must keep its own shell options, and must see no output.
 test_sourcing_keeps_the_caller_shell_options() {
@@ -725,6 +771,7 @@ test_the_preflight_asks_pkg_config
 test_an_extracted_cudnn_tree_is_not_downloaded_again
 test_the_legacy_asset_warning_names_the_cuda_major
 test_a_cuda_repo_with_another_id_works
+test_a_missing_dnf_prints_the_repo_hint
 test_sourcing_keeps_the_caller_shell_options
 
 if [[ "${FAILURES}" -ne 0 ]]; then
