@@ -438,7 +438,6 @@ bool TestLiveVirtualSourceAcceptsWrites() {
 // a live write reports the scheduler and the server, not this rule.
 bool TestAFullRingWriteWaitsOneQuantumAtMost() {
   using studiocast::pw::internal::FullRingWait;
-  constexpr auto kCap = std::chrono::microseconds(2000);
 
   studiocast::pw::AudioNodeConfig cfg;
   cfg.sample_rate = 48000;
@@ -450,20 +449,25 @@ bool TestAFullRingWriteWaitsOneQuantumAtMost() {
   small.frame_samples = 48;
   const auto short_frame = FullRingWait(small);
 
-  // A config that says nothing usable falls back to the cap.
+  // The cap, taken from the production code and not written again here: a
+  // config that says nothing usable falls back to it.
   studiocast::pw::AudioNodeConfig unset = cfg;
   unset.sample_rate = 0;
-  const auto fallback = FullRingWait(unset);
+  const auto cap = FullRingWait(unset);
+  const auto cap_us = std::to_string(cap.count()) + " us";
 
-  return Expect(quantum == kCap,
+  return Expect(cap == std::chrono::microseconds(2000),
+                "the cap must stay at 2 ms; it is " + cap_us) &&
+         Expect(quantum == cap,
                 "a 10 ms frame must wait the cap, not the whole quantum") &&
          Expect(short_frame == std::chrono::microseconds(1000),
                 "a 1 ms frame must wait its own quantum") &&
-         Expect(fallback == kCap, "a config with no rate must wait the cap") &&
-         Expect(quantum <= kCap && short_frame <= kCap && fallback <= kCap,
+         Expect(quantum <= cap && short_frame <= cap,
                 "no write may wait longer than the cap") &&
-         Expect(kCap < std::chrono::milliseconds(10),
-                "the wait must stay under the 10 ms the pipeline thread has");
+         Expect(cap < std::chrono::milliseconds(10),
+                "the wait must stay under the 10 ms the pipeline thread has; "
+                "it is " +
+                    cap_us);
 }
 
 // A virtual source with no consumer is not driven by the graph, so nothing
@@ -471,11 +475,11 @@ bool TestAFullRingWriteWaitsOneQuantumAtMost() {
 // holding the pipeline thread.
 //
 // The proof is the overflow count, not a clock: nothing empties the ring, so
-// every write after the ring filled had to drop its frame to come back at all.
-// A write that waited for room would never return. The slowest write is
-// measured and reported, but it is the scheduler and the server it measures,
-// not this code; the wait this code allows itself is pinned by
-// TestAFullRingWriteWaitsOneQuantumAtMost.
+// every write after the ring filled had to drop its frame to answer at all.
+// How long a write may hold the frame first is the production wait, which this
+// test reads from the production code and holds against the 10 ms the pipeline
+// thread has between frames. The slowest write is measured and reported, but
+// it is the scheduler and the server it measures, not this code.
 bool TestLiveWriteToAFullRingReturnsQuickly() {
   if (!LiveServerAvailable("live write to a full ring returns quickly"))
     return true;
@@ -514,7 +518,18 @@ bool TestLiveWriteToAFullRingReturnsQuickly() {
   std::cout << "[INFO] the slowest write took " << slowest_ms
             << " ms (measured, not asserted)\n";
 
-  return Expect(ok, "a dropped frame must still report success: " + error) &&
+  // What this node allows a full-ring write, from the production code. A wait
+  // that grew as long as a pipeline frame would hold the pipeline thread for
+  // the whole of it, and the drop count above would no longer mean the write
+  // came back in time.
+  const auto wait = studiocast::pw::internal::FullRingWait(cfg);
+
+  return Expect(wait < std::chrono::milliseconds(10),
+                "a write into a full ring may wait " +
+                    std::to_string(wait.count()) +
+                    " us, which is not under the 10 ms the pipeline thread "
+                    "has") &&
+         Expect(ok, "a dropped frame must still report success: " + error) &&
          Expect(overflows == expected,
                 "every write into a full ring must drop its frame instead of "
                 "waiting for room; " +
