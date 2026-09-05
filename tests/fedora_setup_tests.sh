@@ -428,6 +428,58 @@ CHILD
   fi
 }
 
+# Only a CUDA major the user passed can be a bad option value. A major that
+# comes from the toolkit on the machine belongs to the report, not to the
+# option check: the cpu flavor never reads it, and the message would name an
+# option the user never passed.
+#
+# CUDA_MAJOR from the environment takes the same path as the detected one, so
+# the checks below set it instead of faking a toolkit.
+test_only_an_explicit_cuda_major_is_an_option_error() {
+  local os_release="${SANDBOX}/os-release"
+  cat > "${os_release}" <<'RELEASE'
+ID=fedora
+VERSION_ID=44
+RELEASE
+
+  local empty_roots="${SANDBOX}/no-bootstrap"
+  mkdir -p "${empty_roots}"
+
+  local out rc=0
+  out="$(CUDA_MAJOR=11 STUDIOCAST_OS_RELEASE="${os_release}" \
+    STUDIOCAST_ORT_INSTALL_DIR="${empty_roots}" \
+    bash "${FEDORA_SETUP}" --onnxruntime-flavor cpu 2>&1)" || rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    t_fail "a detected CUDA major stopped the cpu path with status ${rc}: $(first_line "${out}")"
+  else
+    t_pass "a detected CUDA major leaves the cpu path running"
+  fi
+
+  rc=0
+  out="$(CUDA_MAJOR=11 STUDIOCAST_OS_RELEASE="${os_release}" \
+    STUDIOCAST_ORT_INSTALL_DIR="${empty_roots}" \
+    bash "${FEDORA_SETUP}" --check-cuda 2>&1)" || rc=$?
+  if [[ "${rc}" -eq 0 ]]; then
+    t_fail "an unsupported CUDA major should make the preflight fail"
+  elif [[ "${out}" != *"FAIL  CUDA major 11"* ]]; then
+    t_fail "the preflight should report the CUDA major, got: ${out}"
+  else
+    t_pass "the preflight reports an unsupported CUDA major as a failure"
+  fi
+
+  rc=0
+  out="$(STUDIOCAST_OS_RELEASE="${os_release}" \
+    STUDIOCAST_ORT_INSTALL_DIR="${empty_roots}" \
+    bash "${FEDORA_SETUP}" --cuda-major 11 2>&1)" || rc=$?
+  if [[ "${rc}" -ne 2 ]]; then
+    t_fail "--cuda-major 11 should end with status 2, got ${rc}"
+  elif [[ "${out}" != *"--cuda-major must be one of: 12|13"* ]]; then
+    t_fail "--cuda-major 11 should name the option, got: $(first_line "${out}")"
+  else
+    t_pass "--cuda-major 11 is an option error"
+  fi
+}
+
 # The source guard promises definitions only. A shell that sources the helper
 # must keep its own shell options, and must see no output.
 test_sourcing_keeps_the_caller_shell_options() {
@@ -464,6 +516,7 @@ test_a_missing_index_entry_gives_an_empty_sha256
 test_cuda_required_libs_follows_the_root_layout
 test_a_failing_objdump_keeps_the_fixed_lib_list
 test_the_options_pick_the_bootstrap_root
+test_only_an_explicit_cuda_major_is_an_option_error
 test_sourcing_keeps_the_caller_shell_options
 
 if [[ "${FAILURES}" -ne 0 ]]; then

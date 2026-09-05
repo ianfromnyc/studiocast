@@ -208,8 +208,11 @@ resolves through `ldconfig`.
 ./scripts/setup.sh --check-cuda
 ```
 
-It prints one line per CUDA library, plus the driver state, the ONNX Runtime
-bootstrap and `onnxruntime.pc`.
+It prints one line per CUDA library, plus the CUDA major version, the driver
+state, the ONNX Runtime bootstrap and `onnxruntime.pc`. A CUDA major other than
+12 or 13 is a failed check, because upstream ONNX Runtime has no tarball for
+it. Only `--cuda-major` is an option error; a detected major is reported and
+leaves the `cpu` flavor running.
 
 `./scripts/uninstall.sh --greedy` removes `/opt/studiocast/onnxruntime`,
 `/opt/studiocast/cudnn` and the StudioCast files under `/etc/ld.so.conf.d/`. It

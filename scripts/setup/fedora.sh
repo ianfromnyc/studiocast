@@ -164,6 +164,12 @@ version_at_least() {
   [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" == "$2" ]]
 }
 
+# Upstream publishes gpu tarballs for CUDA 12 and CUDA 13 only, so no other
+# major can give a working gpu install.
+cuda_major_supported() {
+  [[ "${CUDA_MAJOR}" == "12" || "${CUDA_MAJOR}" == "13" ]]
+}
+
 # Upstream asset base name for the gpu flavor.
 #
 # The upstream naming changed twice:
@@ -473,6 +479,14 @@ report_cuda_preflight() {
 
   log "CUDA preflight (CUDA major ${CUDA_MAJOR}, arch ${ORT_ARCH}):"
 
+  if cuda_major_supported; then
+    log "  PASS  CUDA major ${CUDA_MAJOR}"
+  else
+    log "  FAIL  CUDA major ${CUDA_MAJOR} (the gpu flavor needs 12 or 13; pass"
+    log "        --cuda-major 12|13 to install for another toolkit)"
+    failures=$((failures + 1))
+  fi
+
   if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
     local driver
     driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1)"
@@ -739,6 +753,9 @@ PARSE_PASSTHRU_ARGS=0
 # one installed bootstrap root a better answer than another.
 ORT_SELECTION_EXPLICIT=0
 
+# Did the user pass --cuda-major? Only that value is an option to check.
+CUDA_MAJOR_EXPLICIT=0
+
 if [[ -z "${ORT_ARCH:-}" ]]; then
   case "$(uname -m)" in
     x86_64|amd64) ORT_ARCH="x64" ;;
@@ -780,7 +797,9 @@ while [[ $# -gt 0 ]]; do
     --onnxruntime-version) ORT_VERSION="${2:-}"; ORT_SELECTION_EXPLICIT=1; shift 2 ;;
     --onnxruntime-flavor) ORT_FLAVOR="${2:-}"; shift 2 ;;
     --onnxruntime-arch) ORT_ARCH="${2:-}"; ORT_SELECTION_EXPLICIT=1; shift 2 ;;
-    --cuda-major) CUDA_MAJOR="${2:-}"; ORT_SELECTION_EXPLICIT=1; shift 2 ;;
+    --cuda-major)
+      CUDA_MAJOR="${2:-}"; CUDA_MAJOR_EXPLICIT=1; ORT_SELECTION_EXPLICIT=1
+      shift 2 ;;
     --cudnn-version) CUDNN_VERSION="${2:-}"; shift 2 ;;
     --check-cuda) DO_CHECK_CUDA=1; shift ;;
     --build) DO_BUILD=1; shift ;;
@@ -800,7 +819,10 @@ if [[ "${ORT_FLAVOR}" != "cpu" && "${ORT_FLAVOR}" != "gpu" ]]; then
   exit 2
 fi
 
-if [[ "${CUDA_MAJOR}" != "12" && "${CUDA_MAJOR}" != "13" ]]; then
+# Only a value the user passed can be a bad option value. A value that comes
+# from the toolkit on the machine is a fact about the machine: the cpu flavor
+# never reads it, --check-cuda reports it, and only the gpu flavor stops for it.
+if [[ "${CUDA_MAJOR_EXPLICIT}" -eq 1 ]] && ! cuda_major_supported; then
   echo "[setup] ERROR: --cuda-major must be one of: 12|13 (got: '${CUDA_MAJOR}')" >&2
   exit 2
 fi
@@ -843,6 +865,12 @@ if [[ "$DO_DEPS" -eq 1 ]]; then
 
   # Fail before any install when the gpu flavor cannot work on this system.
   if [[ "${ORT_FLAVOR}" == "gpu" ]]; then
+    if ! cuda_major_supported; then
+      echo "[setup] ERROR: the CUDA toolkit on this machine is major ${CUDA_MAJOR}," >&2
+      echo "[setup] and the gpu flavor needs 12 or 13. Pass --cuda-major 12|13 to" >&2
+      echo "[setup] choose the tarball, or use --onnxruntime-flavor cpu." >&2
+      exit 2
+    fi
     ensure_cuda_runtime
   fi
 
