@@ -259,41 +259,56 @@ print(json.dumps(payload))
         "The ONNXRUNTIME_ROOT the cached ONNX Runtime paths come from.")
     endif()
 
-    find_path(ONNXRUNTIME_INCLUDE_DIR
-      NAMES onnxruntime_cxx_api.h
-      PATHS "${ONNXRUNTIME_ROOT}"
-      PATH_SUFFIXES include include/onnxruntime
-      NO_DEFAULT_PATH
-    )
+    # Search the root, then take the results only when both of them are there
+    # and inside this root. A cache entry of an earlier configure of this build
+    # directory can name a path that is gone or that moved, which the search
+    # does not see because it does not run for an entry that is already set.
+    #
+    # Two passes: the first one can read such an entry, the second one runs
+    # after the entries are dropped and gives the state of the root now. Only
+    # the second result can say that the root is unusable.
+    foreach (_ort_pass RANGE 1)
+      find_path(ONNXRUNTIME_INCLUDE_DIR
+        NAMES onnxruntime_cxx_api.h
+        PATHS "${ONNXRUNTIME_ROOT}"
+        PATH_SUFFIXES include include/onnxruntime
+        NO_DEFAULT_PATH
+      )
 
-    find_library(ONNXRUNTIME_LIBRARY
-      NAMES onnxruntime
-      PATHS "${ONNXRUNTIME_ROOT}"
-      PATH_SUFFIXES lib lib64
-      NO_DEFAULT_PATH
-    )
+      find_library(ONNXRUNTIME_LIBRARY
+        NAMES onnxruntime
+        PATHS "${ONNXRUNTIME_ROOT}"
+        PATH_SUFFIXES lib lib64
+        NO_DEFAULT_PATH
+      )
 
-    # Take the results only when both of them are still there and inside this
-    # root. A cache entry of an earlier configure of this build directory can
-    # name a path that was deleted since, which the search above does not see
-    # because it does not run for an entry that is already set.
-    studiocast_ort_path_inside_root(_ort_include_ok "${ONNXRUNTIME_ROOT}"
-      "${ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_cxx_api.h")
-    studiocast_ort_path_inside_root(_ort_library_ok "${ONNXRUNTIME_ROOT}"
-      "${ONNXRUNTIME_LIBRARY}")
+      studiocast_ort_path_inside_root(_ort_include_ok "${ONNXRUNTIME_ROOT}"
+        "${ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_cxx_api.h")
+      studiocast_ort_path_inside_root(_ort_library_ok "${ONNXRUNTIME_ROOT}"
+        "${ONNXRUNTIME_LIBRARY}")
 
-    if (NOT _ort_include_ok OR NOT _ort_library_ok)
+      if (_ort_include_ok AND _ort_library_ok)
+        break()
+      endif()
+
       # Leave no cache entry behind that would keep a wrong path alive.
       unset(ONNXRUNTIME_INCLUDE_DIR CACHE)
       unset(ONNXRUNTIME_LIBRARY CACHE)
+    endforeach()
+
+    if (NOT _ort_include_ok OR NOT _ort_library_ok)
       unset(STUDIOCAST_ORT_ROOT_USED CACHE)
 
+      # "inside the root" covers both a part that is not there and a part that
+      # a symbolic link takes out of the root.
       set(_ort_root_missing "")
       if (NOT _ort_include_ok)
-        list(APPEND _ort_root_missing "no onnxruntime_cxx_api.h in include")
+        list(APPEND _ort_root_missing
+          "no onnxruntime_cxx_api.h in an include directory inside the root")
       endif()
       if (NOT _ort_library_ok)
-        list(APPEND _ort_root_missing "no libonnxruntime in lib or lib64")
+        list(APPEND _ort_root_missing
+          "no libonnxruntime in a lib or lib64 directory inside the root")
       endif()
       list(JOIN _ort_root_missing " and " _ort_root_missing_text)
       message(FATAL_ERROR
