@@ -1599,6 +1599,41 @@ bool TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() {
   return ok;
 }
 
+// `pactl list short sinks` can fail although pactl itself runs. The monitor
+// sink list then holds "System default" alone, which reads like a machine with
+// one output. The status text must carry the reason, the way the speaker
+// target list reports it.
+bool TestAudioPageReportsAMonitorSinkListError() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-error");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  // No event loop runs here, for the reason given above.
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *statusText =
+      page.findChild<QPlainTextEdit *>(QStringLiteral("audioStatusText"));
+  auto *sinkCombo =
+      page.findChild<QComboBox *>(QStringLiteral("monitorSinkCombo"));
+  if (!Expect(statusText != nullptr && sinkCombo != nullptr,
+              "the status text and the monitor sink combo should be findable"))
+    return false;
+
+  const std::string listError = "pactl list short sinks failed: exit status 1";
+  page.ApplyMonitorSinkListForTesting({}, listError);
+
+  const QString text = statusText->toPlainText();
+  bool ok = Expect(text.contains(QString::fromStdString(listError)),
+                   "the status text should carry the sink listing error");
+  if (!ok)
+    std::cerr << "status text was: " << text.toStdString() << "\n";
+
+  ok = Expect(sinkCombo->count() == 1,
+              "a failed listing should leave the system default alone") &&
+       ok;
+  return ok;
+}
+
 bool TestVideoPageKeepsUserSelectedInputWhenRoutineStatusStillAuto() {
   studiocast::gui::VideoPage page;
   auto *inputCombo =
@@ -1887,5 +1922,6 @@ int main(int argc, char **argv) {
   // thread, and nothing after this may pump the event loop that would deliver
   // its result.
   ok = TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() && ok;
+  ok = TestAudioPageReportsAMonitorSinkListError() && ok;
   return ok ? 0 : 1;
 }

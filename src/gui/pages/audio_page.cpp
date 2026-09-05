@@ -547,6 +547,7 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
         statusLayout->setSpacing(10);
 
         statusText_ = new QPlainTextEdit(statusBox_);
+        statusText_->setObjectName(QStringLiteral("audioStatusText"));
         statusText_->setReadOnly(true);
         statusText_->setMinimumHeight(220);
         statusLayout->addWidget(statusText_, 1);
@@ -1397,6 +1398,16 @@ void AudioPage::RefreshMonitorSinks() {
   thread->start();
 }
 
+void AudioPage::ApplyMonitorSinkListForTesting(
+    const std::vector<studiocast::audio::pulse::PactlSink> &sinks,
+    const std::string &listError) {
+  SpeakerTargetRefreshResult result;
+  result.pactlOk = true;
+  result.sinks = sinks;
+  result.listError = listError;
+  ApplyMonitorSinkRefreshResult(result);
+}
+
 void AudioPage::ApplyMonitorSinkRefreshResult(
     const SpeakerTargetRefreshResult &result) {
   if (!monitorSinkCombo_)
@@ -1418,6 +1429,15 @@ void AudioPage::ApplyMonitorSinkRefreshResult(
   monitorSinksUsable_ = true;
   monitorSinkCombo_->addItem("System default",
                              QVariant(QString::fromLatin1(kAutoPulseSink)));
+
+  // A listing that failed leaves the system default alone in the list, which
+  // reads like a machine with one output. Say why, as the speaker target list
+  // does.
+  if (!result.listError.empty() && statusText_) {
+    SetPlainTextPreservingScroll(statusText_,
+                                 QString::fromStdString("Warning: " +
+                                                        result.listError));
+  }
 
   const QString daemonSink = daemonMonitorSink_.trimmed();
   int daemonIndex = -1;

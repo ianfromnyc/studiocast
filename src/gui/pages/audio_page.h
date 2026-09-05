@@ -40,6 +40,13 @@ public:
   explicit AudioPage(AudioPageMode mode, QWidget *parent = nullptr);
   void UpdateStatus(const DaemonStatusSnapshot &snapshot);
 
+  // Test seam. Apply the outcome of one monitor sink listing, the way the
+  // background refresh applies it when it ends. The real listing needs a
+  // running pactl and an event loop, which the offscreen checks do not have.
+  void ApplyMonitorSinkListForTesting(
+      const std::vector<studiocast::audio::pulse::PactlSink> &sinks,
+      const std::string &listError);
+
 signals:
   void StatusRefreshRequested();
 
