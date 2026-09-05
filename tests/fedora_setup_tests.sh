@@ -90,10 +90,6 @@ test_repeated_calls_clean_up_and_keep_the_caller_trap() {
     echo 'set -uo pipefail'
     echo "${CHILD_PREAMBLE}"
     cat <<'CHILD'
-# Sourcing the helper turns errexit on. Turn it off again here, so that a
-# return value can be observed instead of ending this shell.
-set +e
-
 trap 'echo CALLER_EXIT_TRAP_RAN' EXIT
 before="$(trap -p EXIT)"
 export TMPDIR="$2"
@@ -190,9 +186,6 @@ test_a_caller_return_trap_survives_the_call() {
     echo 'set -uo pipefail'
     echo "${CHILD_PREAMBLE}"
     cat <<'CHILD'
-# Sourcing the helper turns errexit on. Turn it off again here, so that a
-# return value can be observed instead of ending this shell.
-set +e
 # functrace passes the RETURN trap of the caller into every function it calls.
 set -T
 
@@ -276,10 +269,40 @@ STUB
   rm -f "${STUB_BIN}/objdump"
 }
 
+# The source guard promises definitions only. A shell that sources the helper
+# must keep its own shell options, and must see no output.
+test_sourcing_keeps_the_caller_shell_options() {
+  local child="${SANDBOX}/source-guard-child.sh"
+  cat > "${child}" <<'CHILD'
+set +e
+set +u
+set +o pipefail
+# shellcheck source=/dev/null
+source "$1"
+for opt in errexit nounset pipefail; do
+  if [[ -o "${opt}" ]]; then
+    echo "OPTION_ON_${opt}"
+  else
+    echo "OPTION_OFF_${opt}"
+  fi
+done
+CHILD
+
+  local out expected
+  out="$(bash "${child}" "${FEDORA_SETUP}" 2>&1)"
+  expected=$'OPTION_OFF_errexit\nOPTION_OFF_nounset\nOPTION_OFF_pipefail'
+  if [[ "${out}" != "${expected}" ]]; then
+    t_fail "sourcing the helper changed the shell or printed something: ${out}"
+  else
+    t_pass "sourcing the helper keeps the shell options of the caller"
+  fi
+}
+
 test_repeated_calls_clean_up_and_keep_the_caller_trap
 test_download_failure_cleans_up_and_runs_the_caller_trap
 test_a_caller_return_trap_survives_the_call
 test_cuda_required_libs_follows_the_root_layout
+test_sourcing_keeps_the_caller_shell_options
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2

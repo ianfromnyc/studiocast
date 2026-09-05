@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 # StudioCast Fedora setup helper.
 #
 # This script is invoked via ./scripts/setup.sh on Fedora 44.
 # It installs build/runtime prerequisites and configures v4l2loopback.
+#
+# Everything down to the source guard is definitions only. The shell options,
+# the system probes and the option defaults come after the guard, so that a
+# shell which sources this file keeps its own settings.
 #
 # Differences from the Ubuntu helper:
 # - The cpu ONNX Runtime flavor comes from the distro package onnxruntime-devel.
@@ -79,28 +82,12 @@ Examples:
 EOF
 }
 
-YES=0
-DO_DEPS=0
-DO_V4L2=0
-DO_LOAD_LOOP=0
-DO_PERSIST_LOOP=0
-DO_CHECK_CUDA=0
+# v4l2loopback defaults. The functions below read them, so they stay here.
 VIDEO_NR=10
 LABEL="StudioCast Camera"
 EXCLUSIVE_CAPS=1
-DO_BUILD=0
-BUILD_DIR="./cmake-build-debug"
-BUILD_TYPE="Debug"
-DO_MAXINE=0
-DO_RPM=0
-PASSTHRU_ARGS=()
-PARSE_PASSTHRU_ARGS=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-
-# Tests can point this at a fake os-release file. Everything else uses the real one.
-OS_RELEASE_FILE="${STUDIOCAST_OS_RELEASE:-/etc/os-release}"
 
 log() { echo "[setup] $*"; }
 warn() { echo "[setup] WARNING: $*" >&2; }
@@ -114,22 +101,6 @@ warn() { echo "[setup] WARNING: $*" >&2; }
 #   helper does.
 ORT_VERSION="${ORT_VERSION:-1.29.0}"
 CUDNN_VERSION="${CUDNN_VERSION:-9.25.1.1}"
-
-if [[ -z "${ORT_ARCH:-}" ]]; then
-  case "$(uname -m)" in
-    x86_64|amd64) ORT_ARCH="x64" ;;
-    aarch64|arm64) ORT_ARCH="aarch64" ;;
-    *) ORT_ARCH="x64" ;;
-  esac
-fi
-
-if [[ -z "${ORT_FLAVOR:-}" ]]; then
-  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
-    ORT_FLAVOR="gpu"
-  else
-    ORT_FLAVOR="cpu"
-  fi
-fi
 
 # CUDA major version of the installed toolkit, or 13 when there is none.
 detect_cuda_major() {
@@ -154,14 +125,6 @@ detect_cuda_major() {
 
   printf '13\n'
 }
-
-CUDA_MAJOR="${CUDA_MAJOR:-$(detect_cuda_major)}"
-
-if [[ "${STUDIOCAST_GUI_SUDO_STDIN:-0}" == "1" ]]; then
-  sudo() {
-    command sudo -S -p "${STUDIOCAST_GUI_SUDO_PROMPT:-[sudo] password for %u: }" "$@"
-  }
-fi
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "[setup] Missing required command: $1"; exit 1; }
@@ -711,11 +674,57 @@ EOF
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-# Everything above is definitions and read-only detection. Stop here when the
-# file is sourced, so that tests/fedora_setup_tests.sh can call single
-# functions without running a setup.
+# Everything above is definitions. Stop here when the file is sourced, so that
+# tests/fedora_setup_tests.sh can call single functions without running a setup
+# and without a change to the shell of the caller.
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
   return 0
+fi
+
+set -euo pipefail
+
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+# Tests can point this at a fake os-release file. Everything else uses the real one.
+OS_RELEASE_FILE="${STUDIOCAST_OS_RELEASE:-/etc/os-release}"
+
+YES=0
+DO_DEPS=0
+DO_V4L2=0
+DO_LOAD_LOOP=0
+DO_PERSIST_LOOP=0
+DO_CHECK_CUDA=0
+DO_BUILD=0
+BUILD_DIR="./cmake-build-debug"
+BUILD_TYPE="Debug"
+DO_MAXINE=0
+DO_RPM=0
+PASSTHRU_ARGS=()
+PARSE_PASSTHRU_ARGS=0
+
+if [[ -z "${ORT_ARCH:-}" ]]; then
+  case "$(uname -m)" in
+    x86_64|amd64) ORT_ARCH="x64" ;;
+    aarch64|arm64) ORT_ARCH="aarch64" ;;
+    *) ORT_ARCH="x64" ;;
+  esac
+fi
+
+if [[ -z "${ORT_FLAVOR:-}" ]]; then
+  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    ORT_FLAVOR="gpu"
+  else
+    ORT_FLAVOR="cpu"
+  fi
+fi
+
+CUDA_MAJOR="${CUDA_MAJOR:-$(detect_cuda_major)}"
+
+# The GUI runs this script with the password on stdin.
+if [[ "${STUDIOCAST_GUI_SUDO_STDIN:-0}" == "1" ]]; then
+  sudo() {
+    command sudo -S -p "${STUDIOCAST_GUI_SUDO_PROMPT:-[sudo] password for %u: }" "$@"
+  }
 fi
 
 while [[ $# -gt 0 ]]; do
