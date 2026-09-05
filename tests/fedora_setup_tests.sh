@@ -727,8 +727,9 @@ echo "CALL_RETURNED_$?"
 CHILD
 
   local out rc=0
-  out="$(PATH="${casedir}/bin:${PATH}" bash "${child}" "${FEDORA_SETUP}" \
-    2>&1)" || rc=$?
+  out="$(PATH="${casedir}/bin:${PATH}" \
+    STUDIOCAST_ORT_INSTALL_DIR="${casedir}/onnxruntime" \
+    bash "${child}" "${FEDORA_SETUP}" 2>&1)" || rc=$?
 
   if [[ "${rc}" -ne 0 ]]; then
     t_fail "a CUDA repository with another id ended the call with status ${rc}: $(first_line "${out}")"
