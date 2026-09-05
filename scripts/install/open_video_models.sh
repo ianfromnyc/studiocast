@@ -388,6 +388,9 @@ install_pack_from_template() {
   local fline
   for fline in "${file_lines[@]}"; do
     local name kind sha role
+    # A record has four fields. Name them all, so that the layout of the line
+    # stays readable, although this loop reads the name and the checksum only.
+    # shellcheck disable=SC2034  # kind and role name the fields they hold
     IFS=$'\t' read -r name kind sha role <<< "${fline}"
 
     [[ -n "${name}" ]] || continue
