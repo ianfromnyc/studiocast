@@ -241,7 +241,7 @@ requested_onnxruntime_root() {
   sc_ort_root "${ORT_VERSION}" "${asset}"
 }
 
-# The bootstrap root to read: the one the options ask for when it is installed,
+# The bootstrap root to read: the one this run asks for when it is installed,
 # else the newest one. Everything that looks at the installed bootstrap goes
 # through here, so a run that asks for one version never reads another one.
 installed_onnxruntime_root() {

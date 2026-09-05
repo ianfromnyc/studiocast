@@ -177,7 +177,11 @@ sudo dnf remove onnxruntime-devel
 
 `--build` passes `-DONNXRUNTIME_ROOT=<bootstrap root>` when the bootstrap is
 present, which makes CMake use it whatever else is installed. Use the same
-option in your own `cmake` commands.
+option in your own `cmake` commands. The root is the one of this run, that is
+the root for `--onnxruntime-version`, `--onnxruntime-arch` and `--cuda-major`,
+or for their defaults. When that root is not installed, the helper says so and
+uses the newest installed root instead. The cpu flavor installs no such root,
+so a cpu build uses the newest one if there is any.
 
 Fedora `pkg-config` searches `/usr/lib64/pkgconfig` and `/usr/share/pkgconfig`
 only, so the helper also links `onnxruntime.pc` into the first of them. No rpm
