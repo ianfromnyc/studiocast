@@ -115,14 +115,19 @@ jobs:
     # The inputs context is empty for a release event, so test the event first.
     if: ${{ github.event_name == 'release' || inputs.build_rpm }}
     runs-on: ubuntu-24.04
+    # The build compiles StudioCast and a private dlib, so it is the longest
+    # job here. Cap it, so a hung step cannot hold a runner for six hours.
+    timeout-minutes: 90
     container:
       image: registry.fedoraproject.org/fedora:44
 
     steps:
-      - name: Install base tools (for checkout)
+      - name: Install base tools (for checkout and the cache)
+        # actions/cache packs the cached directory with tar and zstd, and
+        # neither is in the base image.
         run: |
           dnf install -y --setopt=install_weak_deps=false \
-            git rpm-build rpmdevtools rpmlint dnf5-plugins
+            git rpm-build rpmdevtools rpmlint dnf5-plugins tar zstd
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -136,6 +141,14 @@ jobs:
         run: |
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
+      - name: Cache the pinned dlib source
+        # The tarball is 19 MB and the pin changes rarely, so keep it between
+        # runs. --keep-downloads below tells --clean to leave it in place.
+        uses: actions/cache@v4
+        with:
+          path: build/rpm/downloads
+          key: rpm-dlib-${{ hashFiles('packaging/rpm/dlib.lock') }}
+
       - name: Build RPM packages
         # A container job cannot run podman, so this is the native build path.
         # --install-builddeps reads the BuildRequires from the rendered spec,
@@ -144,8 +157,10 @@ jobs:
         # The script also downloads the dlib source pinned in
         # packaging/rpm/dlib.lock and checks its SHA256. Fedora has no dlib
         # package, so the spec builds that source as a private static library.
+        # --keep-downloads keeps the cached tarball for the next run.
         run: |
-          packaging/rpm/build_rpm.sh --clean --install-builddeps --rpmlint
+          packaging/rpm/build_rpm.sh --clean --keep-downloads \
+            --install-builddeps --rpmlint
 
       - name: Verify RPM packages
         # The job is already root inside a container, so the install test does
