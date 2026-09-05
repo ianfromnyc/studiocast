@@ -277,10 +277,14 @@ cudnn_published_sha256() {
   index="$(curl --fail --silent --show-error --location --retry 3 "${index_url}" 2>/dev/null || true)"
   [[ -n "${index}" ]] || return 0
 
+  # An index without the entry means "no published SHA-256", not an error, so
+  # keep the lookup best-effort. Without the || true, grep finding nothing
+  # would make the pipeline fail under pipefail and set -e would end the setup.
   printf '%s\n' "${index}" \
     | grep -A2 -F "\"relative_path\": \"cudnn/linux-$(cudnn_arch)/${archive}.tar.xz\"" \
     | sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{64\}\)".*/\1/p' \
-    | head -n 1
+    | head -n 1 \
+    || true
 }
 
 ensure_cudnn_available() {

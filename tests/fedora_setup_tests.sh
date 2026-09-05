@@ -29,6 +29,8 @@ trap 'rm -rf "${SANDBOX}"' EXIT
 
 # A curl that writes the -o target instead of downloading it, and prints
 # nothing without one, so the redistributable index lookup finds no SHA-256.
+# With STUB_CURL_INDEX set to a file, a call without -o prints that file, which
+# is how a check below gives the lookup a real index to read.
 # With STUB_CURL_FAIL=1 it reports a failure, which is how the checks below
 # drive the set -e path.
 STUB_BIN="${SANDBOX}/bin"
@@ -48,7 +50,12 @@ if [[ "${STUB_CURL_FAIL:-0}" == "1" ]]; then
   echo "stub curl: refusing to download" >&2
   exit 22
 fi
-[[ -n "${out}" ]] || exit 0
+if [[ -z "${out}" ]]; then
+  if [[ -n "${STUB_CURL_INDEX:-}" ]]; then
+    cat "${STUB_CURL_INDEX}"
+  fi
+  exit 0
+fi
 printf 'fake archive\n' > "${out}"
 STUB
 chmod +x "${STUB_BIN}/curl"
@@ -231,6 +238,51 @@ CHILD
   fi
 }
 
+# A redistributable index can exist and still have no entry for the archive,
+# for example when NVIDIA renames a file. That means "no published SHA-256",
+# not an error. Under set -e the lookup must return 0 and print nothing, so
+# that the caller can log the missing checksum and go on.
+test_a_missing_index_entry_gives_an_empty_sha256() {
+  local index="${SANDBOX}/redistrib-without-entry.json"
+  cat > "${index}" <<'JSON'
+{
+  "release_date": "2025-01-01",
+  "cudnn": {
+    "linux-x86_64": {
+      "relative_path": "cudnn/linux-x86_64/some-other-archive.tar.xz",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  }
+}
+JSON
+
+  local child="${SANDBOX}/index-entry-child.sh"
+  {
+    echo 'set -euo pipefail'
+    echo "${CHILD_PREAMBLE}"
+    cat <<'CHILD'
+export CUDNN_VERSION="$2"
+sha256="$(cudnn_published_sha256 "$(cudnn_archive_name)")"
+echo LOOKUP_RETURNED_0
+echo "LOOKUP_OUTPUT_[${sha256}]"
+CHILD
+  } > "${child}"
+
+  local out rc=0
+  out="$(STUB_CURL_INDEX="${index}" bash "${child}" "${FEDORA_SETUP}" \
+    "${FAKE_CUDNN_VERSION}" 2>/dev/null)" || rc=$?
+
+  if [[ "${rc}" -ne 0 ]]; then
+    t_fail "an index without the entry ended the script with status ${rc}"
+  elif [[ "${out}" != *LOOKUP_RETURNED_0* ]]; then
+    t_fail "the lookup did not return 0, got: $(first_line "${out}")"
+  elif [[ "${out}" != *'LOOKUP_OUTPUT_[]'* ]]; then
+    t_fail "the lookup should print nothing, got: $(first_line "${out}")"
+  else
+    t_pass "an index without the entry gives an empty SHA-256 and returns 0"
+  fi
+}
+
 # The bootstrap root holds its libraries in lib or in lib64, so the CUDA
 # preflight must follow the layout of the root it finds.
 test_cuda_required_libs_follows_the_root_layout() {
@@ -301,6 +353,7 @@ CHILD
 test_repeated_calls_clean_up_and_keep_the_caller_trap
 test_download_failure_cleans_up_and_runs_the_caller_trap
 test_a_caller_return_trap_survives_the_call
+test_a_missing_index_entry_gives_an_empty_sha256
 test_cuda_required_libs_follows_the_root_layout
 test_sourcing_keeps_the_caller_shell_options
 
