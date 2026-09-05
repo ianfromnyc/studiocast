@@ -2,6 +2,28 @@ include_guard(GLOBAL)
 
 include(CheckCXXSourceCompiles)
 
+# Set out to TRUE when path is a file or a directory inside root.
+#
+# The root search below writes its result into the CMake cache, and a cache
+# entry outlives the configure that made it. This is how the module tells a
+# result of the current root from one that an earlier configure left behind.
+function(studiocast_ort_path_inside_root out root path)
+  set(${out} FALSE PARENT_SCOPE)
+
+  if ("${path}" STREQUAL "" OR NOT EXISTS "${path}")
+    return()
+  endif()
+
+  get_filename_component(_real_root "${root}" REALPATH)
+  get_filename_component(_real_path "${path}" REALPATH)
+  string(APPEND _real_root "/")
+
+  string(FIND "${_real_path}" "${_real_root}" _pos)
+  if (_pos EQUAL 0)
+    set(${out} TRUE PARENT_SCOPE)
+  endif()
+endfunction()
+
 function(studiocast_configure_onnxruntime out_found out_target)
   set(_found FALSE)
   set(_target "")
@@ -225,6 +247,18 @@ print(json.dumps(payload))
   # a wrong root could still find a distribution package. A root that holds
   # neither part is an error, not a reason to look elsewhere.
   if (NOT _found AND _ort_explicit_root)
+    # find_path() and find_library() keep their result in a cache entry and
+    # skip the search when that entry is set, so a second configure of the same
+    # build directory would keep the paths of the root of the first one. Note
+    # which root the cache came from, and drop both entries when the root of
+    # this configure is another one.
+    if (NOT "${ONNXRUNTIME_ROOT}" STREQUAL "${STUDIOCAST_ORT_ROOT_USED}")
+      unset(ONNXRUNTIME_INCLUDE_DIR CACHE)
+      unset(ONNXRUNTIME_LIBRARY CACHE)
+      set(STUDIOCAST_ORT_ROOT_USED "${ONNXRUNTIME_ROOT}" CACHE INTERNAL
+        "The ONNXRUNTIME_ROOT the cached ONNX Runtime paths come from.")
+    endif()
+
     find_path(ONNXRUNTIME_INCLUDE_DIR
       NAMES onnxruntime_cxx_api.h
       PATHS "${ONNXRUNTIME_ROOT}"
@@ -239,12 +273,26 @@ print(json.dumps(payload))
       NO_DEFAULT_PATH
     )
 
-    if (NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIBRARY)
+    # Take the results only when both of them are still there and inside this
+    # root. A cache entry of an earlier configure of this build directory can
+    # name a path that was deleted since, which the search above does not see
+    # because it does not run for an entry that is already set.
+    studiocast_ort_path_inside_root(_ort_include_ok "${ONNXRUNTIME_ROOT}"
+      "${ONNXRUNTIME_INCLUDE_DIR}/onnxruntime_cxx_api.h")
+    studiocast_ort_path_inside_root(_ort_library_ok "${ONNXRUNTIME_ROOT}"
+      "${ONNXRUNTIME_LIBRARY}")
+
+    if (NOT _ort_include_ok OR NOT _ort_library_ok)
+      # Leave no cache entry behind that would keep a wrong path alive.
+      unset(ONNXRUNTIME_INCLUDE_DIR CACHE)
+      unset(ONNXRUNTIME_LIBRARY CACHE)
+      unset(STUDIOCAST_ORT_ROOT_USED CACHE)
+
       set(_ort_root_missing "")
-      if (NOT ONNXRUNTIME_INCLUDE_DIR)
+      if (NOT _ort_include_ok)
         list(APPEND _ort_root_missing "no onnxruntime_cxx_api.h in include")
       endif()
-      if (NOT ONNXRUNTIME_LIBRARY)
+      if (NOT _ort_library_ok)
         list(APPEND _ort_root_missing "no libonnxruntime in lib or lib64")
       endif()
       list(JOIN _ort_root_missing " and " _ort_root_missing_text)

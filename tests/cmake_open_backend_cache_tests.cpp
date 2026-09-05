@@ -301,13 +301,136 @@ bool TestExplicitOnnxRuntimeRootWithoutALibraryFails() {
                 "the root search must not report a library outside the root");
 }
 
+// find_path() and find_library() keep their result in a cache entry and skip
+// the search when it is already set, so a second configure of the same build
+// directory could keep the paths of the earlier root. The root of the current
+// configure must win instead.
+bool TestReconfigureWithAnotherOnnxRuntimeRootUsesTheNewRoot() {
+  ScopedTempDir temp("studiocast-cmake-ort-root-reconfigure");
+  if (!Expect(temp.ok(), temp.error().c_str()))
+    return false;
+
+  const fs::path project = temp.path() / "project";
+  const fs::path buildDir = temp.path() / "build";
+  const fs::path first = temp.path() / "root-first";
+  const fs::path second = temp.path() / "root-second";
+  const fs::path decoy = temp.path() / "decoy";
+  const fs::path noPkgConfig = temp.path() / "empty-pkgconfig";
+
+  std::error_code ec;
+  fs::create_directories(noPkgConfig, ec);
+  if (!Expect(!ec, "failed to create empty pkg-config directory"))
+    return false;
+  if (!WriteOnnxRuntimeProbeProject(project))
+    return false;
+  for (const fs::path &root : {first, second}) {
+    if (!WriteEmptyFile(root / "include" / "onnxruntime_cxx_api.h"))
+      return false;
+    if (!WriteEmptyFile(root / "lib" / "libonnxruntime.so"))
+      return false;
+  }
+  if (!WriteEmptyFile(decoy / "libonnxruntime.so"))
+    return false;
+
+  studiocast::util::ExecCaptureOptions options;
+  options.timeout_ms = 120000;
+  options.max_output_bytes = 2 * 1024 * 1024;
+
+  auto result = studiocast::util::ExecCapture(
+      OnnxRuntimeProbeCommand(project, buildDir, first, decoy, noPkgConfig),
+      options);
+  if (!Expect(result.exit_code == 0,
+              "the first probe configure should succeed")) {
+    std::cerr << result.stdout_str << "\n";
+    return false;
+  }
+
+  result = studiocast::util::ExecCapture(
+      OnnxRuntimeProbeCommand(project, buildDir, second, decoy, noPkgConfig),
+      options);
+  if (!Expect(result.exit_code == 0,
+              "the second probe configure should succeed")) {
+    std::cerr << result.stdout_str << "\n";
+    return false;
+  }
+
+  const std::string cache = ReadFile(buildDir / "CMakeCache.txt");
+  return ExpectContains("probe CMake cache", cache,
+                        "ONNXRUNTIME_INCLUDE_DIR:PATH=" +
+                            (second / "include").string()) &&
+         ExpectContains("probe CMake cache", cache,
+                        "ONNXRUNTIME_LIBRARY:FILEPATH=" +
+                            (second / "lib" / "libonnxruntime.so").string()) &&
+         Expect(cache.find(first.string()) == std::string::npos,
+                "the cache must not keep the paths of the earlier root");
+}
+
+// A root that is deleted between two configures of the same build directory
+// leaves the cache with paths that are gone. Accepting them would build
+// against a runtime that is no longer there, so the configure must stop.
+bool TestReconfigureAfterTheRootIsDeletedStopsTheConfigure() {
+  ScopedTempDir temp("studiocast-cmake-ort-root-deleted");
+  if (!Expect(temp.ok(), temp.error().c_str()))
+    return false;
+
+  const fs::path project = temp.path() / "project";
+  const fs::path buildDir = temp.path() / "build";
+  const fs::path root = temp.path() / "root";
+  const fs::path decoy = temp.path() / "decoy";
+  const fs::path noPkgConfig = temp.path() / "empty-pkgconfig";
+
+  std::error_code ec;
+  fs::create_directories(noPkgConfig, ec);
+  if (!Expect(!ec, "failed to create empty pkg-config directory"))
+    return false;
+  if (!WriteOnnxRuntimeProbeProject(project))
+    return false;
+  if (!WriteEmptyFile(root / "include" / "onnxruntime_cxx_api.h"))
+    return false;
+  if (!WriteEmptyFile(root / "lib" / "libonnxruntime.so"))
+    return false;
+  if (!WriteEmptyFile(decoy / "libonnxruntime.so"))
+    return false;
+
+  studiocast::util::ExecCaptureOptions options;
+  options.timeout_ms = 120000;
+  options.max_output_bytes = 2 * 1024 * 1024;
+
+  auto result = studiocast::util::ExecCapture(
+      OnnxRuntimeProbeCommand(project, buildDir, root, decoy, noPkgConfig),
+      options);
+  if (!Expect(result.exit_code == 0,
+              "the first probe configure should succeed")) {
+    std::cerr << result.stdout_str << "\n";
+    return false;
+  }
+
+  fs::remove_all(root, ec);
+  if (!Expect(!ec, "failed to remove the root directory"))
+    return false;
+
+  result = studiocast::util::ExecCapture(
+      OnnxRuntimeProbeCommand(project, buildDir, root, decoy, noPkgConfig),
+      options);
+  if (!Expect(result.exit_code != 0,
+              "a deleted root should stop the second configure")) {
+    std::cerr << result.stdout_str << "\n";
+    return false;
+  }
+
+  return ExpectContains("probe configure output", result.stdout_str,
+                        "ONNXRUNTIME_ROOT=" + root.string());
+}
+
 } // namespace
 
 int main() {
   return (TestMissingOnnxRuntimeDoesNotForceOpenBackendsOff() &&
           TestEmptyOnnxRuntimeRootDoesNotRunTheRootSearch() &&
           TestExplicitOnnxRuntimeRootTakesBothPartsFromTheRoot() &&
-          TestExplicitOnnxRuntimeRootWithoutALibraryFails())
+          TestExplicitOnnxRuntimeRootWithoutALibraryFails() &&
+          TestReconfigureWithAnotherOnnxRuntimeRootUsesTheNewRoot() &&
+          TestReconfigureAfterTheRootIsDeletedStopsTheConfigure())
              ? 0
              : 1;
 }
