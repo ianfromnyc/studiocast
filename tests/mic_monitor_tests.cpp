@@ -942,15 +942,13 @@ bool TestServiceStopsTheMonitorWhenTheResolvedOutputDisappears() {
       [&] {
         const auto st = service.Status();
         return !st.monitor_active &&
-               st.monitor_last_error.find("headset_test_sink") !=
-                   std::string::npos;
+               st.monitor_note.find("headset_test_sink") != std::string::npos;
       },
       5000ms);
   if (!reported) {
     const auto st = service.Status();
     std::cerr << "the lost monitor output was not reported: active="
-              << st.monitor_active << " error='" << st.monitor_last_error
-              << "'\n";
+              << st.monitor_active << " note='" << st.monitor_note << "'\n";
     service.Stop();
     return false;
   }
@@ -976,9 +974,9 @@ bool TestServiceStopsTheMonitorWhenTheResolvedOutputDisappears() {
   // service resolves the default afresh.
   cfg.monitor.enabled = false;
   service.UpdateConfig(cfg);
-  if (!WaitUntil([&] { return service.Status().monitor_last_error.empty(); },
+  if (!WaitUntil([&] { return service.Status().monitor_note.empty(); },
                  1000ms)) {
-    std::cerr << "the lost-output error survived turning the monitor off\n";
+    std::cerr << "the lost-output note survived turning the monitor off\n";
     ok = false;
   }
   cfg.monitor.enabled = true;
@@ -990,6 +988,60 @@ bool TestServiceStopsTheMonitorWhenTheResolvedOutputDisappears() {
           1000ms)) {
     std::cerr << "the monitor did not resolve the default again after the "
                  "user turned it back on\n";
+    ok = false;
+  }
+
+  service.Stop();
+  return ok;
+}
+
+// A lost output is the designed-for failure of the monitor, and the sentence
+// the service writes tells the user what to do about it. It goes in the note,
+// which the GUI prints as written, and not in the error, which the GUI turns
+// into "The monitor needs attention. Open Support for technical details."
+bool TestServiceReportsALostOutputAsANote() {
+  MonitorRecorder rec;
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  VirtualAudioService service(std::move(hooks));
+  const auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil([&] { return service.Status().monitor_active; }, 1000ms)) {
+    std::cerr << "the monitor did not start\n";
+    service.Stop();
+    return false;
+  }
+
+  // Pulse unloads the loopback when the output disappears.
+  rec.running.store(false, std::memory_order_relaxed);
+
+  // The service checks the route every two seconds.
+  const bool reported = WaitUntil(
+      [&] {
+        const auto st = service.Status();
+        return !st.monitor_active &&
+               st.monitor_note.find("disappeared") != std::string::npos;
+      },
+      5000ms);
+  bool ok = true;
+  if (!reported) {
+    const auto st = service.Status();
+    std::cerr << "the lost output was not reported as a note: note='"
+              << st.monitor_note << "' error='" << st.monitor_last_error
+              << "'\n";
+    ok = false;
+  } else if (!service.Status().monitor_last_error.empty()) {
+    std::cerr << "the lost output was also reported as an error: '"
+              << service.Status().monitor_last_error << "'\n";
     ok = false;
   }
 
@@ -1589,6 +1641,8 @@ int main() {
        &TestServiceTreatsAFailedMonitorCheckAsStopped},
       {"service stops the monitor when the resolved output disappears",
        &TestServiceStopsTheMonitorWhenTheResolvedOutputDisappears},
+      {"service reports a lost output as a note",
+       &TestServiceReportsALostOutputAsANote},
       {"service keeps the resolved output across a failed check",
        &TestServiceKeepsTheResolvedOutputAcrossAFailedCheck},
       {"service backs off repeated monitor start failures",

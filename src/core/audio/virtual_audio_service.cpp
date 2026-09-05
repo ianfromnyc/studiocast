@@ -1332,14 +1332,18 @@ void VirtualAudioService::ThreadMain() {
         }
         setMonitorNote(std::move(monitorNote));
       } else {
-        setMonitorNote(std::string());
+        // A lost output keeps its note until something restarts the monitor.
+        if (!monitor_output_lost_)
+          setMonitorNote(std::string());
         // A changed setting is an explicit restart by the user: it resolves
         // the output afresh and ends a lost-output stop.
         const bool monitorSettingsChanged =
             monitor_sink_requested_ != monitorCfg.sink ||
             monitor_latency_ms_ != monitorCfg.latency_ms;
-        if (monitorSettingsChanged)
+        if (monitorSettingsChanged) {
           monitor_output_lost_ = false;
+          setMonitorNote(std::string());
+        }
         if (monitorAttemptSink != monitorCfg.sink ||
             monitorAttemptLatencyMs != monitorCfg.latency_ms) {
           monitorAttemptSink = monitorCfg.sink;
@@ -1377,10 +1381,15 @@ void VirtualAudioService::ThreadMain() {
             clearMonitorRouteState();
             monitor_route_may_exist_ = false;
             monitor_output_lost_ = true;
-            setMonitorError("The monitor output '" + lost +
-                            "' disappeared, so the monitor stopped. Choose "
-                            "another output, or turn the monitor off and on "
-                            "again to use the system default.");
+            // This is the failure the feature is designed for, and the
+            // sentence says what to do about it. It goes in the note, which
+            // the GUI prints as written. An error would become "The monitor
+            // needs attention. Open Support for technical details."
+            setMonitorError(std::string());
+            setMonitorNote("The monitor output '" + lost +
+                           "' disappeared, so the monitor stopped. Choose "
+                           "another output, or turn the monitor off and on "
+                           "again to use the system default.");
           }
         }
 
