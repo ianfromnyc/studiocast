@@ -36,7 +36,10 @@ struct SdkRuntimeReport {
 // directories is on the loader path, and the SDK libraries carry no usable
 // RPATH, so a plain dlopen fails. This function reads the DT_NEEDED list of
 // `library`, resolves each soname against the SDK directories, and dlopens the
-// SDK copies with RTLD_NOW | RTLD_GLOBAL in dependency order.
+// SDK copies with RTLD_NOW | RTLD_LOCAL in dependency order. Local is enough:
+// the loader still satisfies a later DT_NEEDED from the link map by soname,
+// and the SDK's own TensorRT and CUDA stay out of the process-wide namespace,
+// where ONNX Runtime would otherwise bind to them.
 //
 // Core system libraries (libc, libstdc++, ...) and the NVIDIA driver library
 // (libcuda.so.1) always stay with the system loader. So does any soname the

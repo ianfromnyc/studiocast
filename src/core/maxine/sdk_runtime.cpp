@@ -327,7 +327,13 @@ void PreloadRecursive(const fs::path &library,
     PreloadRecursive(entry.resolved, dirs, visited, out);
 
     ::dlerror();
-    void *h = dlopen(entry.resolved.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    // RTLD_LOCAL, not RTLD_GLOBAL. A library opened either way still satisfies
+    // the DT_NEEDED of a library opened later, because the loader matches the
+    // soname against the link map. RTLD_GLOBAL would do more than that: it
+    // would put the SDK's own TensorRT and CUDA in the process-wide namespace,
+    // where ONNX Runtime, which this process also loads and which was built
+    // against other versions of the same sonames, would bind to them.
+    void *h = dlopen(entry.resolved.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (h) {
       entry.loaded = true;
     } else {

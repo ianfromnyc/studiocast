@@ -439,6 +439,14 @@ bool TestSdkRuntimePreloadMakesBundledDepsResolvable() {
   }
   ok &= Require(saw_dep, "expected the pre-load to name the bundled soname");
 
+  // A pre-loaded dependency must stay out of the process-wide namespace. The
+  // SDK ships its own TensorRT and CUDA, and the same process also loads ONNX
+  // Runtime, which was built against other versions of the same sonames. A
+  // global pre-load would make ONNX Runtime bind to the SDK copies.
+  ok &= Require(::dlsym(RTLD_DEFAULT, "sc_fake_dep_value") == nullptr,
+                "expected the pre-loaded dependency to export no symbol into "
+                "the global namespace");
+
   void *after = dlopen(target.c_str(), RTLD_NOW | RTLD_LOCAL);
   ok &= Require(after != nullptr,
                 "expected dlopen to succeed after the pre-load");
