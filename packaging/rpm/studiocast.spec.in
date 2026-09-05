@@ -101,7 +101,6 @@ BuildRequires:  qt6-qtbase-devel
 BuildRequires:  pulseaudio-libs-devel
 BuildRequires:  libjpeg-turbo-devel
 BuildRequires:  libpng-devel
-BuildRequires:  sqlite-devel
 BuildRequires:  onnxruntime-devel
 %if %{with libyuv}
 BuildRequires:  libyuv-devel
