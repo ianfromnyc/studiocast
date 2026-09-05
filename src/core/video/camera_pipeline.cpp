@@ -452,9 +452,10 @@ CameraPipelineStatus CameraPipeline::Status() const {
   s.starting = starting_;
   s.input_device = input_device_;
   s.output_device = output_device_;
+  const bool wanted = pw_output_wanted_.load(std::memory_order_acquire);
   s.pipewire_output_state = internal::PipeWireOutputStateText(
-      pw_output_wanted_, pw_node_ != nullptr, pw_node_error_);
-  if (pw_output_wanted_ && pw_node_) {
+      wanted, pw_node_ != nullptr, pw_node_error_);
+  if (wanted && pw_node_) {
     s.pipewire_node_id = pw_node_->NodeId();
     s.pipewire_consumer_count = pw_node_->ConsumerCount();
   }
@@ -503,7 +504,7 @@ CameraPipelineStatus CameraPipeline::Status() const {
 
 bool CameraPipeline::Start(const CameraPipelineConfig &cfg,
                            std::string *error) {
-  pw_output_wanted_ = cfg.pipewire_output;
+  pw_output_wanted_.store(cfg.pipewire_output, std::memory_order_release);
   const bool w_set = cfg.width > 0;
   const bool h_set = cfg.height > 0;
   if (cfg.capture_mode == CaptureMode::requested) {
@@ -821,8 +822,9 @@ internal::PipeWireNodePlan CameraPipeline::PlanPipeWireOutputLocked() const {
   current.height = pw_node_height_;
   current.fps = pw_node_fps_;
   current.format = pw_node_format_;
-  return internal::PlanPipeWireNode(pw_output_wanted_, writer_.Actual(),
-                                    current);
+  return internal::PlanPipeWireNode(
+      pw_output_wanted_.load(std::memory_order_acquire), writer_.Actual(),
+      current);
 }
 
 void CameraPipeline::ApplyPipeWireOutputPlan(
@@ -911,7 +913,7 @@ void CameraPipeline::PublishToPipeWire(const std::uint8_t *data,
 
 bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig &cfg,
                                       std::string *error) {
-  pw_output_wanted_ = cfg.pipewire_output;
+  pw_output_wanted_.store(cfg.pipewire_output, std::memory_order_release);
   const bool w_set = cfg.width > 0;
   const bool h_set = cfg.height > 0;
   if (cfg.capture_mode == CaptureMode::requested) {

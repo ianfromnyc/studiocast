@@ -416,7 +416,11 @@ private:
   // `mu_` guards both the pointer and the error.
   std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> pw_node_;
   std::string pw_node_error_;
-  bool pw_output_wanted_ = false;
+
+  // Atomic, because Start and EnsureOutputOpen set it on the supervisor thread
+  // while Status reads it under `mu_` for the daemon, and the daemon polls the
+  // status all the time.
+  std::atomic<bool> pw_output_wanted_{false};
 
   // Format the running node negotiated, so a renegotiated v4l2loopback format
   // restarts the node instead of sending frames of the wrong size.
