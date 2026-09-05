@@ -504,6 +504,39 @@ bool TestSpeakerLoopbackPumpPassesOnTheFrameItRead() {
          Expect(waits == 0, "a pump that moves frames must not wait");
 }
 
+// A read or a write that fails must say why. Start clears the last error, and
+// a stop request sets none, so both used to fail with an empty message and the
+// caller logged nothing.
+bool TestLiveStoppedNodeSaysWhyItRefusesWork() {
+  if (!LiveServerAvailable("live stopped node says why it refuses work"))
+    return true;
+
+  studiocast::pw::AudioNodeConfig cfg;
+  cfg.role = studiocast::pw::AudioNodeRole::kVirtualSource;
+  cfg.node_name = "studiocast_pipewire_selftest_stopped";
+  cfg.channels = 1;
+
+  studiocast::pw::PipeWireAudioNode node;
+  std::string error;
+  if (!Expect(node.Start(cfg, &error), "node start failed: " + error))
+    return false;
+
+  node.RequestStop();
+
+  std::vector<float> frame(cfg.frame_samples, 0.0f);
+  const std::size_t bytes = frame.size() * sizeof(float);
+  std::string readError;
+  std::string writeError;
+  const bool read = node.Read(frame.data(), bytes, &readError);
+  const bool wrote = node.Write(frame.data(), bytes, &writeError);
+  node.Stop();
+
+  return Expect(!read, "a stopped node must refuse a read") &&
+         Expect(!wrote, "a stopped node must refuse a write") &&
+         Expect(!readError.empty(), "the refused read explained nothing") &&
+         Expect(!writeError.empty(), "the refused write explained nothing");
+}
+
 bool TestPipeWireIoRefusesToOpenWithoutTheVirtualMic() {
   auto io = studiocast::audio::pw_backend::CreatePipeWireAudioIo();
   if (!Expect(io != nullptr, "the PipeWire I/O factory returned nothing"))
@@ -1464,6 +1497,8 @@ int main() {
        &TestSpeakerLoopbackPumpWaitsAfterAnEmptyRead},
       {"speaker loopback pump passes on the frame it read",
        &TestSpeakerLoopbackPumpPassesOnTheFrameItRead},
+      {"live stopped node says why it refuses work",
+       &TestLiveStoppedNodeSaysWhyItRefusesWork},
       {"pipewire io refuses to open without the virtual mic",
        &TestPipeWireIoRefusesToOpenWithoutTheVirtualMic},
       {"live native virtual mic round trip",

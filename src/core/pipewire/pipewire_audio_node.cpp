@@ -391,6 +391,20 @@ bool PipeWireAudioNode::Write(const void *src, std::size_t bytes,
 
 #else
 
+namespace {
+
+// Why a read or a write that a stop request ended failed. Start clears the
+// last error and a stop request records none, so without this the caller got
+// an empty string and logged nothing.
+std::string StopReason(const PipeWireAudioNode::Impl &impl) {
+  std::string reason = impl.Error();
+  if (reason.empty())
+    reason = "The PipeWire node was stopped.";
+  return reason;
+}
+
+} // namespace
+
 bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
   if (error)
     error->clear();
@@ -614,7 +628,7 @@ bool PipeWireAudioNode::Read(void *dst, std::size_t bytes, std::string *error) {
   }
 
   if (error)
-    *error = impl_->Error();
+    *error = StopReason(*impl_);
   return false;
 }
 
@@ -658,7 +672,7 @@ bool PipeWireAudioNode::Write(const void *src, std::size_t bytes,
   }
 
   if (error)
-    *error = impl_->Error();
+    *error = StopReason(*impl_);
   return false;
 }
 
