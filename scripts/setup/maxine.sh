@@ -981,6 +981,26 @@ sdk_script_pinned_root() {
   sed -n 's/^[A-Za-z_]*SDK_PATH="\([^"]*\)".*/\1/p' "$1" | head -n 1
 }
 
+# Write a copy of an SDK feature script with its pinned SDK root replaced.
+#
+# Arguments: <script> <pinned root> <new root> <output file>
+#
+# A path is text, not a pattern. Both roots come from the file system and can
+# hold characters that a sed s### command reads as the delimiter, as the whole
+# match, or as an escape, so python3 compares and writes them as plain text.
+sdk_script_pin_root() {
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
+import re, sys
+
+script, pinned, root, out = sys.argv[1:5]
+pattern = re.compile(r'^([A-Za-z_]*SDK_PATH)="' + re.escape(pinned) + r'"$')
+with open(script, encoding="utf-8") as src, open(out, "w", encoding="utf-8") as dst:
+    for line in src:
+        match = pattern.match(line.rstrip("\n"))
+        dst.write(f'{match.group(1)}="{root}"\n' if match else line)
+PY
+}
+
 # True when the SDK script knows one --gpu name.
 sdk_script_knows_gpu() {
   grep -qE "\[\"$2\"\]=" "$1"
@@ -1009,8 +1029,8 @@ run_sdk_install_feature() {
     log "${label}: running a copy of it that points at ${root}."
     runner="install_feature_local.sh"
     if [[ "${DRY_RUN}" -ne 1 ]]; then
-      sed "s#^\([A-Za-z_]*SDK_PATH\)=\"${pinned}\"#\1=\"${root}\"#" \
-        "${script}" > "${root}/features/${runner}"
+      sdk_script_pin_root "${script}" "${pinned}" "${root}" \
+        "${root}/features/${runner}"
       chmod +x "${root}/features/${runner}"
     fi
   fi

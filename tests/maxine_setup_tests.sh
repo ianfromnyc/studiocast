@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+#
+# Offline checks for the helper functions of scripts/setup/maxine.sh.
+#
+# That script runs its work at the top level, so it cannot be sourced. Each
+# check therefore takes the one function it needs out of the file and runs it
+# in a child shell. Nothing here reaches the network or the SDK.
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+MAXINE_SH="${REPO_ROOT}/scripts/setup/maxine.sh"
+
+FAILURES=0
+t_fail() {
+  echo "FAIL: $*" >&2
+  FAILURES=$((FAILURES + 1))
+}
+t_pass() { echo "ok: $*"; }
+
+SANDBOX="$(mktemp -d)"
+trap 'rm -rf "${SANDBOX}"' EXIT
+
+# Print one shell function of maxine.sh. Functions there start at column 0 and
+# end with a closing brace at column 0.
+extract_function() {
+  sed -n "/^$1() {\$/,/^}\$/p" "${MAXINE_SH}"
+}
+
+# Write a child script holding one function of maxine.sh, which it calls with
+# the four arguments the child itself is given.
+#
+# Arguments: <function name> <child script path>
+write_child() {
+  local fn
+  fn="$(extract_function "$1")"
+  [[ -n "${fn}" ]] || return 1
+  {
+    echo 'set -uo pipefail'
+    echo "${fn}"
+    # The positional parameters below belong to the child, not to this shell,
+    # so they must reach the file as they are written here.
+    # shellcheck disable=SC2016
+    printf '%s "$1" "$2" "$3" "$4"\n' "$1"
+  } > "$2"
+}
+
+# The SDK's install_feature.sh pins the root it installs into. The helper
+# writes a copy that points at this install instead. Both roots come from the
+# file system, so a root holding a character that a text substitution reads as
+# something else must still come out as itself.
+test_pinning_a_root_with_special_characters() {
+  local child="${SANDBOX}/pin-child.sh"
+  if ! write_child sdk_script_pin_root "${child}"; then
+    t_fail "sdk_script_pin_root is not in ${MAXINE_SH}"
+    return
+  fi
+
+  # '#' is the sed delimiter this used to use, '&' is its whole match, and a
+  # backslash is its escape.
+  local pinned='/usr/local/VideoFX'
+  local root='/home/u/sc#1 & co\dir/VideoFX'
+
+  local script="${SANDBOX}/install_feature.sh"
+  {
+    echo '#!/usr/bin/env bash'
+    printf 'VFX_SDK_PATH="%s"\n' "${pinned}"
+  } > "${script}"
+
+  local out="${SANDBOX}/install_feature_local.sh"
+  bash "${child}" "${script}" "${pinned}" "${root}" "${out}"
+
+  local got
+  got="$(sed -n 's/^VFX_SDK_PATH="\(.*\)"$/\1/p' "${out}")"
+  if [[ "${got}" != "${root}" ]]; then
+    t_fail "expected the pinned root '${root}', got '${got}'"
+  else
+    t_pass "a root with #, & and a backslash survives the copy"
+  fi
+
+  if [[ "$(head -n 1 "${out}")" != "#!/usr/bin/env bash" ]]; then
+    t_fail "the copy lost the first line: $(head -n 1 "${out}")"
+  else
+    t_pass "the copy keeps the lines it does not change"
+  fi
+}
+
+# A pinned root holding a regular expression character must match as text.
+test_pinning_a_root_that_looks_like_a_pattern() {
+  local child="${SANDBOX}/pin-re-child.sh"
+  if ! write_child sdk_script_pin_root "${child}"; then
+    t_fail "sdk_script_pin_root is not in ${MAXINE_SH}"
+    return
+  fi
+
+  local pinned='/opt/v.1[x]/VideoFX'
+  local root='/home/u/VideoFX'
+
+  local script="${SANDBOX}/install_feature_re.sh"
+  {
+    printf 'VFX_SDK_PATH="%s"\n' "${pinned}"
+    # A line the pinned root would match if it were read as a pattern.
+    echo 'AR_SDK_PATH="/opt/vX1Xx/VideoFX"'
+  } > "${script}"
+
+  local out="${SANDBOX}/install_feature_re_local.sh"
+  bash "${child}" "${script}" "${pinned}" "${root}" "${out}"
+
+  if ! grep -q "^VFX_SDK_PATH=\"${root}\"\$" "${out}"; then
+    t_fail "the pinned root was not replaced: $(cat "${out}")"
+  else
+    t_pass "a pinned root with regex characters is replaced"
+  fi
+
+  if ! grep -q '^AR_SDK_PATH="/opt/vX1Xx/VideoFX"$' "${out}"; then
+    t_fail "a line that only matches as a pattern was changed: $(cat "${out}")"
+  else
+    t_pass "only the pinned root itself is replaced"
+  fi
+}
+
+test_pinning_a_root_with_special_characters
+test_pinning_a_root_that_looks_like_a_pattern
+
+if [[ "${FAILURES}" -ne 0 ]]; then
+  echo "${FAILURES} check(s) failed." >&2
+  exit 1
+fi
+
+echo "All checks passed."
