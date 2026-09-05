@@ -218,9 +218,13 @@ MicMonitorState DetectMicMonitor(std::string *error) {
 bool StopMicMonitor(std::string *error) {
   std::string details;
   if (!pulse::PactlAvailable(&details)) {
+    // No pactl means no Pulse, and no Pulse means there is no loopback to
+    // remove. That is nothing to clean, not a failure: a failure would tell a
+    // user who never turned the monitor on that it needs attention, and would
+    // keep the stop retry running for ever.
     if (error)
-      *error = "pactl not available: " + details;
-    return false;
+      error->clear();
+    return true;
   }
 
   std::string listErr;

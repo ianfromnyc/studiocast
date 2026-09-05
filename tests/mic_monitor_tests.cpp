@@ -338,6 +338,36 @@ bool TestStopUnloadsOnlyMonitorModules() {
   return true;
 }
 
+// No pactl means no Pulse, and no Pulse means there is no loopback to remove.
+// The stop must report that as nothing to clean. Reporting a failure instead
+// tells a user who never turned the monitor on that it needs attention, and
+// keeps the stop retry running for ever.
+bool TestStopReportsNothingToCleanWithoutPactl() {
+  std::vector<std::string> log;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    log.push_back(command);
+    if (command == "pactl --version 2>&1")
+      return ExecResult(127, "sh: pactl: command not found\n");
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  std::string error = "not touched";
+  if (!studiocast::audio::StopMicMonitor(&error)) {
+    std::cerr << "the stop reported a failure without pactl: '" << error
+              << "'\n";
+    return false;
+  }
+  if (!error.empty()) {
+    std::cerr << "the stop left an error behind: '" << error << "'\n";
+    return false;
+  }
+  if (CommandWasRun(log, "unload-module")) {
+    std::cerr << "the stop ran pactl after the availability check failed\n";
+    return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Service lifecycle
 // ---------------------------------------------------------------------------
@@ -1713,6 +1743,8 @@ int main() {
        &TestStartRefusesStudioCastOwnSink},
       {"monitor stop unloads only monitor modules",
        &TestStopUnloadsOnlyMonitorModules},
+      {"monitor stop reports nothing to clean without pactl",
+       &TestStopReportsNothingToCleanWithoutPactl},
       {"service starts and stops the monitor with config",
        &TestServiceStartsAndStopsMonitorWithConfig},
       {"service restarts the monitor on a sink change",
