@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -403,6 +404,46 @@ bool TestLiveVirtualSourceAcceptsWrites() {
 
   return Expect(ok, "writing into the virtual source failed: " + error) &&
          Expect(consumers >= 0, "the consumer count must never be negative");
+}
+
+// A virtual source with no consumer is not driven by the graph, so nothing
+// empties its ring. The pipeline thread writes a frame every 10 ms, so a full
+// ring must give the frame up quickly instead of holding the thread.
+bool TestLiveWriteToAFullRingReturnsQuickly() {
+  if (!LiveServerAvailable("live write to a full ring returns quickly"))
+    return true;
+
+  studiocast::pw::AudioNodeConfig cfg;
+  cfg.role = studiocast::pw::AudioNodeRole::kVirtualSource;
+  cfg.node_name = "studiocast_pipewire_selftest_full_ring";
+  cfg.channels = 1;
+
+  studiocast::pw::PipeWireAudioNode node;
+  std::string error;
+  if (!Expect(node.Start(cfg, &error), "node start failed: " + error))
+    return false;
+
+  // More writes than the ring holds, so the last ones find it full.
+  std::vector<float> frame(cfg.frame_samples, 0.0f);
+  const std::size_t bytes = frame.size() * sizeof(float);
+  bool ok = true;
+  std::chrono::steady_clock::duration slowest{0};
+  for (int i = 0; i < cfg.ring_frames * 4 && ok; ++i) {
+    const auto started = std::chrono::steady_clock::now();
+    ok = node.Write(frame.data(), bytes, &error);
+    slowest = std::max(slowest, std::chrono::steady_clock::now() - started);
+  }
+  const std::uint64_t overflows = node.OverflowCount();
+  node.Stop();
+
+  const auto slowest_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(slowest).count();
+  return Expect(ok, "a dropped frame must still report success: " + error) &&
+         Expect(overflows > 0,
+                "a ring that nothing empties must count an overflow") &&
+         Expect(slowest_ms <= 10,
+                "a write waited " + std::to_string(slowest_ms) +
+                    " ms; a full ring must not stall the pipeline thread");
 }
 
 bool TestPipeWireIoRefusesToOpenWithoutTheVirtualMic() {
@@ -1158,6 +1199,8 @@ int main() {
        &TestLiveVirtualSourceNodeReachesTheGraph},
       {"live virtual source accepts writes",
        &TestLiveVirtualSourceAcceptsWrites},
+      {"live write to a full ring returns quickly",
+       &TestLiveWriteToAFullRingReturnsQuickly},
       {"pipewire io refuses to open without the virtual mic",
        &TestPipeWireIoRefusesToOpenWithoutTheVirtualMic},
       {"live native virtual mic round trip",

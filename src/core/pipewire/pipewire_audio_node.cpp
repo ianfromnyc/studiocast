@@ -84,6 +84,20 @@ bool IsVirtualDevice(AudioNodeRole role) {
          role == AudioNodeRole::kVirtualSink;
 }
 
+// How long Write may wait on a full ring. One quantum is all the real-time
+// callback needs to take a block, and the cap keeps a node with a long frame
+// from holding the pipeline thread. A node that nothing consumes is not driven
+// at all, so no wait would help it: there the wait only costs the small delay
+// below before the frame goes.
+std::chrono::microseconds FullRingWait(const AudioNodeConfig &cfg) {
+  constexpr std::chrono::microseconds kCap{2000};
+  if (cfg.sample_rate <= 0 || cfg.frame_samples == 0)
+    return kCap;
+  const std::chrono::microseconds quantum{
+      static_cast<std::int64_t>(cfg.frame_samples) * 1000000 / cfg.sample_rate};
+  return std::min(quantum, kCap);
+}
+
 #endif // STUDIOCAST_HAVE_PIPEWIRE
 
 } // namespace
@@ -619,8 +633,10 @@ bool PipeWireAudioNode::Write(const void *src, std::size_t bytes,
     return false;
   }
 
-  const auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(impl_->cfg.io_timeout_ms);
+  // A write never waits for io_timeout_ms. The pipeline thread hands over a
+  // frame every 10 ms, so a full ring may hold it for one quantum at most.
+  const auto deadline =
+      std::chrono::steady_clock::now() + FullRingWait(impl_->cfg);
   while (!impl_->stop_requested.load(std::memory_order_acquire)) {
     if (impl_->stream_down.load(std::memory_order_acquire)) {
       if (error)
@@ -630,9 +646,11 @@ bool PipeWireAudioNode::Write(const void *src, std::size_t bytes,
     if (impl_->ring.Push(src, bytes))
       return true;
     if (std::chrono::steady_clock::now() >= deadline) {
-      // Nothing consumes the node, so the graph does not run it. This thread
-      // is the producer and may not move the read end, so the frame it holds
-      // goes and the pipeline thread keeps moving.
+      // The ring is still full, so either the callback is late or nothing
+      // consumes the node and the graph does not run it at all. This thread is
+      // the producer and may not move the read end, so the frame it holds goes
+      // and the pipeline thread keeps moving. A dropped frame is a count, not
+      // an error.
       impl_->overflow_count.fetch_add(1, std::memory_order_relaxed);
       return true;
     }

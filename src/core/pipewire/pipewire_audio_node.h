@@ -45,10 +45,11 @@ struct AudioNodeConfig {
   // Number of pipeline frames the ring can hold.
   int ring_frames = 8;
 
-  // Milliseconds a blocked Read or Write waits before it gives up. A Read
-  // reports an error. A Write drops the frame it holds and continues, because
-  // a virtual device with no consumer is not driven by the graph and must
-  // never stall the pipeline thread.
+  // Milliseconds a blocked Read waits for a full frame before it gives up and
+  // reports an error. Write does not use it: a virtual device with no consumer
+  // is not driven by the graph, so a write that waited here would stall the
+  // pipeline thread. Write waits one quantum at most, then drops the frame it
+  // holds and reports success. See OverflowCount.
   int io_timeout_ms = 500;
 };
 
@@ -79,7 +80,13 @@ public:
   // Wakes a blocked Read or Write. Safe to call from another thread.
   void RequestStop();
 
-  // Blocking transfer of exactly `bytes` bytes of interleaved float32.
+  // Transfer of exactly `bytes` bytes of interleaved float32.
+  //
+  // Read blocks for io_timeout_ms and reports an error when no full frame
+  // arrives. Write is as good as non-blocking: it waits one quantum at most
+  // for the real-time callback to make room, then drops the frame, counts the
+  // drop and reports success, so the pipeline thread keeps its cadence. Both
+  // report an error when the node stops or the stream goes down.
   bool Read(void *dst, std::size_t bytes, std::string *error);
   bool Write(const void *src, std::size_t bytes, std::string *error);
 
