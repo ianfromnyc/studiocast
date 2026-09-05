@@ -7,9 +7,8 @@
 #include <string>
 #include <system_error>
 
-#include <unistd.h>
-
 #include "core/util/exec.h"
+#include "scoped_temp_dir.h"
 
 #ifndef STUDIOCAST_SOURCE_DIR
 #define STUDIOCAST_SOURCE_DIR ""
@@ -22,6 +21,8 @@
 namespace {
 
 namespace fs = std::filesystem;
+
+using studiocast::tests::ScopedTempDir;
 
 bool Expect(bool condition, const char *message) {
   if (!condition) {
@@ -52,37 +53,6 @@ std::string ShellQuote(const std::string &value) {
   out += "'";
   return out;
 }
-
-class ScopedTempDir {
-public:
-  explicit ScopedTempDir(const std::string &prefix) {
-    std::error_code ec;
-    const fs::path base = fs::temp_directory_path(ec);
-    if (ec) {
-      error_ = "temp_directory_path failed: " + ec.message();
-      return;
-    }
-    path_ = base /
-            (prefix + "-" + std::to_string(static_cast<long long>(::getpid())));
-    fs::remove_all(path_, ec);
-    fs::create_directories(path_, ec);
-    if (ec)
-      error_ = "create_directories failed: " + ec.message();
-  }
-
-  ~ScopedTempDir() {
-    std::error_code ec;
-    fs::remove_all(path_, ec);
-  }
-
-  bool ok() const { return error_.empty(); }
-  const std::string &error() const { return error_; }
-  const fs::path &path() const { return path_; }
-
-private:
-  fs::path path_;
-  std::string error_;
-};
 
 // Configures the repository into a throwaway build directory. Nothing is
 // built, so a case costs one configure step.
@@ -167,10 +137,39 @@ bool TestDisabledLibyuvSkipsDetection() {
              "STUDIOCAST_ENABLE_LIBYUV=OFF must not enable libyuv");
 }
 
+// Two helpers with one prefix must not name the same directory. A predictable
+// name in the temp directory lets one run remove the directory of another, and
+// lets anyone else on the machine create it first.
+bool TestTempDirGivesEachInstanceItsOwnPath() {
+  fs::path first_path;
+  {
+    ScopedTempDir first("studiocast-cmake-temp-check");
+    ScopedTempDir second("studiocast-cmake-temp-check");
+    if (!Expect(first.ok(), first.error().c_str()) ||
+        !Expect(second.ok(), second.error().c_str()))
+      return false;
+    if (!Expect(first.path() != second.path(),
+                "two temp directories with one prefix must differ"))
+      return false;
+
+    std::error_code ec;
+    if (!Expect(fs::is_directory(first.path(), ec) &&
+                    fs::is_directory(second.path(), ec),
+                "both temp directories must exist"))
+      return false;
+    first_path = first.path();
+  }
+
+  std::error_code ec;
+  return Expect(!fs::exists(first_path, ec),
+                "the helper must remove its directory at the end of the scope");
+}
+
 } // namespace
 
 int main() {
-  const bool ok = TestExplicitLibyuvRequestFailsWhenLibyuvIsMissing() &&
+  const bool ok = TestTempDirGivesEachInstanceItsOwnPath() &&
+                  TestExplicitLibyuvRequestFailsWhenLibyuvIsMissing() &&
                   TestDisabledLibyuvSkipsDetection();
   return ok ? 0 : 1;
 }

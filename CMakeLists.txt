@@ -1138,6 +1138,7 @@ if (BUILD_TESTING)
 
     add_executable(studiocast-cmake-open-backend-cache-tests
             tests/cmake_open_backend_cache_tests.cpp
+            tests/scoped_temp_dir.h
     )
 
     target_link_libraries(studiocast-cmake-open-backend-cache-tests PRIVATE
@@ -1168,6 +1169,7 @@ if (BUILD_TESTING)
 
     add_executable(studiocast-cmake-libyuv-option-tests
             tests/cmake_libyuv_option_tests.cpp
+            tests/scoped_temp_dir.h
     )
 
     target_link_libraries(studiocast-cmake-libyuv-option-tests PRIVATE
