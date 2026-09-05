@@ -9,8 +9,6 @@
 #include <vector>
 
 #if STUDIOCAST_HAVE_PIPEWIRE
-#include <map>
-
 #include <pipewire/pipewire.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/pod/builder.h>
@@ -66,6 +64,13 @@ const char *MediaClassFor(AudioNodeRole role) {
 bool ProducesSamples(AudioNodeRole role) {
   return role == AudioNodeRole::kVirtualSource ||
          role == AudioNodeRole::kPlayback;
+}
+
+// Which end of a consumer link this node sits on. A node that hands out
+// samples is the output end of the link; a node that receives them is the
+// input end.
+LinkEnd LinkEndForRole(AudioNodeRole role) {
+  return ProducesSamples(role) ? LinkEnd::kOutput : LinkEnd::kInput;
 }
 
 // True when the node is a device that other applications connect to, rather
@@ -156,8 +161,7 @@ struct PipeWireAudioNode::Impl {
   SpscByteRing ring;
 
   std::atomic<bool> stop_requested{false};
-  std::atomic<std::uint32_t> node_id{0};
-  std::atomic<int> consumer_count{0};
+  NodeLinkCounter links;
   std::atomic<std::uint64_t> latency_us{0};
   std::atomic<std::uint64_t> overflow_count{0};
   std::atomic<bool> latency_valid{false};
@@ -199,11 +203,6 @@ struct PipeWireAudioNode::Impl {
   struct spa_hook stream_listener{};
   struct spa_hook registry_listener{};
 
-  // Graph link ids that touch this node, so a remove event can undo a add
-  // event.
-  std::map<std::uint32_t, bool> counted_links;
-  std::mutex links_mu;
-
   std::size_t stride = 0;
 #endif
 };
@@ -218,11 +217,13 @@ void OnStreamStateChanged(void *data, enum pw_stream_state old,
   auto *impl = static_cast<PipeWireAudioNode::Impl *>(data);
   if (state == PW_STREAM_STATE_ERROR) {
     impl->SetError(error ? std::string(error) : std::string("stream error"));
-  } else if (state == PW_STREAM_STATE_STREAMING ||
-             state == PW_STREAM_STATE_PAUSED) {
+  } else {
+    // The server gives the node an id while the stream is still connecting.
+    // Take it at the first state that has one, so a consumer that links right
+    // away is counted.
     const std::uint32_t id = pw_stream_get_node_id(impl->stream);
     if (id != PW_ID_ANY)
-      impl->node_id.store(id, std::memory_order_release);
+      impl->links.SetNodeId(id);
   }
   impl->Wake();
 }
@@ -317,17 +318,17 @@ const struct pw_stream_events &StreamEvents() {
   return events;
 }
 
-// Reads a numeric node id out of a link property.
-bool LinkEndpointMatches(const struct spa_dict *props, const char *key,
-                         std::uint32_t node_id) {
+// Reads a numeric node id out of a link property. Returns zero when the
+// property is absent or is not a plain number.
+std::uint32_t LinkEndpointNode(const struct spa_dict *props, const char *key) {
   const char *v = spa_dict_lookup(props, key);
   if (!v)
-    return false;
+    return 0;
   char *end = nullptr;
   const unsigned long parsed = std::strtoul(v, &end, 10);
   if (!end || *end != '\0')
-    return false;
-  return static_cast<std::uint32_t>(parsed) == node_id;
+    return 0;
+  return static_cast<std::uint32_t>(parsed);
 }
 
 void OnRegistryGlobal(void *data, std::uint32_t id, std::uint32_t permissions,
@@ -339,27 +340,13 @@ void OnRegistryGlobal(void *data, std::uint32_t id, std::uint32_t permissions,
   if (!type || std::strcmp(type, PW_TYPE_INTERFACE_Link) != 0 || !props)
     return;
 
-  const std::uint32_t self = impl->node_id.load(std::memory_order_acquire);
-  if (self == 0)
-    return;
-
-  // A virtual source is the output end of every consumer link. A virtual sink
-  // is the input end.
-  const char *key = ProducesSamples(impl->cfg.role) ? PW_KEY_LINK_OUTPUT_NODE
-                                                    : PW_KEY_LINK_INPUT_NODE;
-  if (!LinkEndpointMatches(props, key, self))
-    return;
-
-  std::lock_guard<std::mutex> lock(impl->links_mu);
-  if (impl->counted_links.emplace(id, true).second)
-    impl->consumer_count.fetch_add(1, std::memory_order_relaxed);
+  impl->links.OnLinkAdded(id, LinkEndpointNode(props, PW_KEY_LINK_OUTPUT_NODE),
+                          LinkEndpointNode(props, PW_KEY_LINK_INPUT_NODE));
 }
 
 void OnRegistryGlobalRemove(void *data, std::uint32_t id) {
   auto *impl = static_cast<PipeWireAudioNode::Impl *>(data);
-  std::lock_guard<std::mutex> lock(impl->links_mu);
-  if (impl->counted_links.erase(id) > 0)
-    impl->consumer_count.fetch_sub(1, std::memory_order_relaxed);
+  impl->links.OnGlobalRemoved(id);
 }
 
 const struct pw_registry_events &RegistryEvents() {
@@ -432,8 +419,7 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
 
   impl_->cfg = cfg;
   impl_->stop_requested.store(false, std::memory_order_release);
-  impl_->node_id.store(0, std::memory_order_release);
-  impl_->consumer_count.store(0, std::memory_order_relaxed);
+  impl_->links.Reset(LinkEndForRole(cfg.role));
   impl_->latency_valid.store(false, std::memory_order_relaxed);
   impl_->overflow_count.store(0, std::memory_order_relaxed);
   impl_->stride = AudioFrameBytes(1, cfg.channels);
@@ -605,12 +591,7 @@ void PipeWireAudioNode::Stop() {
     impl_->loop = nullptr;
   }
 
-  {
-    std::lock_guard<std::mutex> lock(impl_->links_mu);
-    impl_->counted_links.clear();
-  }
-  impl_->consumer_count.store(0, std::memory_order_relaxed);
-  impl_->node_id.store(0, std::memory_order_release);
+  impl_->links.Reset(LinkEndForRole(impl_->cfg.role));
 }
 
 bool PipeWireAudioNode::Read(void *dst, std::size_t bytes, std::string *error) {
@@ -697,11 +678,11 @@ std::uint64_t PipeWireAudioNode::OverflowCount() const {
 }
 
 std::uint32_t PipeWireAudioNode::NodeId() const {
-  return impl_->node_id.load(std::memory_order_acquire);
+  return impl_->links.NodeId();
 }
 
 int PipeWireAudioNode::ConsumerCount() const {
-  return impl_->consumer_count.load(std::memory_order_relaxed);
+  return impl_->links.ConsumerCount();
 }
 
 std::string PipeWireAudioNode::LastError() const { return impl_->Error(); }

@@ -1,9 +1,13 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 
@@ -82,6 +86,62 @@ std::size_t AudioFrameBytes(std::uint32_t frame_samples,
 // meet on the same frame.
 std::size_t AudioRingCapacityBytes(std::uint32_t frame_samples,
                                    std::uint32_t channels, int frames);
+
+// Which end of a graph link the node sits on. A node that hands out samples or
+// frames is the output end of a consumer link; a node that receives them is
+// the input end.
+enum class LinkEnd {
+  kOutput,
+  kInput,
+};
+
+// Counts the graph links that reach one node.
+//
+// The bookkeeping is the same for an audio node and for a camera node, and it
+// holds no PipeWire type, so the rules can be checked without a server.
+class NodeLinkCounter {
+public:
+  // Forgets every link and waits for a node id again.
+  void Reset(LinkEnd end);
+
+  // The registry announced a link between two nodes.
+  void OnLinkAdded(std::uint32_t link_id, std::uint32_t output_node,
+                   std::uint32_t input_node);
+
+  // The registry withdrew a global. A global that is not a link of this node
+  // is ignored.
+  void OnGlobalRemoved(std::uint32_t global_id);
+
+  // Stores the id PipeWire assigned to the node. A zero id is ignored.
+  void SetNodeId(std::uint32_t node_id);
+
+  std::uint32_t NodeId() const;
+
+  int ConsumerCount() const {
+    return consumer_count_.load(std::memory_order_relaxed);
+  }
+
+private:
+  struct Link {
+    std::uint32_t output_node = 0;
+    std::uint32_t input_node = 0;
+  };
+
+  // How many links are held while the node has no id. The wait is short, so
+  // this only keeps a very busy graph from filling memory.
+  static constexpr std::size_t kMaxHeldLinks = 512;
+
+  // True when `link` touches this node on the end it consumes from. The caller
+  // holds `mu_` and has a node id.
+  bool MatchesLocked(const Link &link) const;
+
+  mutable std::mutex mu_;
+  LinkEnd end_ = LinkEnd::kOutput;
+  std::uint32_t node_id_ = 0;
+  std::set<std::uint32_t> counted_;
+  std::map<std::uint32_t, Link> held_;
+  std::atomic<int> consumer_count_{0};
+};
 
 // Which output carries the processed camera frames.
 enum class VideoOutputPreference {

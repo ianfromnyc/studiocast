@@ -158,6 +158,70 @@ std::size_t AudioRingCapacityBytes(std::uint32_t frame_samples,
          AudioFrameBytes(frame_samples, channels);
 }
 
+void NodeLinkCounter::Reset(LinkEnd end) {
+  std::lock_guard<std::mutex> lock(mu_);
+  end_ = end;
+  node_id_ = 0;
+  counted_.clear();
+  held_.clear();
+  consumer_count_.store(0, std::memory_order_relaxed);
+}
+
+bool NodeLinkCounter::MatchesLocked(const Link &link) const {
+  return end_ == LinkEnd::kOutput ? link.output_node == node_id_
+                                  : link.input_node == node_id_;
+}
+
+void NodeLinkCounter::OnLinkAdded(std::uint32_t link_id,
+                                  std::uint32_t output_node,
+                                  std::uint32_t input_node) {
+  const Link link{output_node, input_node};
+  std::lock_guard<std::mutex> lock(mu_);
+
+  // The node has no id yet, so there is nothing to compare the link against.
+  // Hold it until the id arrives. The cap keeps a busy graph from filling
+  // memory; a graph that large means the id is long overdue.
+  if (node_id_ == 0) {
+    if (held_.size() < kMaxHeldLinks)
+      held_[link_id] = link;
+    return;
+  }
+
+  if (!MatchesLocked(link))
+    return;
+  if (counted_.insert(link_id).second)
+    consumer_count_.fetch_add(1, std::memory_order_relaxed);
+}
+
+void NodeLinkCounter::OnGlobalRemoved(std::uint32_t global_id) {
+  std::lock_guard<std::mutex> lock(mu_);
+  held_.erase(global_id);
+  if (counted_.erase(global_id) > 0)
+    consumer_count_.fetch_sub(1, std::memory_order_relaxed);
+}
+
+void NodeLinkCounter::SetNodeId(std::uint32_t node_id) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (node_id == 0 || node_id == node_id_)
+    return;
+  node_id_ = node_id;
+
+  // Judge the links that arrived before the id, so a consumer that connected
+  // at once is counted.
+  for (const auto &entry : held_) {
+    if (!MatchesLocked(entry.second))
+      continue;
+    if (counted_.insert(entry.first).second)
+      consumer_count_.fetch_add(1, std::memory_order_relaxed);
+  }
+  held_.clear();
+}
+
+std::uint32_t NodeLinkCounter::NodeId() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return node_id_;
+}
+
 PipeWireSocketProbe ProbePipeWireSocket(const PipeWireProbeEnv &env) {
   PipeWireSocketProbe out;
   if (!env.get_env || !env.path_exists) {

@@ -232,6 +232,77 @@ bool TestCanonicalNodeNames() {
                 "the virtual camera description must not change");
 }
 
+// PipeWire gives a stream its node id only after the server has the node, so
+// a consumer that links at once is announced before the id is known. Such a
+// link must still be counted, otherwise the node reports no consumer while one
+// listens.
+bool TestLinkCounterCountsALinkSeenBeforeTheNodeId() {
+  studiocast::pw::NodeLinkCounter counter;
+  counter.Reset(studiocast::pw::LinkEnd::kOutput);
+
+  // The registry announces the link first.
+  counter.OnLinkAdded(70, 42, 55);
+  const int before = counter.ConsumerCount();
+
+  // The stream then learns its own id.
+  counter.SetNodeId(42);
+
+  return Expect(before == 0, "a link cannot be counted without a node id") &&
+         Expect(counter.ConsumerCount() == 1,
+                "an early link must be counted once the node id arrives");
+}
+
+// A link that comes and goes before the node id arrives leaves nothing behind.
+bool TestLinkCounterForgetsAnEarlyLinkThatWentAway() {
+  studiocast::pw::NodeLinkCounter counter;
+  counter.Reset(studiocast::pw::LinkEnd::kOutput);
+
+  counter.OnLinkAdded(70, 42, 55);
+  counter.OnGlobalRemoved(70);
+  counter.SetNodeId(42);
+
+  return Expect(counter.ConsumerCount() == 0,
+                "a link that went away must not be counted later");
+}
+
+// A link between two other nodes is not a consumer of this node, whenever it
+// is seen.
+bool TestLinkCounterIgnoresLinksOfOtherNodes() {
+  studiocast::pw::NodeLinkCounter counter;
+  counter.Reset(studiocast::pw::LinkEnd::kOutput);
+
+  counter.OnLinkAdded(70, 11, 12);
+  counter.SetNodeId(42);
+  counter.OnLinkAdded(71, 13, 14);
+  // The node is the input end of this one, and it hands out samples, so this
+  // is not a consumer link either.
+  counter.OnLinkAdded(72, 13, 42);
+
+  return Expect(counter.ConsumerCount() == 0,
+                "only the links of this node count");
+}
+
+// A node that receives samples, such as the virtual speakers, is the input end
+// of a consumer link.
+bool TestLinkCounterReadsTheInputEndForASink() {
+  studiocast::pw::NodeLinkCounter counter;
+  counter.Reset(studiocast::pw::LinkEnd::kInput);
+
+  counter.OnLinkAdded(80, 9, 42);
+  counter.SetNodeId(42);
+  counter.OnLinkAdded(81, 10, 42);
+  const int both = counter.ConsumerCount();
+
+  counter.OnGlobalRemoved(80);
+  const int one = counter.ConsumerCount();
+
+  counter.Reset(studiocast::pw::LinkEnd::kInput);
+
+  return Expect(both == 2, "both input links must count") &&
+         Expect(one == 1, "a removed link must stop counting") &&
+         Expect(counter.ConsumerCount() == 0, "a reset must clear the count");
+}
+
 // Runs a command and returns its standard output. An empty result means the
 // command failed or printed nothing.
 std::string RunCapture(const std::string &cmd) {
@@ -868,6 +939,14 @@ int main() {
       {"socket probe reports a missing runtime directory",
        &TestSocketProbeReportsAMissingRuntimeDirectory},
       {"node property arithmetic", &TestNodePropertyArithmetic},
+      {"link counter counts a link seen before the node id",
+       &TestLinkCounterCountsALinkSeenBeforeTheNodeId},
+      {"link counter forgets an early link that went away",
+       &TestLinkCounterForgetsAnEarlyLinkThatWentAway},
+      {"link counter ignores links of other nodes",
+       &TestLinkCounterIgnoresLinksOfOtherNodes},
+      {"link counter reads the input end for a sink",
+       &TestLinkCounterReadsTheInputEndForASink},
       {"live virtual source node reaches the graph",
        &TestLiveVirtualSourceNodeReachesTheGraph},
       {"live virtual source accepts writes",
@@ -896,8 +975,7 @@ int main() {
       {"video output backend parsing", &TestVideoOutputBackendParsing},
       {"video output backend selection", &TestVideoOutputBackendSelection},
       {"camera frame byte arithmetic", &TestCameraFrameByteArithmetic},
-      {"camera node rejects a short frame",
-       &TestCameraNodeRejectsAShortFrame},
+      {"camera node rejects a short frame", &TestCameraNodeRejectsAShortFrame},
       {"live virtual camera node reaches the graph",
        &TestLiveVirtualCameraNodeReachesTheGraph},
       {"live virtual camera feeds a GStreamer consumer",
