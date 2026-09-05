@@ -84,8 +84,14 @@ public:
       return false;
 
     std::uint8_t *dst = slots_[back_].data();
-    for (std::size_t y = 0; y < rows; ++y)
-      std::memcpy(dst + y * row_bytes, data + y * source_stride, row_bytes);
+    if (source_stride == row_bytes) {
+      // A packed source needs no row walk, which is the usual case: a size
+      // the driver does not pad.
+      std::memcpy(dst, data, frame_bytes_);
+    } else {
+      for (std::size_t y = 0; y < rows; ++y)
+        std::memcpy(dst + y * row_bytes, data + y * source_stride, row_bytes);
+    }
     return Offer();
   }
 
