@@ -46,9 +46,9 @@ struct AudioNodeConfig {
   int ring_frames = 8;
 
   // Milliseconds a blocked Read or Write waits before it gives up. A Read
-  // reports an error. A Write drops the oldest frame and continues, because a
-  // virtual device with no consumer is not driven by the graph and must never
-  // stall the pipeline thread.
+  // reports an error. A Write drops the frame it holds and continues, because
+  // a virtual device with no consumer is not driven by the graph and must
+  // never stall the pipeline thread.
   int io_timeout_ms = 500;
 };
 
@@ -83,10 +83,14 @@ public:
   bool Read(void *dst, std::size_t bytes, std::string *error);
   bool Write(const void *src, std::size_t bytes, std::string *error);
 
-  // Number of writes that had to drop older samples to make room.
+  // Number of sample blocks the node had to drop because the ring was full.
+  // The ring is single-producer single-consumer, so a full ring loses the new
+  // block and keeps what it holds. See core/pipewire/spsc_byte_ring.h.
   std::uint64_t OverflowCount() const;
 
-  // Drops everything the ring holds.
+  // Drops everything the ring holds. On a node that StudioCast writes into,
+  // the real-time callback reads the ring, so it empties the ring on its next
+  // pass instead of emptying it here.
   void Flush();
 
   // Best-effort graph latency in microseconds.

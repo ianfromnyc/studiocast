@@ -1,5 +1,7 @@
 #include "core/pipewire/pipewire_audio_node.h"
 
+#include "core/pipewire/spsc_byte_ring.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -25,6 +27,14 @@
 namespace studiocast::pw {
 
 namespace {
+
+// True when StudioCast produces the samples on this node. The
+// real-time callback is the consumer of the ring on such a node, and the
+// producer on every other one.
+bool ProducesSamples(AudioNodeRole role) {
+  return role == AudioNodeRole::kVirtualSource ||
+         role == AudioNodeRole::kPlayback;
+}
 
 #if STUDIOCAST_HAVE_PIPEWIRE
 
@@ -60,12 +70,6 @@ const char *MediaClassFor(AudioNodeRole role) {
   return "Stream/Input/Audio";
 }
 
-// True when StudioCast produces the samples on this node.
-bool ProducesSamples(AudioNodeRole role) {
-  return role == AudioNodeRole::kVirtualSource ||
-         role == AudioNodeRole::kPlayback;
-}
-
 // Which end of a consumer link this node sits on. A node that hands out
 // samples is the output end of the link; a node that receives them is the
 // input end.
@@ -82,78 +86,6 @@ bool IsVirtualDevice(AudioNodeRole role) {
 
 #endif // STUDIOCAST_HAVE_PIPEWIRE
 
-// Single-producer single-consumer byte ring.
-//
-// The real-time callback owns one end and the pipeline thread owns the other,
-// so no lock is needed on the data path.
-class SpscByteRing final {
-public:
-  void Reset(std::size_t capacity) {
-    buf_.assign(capacity + 1, 0);
-    head_.store(0, std::memory_order_relaxed);
-    tail_.store(0, std::memory_order_relaxed);
-  }
-
-  std::size_t Capacity() const { return buf_.empty() ? 0 : buf_.size() - 1; }
-
-  std::size_t Readable() const {
-    const std::size_t h = head_.load(std::memory_order_acquire);
-    const std::size_t t = tail_.load(std::memory_order_acquire);
-    return h >= t ? h - t : buf_.size() - (t - h);
-  }
-
-  std::size_t Writable() const { return Capacity() - Readable(); }
-
-  // Returns false and writes nothing when the ring has no room.
-  bool Push(const void *src, std::size_t bytes) {
-    if (bytes > Writable())
-      return false;
-    const auto *in = static_cast<const std::uint8_t *>(src);
-    std::size_t h = head_.load(std::memory_order_relaxed);
-    const std::size_t first = std::min(bytes, buf_.size() - h);
-    std::memcpy(buf_.data() + h, in, first);
-    if (bytes > first)
-      std::memcpy(buf_.data(), in + first, bytes - first);
-    h = (h + bytes) % buf_.size();
-    head_.store(h, std::memory_order_release);
-    return true;
-  }
-
-  // Returns false and reads nothing when the ring holds too little.
-  bool Pop(void *dst, std::size_t bytes) {
-    if (bytes > Readable())
-      return false;
-    auto *out = static_cast<std::uint8_t *>(dst);
-    std::size_t t = tail_.load(std::memory_order_relaxed);
-    const std::size_t first = std::min(bytes, buf_.size() - t);
-    std::memcpy(out, buf_.data() + t, first);
-    if (bytes > first)
-      std::memcpy(out + first, buf_.data(), bytes - first);
-    t = (t + bytes) % buf_.size();
-    tail_.store(t, std::memory_order_release);
-    return true;
-  }
-
-  // Throws away the oldest bytes to make room for a new write.
-  void DropOldest(std::size_t bytes) {
-    const std::size_t drop = std::min(bytes, Readable());
-    if (drop == 0)
-      return;
-    const std::size_t t = tail_.load(std::memory_order_relaxed);
-    tail_.store((t + drop) % buf_.size(), std::memory_order_release);
-  }
-
-  void Clear() {
-    tail_.store(head_.load(std::memory_order_acquire),
-                std::memory_order_release);
-  }
-
-private:
-  std::vector<std::uint8_t> buf_;
-  std::atomic<std::size_t> head_{0};
-  std::atomic<std::size_t> tail_{0};
-};
-
 } // namespace
 
 struct PipeWireAudioNode::Impl {
@@ -161,6 +93,9 @@ struct PipeWireAudioNode::Impl {
   SpscByteRing ring;
 
   std::atomic<bool> stop_requested{false};
+  // Set by the pipeline thread when it is the producer, applied by the
+  // real-time callback, which is the consumer on such a node.
+  std::atomic<bool> flush_pending{false};
   NodeLinkCounter links;
   std::atomic<std::uint64_t> latency_us{0};
   std::atomic<std::uint64_t> overflow_count{0};
@@ -264,6 +199,11 @@ void OnStreamProcess(void *data) {
   const std::size_t stride = impl->stride;
 
   if (ProducesSamples(impl->cfg.role)) {
+    // This callback is the consumer of the ring, so it is the one that empties
+    // it for a Flush from the pipeline thread.
+    if (impl->flush_pending.exchange(false, std::memory_order_acquire))
+      impl->ring.Clear();
+
     // The server asks for samples. Give it what the ring holds and pad the
     // rest with silence, so an underrun is a short gap and not a stall.
     std::size_t want = buf->datas[0].maxsize;
@@ -288,15 +228,14 @@ void OnStreamProcess(void *data) {
     buf->datas[0].chunk->stride = static_cast<std::int32_t>(stride);
     buf->datas[0].chunk->size = static_cast<std::uint32_t>(want);
   } else {
-    // The server delivers samples. Keep the newest ones when the pipeline
-    // thread is late, so latency never grows without a bound.
+    // The server delivers samples. This callback is the producer of the ring,
+    // so it may not move the read end: when the pipeline thread is late, the
+    // new buffer goes and the ring keeps what it holds.
     const std::size_t size = buf->datas[0].chunk->size;
     const std::size_t offset = buf->datas[0].chunk->offset;
     if (size > 0 && offset + size <= buf->datas[0].maxsize) {
-      if (size > impl->ring.Writable())
-        impl->ring.DropOldest(size - impl->ring.Writable());
-      (void)impl->ring.Push(bytes + offset,
-                            std::min(size, impl->ring.Capacity()));
+      if (!impl->ring.Push(bytes + offset, size))
+        impl->overflow_count.fetch_add(1, std::memory_order_relaxed);
     }
   }
 
@@ -642,11 +581,11 @@ bool PipeWireAudioNode::Write(const void *src, std::size_t bytes,
     if (impl_->ring.Push(src, bytes))
       return true;
     if (std::chrono::steady_clock::now() >= deadline) {
-      // Nothing consumes the node, so the graph does not run it. Drop the
-      // oldest samples and keep the pipeline thread moving.
-      impl_->ring.DropOldest(bytes);
+      // Nothing consumes the node, so the graph does not run it. This thread
+      // is the producer and may not move the read end, so the frame it holds
+      // goes and the pipeline thread keeps moving.
       impl_->overflow_count.fetch_add(1, std::memory_order_relaxed);
-      return impl_->ring.Push(src, bytes);
+      return true;
     }
     impl_->WaitForRing();
   }
@@ -663,7 +602,15 @@ void PipeWireAudioNode::RequestStop() {
   impl_->Wake();
 }
 
-void PipeWireAudioNode::Flush() { impl_->ring.Clear(); }
+void PipeWireAudioNode::Flush() {
+  if (ProducesSamples(impl_->cfg.role)) {
+    // The real-time callback reads this ring, and only the reader may empty
+    // it. Ask the callback to do it on its next pass.
+    impl_->flush_pending.store(true, std::memory_order_release);
+    return;
+  }
+  impl_->ring.Clear();
+}
 
 bool PipeWireAudioNode::GetLatencyUs(std::uint64_t *latency_us) const {
   if (!impl_->latency_valid.load(std::memory_order_relaxed))

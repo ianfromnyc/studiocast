@@ -20,6 +20,7 @@
 #include "core/video/pipewire/pipewire_camera_node.h"
 
 #include "core/pipewire/pipewire_support.h"
+#include "core/pipewire/spsc_byte_ring.h"
 
 namespace {
 
@@ -907,6 +908,146 @@ bool TestMicMonitorCleanupIgnoresNativePathNames() {
                 "the monitor must claim only its own tagged loopback");
 }
 
+// One frame of the ring stress check: the same counter twice, so a torn or
+// overwritten frame does not read as a whole one.
+struct RingFrame {
+  std::uint32_t first = 0;
+  std::uint32_t second = 0;
+};
+
+// The ring drops the data the producer holds when it is full, and never the
+// data it already took. Only the consumer may move the read end, so a full
+// ring has no other way to make room.
+bool TestRingDropsTheNewestWhenItIsFull() {
+  studiocast::pw::SpscByteRing ring;
+  ring.Reset(8);
+
+  std::array<std::uint8_t, 8> oldest{};
+  for (std::size_t i = 0; i < oldest.size(); ++i)
+    oldest[i] = static_cast<std::uint8_t>(i + 1);
+
+  bool ok = Expect(ring.Capacity() == 8, "the ring should hold 8 bytes");
+  ok = Expect(ring.Push(oldest.data(), oldest.size()),
+              "an empty ring should take a full write") &&
+       ok;
+  ok = Expect(ring.Writable() == 0, "a full ring should offer no room") && ok;
+
+  const std::array<std::uint8_t, 4> newest = {0xEE, 0xEE, 0xEE, 0xEE};
+  ok = Expect(!ring.Push(newest.data(), newest.size()),
+              "a full ring should refuse the new bytes") &&
+       ok;
+  ok = Expect(ring.Readable() == oldest.size(),
+              "a refused write should leave the ring as it was") &&
+       ok;
+
+  std::array<std::uint8_t, 8> back{};
+  ok = Expect(ring.Pop(back.data(), back.size()),
+              "the ring should give its bytes back") &&
+       ok;
+  ok = Expect(back == oldest, "the ring should keep the bytes it took") && ok;
+  ok = Expect(ring.Readable() == 0, "the ring should be empty again") && ok;
+
+  // Room comes back only from the consumer, and then a write fits again.
+  ok = Expect(ring.Push(newest.data(), newest.size()),
+              "an emptied ring should take a write again") &&
+       ok;
+  ok = Expect(ring.Readable() == newest.size(),
+              "the ring should hold the new bytes") &&
+       ok;
+  return ok;
+}
+
+// A write and a read that both run over the end of the buffer must keep the
+// byte order.
+bool TestRingWrapsWithoutLosingOrder() {
+  studiocast::pw::SpscByteRing ring;
+  ring.Reset(8);
+
+  std::array<std::uint8_t, 6> first{};
+  for (std::size_t i = 0; i < first.size(); ++i)
+    first[i] = static_cast<std::uint8_t>(0x10 + i);
+  std::array<std::uint8_t, 6> second{};
+  for (std::size_t i = 0; i < second.size(); ++i)
+    second[i] = static_cast<std::uint8_t>(0x20 + i);
+
+  bool ok = Expect(ring.Push(first.data(), first.size()), "first write");
+  std::array<std::uint8_t, 6> back{};
+  ok = Expect(ring.Pop(back.data(), back.size()), "first read") && ok;
+  ok = Expect(back == first, "the first write should come back whole") && ok;
+
+  // The write end now sits 6 bytes into a 9 byte buffer, so this write wraps.
+  ok = Expect(ring.Push(second.data(), second.size()), "wrapped write") && ok;
+  ok = Expect(ring.Readable() == second.size(),
+              "the wrapped write should be readable whole") &&
+       ok;
+  ok = Expect(ring.Pop(back.data(), back.size()), "wrapped read") && ok;
+  ok =
+      Expect(back == second, "a wrapped write should come back in order") && ok;
+  return ok;
+}
+
+// One producer and one consumer, with a ring far too small for the traffic, so
+// the overflow path runs again and again. Every frame the consumer reads must
+// be whole, and the frames must arrive in the order the producer wrote them.
+// A second writer of the read end would break both.
+bool TestRingSurvivesAProducerAndAConsumer() {
+  studiocast::pw::SpscByteRing ring;
+  ring.Reset(sizeof(RingFrame) * 4);
+
+  constexpr std::uint32_t kFrames = 200000;
+  std::atomic<std::uint32_t> dropped{0};
+  std::atomic<bool> producer_done{false};
+
+  std::thread producer([&] {
+    for (std::uint32_t i = 1; i <= kFrames; ++i) {
+      const RingFrame frame{i, i};
+      if (!ring.Push(&frame, sizeof(frame)))
+        dropped.fetch_add(1, std::memory_order_relaxed);
+    }
+    producer_done.store(true, std::memory_order_release);
+  });
+
+  std::uint32_t last = 0;
+  std::uint32_t taken = 0;
+  bool torn = false;
+  bool out_of_order = false;
+  bool too_full = false;
+
+  while (true) {
+    if (ring.Readable() > ring.Capacity())
+      too_full = true;
+
+    RingFrame frame{};
+    if (!ring.Pop(&frame, sizeof(frame))) {
+      if (producer_done.load(std::memory_order_acquire) &&
+          ring.Readable() < sizeof(RingFrame)) {
+        break;
+      }
+      std::this_thread::yield();
+      continue;
+    }
+    ++taken;
+    if (frame.first != frame.second)
+      torn = true;
+    if (frame.first <= last)
+      out_of_order = true;
+    last = frame.first;
+  }
+
+  producer.join();
+
+  bool ok = Expect(!torn, "the consumer read a frame that was written twice");
+  ok = Expect(!out_of_order,
+              "the consumer read the frames out of the written order") &&
+       ok;
+  ok = Expect(!too_full, "the ring reported more bytes than it can hold") && ok;
+  ok = Expect(taken + dropped.load(std::memory_order_relaxed) == kFrames,
+              "every frame should be either read or counted as dropped") &&
+       ok;
+  ok = Expect(taken > 0, "the consumer should have read something") && ok;
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -938,6 +1079,12 @@ int main() {
        &TestSocketProbeReportsAMissingSocket},
       {"socket probe reports a missing runtime directory",
        &TestSocketProbeReportsAMissingRuntimeDirectory},
+      {"ring drops the newest bytes when it is full",
+       &TestRingDropsTheNewestWhenItIsFull},
+      {"ring wraps without losing the byte order",
+       &TestRingWrapsWithoutLosingOrder},
+      {"ring survives a producer and a consumer",
+       &TestRingSurvivesAProducerAndAConsumer},
       {"node property arithmetic", &TestNodePropertyArithmetic},
       {"link counter counts a link seen before the node id",
        &TestLinkCounterCountsALinkSeenBeforeTheNodeId},
