@@ -372,10 +372,26 @@ bool RunShellCommand(const std::string &cmd) {
   return true;
 }
 
-// Builds a shared library that exports one function and, optionally, links
-// against `link_against` so the result carries a DT_NEEDED entry.
+// Builds a shared library that exports `symbol` and, optionally, links against
+// `link_against` and calls the `dep_symbol` that this library exports.
+//
+// The call is necessary, not decoration. Debian and its derivatives give the
+// linker `--as-needed` by default, and that option removes the DT_NEEDED entry
+// of a library from which the object uses no symbol. A library that only links
+// against the dependency therefore carries no dependency at all on those
+// distributions, and the pre-load correctly finds nothing to load. The library
+// must use the dependency to depend on it.
 bool BuildSharedLib(const fs::path &out, const std::string &soname,
-                    const std::string &symbol, const fs::path &link_against) {
+                    const std::string &symbol, const fs::path &link_against,
+                    const std::string &dep_symbol = {}) {
+  // A dependency the library never calls is not a dependency. Refuse it here
+  // instead of building a fixture that only works where `--as-needed` is off.
+  if (link_against.empty() != dep_symbol.empty()) {
+    std::cerr << "BuildSharedLib needs the symbol of the library it links "
+                 "against\n";
+    return false;
+  }
+
   std::error_code ec;
   fs::create_directories(out.parent_path(), ec);
 
@@ -385,11 +401,15 @@ bool BuildSharedLib(const fs::path &out, const std::string &soname,
     if (!f)
       return false;
     if (!link_against.empty()) {
-      f << "extern \"C\" int sc_fake_dep_value();\n";
-      f << "extern \"C\" int " << symbol
-        << "() { return sc_fake_dep_value(); }\n";
+      f << "extern \"C\" int " << dep_symbol << "();\n";
+      f << "extern \"C\" int " << symbol << "() { return " << dep_symbol
+        << "(); }\n";
     } else {
-      f << "extern \"C\" int " << symbol << "() { return 42; }\n";
+      // `--as-needed` drops the C library as well, so use it. A library with
+      // no dependency at all would make the system-library tests say nothing.
+      f << "#include <cstring>\n";
+      f << "extern \"C\" int " << symbol
+        << "() { return static_cast<int>(std::strlen(\"42\")); }\n";
     }
     if (!f.good())
       return false;
@@ -420,7 +440,7 @@ bool TestSdkRuntimePreloadMakesBundledDepsResolvable() {
 
   if (!BuildSharedLib(dep, "libsc_fake_dep.so", "sc_fake_dep_value", {}) ||
       !BuildSharedLib(target, "libsc_fake_target.so", "sc_fake_target_value",
-                      dep)) {
+                      dep, "sc_fake_dep_value")) {
     fs::remove_all(root, ec);
     return false;
   }
@@ -484,7 +504,7 @@ bool TestSdkRuntimePreloadSharesOneEntryForTheInferredRoot() {
   const fs::path target = root / "lib" / "libsc_same_target.so";
   if (!BuildSharedLib(dep, "libsc_same_dep.so", "sc_same_dep_value", {}) ||
       !BuildSharedLib(target, "libsc_same_target.so", "sc_same_target_value",
-                      dep)) {
+                      dep, "sc_same_dep_value")) {
     fs::remove_all(root, ec);
     return false;
   }
@@ -527,9 +547,9 @@ bool TestSdkRuntimePreloadCachesPerSdkRoot() {
 
   fs::create_directories(empty_root / "external" / "cuda" / "lib", ec);
   if (ec ||
-      !BuildSharedLib(dep, "libsc_root_dep.so", "sc_fake_dep_value", {}) ||
+      !BuildSharedLib(dep, "libsc_root_dep.so", "sc_root_dep_value", {}) ||
       !BuildSharedLib(target, "libsc_root_target.so", "sc_root_target_value",
-                      dep)) {
+                      dep, "sc_root_dep_value")) {
     fs::remove_all(base, ec);
     return false;
   }
@@ -581,9 +601,9 @@ bool TestSdkRuntimePreloadIsSharedAcrossThreads() {
   const fs::path dep =
       root / "external" / "cuda" / "lib" / "libsc_thread_dep.so";
 
-  if (!BuildSharedLib(dep, "libsc_thread_dep.so", "sc_fake_dep_value", {}) ||
+  if (!BuildSharedLib(dep, "libsc_thread_dep.so", "sc_thread_dep_value", {}) ||
       !BuildSharedLib(target, "libsc_thread_target.so",
-                      "sc_thread_target_value", dep)) {
+                      "sc_thread_target_value", dep, "sc_thread_dep_value")) {
     fs::remove_all(base, ec);
     return false;
   }
