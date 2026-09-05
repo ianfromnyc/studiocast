@@ -1141,6 +1141,32 @@ bool TestFrameBufferDropsTheRowPadding() {
                 "a frame shorter than the last row must be refused");
 }
 
+// The node offers one format only, so a negotiated format that differs is a
+// dead node: the callback stops before it answers SPA_PARAM_Buffers, the
+// stream never gets data ports and no consumer ever receives a frame.
+bool TestCameraNegotiatedFormatMismatchNamesTheDifference() {
+  using studiocast::video::pw_backend::internal::CameraFormatMismatch;
+  constexpr std::uint32_t kOffered = 7;
+  constexpr std::uint32_t kOther = 9;
+
+  if (!Expect(CameraFormatMismatch(kOffered, 1280, 720, kOffered, 1280u, 720u)
+                  .empty(),
+              "the format the node offered is not a mismatch"))
+    return false;
+
+  const std::string size =
+      CameraFormatMismatch(kOffered, 1280, 720, kOffered, 640u, 480u);
+  const std::string format =
+      CameraFormatMismatch(kOffered, 1280, 720, kOther, 1280u, 720u);
+  return Expect(size.find("640x480") != std::string::npos,
+                "a different size must name what the server picked: " + size) &&
+         Expect(size.find("1280x720") != std::string::npos,
+                "a different size must name what the node offered: " + size) &&
+         Expect(format.find(std::to_string(kOther)) != std::string::npos,
+                "a different format must name what the server picked: " +
+                    format);
+}
+
 bool TestCameraFrameByteArithmetic() {
   using studiocast::video::PixelFormat;
   using studiocast::video::pw_backend::CameraFrameBytes;
@@ -2033,6 +2059,8 @@ int main() {
        &TestFrameBufferSurvivesAProducerAndAConsumer},
       {"frame buffer drops the row padding",
        &TestFrameBufferDropsTheRowPadding},
+      {"camera negotiated format mismatch names the difference",
+       &TestCameraNegotiatedFormatMismatchNamesTheDifference},
       {"camera frame byte arithmetic", &TestCameraFrameByteArithmetic},
       {"camera node rejects a short frame", &TestCameraNodeRejectsAShortFrame},
       {"live virtual camera node reaches the graph",

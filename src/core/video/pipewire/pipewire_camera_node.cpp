@@ -27,6 +27,28 @@
 
 namespace studiocast::video::pw_backend {
 
+namespace internal {
+
+std::string CameraFormatMismatch(std::uint32_t offered_format, int width,
+                                 int height, std::uint32_t negotiated_format,
+                                 std::uint32_t negotiated_width,
+                                 std::uint32_t negotiated_height) {
+  if (negotiated_format == offered_format &&
+      negotiated_width == static_cast<std::uint32_t>(width) &&
+      negotiated_height == static_cast<std::uint32_t>(height)) {
+    return {};
+  }
+  return "The PipeWire server picked a camera format StudioCast did not "
+         "offer: " +
+         std::to_string(negotiated_width) + "x" +
+         std::to_string(negotiated_height) + " format " +
+         std::to_string(negotiated_format) + ", where the node offers " +
+         std::to_string(width) + "x" + std::to_string(height) + " format " +
+         std::to_string(offered_format) + ".";
+}
+
+} // namespace internal
+
 std::size_t CameraStrideBytes(int width, PixelFormat format) {
   // The loopback writer already holds this rule, and the two must agree: the
   // pipeline sizes its output buffer with MinBytesPerLine, so an odd YUYV
@@ -194,15 +216,17 @@ void OnParamChanged(void *data, std::uint32_t id, const struct spa_pod *param) {
   // Check it anyway: the buffer answer below is built from the configured
   // size, and a negotiated size that differed would make the callback send
   // truncated frames with nothing to explain them.
-  if (raw.format != static_cast<enum spa_video_format>(
-                        SpaFormatFor(impl->cfg.format)) ||
-      raw.size.width != static_cast<std::uint32_t>(impl->cfg.width) ||
-      raw.size.height != static_cast<std::uint32_t>(impl->cfg.height)) {
-    impl->SetError("The PipeWire server picked a camera format StudioCast did "
-                   "not offer: " +
-                   std::to_string(raw.size.width) + "x" +
-                   std::to_string(raw.size.height) + " format " +
-                   std::to_string(static_cast<int>(raw.format)) + ".");
+  //
+  // Such a node never gets data ports, so it is down and not merely in error.
+  // Without this the status would say "running" for ever and the planner would
+  // keep a node that hands out nothing.
+  const std::string mismatch = internal::CameraFormatMismatch(
+      SpaFormatFor(impl->cfg.format), impl->cfg.width, impl->cfg.height,
+      static_cast<std::uint32_t>(raw.format), raw.size.width, raw.size.height);
+  if (!mismatch.empty()) {
+    impl->running.store(false, std::memory_order_release);
+    impl->SetError(mismatch);
+    impl->links.Reset(studiocast::pw::LinkEnd::kOutput);
     return;
   }
 

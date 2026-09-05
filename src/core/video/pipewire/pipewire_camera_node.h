@@ -80,6 +80,26 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
+namespace internal {
+
+// Compares the video format the server negotiated with the one the node
+// offered. Returns an empty string when they match, and a message that names
+// both otherwise.
+//
+// The node offers exactly one format, so a negotiated format that differs is
+// a node that will never hand out a frame: the buffer answer is built from the
+// configured size, and the callback refuses to give one for anything else. The
+// caller must therefore take such a node down, not only record the reason.
+//
+// The formats are the plain SPA video format numbers, so this rule needs no
+// PipeWire header.
+std::string CameraFormatMismatch(std::uint32_t offered_format, int width,
+                                 int height, std::uint32_t negotiated_format,
+                                 std::uint32_t negotiated_width,
+                                 std::uint32_t negotiated_height);
+
+} // namespace internal
+
 // Bytes one packed row of this format needs, which is the row size the node
 // hands its consumers. It is the same rule the loopback writer follows, so an
 // odd YUYV width counts the last pixel pair whole.

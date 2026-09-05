@@ -457,9 +457,13 @@ CameraPipelineStatus CameraPipeline::Status() const {
   // replaces it, so the state must come from the node and not from the
   // pointer, and the node's own reason must reach the status.
   const bool node_up = pw_node_ && pw_node_->IsRunning();
-  std::string node_error = pw_node_error_;
-  if (node_error.empty() && pw_node_ && !node_up)
+  // A node that is down knows why better than the frame write that found it
+  // down, so its own reason comes first.
+  std::string node_error;
+  if (pw_node_ && !node_up)
     node_error = pw_node_->LastError();
+  if (node_error.empty())
+    node_error = pw_node_error_;
   s.pipewire_output_state =
       internal::PipeWireOutputStateText(wanted, node_up, node_error);
   if (wanted && pw_node_) {
