@@ -613,10 +613,28 @@ EOF
 # A system without dnf offers none. Report that as an empty suffix, so that the
 # caller prints the repository hint instead of ending the script on a command
 # that is not there.
+#
+# A dnf that is there but fails offers none either: repository metadata that
+# does not download, no network, a locked rpmdb. Report that as an empty suffix
+# too, so that it reaches the same hint. rpmfusion_free_enabled below degrades
+# the same way.
+#
+# dnf writes its progress and its errors to stderr. Keep the output of a good
+# query, which the pattern below reads, and show what dnf said only when the
+# query fails, where it tells the user why there is no suffix.
 cuda_package_suffix() {
   command -v dnf >/dev/null 2>&1 || return 0
 
-  dnf repoquery --qf '%{name}\n' "cuda-cudart-${CUDA_MAJOR}-*" 2>/dev/null \
+  local output status=0
+  output="$(dnf repoquery --qf '%{name}\n' \
+    "cuda-cudart-${CUDA_MAJOR}-*" 2>&1)" || status=$?
+
+  if [[ "${status}" -ne 0 ]]; then
+    printf '%s\n' "${output}" >&2
+    return 0
+  fi
+
+  printf '%s\n' "${output}" \
     | sed -n "s/^cuda-cudart-\(${CUDA_MAJOR}-[0-9]\+\)$/\1/p" \
     | sort -t- -k2 -V \
     | tail -n 1

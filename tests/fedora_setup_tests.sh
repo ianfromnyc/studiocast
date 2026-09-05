@@ -786,6 +786,56 @@ CHILD
   fi
 }
 
+# A dnf that is there but fails is the more usual trouble: repository metadata
+# that does not download, no network, a locked rpmdb. That must read as "no
+# package anywhere", not end the whole script without a word. The helper must
+# show what dnf said, print the hint and stop with status 2.
+test_a_failing_dnf_prints_the_repo_hint() {
+  local casedir="${SANDBOX}/dnf-fails"
+  mkdir -p "${casedir}/bin"
+
+  cat > "${casedir}/bin/dnf" <<'STUB'
+#!/usr/bin/env bash
+echo "dnf stub: cannot download repository metadata" >&2
+exit 1
+STUB
+  chmod +x "${casedir}/bin/dnf"
+
+  local child="${SANDBOX}/dnf-fails-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+export ORT_FLAVOR=gpu
+export CUDA_MAJOR=13
+export ORT_ARCH=x64
+# shellcheck source=/dev/null
+source "$1"
+log() { :; }
+run_priv() { :; }
+cuda_required_libs() { printf 'libcublas.so.13\n'; }
+lib_resolves() { return 1; }
+# The helper turns these on after the source guard, so the call must run
+# under them.
+set -euo pipefail
+ensure_cuda_runtime
+echo "CALL_RETURNED_$?"
+CHILD
+
+  local out rc=0
+  out="$(PATH="${casedir}/bin:${PATH}" \
+    STUDIOCAST_ORT_INSTALL_DIR="${casedir}/onnxruntime" \
+    bash "${child}" "${FEDORA_SETUP}" 2>&1)" || rc=$?
+
+  if [[ "${rc}" -ne 2 ]]; then
+    t_fail "a failing dnf should stop with status 2, got ${rc}: ${out}"
+  elif [[ "${out}" != *"cannot download repository metadata"* ]]; then
+    t_fail "a failing dnf should show what dnf said, got: ${out}"
+  elif [[ "${out}" != *"config-manager addrepo"* ]]; then
+    t_fail "a failing dnf should print the repository hint, got: ${out}"
+  else
+    t_pass "a failing dnf shows the error and prints the repository hint"
+  fi
+}
+
 # The source guard promises definitions only. A shell that sources the helper
 # must keep its own shell options, and must see no output.
 test_sourcing_keeps_the_caller_shell_options() {
@@ -831,6 +881,7 @@ test_an_extracted_cudnn_tree_is_not_downloaded_again
 test_the_legacy_asset_warning_names_the_cuda_major
 test_a_cuda_repo_with_another_id_works
 test_a_missing_dnf_prints_the_repo_hint
+test_a_failing_dnf_prints_the_repo_hint
 test_sourcing_keeps_the_caller_shell_options
 
 if [[ "${FAILURES}" -ne 0 ]]; then
