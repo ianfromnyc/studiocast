@@ -300,6 +300,8 @@ std::map<std::string, int> g_set_status;
 std::uint32_t g_channels_readback = 1;
 bool g_have_get_u32 = true;
 bool g_loaded = false;
+// Status NvAFX_CreateEffect answers with. Anything but 0 gives no handle.
+int g_create_status = 0;
 
 void Reset() {
   g_set_order.clear();
@@ -308,6 +310,7 @@ void Reset() {
   g_channels_readback = 1;
   g_have_get_u32 = true;
   g_loaded = false;
+  g_create_status = 0;
 }
 
 bool Rejected(const char *param) {
@@ -327,6 +330,10 @@ int Record(const char *param) {
 }
 
 int CreateEffect(const char *, void **handle) {
+  if (g_create_status != 0) {
+    *handle = nullptr;
+    return g_create_status;
+  }
   *handle = reinterpret_cast<void *>(0x1);
   return 0;
 }
@@ -620,6 +627,55 @@ bool TestMissingRequiredParameterFails() {
   ok &= Require(!loaded, "expected a rejected sample rate to fail");
   ok &= Require(err.find("sample_rate") != std::string::npos,
                 "expected the error to name the sample rate, got: " + err);
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
+// AfxEffect runs in the daemon, in studiocast-audio and in
+// studiocast-probe, so the hint after a failed NvAFX_CreateEffect must not
+// name one of them. It names the directory that must be on LD_LIBRARY_PATH
+// and the two ways to put it there.
+bool TestTheLoaderPathHintNamesNoProgram() {
+  const fs::path root = TempRoot("loaderhint");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  fake_afx::Reset();
+  fake_afx::g_create_status = fake_afx::kInvalidParam;
+  studiocast::maxine::afx::AfxApi api;
+  fake_afx::Install(&api);
+
+  studiocast::maxine::afx::AfxEffect fx(&api);
+  const auto cfg = MakeConfig(features, "denoiser", "denoiser");
+
+  std::string err;
+  const bool configured = fx.Configure(cfg, &err);
+  bool ok = Require(configured, "expected the denoiser to configure: " + err);
+  if (!ok) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  const bool loaded = fx.Load(&err);
+  ok &= Require(!loaded, "expected a failed NvAFX_CreateEffect to fail");
+
+  const std::string lib_dir = (features / "denoiser" / "lib").string();
+  ok &= Require(err.find(lib_dir) != std::string::npos,
+                "expected the hint to name the library directory, got: " + err);
+  ok &= Require(err.find("LD_LIBRARY_PATH") != std::string::npos,
+                "expected the hint to name LD_LIBRARY_PATH, got: " + err);
+  ok &= Require(err.find("daemon") == std::string::npos,
+                "expected the hint to name no single program, got: " + err);
+  ok &= Require(err.find("export LD_LIBRARY_PATH") != std::string::npos,
+                "expected the hint to offer the export, got: " + err);
 
   fs::remove_all(root, ec);
   return ok;
@@ -939,6 +995,7 @@ int main() {
   ok = TestChannelCountMismatchFails() && ok;
   ok = TestAChannelCountErrorFailsTheLoad() && ok;
   ok = TestMissingRequiredParameterFails() && ok;
+  ok = TestTheLoaderPathHintNamesNoProgram() && ok;
   ok = TestFeatureLibDirsAreListed() && ok;
   ok = TestLoaderPathValue() && ok;
   ok = TestRunPassesChannelPointers() && ok;

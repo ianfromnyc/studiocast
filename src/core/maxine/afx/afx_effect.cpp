@@ -574,9 +574,11 @@ bool AfxEffect::Load(std::string *error_out) {
           << "` (status=" << stCreate << "). The feature library is "
           << resolved_feature_lib_path_.string() << ".";
       if (!lib_dir_on_loader_path) {
-        oss << " Its directory is not on LD_LIBRARY_PATH, which is how the "
-               "AFX core finds it. Restart StudioCast so that the daemon can "
-               "put it there.";
+        oss << " Its directory " << resolved_feature_lib_dir_.string()
+            << " is not on LD_LIBRARY_PATH, which is how the AFX core finds "
+               "it. StudioCast programs put it there when they start, so run "
+               "this program again, or export LD_LIBRARY_PATH with that "
+               "directory before you start it.";
       }
       *error_out = oss.str();
     }
