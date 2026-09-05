@@ -484,6 +484,39 @@ CHILD
   fi
 }
 
+# The flavor gets its default below the source guard, together with the system
+# probe that finds it. A shell that sources the helper, which is what the guard
+# is for, has no flavor at all. Reading one must not stop that shell under
+# "set -u": with no flavor there is no gpu run, and thus no bootstrap root.
+test_a_sourced_caller_needs_no_flavor() {
+  local child="${SANDBOX}/no-flavor-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+export ORT_ARCH=x64
+export CUDA_MAJOR=13
+# shellcheck source=/dev/null
+source "$1"
+log() { :; }
+warn() { :; }
+run_priv() { :; }
+echo "REQUESTED_[$(requested_onnxruntime_root)]"
+CHILD
+
+  local out rc=0
+  out="$(env -u ORT_FLAVOR STUDIOCAST_ORT_INSTALL_DIR="${SANDBOX}/no-flavor" \
+    bash "${child}" "${FEDORA_SETUP}" 2>&1)" || rc=$?
+
+  if [[ "${out}" == *"ORT_FLAVOR: unbound variable"* ]]; then
+    t_fail "a sourced caller without a flavor should get no error, got: ${out}"
+  elif [[ "${rc}" -ne 0 ]]; then
+    t_fail "a sourced caller without a flavor ended with status ${rc}: ${out}"
+  elif [[ "${out}" != *"REQUESTED_[]"* ]]; then
+    t_fail "no flavor should ask for no bootstrap root, got: ${out}"
+  else
+    t_pass "a sourced caller without a flavor asks for no bootstrap root"
+  fi
+}
+
 # Only a CUDA major the user passed can be a bad option value. A major that
 # comes from the toolkit on the machine belongs to the report, not to the
 # option check: the cpu flavor never reads it, and the message would name an
@@ -874,6 +907,7 @@ test_a_failing_objdump_keeps_the_fixed_lib_list
 test_the_options_pick_the_bootstrap_root
 test_the_default_version_picks_its_own_root
 test_the_cpu_flavor_asks_for_no_bootstrap_root
+test_a_sourced_caller_needs_no_flavor
 test_only_an_explicit_cuda_major_is_an_option_error
 test_an_option_without_a_value_says_so
 test_the_preflight_asks_pkg_config

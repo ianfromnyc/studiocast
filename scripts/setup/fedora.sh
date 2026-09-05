@@ -230,8 +230,11 @@ onnxruntime_known_sha256() {
 # root. A run that installs nothing still gets the root it would install.
 #
 # Only the gpu flavor installs a bootstrap root, so a cpu run asks for none.
+# The flavor gets its default below the source guard, together with the probe
+# that finds it, so a shell that sources this file can have none. Read it like
+# the other defaults, because a shell with no flavor makes no gpu run either.
 requested_onnxruntime_root() {
-  [[ "${ORT_FLAVOR}" == "gpu" ]] || return 0
+  [[ "${ORT_FLAVOR:-}" == "gpu" ]] || return 0
 
   local asset
   # The warning about a version with no CUDA asset belongs to the install path,
