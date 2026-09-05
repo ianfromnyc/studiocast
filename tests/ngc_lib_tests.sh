@@ -257,10 +257,11 @@ PAYLOAD_MD5="a034a9f16f32f0f19a6bc5f6828c593e"
 # Download one model version whose only file sits in a subdirectory, with the
 # .md5 companion next to it. Print the return code of the download.
 #
-# Arguments: <md5 the stub serves> <dest dir>
+# Arguments: <md5 the stub serves> <dest dir> [keep, to leave the dir as it is]
 run_nested_model_version_download() {
   local md5="$1"
   local destdir="$2"
+  local keep="${3:-}"
 
   local listing="${SANDBOX}/listing.json"
   cat > "${listing}" <<'JSON'
@@ -289,7 +290,7 @@ sc_ngc_download_model_version test-model 1.0 "$3" >/dev/null 2>&1
 echo "RC=$?"
 CHILD
 
-  rm -rf "${destdir}"
+  [[ -n "${keep}" ]] || rm -rf "${destdir}"
   NGC_CURL_LOG="${SANDBOX}/model-version.log" \
     NGC_STUB_LISTING="${listing}" \
     NGC_STUB_MD5="${md5}" \
@@ -391,6 +392,40 @@ CHILD
 # The payload the stub curl writes for a file, in bytes. A listing that
 # reports this size makes the download accept the stub answer.
 STUB_PAYLOAD_BYTES=13
+
+# Several feature packs share one destination directory, because
+# rest_download_sdk_features hands every feature the same <root>/lib/models.
+# A download must therefore check and remove only the .md5 companions it
+# fetched itself, not every one it finds in the destination.
+test_an_unrelated_md5_in_the_destination_is_left_alone() {
+  local destdir="${SANDBOX}/model-shared"
+  rm -rf "${destdir}"
+  mkdir -p "${destdir}/other"
+  printf 'EARLIER FEATURE PAYLOAD\n' > "${destdir}/other/earlier.trtpkg"
+  printf '00000000000000000000000000000000  earlier.trtpkg\n' \
+    > "${destdir}/other/earlier.trtpkg.md5"
+
+  local out
+  out="$(run_nested_model_version_download "${PAYLOAD_MD5}" "${destdir}" keep)"
+
+  if [[ "${out}" != *"RC=0"* ]]; then
+    t_fail "an unrelated md5 in the destination failed the download: ${out}"
+  else
+    t_pass "an unrelated md5 in the destination does not fail the download"
+  fi
+
+  if [[ ! -f "${destdir}/other/earlier.trtpkg" ]]; then
+    t_fail "the download removed a payload of an earlier download"
+  else
+    t_pass "a payload of an earlier download is left alone"
+  fi
+
+  if [[ ! -f "${destdir}/other/earlier.trtpkg.md5" ]]; then
+    t_fail "the download removed the md5 of an earlier download"
+  else
+    t_pass "the md5 of an earlier download is left alone"
+  fi
+}
 
 # Run one model version download whose listing holds the given file path.
 # Print the return code of the download.
@@ -596,6 +631,7 @@ test_a_path_that_leaves_the_destination_is_refused
 test_an_absolute_path_is_refused
 test_a_file_with_no_hash_and_no_size_is_downloaded_again
 test_a_size_only_check_is_named_a_size_check
+test_an_unrelated_md5_in_the_destination_is_left_alone
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2

@@ -81,7 +81,6 @@ fi
 _SC_NGC_TOOLS=(
   curl python3
   awk cut dirname head md5sum mktemp realpath sha256sum stat tail
-  find
 )
 
 # Fail early when a tool this file needs is absent.
@@ -95,8 +94,8 @@ sc_ngc_require_tools() {
   if [[ "${#missing[@]}" -gt 0 ]]; then
     sc_ngc_err "missing required tool(s): ${missing[*]}"
     sc_ngc_err "Install them, for example:"
-    sc_ngc_err "  Fedora: sudo dnf install curl python3 coreutils gawk findutils"
-    sc_ngc_err "  Ubuntu: sudo apt-get install curl python3 coreutils gawk findutils"
+    sc_ngc_err "  Fedora: sudo dnf install curl python3 coreutils gawk"
+    sc_ngc_err "  Ubuntu: sudo apt-get install curl python3 coreutils gawk"
     return 2
   fi
 }
@@ -735,6 +734,7 @@ sc_ngc_download_model_version() {
   local version="$2"
   local destdir="$3"
   local listing path size sha dest md5file target want got
+  local -a fetched=()
 
   listing="$(sc_ngc_list_model_files "${model}" "${version}")" || return 2
   if [[ -z "${listing}" ]]; then
@@ -746,13 +746,19 @@ sc_ngc_download_model_version() {
     [[ -n "${path}" ]] || continue
     dest="$(sc_ngc_safe_dest "${destdir}" "${path}")" || return 2
     sc_ngc_download_model_file "${model}" "${version}" "${path}" "${dest}" "${sha}" "${size}" || return 2
+    fetched+=("${dest}")
   done <<< "${listing}"
 
   [[ "${SC_NGC_DRY_RUN}" != "1" ]] || return 0
 
-  # A model file path can name a subdirectory, so the .md5 companions do not
-  # all land at the top of the destination. Check every one of them where it is.
-  while IFS= read -r -d '' md5file; do
+  # Check the .md5 companions of this call only. A model file path can name a
+  # subdirectory, so they do not all land at the top of the destination, and
+  # several feature packs share one destination: rest_download_sdk_features
+  # gives every feature the same <root>/lib/models. A sweep of the whole
+  # directory would therefore check, and then remove, the companions of an
+  # earlier pack, and a mismatch there would delete that pack's model file.
+  for md5file in ${fetched[@]+"${fetched[@]}"}; do
+    [[ "${md5file}" == *.md5 && -f "${md5file}" ]] || continue
     target="${md5file%.md5}"
     [[ -f "${target}" ]] || continue
     want="$(cut -c1-32 < "${md5file}")"
@@ -764,5 +770,5 @@ sc_ngc_download_model_version() {
     fi
     sc_ngc_log "${target#"${destdir}"/}: md5 verified."
     rm -f "${md5file}"
-  done < <(find "${destdir}" -type f -name '*.md5' -print0)
+  done
 }
