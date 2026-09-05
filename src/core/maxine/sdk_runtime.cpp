@@ -28,9 +28,11 @@ bool FileExists(const fs::path &p) {
   return !p.empty() && fs::exists(p, ec) && !fs::is_directory(p, ec);
 }
 
-// Reads the whole file. SDK libraries are large, so cap the read: the ELF
-// header and the program headers always sit near the start, but the dynamic
-// segment can sit anywhere, so we do need the whole file.
+// Reads the whole file into memory. The ELF header and the program headers
+// always sit near the start, but the dynamic segment they point at, and the
+// dynamic string table it names, can sit anywhere in the file. A capped read
+// could stop before either one, so the reader takes all of it. SDK libraries
+// are large, so this buffer is large as well.
 bool ReadFile(const fs::path &p, std::vector<char> *out) {
   std::ifstream in(p, std::ios::binary);
   if (!in)
