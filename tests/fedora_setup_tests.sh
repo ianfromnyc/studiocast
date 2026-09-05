@@ -375,9 +375,8 @@ STUB
   t_pass "a failing objdump keeps the fixed library list"
 }
 
-# More than one bootstrap root can be installed at a time. When the options
-# name a version, a CUDA major or an architecture, the helper must use the root
-# of those options, not the newest root on disk.
+# More than one bootstrap root can be installed at a time. The helper must use
+# the root the options name, not the newest root on disk.
 test_the_options_pick_the_bootstrap_root() {
   local base="${SANDBOX}/root-choice"
   local older="${base}/1.28.0/onnxruntime-linux-x64-gpu_cuda12-1.28.0"
@@ -398,11 +397,8 @@ log() { :; }
 warn() { :; }
 run_priv() { :; }
 ORT_VERSION=1.28.0
-ORT_SELECTION_EXPLICIT=1
 echo "REQUESTED_[$(requested_onnxruntime_root)]"
 echo "SELECTED_[$(installed_onnxruntime_root)]"
-ORT_SELECTION_EXPLICIT=0
-echo "DEFAULTS_[$(installed_onnxruntime_root)]"
 CHILD
 
   local out
@@ -420,11 +416,41 @@ CHILD
   else
     t_pass "the root of the options wins over the newest root"
   fi
+}
 
-  if [[ "${out}" != *"DEFAULTS_[${newer}]"* ]]; then
-    t_fail "without options the newest root should win, got: ${out}"
+# The default version is a selection too: a run with no options installs the
+# default and must then build against it, not against a newer root that some
+# earlier run left on disk.
+test_the_default_version_picks_its_own_root() {
+  local base="${SANDBOX}/root-default"
+  local default_root="${base}/1.29.0/onnxruntime-linux-x64-gpu_cuda13-1.29.0"
+  local newer="${base}/1.30.0/onnxruntime-linux-x64-gpu_cuda13-1.30.0"
+  mkdir -p "${default_root}/include" "${newer}/include"
+  : > "${default_root}/include/onnxruntime_cxx_api.h"
+  : > "${newer}/include/onnxruntime_cxx_api.h"
+
+  local child="${SANDBOX}/root-default-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+export ORT_FLAVOR=gpu
+export ORT_ARCH=x64
+export CUDA_MAJOR=13
+# shellcheck source=/dev/null
+source "$1"
+log() { :; }
+warn() { :; }
+run_priv() { :; }
+echo "SELECTED_[$(installed_onnxruntime_root)]"
+CHILD
+
+  local out
+  out="$(STUDIOCAST_ORT_INSTALL_DIR="${base}" bash "${child}" "${FEDORA_SETUP}" \
+    2>/dev/null)"
+
+  if [[ "${out}" != *"SELECTED_[${default_root}]"* ]]; then
+    t_fail "the default version should name its own root, got: ${out}"
   else
-    t_pass "without options the newest root wins"
+    t_pass "the default version picks its own root"
   fi
 }
 
@@ -765,6 +791,7 @@ test_a_missing_index_entry_gives_an_empty_sha256
 test_cuda_required_libs_follows_the_root_layout
 test_a_failing_objdump_keeps_the_fixed_lib_list
 test_the_options_pick_the_bootstrap_root
+test_the_default_version_picks_its_own_root
 test_only_an_explicit_cuda_major_is_an_option_error
 test_an_option_without_a_value_says_so
 test_the_preflight_asks_pkg_config

@@ -223,15 +223,12 @@ onnxruntime_known_sha256() {
   esac
 }
 
-# The bootstrap root the options ask for, or nothing when they are all
-# defaults.
+# The bootstrap root this run asks for.
 #
-# ORT_SELECTION_EXPLICIT says whether the user named a version, a CUDA major or
-# an architecture. Without that, every root on disk is as good as any other and
-# the newest one is the right answer.
+# The default version, arch and CUDA major name a root as much as the matching
+# options do: the install path uses them, so the build path must read the same
+# root. A run that installs nothing still gets the root it would install.
 requested_onnxruntime_root() {
-  [[ "${ORT_SELECTION_EXPLICIT:-0}" -eq 1 ]] || return 0
-
   local asset
   # The warning about a version with no CUDA asset belongs to the install path,
   # which prints it once. This is only a name lookup.
@@ -805,10 +802,6 @@ DO_RPM=0
 PASSTHRU_ARGS=()
 PARSE_PASSTHRU_ARGS=0
 
-# Did the user name a version, a CUDA major or an architecture? Only then is
-# one installed bootstrap root a better answer than another.
-ORT_SELECTION_EXPLICIT=0
-
 # Did the user pass --cuda-major? Only that value is an option to check.
 CUDA_MAJOR_EXPLICIT=0
 
@@ -848,16 +841,11 @@ while [[ $# -gt 0 ]]; do
     --video-nr) need_value "$@"; VIDEO_NR="$2"; shift 2 ;;
     --label) need_value "$@"; LABEL="$2"; shift 2 ;;
     --exclusive-caps) need_value "$@"; EXCLUSIVE_CAPS="$2"; shift 2 ;;
-    --onnxruntime-version)
-      need_value "$@"; ORT_VERSION="$2"; ORT_SELECTION_EXPLICIT=1
-      shift 2 ;;
+    --onnxruntime-version) need_value "$@"; ORT_VERSION="$2"; shift 2 ;;
     --onnxruntime-flavor) need_value "$@"; ORT_FLAVOR="$2"; shift 2 ;;
-    --onnxruntime-arch)
-      need_value "$@"; ORT_ARCH="$2"; ORT_SELECTION_EXPLICIT=1
-      shift 2 ;;
+    --onnxruntime-arch) need_value "$@"; ORT_ARCH="$2"; shift 2 ;;
     --cuda-major)
       need_value "$@"; CUDA_MAJOR="$2"; CUDA_MAJOR_EXPLICIT=1
-      ORT_SELECTION_EXPLICIT=1
       shift 2 ;;
     --cudnn-version) need_value "$@"; CUDNN_VERSION="$2"; shift 2 ;;
     --check-cuda) DO_CHECK_CUDA=1; shift ;;
@@ -1002,7 +990,7 @@ if [[ "$DO_BUILD" -eq 1 ]]; then
   if [[ -n "${ORT_BOOTSTRAP_ROOT}" ]]; then
     if [[ -n "${REQUESTED_ORT_ROOT}" &&
       "${REQUESTED_ORT_ROOT}" != "${ORT_BOOTSTRAP_ROOT}" ]]; then
-      warn "The options ask for ${REQUESTED_ORT_ROOT}, which is not installed."
+      warn "This run asks for ${REQUESTED_ORT_ROOT}, which is not installed."
       warn "Building against the newest installed bootstrap instead."
     fi
     log "Using the ONNX Runtime bootstrap at ${ORT_BOOTSTRAP_ROOT}"
