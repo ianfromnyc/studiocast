@@ -683,6 +683,55 @@ bool TestTheLoaderPathHintNamesNoProgram() {
   return ok;
 }
 
+// The loader splits LD_LIBRARY_PATH on ':', so a directory whose path holds
+// one can never go on that path. The hint must say to rename it, and must not
+// offer an export that cannot work.
+bool TestTheHintForAColonDirectorySaysToRenameIt() {
+  const fs::path root = TempRoot("colon:hint");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  fake_afx::Reset();
+  fake_afx::g_create_status = fake_afx::kInvalidParam;
+  studiocast::maxine::afx::AfxApi api;
+  fake_afx::Install(&api);
+
+  studiocast::maxine::afx::AfxEffect fx(&api);
+  const auto cfg = MakeConfig(features, "denoiser", "denoiser");
+
+  std::string err;
+  const bool configured = fx.Configure(cfg, &err);
+  bool ok = Require(configured, "expected the denoiser to configure: " + err);
+  if (!ok) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  ok &= Require(!fx.Load(&err), "expected a failed NvAFX_CreateEffect to fail");
+
+  const std::string lib_dir = (features / "denoiser" / "lib").string();
+  ok &= Require(err.find(lib_dir) != std::string::npos,
+                "expected the hint to name the library directory, got: " + err);
+  ok &= Require(err.find("Rename") != std::string::npos ||
+                    err.find("rename") != std::string::npos,
+                "expected the hint to say to rename the directory, got: " +
+                    err);
+  ok &= Require(err.find("export LD_LIBRARY_PATH") == std::string::npos,
+                "expected no export hint for a directory that can never go on "
+                "the loader path, got: " +
+                    err);
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 // The AFX core loads a feature library by its bare name, so every
 // `<features>/<feature>/lib` directory must be on the loader path.
 bool TestFeatureLibDirsAreListed() {
@@ -1168,6 +1217,7 @@ int main() {
   ok = TestAChannelCountErrorFailsTheLoad() && ok;
   ok = TestMissingRequiredParameterFails() && ok;
   ok = TestTheLoaderPathHintNamesNoProgram() && ok;
+  ok = TestTheHintForAColonDirectorySaysToRenameIt() && ok;
   ok = TestFeatureLibDirsAreListed() && ok;
   ok = TestLoaderPathValue() && ok;
   ok = TestAFailedRestartPutsTheEnvironmentBack() && ok;

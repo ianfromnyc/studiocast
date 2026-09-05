@@ -1,7 +1,5 @@
 #include "core/maxine/afx/afx_effect.h"
 
-#include "core/maxine/afx/afx_loader_path.h"
-
 #include <algorithm>
 #include <cerrno>
 #include <cstdlib>
@@ -188,14 +186,33 @@ std::vector<fs::path> FeatureLibraryCandidates(const fs::path &lib_dir,
   return out;
 }
 
+// The loader splits LD_LIBRARY_PATH on ':', so a directory whose path holds
+// one can never be found on that path.
+bool CanGoOnLoaderPath(const fs::path &dir) {
+  return dir.string().find(':') == std::string::npos;
+}
+
 // True when `dir` is on LD_LIBRARY_PATH of this process.
+//
+// This compares against the entries of the variable itself. Asking
+// LdLibraryPathWithDirs whether it wants to add the directory would answer
+// "already there" for a directory whose path holds a ':', because that
+// function leaves such a directory out for the reason above.
 bool LoaderPathHasDir(const fs::path &dir) {
-  if (dir.empty())
+  if (dir.empty() || !CanGoOnLoaderPath(dir))
     return false;
   const char *current = std::getenv("LD_LIBRARY_PATH");
-  return !LdLibraryPathWithDirs(current ? std::string(current) : std::string(),
-                                {dir})
-              .has_value();
+  if (!current)
+    return false;
+
+  const std::string want = dir.string();
+  std::istringstream in(current);
+  std::string entry;
+  while (std::getline(in, entry, ':')) {
+    if (entry == want)
+      return true;
+  }
+  return false;
 }
 
 std::optional<fs::path> ResolveModelPath(const AfxEffectConfig &cfg,
@@ -586,11 +603,18 @@ bool AfxEffect::Load(std::string *error_out) {
           << "` (status=" << stCreate << "). The feature library is "
           << resolved_feature_lib_path_.string() << ".";
       if (!lib_dir_on_loader_path) {
-        oss << " Its directory " << resolved_feature_lib_dir_.string()
-            << " is not on LD_LIBRARY_PATH, which is how the AFX core finds "
-               "it. StudioCast programs put it there when they start, so run "
-               "this program again, or export LD_LIBRARY_PATH with that "
-               "directory before you start it.";
+        if (!CanGoOnLoaderPath(resolved_feature_lib_dir_)) {
+          oss << " Its directory " << resolved_feature_lib_dir_.string()
+              << " can never go on LD_LIBRARY_PATH, which is how the AFX core "
+                 "finds it: the loader splits that variable on ':' and this "
+                 "name holds one. Rename the directory.";
+        } else {
+          oss << " Its directory " << resolved_feature_lib_dir_.string()
+              << " is not on LD_LIBRARY_PATH, which is how the AFX core finds "
+                 "it. StudioCast programs put it there when they start, so run "
+                 "this program again, or export LD_LIBRARY_PATH with that "
+                 "directory before you start it.";
+        }
       }
       *error_out = oss.str();
     }
