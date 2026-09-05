@@ -27,6 +27,7 @@ USE_CONTAINER=0
 SRPM_ONLY=0
 RUN_RPMLINT=0
 INSTALL_BUILDDEPS=0
+ALLOW_CLEAN_OUTSIDE_REPO=0
 # The spec turns dlib on by default. Track the effective setting here, because
 # the dlib source tarball is only needed, and only fetched, when dlib is on.
 WITH_DLIB=1
@@ -45,6 +46,10 @@ Options:
   --clean                   Remove the rpmbuild tree and previous artifacts first.
   --keep-downloads          With --clean, keep the cached downloads directory,
                             so the dlib tarball is not fetched again.
+  --clean-outside-repo      Let --clean remove a build or dist directory that
+                            is outside the repository. Without it, --clean
+                            refuses such a path, so a typo in --build-dir or
+                            --dist-dir cannot delete something else.
   --build-dir DIR           Working directory for the private rpmbuild tree.
                             Default: ${BUILD_DIR}
   --dist-dir DIR            Artifact output directory.
@@ -140,6 +145,10 @@ parse_args() {
         ;;
       --keep-downloads)
         KEEP_DOWNLOADS=1
+        shift
+        ;;
+      --clean-outside-repo)
+        ALLOW_CLEAN_OUTSIDE_REPO=1
         shift
         ;;
       --build-dir)
@@ -529,6 +538,29 @@ report_artifacts() {
   log "  ${CHECKSUM_FILE}"
 }
 
+# --clean removes the build directory and the artifact directory, so check
+# first that the path is one this script made. A path outside the repository
+# needs --clean-outside-repo, which keeps a typo in --build-dir or --dist-dir
+# from deleting the home directory or the root file system.
+require_safe_clean_target() {
+  local label="$1"
+  local path="$2"
+  local resolved
+
+  [[ -n "${path}" ]] || die "${label} is empty; --clean needs a directory"
+  resolved="$(readlink -m -- "${path}")" ||
+    die "could not resolve the ${label} path: ${path}"
+
+  [[ "${resolved}" != "/" ]] ||
+    die "--clean refuses to remove the root directory (${label})"
+  [[ -z "${HOME:-}" || "${resolved}" != "${HOME}" ]] ||
+    die "--clean refuses to remove the home directory (${label})"
+
+  if [[ "${ALLOW_CLEAN_OUTSIDE_REPO}" -eq 0 && "${resolved}" != "${REPO_ROOT}/"* ]]; then
+    die "--clean refuses the ${label} path ${resolved}, which is outside ${REPO_ROOT}. Add --clean-outside-repo to allow it."
+  fi
+}
+
 clean_build_dir() {
   if [[ "${KEEP_DOWNLOADS}" -eq 1 ]]; then
     log "Cleaning the rpmbuild tree, keeping ${DOWNLOAD_DIR}"
@@ -554,6 +586,8 @@ main() {
   load_dlib_lock
 
   if [[ "${CLEAN}" -eq 1 ]]; then
+    require_safe_clean_target "--build-dir" "${BUILD_DIR}"
+    require_safe_clean_target "--dist-dir" "${DIST_DIR}"
     clean_build_dir
     log "Removing the previous artifacts"
     run rm -rf -- "${DIST_DIR}"
