@@ -624,20 +624,19 @@ sc_ngc_download_model_version() {
 
   [[ "${SC_NGC_DRY_RUN}" != "1" ]] || return 0
 
-  shopt -s nullglob
-  for md5file in "${destdir}"/*.md5; do
+  # A model file path can name a subdirectory, so the .md5 companions do not
+  # all land at the top of the destination. Check every one of them where it is.
+  while IFS= read -r -d '' md5file; do
     target="${md5file%.md5}"
     [[ -f "${target}" ]] || continue
     want="$(cut -c1-32 < "${md5file}")"
     got="$(md5sum "${target}" | cut -c1-32)"
     if [[ "${want}" != "${got}" ]]; then
-      sc_ngc_err "md5 mismatch for $(basename "${target}"). Removing it; run the download again."
+      sc_ngc_err "md5 mismatch for ${target#"${destdir}"/}. Removing it; run the download again."
       rm -f "${target}"
-      shopt -u nullglob
       return 2
     fi
-    sc_ngc_log "$(basename "${target}"): md5 verified."
+    sc_ngc_log "${target#"${destdir}"/}: md5 verified."
     rm -f "${md5file}"
-  done
-  shopt -u nullglob
+  done < <(find "${destdir}" -type f -name '*.md5' -print0)
 }

@@ -58,6 +58,10 @@ done
 
 if [[ "${url}" == *"/token?"* ]]; then
   [[ -z "${out}" ]] || printf '{"token": "stub-jwt"}' > "${out}"
+elif [[ "${url}" == */files || "${url}" == */files\?* ]]; then
+  [[ -z "${out}" ]] || cat "${NGC_STUB_LISTING:-/dev/null}" > "${out}"
+elif [[ "${url}" == *.md5 ]]; then
+  [[ -z "${out}" ]] || printf '%s  payload\n' "${NGC_STUB_MD5:-}" > "${out}"
 else
   [[ -z "${out}" ]] || printf 'stub payload\n' > "${out}"
 fi
@@ -214,9 +218,106 @@ CHILD
   fi
 }
 
+# The md5 of the payload the stub curl writes for a model file.
+PAYLOAD_MD5="a034a9f16f32f0f19a6bc5f6828c593e"
+
+# Download one model version whose only file sits in a subdirectory, with the
+# .md5 companion next to it. Print the return code of the download.
+#
+# Arguments: <md5 the stub serves> <dest dir>
+run_nested_model_version_download() {
+  local md5="$1"
+  local destdir="$2"
+
+  local listing="${SANDBOX}/listing.json"
+  cat > "${listing}" <<'JSON'
+{
+  "modelFiles": [
+    {"path": "sub/dir/model.trtpkg"},
+    {"path": "sub/dir/model.trtpkg.md5"}
+  ],
+  "paginationInfo": {"totalPages": 1}
+}
+JSON
+
+  local child="${SANDBOX}/model-version-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+unset NGC_API_KEY NGC_CLI_API_KEY
+sc_ngc_log() { :; }
+sc_ngc_err() { :; }
+# shellcheck source=/dev/null
+source "$1"
+export SC_NGC_API_KEY="$2"
+export SC_NGC_AUTHN_HOST="https://authn.invalid"
+export SC_NGC_HOST="https://api.invalid"
+export SC_NGC_RETRIES=1
+sc_ngc_download_model_version test-model 1.0 "$3" >/dev/null 2>&1
+echo "RC=$?"
+CHILD
+
+  rm -rf "${destdir}"
+  NGC_CURL_LOG="${SANDBOX}/model-version.log" \
+    NGC_STUB_LISTING="${listing}" \
+    NGC_STUB_MD5="${md5}" \
+    bash "${child}" "${NGC_LIB}" "${MODERN_KEY}" "${destdir}" 2>/dev/null
+}
+
+# A model file path can name a subdirectory, so the .md5 companion lands there
+# too. It must be checked and removed where it is, not only at the top of the
+# destination directory.
+test_a_nested_md5_is_verified_and_removed() {
+  local destdir="${SANDBOX}/model-good"
+  local out
+  out="$(run_nested_model_version_download "${PAYLOAD_MD5}" "${destdir}")"
+
+  if [[ "${out}" != *"RC=0"* ]]; then
+    t_fail "a model version with a nested file did not download: ${out}"
+  else
+    t_pass "a model version with a nested file downloads"
+  fi
+
+  if [[ ! -f "${destdir}/sub/dir/model.trtpkg" ]]; then
+    t_fail "the nested model file is missing after a matching md5"
+  else
+    t_pass "a matching md5 keeps the nested model file"
+  fi
+
+  local leftover
+  leftover="$(find "${destdir}" -name '*.md5' 2>/dev/null)"
+  if [[ -n "${leftover}" ]]; then
+    t_fail "the nested md5 file was left behind: ${leftover}"
+  else
+    t_pass "a verified nested md5 file is removed"
+  fi
+}
+
+# A nested .md5 that does not match must fail the download and take the file
+# with it, the same as one at the top of the destination directory.
+test_a_nested_md5_mismatch_fails() {
+  local destdir="${SANDBOX}/model-bad"
+  local out
+  out="$(run_nested_model_version_download "00000000000000000000000000000000" \
+    "${destdir}")"
+
+  if [[ "${out}" != *"RC=2"* ]]; then
+    t_fail "a nested md5 mismatch should return 2: ${out}"
+  else
+    t_pass "a nested md5 mismatch returns 2"
+  fi
+
+  if [[ -f "${destdir}/sub/dir/model.trtpkg" ]]; then
+    t_fail "a nested md5 mismatch left the model file in place"
+  else
+    t_pass "a nested md5 mismatch removes the model file"
+  fi
+}
+
 test_a_first_call_download_sets_the_token
 test_a_first_call_download_exchanges_an_older_key
 test_no_key_is_reported
+test_a_nested_md5_is_verified_and_removed
+test_a_nested_md5_mismatch_fails
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2
