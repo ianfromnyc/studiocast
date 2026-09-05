@@ -136,10 +136,13 @@ struct PipeWireAudioNode::Impl {
     return last_error;
   }
 
+  // Wakes a blocked Read or Write. Only the loop thread and the pipeline
+  // thread call it; the real-time callback never does. See OnStreamProcess.
   void Wake() { wake_cv.notify_all(); }
 
-  // Waits a short time for the ring to change. The bounded wait makes a lost
-  // notification a small hiccup instead of a hang.
+  // Waits a short time for the ring to change. The real-time callback does not
+  // notify, so this short wait, and not a notification, is what carries a
+  // reader or a writer through a cycle.
   void WaitForRing() {
     std::unique_lock<std::mutex> lock(wake_mu);
     wake_cv.wait_for(lock, std::chrono::microseconds(500));
@@ -292,7 +295,10 @@ void OnStreamProcess(void *data) {
 
   pw_stream_queue_buffer(impl->stream, b);
   UpdateLatency(impl);
-  impl->Wake();
+  // No notification from here. This runs on the real-time data thread, and a
+  // condition variable notify is a futex syscall even without a mutex. The
+  // waiting side already wakes on its own every 500 us, which is a twentieth
+  // of a pipeline frame, so the wait costs less than the syscall would.
 }
 
 // Built field by field, because the PipeWire event structures grow between
