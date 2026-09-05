@@ -116,11 +116,14 @@ bool TestExplicitLibyuvRequestFailsWhenLibyuvIsMissing() {
   if (!Expect(!ec, "failed to create empty pkg-config directory"))
     return false;
 
-  // An empty pkg-config path hides libyuv.pc, and the two pre-set cache
+  // Empty pkg-config search paths hide libyuv.pc, and the two pre-set cache
   // entries stop the find_path/find_library fallback from searching. So the
-  // configure step sees no libyuv, whatever the machine really has.
+  // configure step sees no libyuv, whatever the machine really has. Both
+  // variables are needed: PKG_CONFIG_PATH is searched as well as
+  // PKG_CONFIG_LIBDIR, and an RPM build sets it.
+  const std::string empty = ShellQuote(noPkgConfig.string());
   const std::string env_prefix =
-      "PKG_CONFIG_LIBDIR=" + ShellQuote(noPkgConfig.string()) + " ";
+      "PKG_CONFIG_LIBDIR=" + empty + " PKG_CONFIG_PATH=" + empty + " ";
   const auto result = ConfigureRepository(
       temp.path() / "build",
       "-DSTUDIOCAST_ENABLE_LIBYUV=ON -DLIBYUV_INCLUDE_DIR= -DLIBYUV_LIBRARY=",
