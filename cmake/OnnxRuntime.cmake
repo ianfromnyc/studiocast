@@ -218,18 +218,42 @@ print(json.dumps(payload))
   # so that an empty -DONNXRUNTIME_ROOT= is "no root" for both: steps 1-3 keep
   # the search order, and this step does not look in the system directories
   # with an empty hint.
+  #
+  # NO_DEFAULT_PATH keeps both finds inside the root. With HINTS alone, CMake
+  # searches its own path variables and the system directories first, so the
+  # headers of the root could end up beside a library from somewhere else, and
+  # a wrong root could still find a distribution package. A root that holds
+  # neither part is an error, not a reason to look elsewhere.
   if (NOT _found AND _ort_explicit_root)
     find_path(ONNXRUNTIME_INCLUDE_DIR
       NAMES onnxruntime_cxx_api.h
-      HINTS "${ONNXRUNTIME_ROOT}"
+      PATHS "${ONNXRUNTIME_ROOT}"
       PATH_SUFFIXES include include/onnxruntime
+      NO_DEFAULT_PATH
     )
 
     find_library(ONNXRUNTIME_LIBRARY
       NAMES onnxruntime
-      HINTS "${ONNXRUNTIME_ROOT}"
+      PATHS "${ONNXRUNTIME_ROOT}"
       PATH_SUFFIXES lib lib64
+      NO_DEFAULT_PATH
     )
+
+    if (NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIBRARY)
+      set(_ort_root_missing "")
+      if (NOT ONNXRUNTIME_INCLUDE_DIR)
+        list(APPEND _ort_root_missing "no onnxruntime_cxx_api.h in include")
+      endif()
+      if (NOT ONNXRUNTIME_LIBRARY)
+        list(APPEND _ort_root_missing "no libonnxruntime in lib or lib64")
+      endif()
+      list(JOIN _ort_root_missing " and " _ort_root_missing_text)
+      message(FATAL_ERROR
+        "ONNX Runtime: ONNXRUNTIME_ROOT=${ONNXRUNTIME_ROOT} does not hold a "
+        "usable ONNX Runtime. The root has ${_ort_root_missing_text}. "
+        "Give the directory that holds the include and lib directories of the "
+        "build, or leave ONNXRUNTIME_ROOT empty to search the system.")
+    endif()
 
     if (ONNXRUNTIME_INCLUDE_DIR AND ONNXRUNTIME_LIBRARY)
       if (NOT TARGET studiocast_onnxruntime)
