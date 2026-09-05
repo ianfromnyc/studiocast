@@ -191,9 +191,16 @@ bool TestSocketProbeReportsAMissingSocket() {
 
 bool TestSocketProbeReportsAMissingRuntimeDirectory() {
   const auto p = ProbePipeWireSocket(FakeEnv({}, "/nowhere"));
-  return Expect(!p.found, "no runtime directory means no socket") &&
-         Expect(p.reason.find("XDG_RUNTIME_DIR") != std::string::npos,
-                "the reason should name the missing variable: " + p.reason);
+  bool ok = Expect(!p.found, "no runtime directory means no socket");
+  // The probe reads three variables, so the reason must name all three.
+  for (const char *name :
+       {"PIPEWIRE_RUNTIME_DIR", "XDG_RUNTIME_DIR", "USERPROFILE"}) {
+    ok = Expect(p.reason.find(name) != std::string::npos,
+                std::string("the reason should name ") + name + ": " +
+                    p.reason) &&
+         ok;
+  }
+  return ok;
 }
 
 bool TestNodePropertyArithmetic() {

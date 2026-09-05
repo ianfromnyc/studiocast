@@ -236,15 +236,16 @@ PipeWireSocketProbe ProbePipeWireSocket(const PipeWireProbeEnv &env) {
     return out;
   }
 
-  // PipeWire itself reads these three variables, in this order.
+  // PipeWire itself reads these three variables, in this order. USERPROFILE
+  // is the one its Windows build uses, so on Linux it is almost always empty.
   std::string dir = env.get_env("PIPEWIRE_RUNTIME_DIR");
   if (dir.empty())
     dir = env.get_env("XDG_RUNTIME_DIR");
   if (dir.empty())
     dir = env.get_env("USERPROFILE");
   if (dir.empty()) {
-    out.reason = "No PipeWire runtime directory: PIPEWIRE_RUNTIME_DIR and "
-                 "XDG_RUNTIME_DIR are not set.";
+    out.reason = "No PipeWire runtime directory: PIPEWIRE_RUNTIME_DIR, "
+                 "XDG_RUNTIME_DIR and USERPROFILE are not set.";
     return out;
   }
 
