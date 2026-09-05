@@ -3,7 +3,13 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
+
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 namespace studiocast::pw {
 
@@ -274,6 +280,15 @@ PipeWireSocketProbe ProbePipeWireSocket(const PipeWireProbeEnv &env) {
     return out;
   }
 
+  // A server that died leaves its socket file behind. Without this question a
+  // stale file would pass, StudioCast would commit to the native backend, and
+  // the documented fallback to PulseAudio would never happen.
+  if (env.socket_answers && !env.socket_answers(out.path)) {
+    out.reason = "PipeWire socket " + out.path +
+                 " exists but no server answers on it.";
+    return out;
+  }
+
   out.found = true;
   return out;
 }
@@ -287,6 +302,30 @@ PipeWireSocketProbe ProbePipeWireSocket() {
   env.path_exists = [](const std::string &path) {
     std::error_code ec;
     return std::filesystem::exists(path, ec);
+  };
+  env.socket_answers = [](const std::string &path) {
+    struct sockaddr_un addr{};
+    if (path.size() >= sizeof(addr.sun_path))
+      return false;
+
+    const int fd =
+        ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    if (fd < 0) {
+      // No socket to ask with. Do not call a live server dead over it.
+      return true;
+    }
+
+    addr.sun_family = AF_UNIX;
+    std::memcpy(addr.sun_path, path.c_str(), path.size());
+    const int rc = ::connect(fd, reinterpret_cast<struct sockaddr *>(&addr),
+                             sizeof(addr));
+    const int failure = errno;
+    ::close(fd);
+    if (rc == 0)
+      return true;
+    // The socket is non-blocking, so a connection still on its way is an
+    // answer as good as a finished one.
+    return failure == EINPROGRESS || failure == EAGAIN || failure == EINTR;
   };
   return ProbePipeWireSocket(env);
 }

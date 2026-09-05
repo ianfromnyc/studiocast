@@ -74,10 +74,12 @@ PipeWire server through `pipewire-pulse`. An upgrade therefore changes nothing
 on a machine that already works. Set `auto` or `pipewire` to move to the native
 nodes.
 
-A server is "reachable" when a PipeWire socket exists. StudioCast looks for
-`$PIPEWIRE_RUNTIME_DIR`, then `$XDG_RUNTIME_DIR`, then `$USERPROFILE`, and
-tests for the socket named by `$PIPEWIRE_REMOTE`, or `pipewire-0` when that
-variable is not set.
+A server is "reachable" when a PipeWire socket exists and a client can open
+it. StudioCast looks for `$PIPEWIRE_RUNTIME_DIR`, then `$XDG_RUNTIME_DIR`,
+then `$USERPROFILE`, and tests for the socket named by `$PIPEWIRE_REMOTE`, or
+`pipewire-0` when that variable is not set. The test is one non-blocking
+connect, so the socket file a dead server left behind does not count as a
+server.
 
 The fallback to PulseAudio happens on availability alone. The daemon probes
 for a server before the audio service starts, and it selects PulseAudio and

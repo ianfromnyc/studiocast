@@ -204,6 +204,11 @@ ResolveVideoOutputBackends(VideoOutputPreference pref,
 struct PipeWireProbeEnv {
   std::function<std::string(const char *)> get_env;
   std::function<bool(const std::string &)> path_exists;
+
+  // True when a client can open the socket at this path. A socket file that a
+  // dead server left behind still exists, so the file alone says nothing. An
+  // empty hook skips the question and takes the file as the answer.
+  std::function<bool(const std::string &)> socket_answers;
 };
 
 // Where the PipeWire socket should be, and whether it is there.
@@ -213,9 +218,10 @@ struct PipeWireSocketProbe {
   std::string reason;
 };
 
-// Looks for the server socket. It reads PIPEWIRE_RUNTIME_DIR, then
-// XDG_RUNTIME_DIR, then USERPROFILE, and takes the socket name from
-// PIPEWIRE_REMOTE, or "pipewire-0" when that variable is not set.
+// Looks for the server socket, and asks it whether anyone is behind it. It
+// reads PIPEWIRE_RUNTIME_DIR, then XDG_RUNTIME_DIR, then USERPROFILE, and
+// takes the socket name from PIPEWIRE_REMOTE, or "pipewire-0" when that
+// variable is not set.
 PipeWireSocketProbe ProbePipeWireSocket(const PipeWireProbeEnv &env);
 
 // The same probe against the real process environment and file system.

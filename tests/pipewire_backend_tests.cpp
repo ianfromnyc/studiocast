@@ -150,9 +150,28 @@ PipeWireProbeEnv FakeEnv(std::map<std::string, std::string> vars,
     const auto it = vars.find(name ? name : "");
     return it == vars.end() ? std::string() : it->second;
   };
-  env.path_exists = [existing = std::move(existing_path)](
-                        const std::string &path) { return path == existing; };
+  env.path_exists = [existing = existing_path](const std::string &path) {
+    return path == existing;
+  };
+  env.socket_answers = [existing = std::move(existing_path)](
+                           const std::string &path) { return path == existing; };
   return env;
+}
+
+// A server that died leaves its socket file behind. StudioCast must not take
+// that file for a running server, or it commits to the native backend and the
+// fallback to PulseAudio never happens.
+bool TestSocketProbeReportsASocketNobodyAnswers() {
+  auto env = FakeEnv({{"XDG_RUNTIME_DIR", "/run/user/1000"}},
+                     "/run/user/1000/pipewire-0");
+  env.socket_answers = [](const std::string &) { return false; };
+
+  const auto p = ProbePipeWireSocket(env);
+  return Expect(!p.found, "a socket that nobody answers must not count") &&
+         Expect(p.reason.find("no server answers") != std::string::npos,
+                "the reason must say nobody answered: " + p.reason) &&
+         Expect(p.reason.find("/run/user/1000/pipewire-0") != std::string::npos,
+                "the reason must name the socket: " + p.reason);
 }
 
 bool TestSocketProbeUsesTheRuntimeDirectory() {
@@ -1718,6 +1737,8 @@ int main() {
        &TestSocketProbePrefersPipeWireRuntimeDir},
       {"socket probe honours PIPEWIRE_REMOTE",
        &TestSocketProbeHonoursPipeWireRemote},
+      {"socket probe reports a socket nobody answers",
+       &TestSocketProbeReportsASocketNobodyAnswers},
       {"socket probe reports a missing socket",
        &TestSocketProbeReportsAMissingSocket},
       {"socket probe reports a missing runtime directory",
