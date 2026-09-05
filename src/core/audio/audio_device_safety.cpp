@@ -34,10 +34,12 @@ bool IsStudioCastVirtualSourceName(const std::string &name) {
          n == std::string(kVirtualSpeakersSinkName) + ".monitor";
 }
 
+// Pulse names the monitor source of a sink "<sink>.monitor", so the word is
+// always the suffix. Matching it anywhere in the name would also refuse a
+// device that carries the word for another reason, such as
+// "alsa_output.monitor_speakers".
 bool IsPulseMonitorSourceName(const std::string &name) {
-  const std::string n = Trimmed(name);
-  return n.ends_with(".monitor") || n.find(".monitor.") != std::string::npos ||
-         n.find(".monitor") != std::string::npos;
+  return Trimmed(name).ends_with(".monitor");
 }
 
 bool IsUnsafeInputSourceName(const std::string &name, std::string *reason) {
