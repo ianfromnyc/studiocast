@@ -347,6 +347,18 @@ bool TestLegacyModelsDirStillWins() {
                 "expected VFX models dir source 'models', got '" +
                     rep.vfx.models_dir_source + "'");
 
+  // The effects do not see the report; they only know the library they
+  // loaded. Both ways of asking must give one answer on a tree that holds
+  // both layouts, or `doctor` names one directory and the effects use
+  // another.
+  ok &= Require(studiocast::maxine::ModelsDirForLibrary(
+                    vfx / "lib" / "libVideoFX.so") == rep.vfx.models_dir,
+                "expected the library walk to agree with the resolved paths, "
+                "got " +
+                    studiocast::maxine::ModelsDirForLibrary(
+                        vfx / "lib" / "libVideoFX.so")
+                        .string());
+
   fs::remove_all(root, ec);
   return ok;
 }

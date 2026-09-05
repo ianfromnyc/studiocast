@@ -36,6 +36,49 @@ bool DirExists(const fs::path &p) {
   return !p.empty() && fs::exists(p, ec) && fs::is_directory(p, ec);
 }
 
+// The models directory names of an SDK root, in the order that decides which
+// one wins when a tree holds both. Legacy 0.7/0.8 SDKs keep `<root>/models`;
+// the SDK Core 1.x installs the model engines into `<root>/lib/models`. The
+// legacy name is first, so an old install keeps its behaviour.
+//
+// This is the one place that holds the order. Everything that needs a models
+// directory goes through ModelsDirForRoot, so `doctor` and the effects cannot
+// name different directories for one tree.
+const char *const kModelsDirNames[] = {"models", "lib/models"};
+
+// The models directory of one SDK root. Also gives the name that matched, for
+// the report. Returns an empty path when the root holds neither name.
+fs::path ModelsDirForRoot(const fs::path &root, std::string *source_out) {
+  if (source_out)
+    source_out->clear();
+  if (root.empty())
+    return {};
+
+  for (const char *rel : kModelsDirNames) {
+    const auto cand = root / fs::path(rel);
+    if (DirExists(cand)) {
+      if (source_out)
+        *source_out = rel;
+      return cand;
+    }
+  }
+  return {};
+}
+
+// The SDK root that holds a library. Every layout puts the library in
+// `<root>/lib`, `<root>/lib64`, `<root>/nvafx/lib` or the root itself, so the
+// root is the first directory above those names.
+fs::path RootForLibrary(const fs::path &library) {
+  fs::path dir = library.parent_path();
+  for (int i = 0; i < 3 && !dir.empty() && dir != dir.root_path(); ++i) {
+    const std::string name = dir.filename().string();
+    if (name != "lib" && name != "lib64" && name != "nvafx")
+      break;
+    dir = dir.parent_path();
+  }
+  return dir;
+}
+
 std::vector<fs::path> CandidateLibDirs(const fs::path &root) {
   std::vector<fs::path> dirs;
   if (root.empty())
@@ -145,22 +188,12 @@ ResolveComponent(const std::string &component, const char *env_var,
       ChooseRoot(env_override, xdg_default, system_default, &out.root_source);
   out.root_exists = DirExists(out.root);
 
-  // Models directory. Legacy SDKs use `<root>/models`; the SDK Core 1.x
-  // installs the model engines into `<root>/lib/models`. Prefer the legacy
-  // location when both exist so old installs keep their behaviour.
-  static const char *const kModelsDirNames[] = {"models", "lib/models"};
+  // Models directory. ModelsDirForRoot holds the order; see its comment.
   out.candidate_models_dirs.clear();
   for (const char *rel : kModelsDirNames) {
     out.candidate_models_dirs.push_back(out.root / fs::path(rel));
   }
-  out.models_dir_source.clear();
-  for (size_t i = 0; i < out.candidate_models_dirs.size(); ++i) {
-    if (DirExists(out.candidate_models_dirs[i])) {
-      out.models_dir = out.candidate_models_dirs[i];
-      out.models_dir_source = kModelsDirNames[i];
-      break;
-    }
-  }
+  out.models_dir = ModelsDirForRoot(out.root, &out.models_dir_source);
   if (out.models_dir_source.empty()) {
     // Keep a stable hint path when nothing exists yet.
     out.models_dir = out.candidate_models_dirs.front();
@@ -223,17 +256,11 @@ fs::path ModelsDirForLibrary(const fs::path &library) {
   if (library.empty())
     return {};
 
-  fs::path dir = library.parent_path();
-  for (int i = 0; i < 5 && !dir.empty(); ++i) {
-    const auto cand = dir / "models";
-    if (DirExists(cand)) {
-      return cand;
-    }
-    if (dir == dir.root_path())
-      break;
-    dir = dir.parent_path();
-  }
-  return {};
+  // Find the root first, then apply the one order. Walking up from the library
+  // and taking the first `models` directory would find `<root>/lib/models`
+  // before `<root>/models`, which is the opposite of what ResolveMaxinePaths
+  // reports for a tree that holds both.
+  return ModelsDirForRoot(RootForLibrary(library), nullptr);
 }
 
 MaxinePathsReport ResolveMaxinePaths() {

@@ -38,6 +38,7 @@
 #include "core/maxine/effects/vfx_relighting_effect.h"
 #include "core/maxine/maxine_manager.h"
 #include "core/maxine/nvcv_api.h"
+#include "core/maxine/paths.h"
 #include "core/maxine/vfx_api.h"
 #include "core/open_video/fastdvdnet_denoiser.h"
 #include "core/open_video/frame_analysis_cache.h"
@@ -1633,21 +1634,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       enabled = false;
     }
 
-    static std::filesystem::path
-    InferModelsDirFromLibrary(const std::filesystem::path &lib) {
-      std::error_code ec;
-      std::filesystem::path p = lib.parent_path();
-      for (int i = 0; i < 5 && !p.empty(); ++i) {
-        const auto cand = p / "models";
-        if (std::filesystem::exists(cand, ec) &&
-            std::filesystem::is_directory(cand, ec)) {
-          return cand;
-        }
-        p = p.parent_path();
-      }
-      return {};
-    }
-
     bool EnsureInitialized(
         int width, int height,
         const studiocast::video::effects::BroadcastCameraEffects &fx,
@@ -1702,7 +1688,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
       }
       if (model_dir.empty()) {
-        model_dir = InferModelsDirFromLibrary(vfx.library_path());
+        model_dir = studiocast::maxine::ModelsDirForLibrary(vfx.library_path());
       }
 
       // Allocate CPU-side BGR staging buffers and wrap with NvCVImage_Init.
@@ -4336,21 +4322,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
 
     static std::filesystem::path
-    InferModelsDirFromLibrary(const std::filesystem::path &lib) {
-      std::error_code ec;
-      std::filesystem::path p = lib.parent_path();
-      for (int i = 0; i < 5 && !p.empty(); ++i) {
-        const auto cand = p / "models";
-        if (std::filesystem::exists(cand, ec) &&
-            std::filesystem::is_directory(cand, ec)) {
-          return cand;
-        }
-        p = p.parent_path();
-      }
-      return {};
-    }
-
-    static std::filesystem::path
     InferFeaturesDirFromLibrary(const std::filesystem::path &lib) {
       std::error_code ec;
       std::filesystem::path p = lib.parent_path();
@@ -4547,7 +4518,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
       }
       if (model_dir.empty()) {
-        model_dir = InferModelsDirFromLibrary(vfx.library_path());
+        model_dir = studiocast::maxine::ModelsDirForLibrary(vfx.library_path());
       }
       if (features_dir.empty()) {
         features_dir = InferFeaturesDirFromLibrary(vfx.library_path());
@@ -4912,21 +4883,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       initialized = false;
     }
 
-    static std::filesystem::path
-    InferModelsDirFromLibrary(const std::filesystem::path &lib) {
-      std::error_code ec;
-      std::filesystem::path p = lib.parent_path();
-      for (int i = 0; i < 5 && !p.empty(); ++i) {
-        const auto cand = p / "models";
-        if (std::filesystem::exists(cand, ec) &&
-            std::filesystem::is_directory(cand, ec)) {
-          return cand;
-        }
-        p = p.parent_path();
-      }
-      return {};
-    }
-
     bool EnsureInitialized(
         int width, int height,
         const studiocast::video::effects::BroadcastCameraEffects &fx,
@@ -4977,7 +4933,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         }
       }
       if (model_dir.empty()) {
-        model_dir = InferModelsDirFromLibrary(vfx.library_path());
+        model_dir = studiocast::maxine::ModelsDirForLibrary(vfx.library_path());
       }
 
       // Allocate CPU BGR staging buffers.
