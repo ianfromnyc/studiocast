@@ -38,6 +38,7 @@ class AudioPage final : public QWidget {
 
 public:
   explicit AudioPage(AudioPageMode mode, QWidget *parent = nullptr);
+  ~AudioPage() override;
   void UpdateStatus(const DaemonStatusSnapshot &snapshot);
 
   // Test seam. Apply the outcome of one monitor sink listing, the way the

@@ -22,8 +22,10 @@
 #include <QTimer>
 #include <unistd.h>
 
+#include "core/audio/pulse/pactl.h"
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
+#include "core/util/exec.h"
 #include "gui/pages/audio_page.h"
 #include "gui/pages/engines_models_page.h"
 #include "gui/pages/video_page.h"
@@ -1479,6 +1481,48 @@ bool TestPendingDaemonWriteGuardSkipsRoutineStatusUntilWriteSettles() {
                 "rejected write should allow forced daemon resync");
 }
 
+// Runs every pactl command through `hook` for the life of the object. The
+// audio page lists the audio devices on background threads, so the fake keeps
+// those threads off the sound server of whoever runs the tests.
+class ScopedPactlExecHook final {
+public:
+  explicit ScopedPactlExecHook(
+      studiocast::audio::pulse::PactlExecCaptureHook hook) {
+    studiocast::audio::pulse::SetPactlExecCaptureHookForTesting(
+        std::move(hook));
+  }
+
+  ~ScopedPactlExecHook() {
+    studiocast::audio::pulse::SetPactlExecCaptureHookForTesting(nullptr);
+  }
+
+  ScopedPactlExecHook(const ScopedPactlExecHook &) = delete;
+  ScopedPactlExecHook &operator=(const ScopedPactlExecHook &) = delete;
+};
+
+// One physical input and one physical output, the smallest machine the audio
+// page can list.
+ScopedPactlExecHook FakeSoundServer() {
+  return ScopedPactlExecHook([](const std::string &command) {
+    studiocast::util::ExecResult result;
+    result.exit_code = 0;
+    if (command == "pactl --version 2>&1") {
+      result.stdout_str = "pactl 17.0\n";
+    } else if (command == "pactl list short sources 2>&1") {
+      result.stdout_str = "2\tphysical_test_mic\tmodule-alsa-card.c\t"
+                          "s16le 2ch 48000Hz\tRUNNING\n";
+    } else if (command == "pactl list short sinks 2>&1") {
+      result.stdout_str = "3\tphysical_test_sink\tmodule-alsa-card.c\t"
+                          "s16le 2ch 48000Hz\tSUSPENDED\n";
+    } else if (command == "pactl get-default-source 2>&1") {
+      result.stdout_str = "physical_test_mic\n";
+    } else if (command == "pactl get-default-sink 2>&1") {
+      result.stdout_str = "physical_test_sink\n";
+    }
+    return result;
+  });
+}
+
 // The status a daemon without a microphone monitor sends: an audio object with
 // no "monitor" member.
 const char *const kAudioStatusWithoutMonitor = R"({
@@ -1525,6 +1569,45 @@ const char *const kAudioStatusWithMonitor = R"({
         }
       })";
 
+// The page lists the audio devices on background threads. Nothing pumps the
+// event loop in these checks, so `deleteLater` never runs; a thread left
+// behind would still be inside popen when main() returns. The page must wait
+// for its own listings instead.
+bool TestAudioPageWaitsForItsDeviceListings() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-threads");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  std::atomic<int> commands{0};
+  ScopedPactlExecHook pactl([&commands](const std::string &) {
+    // A slow sound server, so a listing that outlives the page is visible.
+    std::this_thread::sleep_for(150ms);
+    commands.fetch_add(1, std::memory_order_relaxed);
+    studiocast::util::ExecResult result;
+    result.exit_code = 0;
+    return result;
+  });
+
+  {
+    studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+  }
+
+  const int atDestruction = commands.load(std::memory_order_relaxed);
+  std::this_thread::sleep_for(600ms);
+  const int later = commands.load(std::memory_order_relaxed);
+
+  bool ok = Expect(atDestruction > 0,
+                   "the page should have listed the audio devices");
+  ok = Expect(later == atDestruction,
+              "no device listing may keep running after the page is gone") &&
+       ok;
+  if (later != atDestruction) {
+    std::cerr << "pactl calls: " << atDestruction << " at destruction, "
+              << later << " afterwards\n";
+  }
+  return ok;
+}
+
 // The daemon owns the monitor route, so a daemon that does not report a
 // monitor refuses every write the group can make. All of the controls must go
 // dead together, not the check box alone, and they must come back when a
@@ -1537,10 +1620,11 @@ bool TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() {
   if (!Expect(runtime.ok(), runtime.error().c_str()))
     return false;
 
-  // No event loop runs in this test, on purpose. The page lists the audio
-  // devices on a background thread, and on a machine without pactl that
-  // listing ends in a modal dialog. UpdateStatus is synchronous, which is all
-  // this test needs.
+  // No event loop runs in this test, on purpose: UpdateStatus is synchronous,
+  // which is all this test needs. The page still lists the audio devices on
+  // background threads, so a fake sound server keeps them off the host. It is
+  // declared before the page because ~AudioPage waits for those threads.
+  const auto pactl = FakeSoundServer();
   studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
 
   auto *enableCheck =
@@ -1608,7 +1692,8 @@ bool TestAudioPageReportsAMonitorSinkListError() {
   if (!Expect(runtime.ok(), runtime.error().c_str()))
     return false;
 
-  // No event loop runs here, for the reason given above.
+  // No event loop and no real sound server, for the reasons given above.
+  const auto pactl = FakeSoundServer();
   studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
 
   auto *statusText =
@@ -1642,7 +1727,8 @@ bool TestAudioPageReportsAnUnavailablePactlForTheMonitorSinks() {
   if (!Expect(runtime.ok(), runtime.error().c_str()))
     return false;
 
-  // No event loop runs here, for the reason given above.
+  // No event loop and no real sound server, for the reasons given above.
+  const auto pactl = FakeSoundServer();
   studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
 
   auto *statusText =
@@ -1952,9 +2038,7 @@ int main(int argc, char **argv) {
   ok = TestVideoPageEnablesAvailableVirtualBackgroundRemoveMode() && ok;
   ok = TestVideoPageKeepsReplaceModeSelectedWhileImagePathIsMissing() && ok;
 
-  // Last: the audio page leaves a device listing running on a background
-  // thread, and nothing after this may pump the event loop that would deliver
-  // its result.
+  ok = TestAudioPageWaitsForItsDeviceListings() && ok;
   ok = TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() && ok;
   ok = TestAudioPageReportsAMonitorSinkListError() && ok;
   ok = TestAudioPageReportsAnUnavailablePactlForTheMonitorSinks() && ok;

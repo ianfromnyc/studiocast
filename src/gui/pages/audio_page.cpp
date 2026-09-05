@@ -950,6 +950,27 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
 #endif
 }
 
+// The device listings run on threads that report back through the event loop.
+// A page that goes away before that loop runs would leave them inside `popen`,
+// so wait for each one here. The listing has no cancellation point, so the
+// wait is for the pactl call that is already running.
+AudioPage::~AudioPage() {
+  QThread *const threads[] = {sourceRefreshThread_, speakerTargetRefreshThread_,
+                              monitorSinkRefreshThread_};
+  sourceRefreshThread_ = nullptr;
+  speakerTargetRefreshThread_ = nullptr;
+  monitorSinkRefreshThread_ = nullptr;
+
+  for (QThread *thread : threads) {
+    if (!thread)
+      continue;
+    // Nothing may run once this page is going away, `deleteLater` included.
+    thread->disconnect();
+    thread->wait();
+    delete thread;
+  }
+}
+
 void AudioPage::ShowError(const QString &title, const QString &details) {
   QMessageBox::critical(this, title, details);
 }
