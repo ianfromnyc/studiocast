@@ -444,9 +444,13 @@ Expected:
 
 Expected:
 
-- Status reports the monitor stopped and that StudioCast is starting it again.
-- The monitor comes back on its own, or reports an actionable error when no safe
-  output exists.
+- Status reports that the monitor output disappeared and that the monitor
+  stopped.
+- StudioCast does not move the monitor to another output by itself. The default
+  output after an unplug is usually the loudspeakers, which would feed the
+  microphone back into itself.
+- Plugging the headphones back in does not start the monitor again. Turn the
+  monitor off and on again, or select the output, to hear it there.
 
 - [ ] Turn microphone processing off while the monitor is on, then stop the
   daemon.

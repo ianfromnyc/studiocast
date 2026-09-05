@@ -449,8 +449,10 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
     speakers_loopback_latency_ms_ = 0;
     monitor_running_ = false;
     monitor_sink_requested_.clear();
+    monitor_sink_resolved_.clear();
     monitor_latency_ms_ = 0;
     monitor_volume_ = 0;
+    monitor_output_lost_ = false;
     consumer_detector_.reset();
   }
 
@@ -530,8 +532,10 @@ void VirtualAudioService::Stop() {
     st_.monitor_last_error.clear();
     monitor_running_ = false;
     monitor_sink_requested_.clear();
+    monitor_sink_resolved_.clear();
     monitor_latency_ms_ = 0;
     monitor_volume_ = 0;
+    monitor_output_lost_ = false;
     consumer_detector_.reset();
   }
 }
@@ -1209,11 +1213,10 @@ void VirtualAudioService::ThreadMain() {
         std::lock_guard<std::mutex> lock(mu_);
         st_.monitor_last_error = std::move(msg);
       };
+      // Forgets the live route but keeps what the last start asked for, so a
+      // settings change stays tellable from a lost output.
       auto clearMonitorRouteState = [&]() {
         monitor_running_ = false;
-        monitor_sink_requested_.clear();
-        monitor_latency_ms_ = 0;
-        monitor_volume_ = 0;
         std::lock_guard<std::mutex> lock(mu_);
         st_.monitor_active = false;
         st_.monitor_module_id = -1;
@@ -1221,12 +1224,25 @@ void VirtualAudioService::ThreadMain() {
         st_.monitor_latency_ms_active = 0;
         st_.monitor_volume_active = 0;
       };
+      auto forgetMonitorRequest = [&]() {
+        monitor_sink_requested_.clear();
+        monitor_sink_resolved_.clear();
+        monitor_latency_ms_ = 0;
+        monitor_volume_ = 0;
+      };
 
       if (!wantMonitor) {
+        if (monitor_output_lost_) {
+          // Turning the monitor off ends the lost-output stop and its message.
+          monitor_output_lost_ = false;
+          forgetMonitorRequest();
+          setMonitorError(std::string());
+        }
         if (monitor_running_) {
           std::string err;
           if (StopMicMonitorRoute(&err)) {
             clearMonitorRouteState();
+            forgetMonitorRequest();
             setMonitorError(std::string());
           } else {
             setMonitorError("Failed to stop the microphone monitor: " + err);
@@ -1239,9 +1255,17 @@ void VirtualAudioService::ThreadMain() {
                           "the monitor.");
         }
       } else {
+        // A changed setting is an explicit restart by the user: it resolves
+        // the output afresh and ends a lost-output stop.
+        const bool monitorSettingsChanged =
+            monitor_sink_requested_ != monitorCfg.sink ||
+            monitor_latency_ms_ != monitorCfg.latency_ms;
+        if (monitorSettingsChanged)
+          monitor_output_lost_ = false;
+
         // The Pulse server unloads the loopback when the sink disappears, for
         // example when a headset is unplugged. Re-check now and then so the
-        // retry path can bring the monitor back.
+        // status follows the route.
         if (monitor_running_ && monitorNow >= nextMonitorVerify) {
           std::string detectErr;
           const auto live = DetectMicMonitorRoute(&detectErr);
@@ -1254,16 +1278,25 @@ void VirtualAudioService::ThreadMain() {
             setMonitorError("Failed to check the microphone monitor: " +
                             detectErr);
           } else if (!live.active) {
+            // The output is gone. A configured sink of "auto" would now
+            // resolve to whatever the Pulse default has become, usually the
+            // built-in speakers, which is a feedback loop the user never
+            // asked for. Stop instead and say what happened.
+            const std::string lost = monitor_sink_resolved_.empty()
+                                         ? monitorCfg.sink
+                                         : monitor_sink_resolved_;
             clearMonitorRouteState();
-            setMonitorError("The microphone monitor stopped. StudioCast is "
-                            "starting it again.");
+            monitor_output_lost_ = true;
+            setMonitorError("The monitor output '" + lost +
+                            "' disappeared, so the monitor stopped. Choose "
+                            "another output, or turn the monitor off and on "
+                            "again to use the system default.");
           }
         }
 
-        const bool needRestart = !monitor_running_ ||
-                                 monitor_sink_requested_ != monitorCfg.sink ||
-                                 monitor_latency_ms_ != monitorCfg.latency_ms ||
-                                 monitor_volume_ != monitorCfg.volume;
+        const bool needRestart = !monitor_output_lost_ &&
+                                 (!monitor_running_ || monitorSettingsChanged ||
+                                  monitor_volume_ != monitorCfg.volume);
 
         if (needRestart && monitorNow >= nextMonitorStartRetry) {
           MicMonitorState state;
@@ -1272,6 +1305,7 @@ void VirtualAudioService::ThreadMain() {
                                    &state, &err)) {
             monitor_running_ = true;
             monitor_sink_requested_ = monitorCfg.sink;
+            monitor_sink_resolved_ = state.sink;
             monitor_latency_ms_ = monitorCfg.latency_ms;
             monitor_volume_ = monitorCfg.volume;
             nextMonitorStartRetry = steady_clock::time_point{};
@@ -2709,8 +2743,10 @@ void VirtualAudioService::ThreadMain() {
     if (StopMicMonitorRoute(&err)) {
       monitor_running_ = false;
       monitor_sink_requested_.clear();
+      monitor_sink_resolved_.clear();
       monitor_latency_ms_ = 0;
       monitor_volume_ = 0;
+      monitor_output_lost_ = false;
       std::lock_guard<std::mutex> lock(mu_);
       st_.monitor_active = false;
       st_.monitor_module_id = -1;

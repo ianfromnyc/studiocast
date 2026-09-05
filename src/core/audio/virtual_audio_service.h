@@ -281,8 +281,15 @@ private:
 
   bool monitor_running_ = false;
   std::string monitor_sink_requested_;
+  // The output the last successful start really used. A configured sink of
+  // "auto" is resolved once, here, so a later restart cannot move the monitor
+  // onto whatever the Pulse default has become.
+  std::string monitor_sink_resolved_;
   int monitor_latency_ms_ = 0;
   int monitor_volume_ = 0;
+  // Set when the resolved output disappeared. The monitor then stays off until
+  // the user changes the setting or turns the monitor off and on again.
+  bool monitor_output_lost_ = false;
 
   VirtualAudioServiceHooks hooks_{};
   VirtualAudioServiceConfig cfg_{};

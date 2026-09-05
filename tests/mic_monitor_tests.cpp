@@ -758,6 +758,117 @@ bool TestServiceTreatsAFailedMonitorCheckAsStopped() {
   return ok;
 }
 
+// Pulse unloads the loopback when the chosen output disappears, and the Pulse
+// default moves to the built-in speakers on the same unplug. Re-resolving
+// "auto" would therefore move the monitor onto the speakers on its own and
+// build a feedback loop, so the monitor stops and says why instead.
+bool TestServiceStopsTheMonitorWhenTheResolvedOutputDisappears() {
+  MonitorRecorder rec;
+  std::atomic<bool> headset_present{true};
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  // "auto" resolves to the headset while it is plugged in, and to the built-in
+  // speakers once it is gone, the way the Pulse default sink moves.
+  auto start_monitor = hooks.start_mic_monitor;
+  hooks.start_mic_monitor = [&](const MicMonitorConfig &cfg,
+                                const std::string &source, MicMonitorState *out,
+                                std::string *error) {
+    MicMonitorConfig resolved = cfg;
+    if (resolved.sink == "auto") {
+      resolved.sink = headset_present.load(std::memory_order_relaxed)
+                          ? std::string("headset_test_sink")
+                          : std::string("speaker_test_sink");
+    }
+    return start_monitor(resolved, source, out, error);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            return service.Status().monitor_sink_active == "headset_test_sink";
+          },
+          1000ms)) {
+    std::cerr << "the monitor did not start on the headset\n";
+    service.Stop();
+    return false;
+  }
+
+  // The headset is unplugged: Pulse unloads the loopback and the default sink
+  // becomes the built-in speakers.
+  headset_present.store(false, std::memory_order_relaxed);
+  rec.running.store(false, std::memory_order_relaxed);
+
+  // The service checks the route every two seconds.
+  const bool reported = WaitUntil(
+      [&] {
+        const auto st = service.Status();
+        return !st.monitor_active &&
+               st.monitor_last_error.find("headset_test_sink") !=
+                   std::string::npos;
+      },
+      5000ms);
+  if (!reported) {
+    const auto st = service.Status();
+    std::cerr << "the lost monitor output was not reported: active="
+              << st.monitor_active << " error='" << st.monitor_last_error
+              << "'\n";
+    service.Stop();
+    return false;
+  }
+
+  // The monitor must stay off rather than follow the default onto the
+  // speakers.
+  std::this_thread::sleep_for(500ms);
+  bool ok = true;
+  {
+    std::lock_guard<std::mutex> lock(rec.mu);
+    if (rec.last_sink != "headset_test_sink") {
+      std::cerr << "the monitor moved to '" << rec.last_sink
+                << "' on its own\n";
+      ok = false;
+    }
+  }
+  if (service.Status().monitor_active) {
+    std::cerr << "the monitor restarted itself after the output was lost\n";
+    ok = false;
+  }
+
+  // Turning the monitor off and on again is an explicit restart, so the
+  // service resolves the default afresh.
+  cfg.monitor.enabled = false;
+  service.UpdateConfig(cfg);
+  if (!WaitUntil([&] { return service.Status().monitor_last_error.empty(); },
+                 1000ms)) {
+    std::cerr << "the lost-output error survived turning the monitor off\n";
+    ok = false;
+  }
+  cfg.monitor.enabled = true;
+  service.UpdateConfig(cfg);
+  if (!WaitUntil(
+          [&] {
+            return service.Status().monitor_sink_active == "speaker_test_sink";
+          },
+          1000ms)) {
+    std::cerr << "the monitor did not resolve the default again after the "
+                 "user turned it back on\n";
+    ok = false;
+  }
+
+  service.Stop();
+  return ok;
+}
+
 bool TestMonitorConsumerIsCountedApartFromApps() {
   MonitorRecorder rec;
   std::atomic<int> consumer_count{0};
@@ -980,6 +1091,8 @@ int main() {
        &TestServiceClearsMonitorErrorWhenItStops},
       {"service treats a failed monitor check as stopped",
        &TestServiceTreatsAFailedMonitorCheckAsStopped},
+      {"service stops the monitor when the resolved output disappears",
+       &TestServiceStopsTheMonitorWhenTheResolvedOutputDisappears},
       {"monitor consumer is counted apart from apps",
        &TestMonitorConsumerIsCountedApartFromApps},
       {"service drives the real helper through pactl",
