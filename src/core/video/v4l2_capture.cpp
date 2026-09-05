@@ -268,7 +268,7 @@ std::vector<std::uint32_t> EnumeratePixelFormatsAnyType(int fd) {
 
   const TypeSpec types[] = {
       {V4L2_BUF_TYPE_VIDEO_CAPTURE, false},
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
       {V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, true},
 #endif
   };
@@ -486,7 +486,7 @@ bool TrySetFmtCapture(int fd, const TypeSpec &t, int width, int height,
     f.fmt.pix.bytesperline = 0;
     f.fmt.pix.sizeimage = 0;
   } else {
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
     f.fmt.pix_mp.width = static_cast<__u32>(width);
     f.fmt.pix_mp.height = static_cast<__u32>(height);
     f.fmt.pix_mp.pixelformat = FourccFor(fmt);
@@ -505,7 +505,7 @@ bool TrySetFmtCapture(int fd, const TypeSpec &t, int width, int height,
     if (!t.mplane) {
       f.fmt.pix.pixelformat = fourcc;
     } else {
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
       f.fmt.pix_mp.pixelformat = fourcc;
 #else
       return false;
@@ -587,7 +587,7 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
       return false;
     }
   } else {
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
     w = static_cast<int>(f.fmt.pix_mp.width);
     h = static_cast<int>(f.fmt.pix_mp.height);
     fourcc = f.fmt.pix_mp.pixelformat;
@@ -780,7 +780,7 @@ bool V4l2Capture::Open(const std::string &device, int width, int height,
   // Try capture single-plane first, then mplane.
   const TypeSpec types[] = {
       {V4L2_BUF_TYPE_VIDEO_CAPTURE, false},
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
       {V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, true},
 #endif
   };
@@ -1060,7 +1060,7 @@ bool V4l2Capture::Open(const std::string &device, int width, int height,
         return false;
       }
     } else {
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
       v4l2_plane planes[1]{};
       v4l2_buffer b{};
       b.type = buf_type_;
@@ -1365,7 +1365,7 @@ bool V4l2Capture::AcquireFrame(CapturedFrameView *out, int timeout_ms,
     return true;
   }
 
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
   v4l2_plane planes[1]{};
   v4l2_buffer b{};
   b.type = buf_type_;
@@ -1428,7 +1428,7 @@ bool V4l2Capture::ReleaseFrame(const CapturedFrameView &f, std::string *error) {
     return true;
   }
 
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
   v4l2_plane planes[1]{};
   v4l2_buffer b{};
   b.type = buf_type_;
