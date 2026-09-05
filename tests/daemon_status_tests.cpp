@@ -2,6 +2,9 @@
 #include <iostream>
 #include <string>
 
+#include "core/audio/pulse/pactl.h"
+#include "core/util/exec.h"
+
 #define main studiocastd_main_disabled_for_tests
 #include "daemon/studiocastd_main.cpp"
 #undef main
@@ -598,6 +601,80 @@ bool TestAudioConfigPatchRejectsFractionalMonitorNumbers() {
   return ok;
 }
 
+// Runs every pactl command through `hook` for the life of the object, so a
+// check that reads the sound server never touches the host.
+class ScopedPactlExecHook final {
+public:
+  explicit ScopedPactlExecHook(
+      studiocast::audio::pulse::PactlExecCaptureHook hook) {
+    studiocast::audio::pulse::SetPactlExecCaptureHookForTesting(
+        std::move(hook));
+  }
+
+  ~ScopedPactlExecHook() {
+    studiocast::audio::pulse::SetPactlExecCaptureHookForTesting(nullptr);
+  }
+
+  ScopedPactlExecHook(const ScopedPactlExecHook &) = delete;
+  ScopedPactlExecHook &operator=(const ScopedPactlExecHook &) = delete;
+};
+
+studiocast::util::ExecResult PactlResult(int exit_code,
+                                         std::string stdout_str = {}) {
+  studiocast::util::ExecResult result;
+  result.exit_code = exit_code;
+  result.stdout_str = std::move(stdout_str);
+  return result;
+}
+
+// The monitor is a listening aid. When no safe output is left, refusing the
+// whole audio config would also refuse microphone processing, the feature the
+// user actually asked for. The monitor is turned off with a warning instead.
+bool TestUnsatisfiableMonitorDoesNotRefuseAudio() {
+  // One physical input and no output at all.
+  ScopedPactlExecHook hook([](const std::string &command) {
+    if (command == "pactl --version 2>&1")
+      return PactlResult(0, "pactl 17.0\n");
+    if (command == "pactl list short sources 2>&1") {
+      return PactlResult(0, "2\tphysical_test_mic\tmodule-alsa-card.c\t"
+                            "s16le 2ch 48000Hz\n");
+    }
+    if (command == "pactl get-default-source 2>&1")
+      return PactlResult(0, "physical_test_mic\n");
+    if (command == "pactl list short sinks 2>&1")
+      return PactlResult(0, "");
+    if (command == "pactl get-default-sink 2>&1")
+      return PactlResult(1, "no default sink\n");
+    return PactlResult(0, "");
+  });
+
+  studiocast::audio::VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.source_name = "physical_test_mic";
+  cfg.monitor.enabled = true;
+  cfg.monitor.sink = "auto";
+
+  std::vector<std::string> warnings;
+  std::string error;
+  const bool safe = ValidateAudioConfigSafetyForDaemon(
+      &cfg, "physical_test_mic", &warnings, &error);
+
+  bool ok = Expect(safe, "microphone processing should still be allowed");
+  if (!ok)
+    std::cerr << "the refusal was: " << error << "\n";
+  ok = Expect(!cfg.monitor.enabled,
+              "the monitor that cannot be satisfied should be turned off") &&
+       ok;
+
+  bool named = false;
+  for (const auto &warning : warnings) {
+    if (warning.find("monitor") != std::string::npos)
+      named = true;
+  }
+  ok = Expect(named, "a warning should say the monitor was turned off") && ok;
+  return ok;
+}
+
 bool TestAudioConfigPatchRejectsUnsafeMonitorSink() {
   studiocast::audio::VirtualAudioServiceConfig cfg;
   std::vector<std::string> warnings;
@@ -611,7 +688,7 @@ bool TestAudioConfigPatchRejectsUnsafeMonitorSink() {
 
   error.clear();
   const bool safe = ValidateAudioConfigSafetyForDaemon(
-      cfg, /*resolvedSource=*/"", &warnings, &error);
+      &cfg, /*resolvedSource=*/"", &warnings, &error);
   return Expect(!safe, "a StudioCast sink should be refused for the monitor") &&
          Expect(!error.empty(), "the refusal should carry a reason");
 }
@@ -629,7 +706,7 @@ bool TestAudioConfigSafetyUsesTheResolvedMicSource() {
   std::vector<std::string> warnings;
   std::string error;
   const bool safe = ValidateAudioConfigSafetyForDaemon(
-      cfg, "alsa_output.usb_headset.monitor", &warnings, &error);
+      &cfg, "alsa_output.usb_headset.monitor", &warnings, &error);
 
   return Expect(!safe,
                 "a sink the resolved microphone monitors should be refused") &&
@@ -792,6 +869,7 @@ int main() {
   ok = TestAudioConfigPatchRejectsFractionalMonitorNumbers() && ok;
   ok = TestAudioConfigPatchRejectsExtremeMonitorNumbers() && ok;
   ok = TestAudioConfigPatchRejectsUnsafeMonitorSink() && ok;
+  ok = TestUnsatisfiableMonitorDoesNotRefuseAudio() && ok;
   ok = TestAudioStatusReportsMonitor() && ok;
   ok = TestAudioConfigSafetyUsesTheResolvedMicSource() && ok;
   ok = TestAudioStatusFlagsMonitorFeedbackOnTheResolvedSource() && ok;

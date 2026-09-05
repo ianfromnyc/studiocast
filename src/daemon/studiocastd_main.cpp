@@ -2042,10 +2042,18 @@ bool ApplyAudioConfigPatchJsonText(
   return true;
 }
 
+// Checks an audio config the daemon is about to apply. `cfg` may be corrected:
+// a microphone monitor that no output can satisfy is turned off with a warning
+// rather than refusing the whole config, because that would also refuse
+// microphone processing.
 bool ValidateAudioConfigSafetyForDaemon(
-    const studiocast::audio::VirtualAudioServiceConfig &cfg,
+    studiocast::audio::VirtualAudioServiceConfig *cfg_inout,
     const std::string &resolved_source_name, std::vector<std::string> *warnings,
     std::string *error) {
+  if (!cfg_inout)
+    return false;
+  studiocast::audio::VirtualAudioServiceConfig &cfg = *cfg_inout;
+
   // A source of "auto" names no input. The feedback checks below need the
   // input the service really captures, so read the resolved name and keep the
   // configured one for the case where the service has not resolved one yet.
@@ -2101,12 +2109,18 @@ bool ValidateAudioConfigSafetyForDaemon(
     std::string monitorErr;
     if (!studiocast::audio::ChooseSafeMicMonitorSinkName(
             cfg.monitor.sink, micSource, &monitorErr)) {
-      if (error) {
-        *error = "Unsafe microphone monitor configuration: " +
-                 (monitorErr.empty() ? "no safe physical output sink was found"
-                                     : monitorErr);
+      // The monitor only lets the user hear the effects. Refusing the config
+      // would also refuse microphone processing, so turn the monitor off and
+      // say why instead.
+      cfg.monitor.enabled = false;
+      if (warnings) {
+        warnings->push_back(
+            "The microphone monitor was turned off because no safe output "
+            "was found: " +
+            (monitorErr.empty() ? std::string("no safe physical output sink "
+                                              "was found")
+                                : monitorErr));
       }
-      return false;
     }
   }
 
@@ -2477,7 +2491,7 @@ int main(int argc, char **argv) {
               std::vector<std::string> warnings;
               std::string verr;
               if (!ValidateAudioConfigSafetyForDaemon(
-                      newCfg, audioSvc.Status().selected_source, &warnings,
+                      &newCfg, audioSvc.Status().selected_source, &warnings,
                       &verr)) {
                 return std::string("ERR ") +
                        ErrorJson(verr.empty() ? "invalid audio config" : verr);
@@ -2531,7 +2545,7 @@ int main(int argc, char **argv) {
                                               : jerr);
               }
               if (!ValidateAudioConfigSafetyForDaemon(
-                      newCfg, audioSvc.Status().selected_source, &warnings,
+                      &newCfg, audioSvc.Status().selected_source, &warnings,
                       &jerr)) {
                 return std::string("ERR ") +
                        ErrorJson(jerr.empty() ? "invalid audio config" : jerr);
