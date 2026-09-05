@@ -456,6 +456,11 @@ sc_ngc_list_kind_files() {
   local rc=0
   local listing=""
 
+  if ! [[ "${SC_NGC_MAX_PAGES}" =~ ^[0-9]+$ ]] || [[ "${SC_NGC_MAX_PAGES}" -lt 1 ]]; then
+    sc_ngc_err "SC_NGC_MAX_PAGES must be a whole number of 1 or more, not '${SC_NGC_MAX_PAGES}'."
+    return 2
+  fi
+
   base="$(sc_ngc_kind_url "${kind}" "${resource}")/versions/${version}/files"
   page=0
   pages=1
@@ -513,12 +518,19 @@ PY
     fi
 
     # Join this page onto what the earlier pages gave, without blank lines and
-    # without repeats. An API that ignores the page number serves page 0 every
-    # time, so a page that adds nothing means there is no more to get. Stop
-    # there, or a large totalPages makes this loop ask for hours.
-    merged="$(printf '%s\n%s\n' "${listing}" \
-      "$(printf '%s\n' "${chunk}" | tail -n +2)" | awk 'NF && !seen[$0]++')"
-    if [[ "${merged}" == "${listing}" ]]; then
+    # without repeats.
+    local entries
+    entries="$(printf '%s\n' "${chunk}" | tail -n +2 | awk 'NF')"
+    merged="$(printf '%s\n%s\n' "${listing}" "${entries}" | awk 'NF && !seen[$0]++')"
+
+    # An API that ignores the page number serves page 0 every time. Such a page
+    # holds files, and every one of them is already known, so there is no more
+    # to get. Stop there, or a large totalPages makes this loop ask for hours.
+    #
+    # A page that holds no file at all is a different thing: the pages after it
+    # can still hold files, so go on and do not lose them.
+    if [[ -n "${entries}" && "${merged}" == "${listing}" ]]; then
+      sc_ngc_err "page ${page} of the file list for '${resource}' version ${version} repeats what the pages before it gave. Stopping after ${page} of ${pages} pages."
       break
     fi
     listing="${merged}"

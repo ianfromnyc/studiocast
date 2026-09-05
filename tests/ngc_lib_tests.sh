@@ -826,6 +826,107 @@ CHILD
   fi
 }
 
+# A page in the middle that holds no file is not a page that repeats an
+# earlier one: the pages after it can still hold files. The loop must go on,
+# or a listing loses files and still reports success.
+test_an_empty_middle_page_does_not_end_the_listing() {
+  local listing="${SANDBOX}/gap.json"
+  cat > "${listing}" <<'JSON'
+{
+  "modelFiles": [{"path": "first.trtpkg", "sizeInBytes": 1}],
+  "paginationInfo": {"totalPages": 3}
+}
+JSON
+  cat > "${listing}.page1" <<'JSON'
+{
+  "modelFiles": [],
+  "paginationInfo": {"totalPages": 3}
+}
+JSON
+  cat > "${listing}.page2" <<'JSON'
+{
+  "modelFiles": [{"path": "last.trtpkg", "sizeInBytes": 2}],
+  "paginationInfo": {"totalPages": 3}
+}
+JSON
+
+  local child="${SANDBOX}/gap-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+unset NGC_API_KEY NGC_CLI_API_KEY
+sc_ngc_log() { :; }
+sc_ngc_err() { :; }
+# shellcheck source=/dev/null
+source "$1"
+export SC_NGC_API_KEY="$2"
+export SC_NGC_AUTHN_HOST="https://authn.invalid"
+export SC_NGC_HOST="https://api.invalid"
+export SC_NGC_RETRIES=1
+sc_ngc_list_model_files test-model 1.0
+CHILD
+
+  local out
+  out="$(timeout 30 env NGC_CURL_LOG="${SANDBOX}/gap.log" \
+    NGC_STUB_LISTING="${listing}" \
+    bash "${child}" "${NGC_LIB}" "${MODERN_KEY}" 2>/dev/null)"
+
+  if [[ "${out}" != *first.trtpkg* ]]; then
+    t_fail "the listing lost the file of the first page: ${out}"
+  else
+    t_pass "an empty page keeps what the pages before it gave"
+  fi
+
+  if [[ "${out}" != *last.trtpkg* ]]; then
+    t_fail "an empty middle page ended the listing early: ${out}"
+  else
+    t_pass "an empty middle page does not end the listing"
+  fi
+}
+
+# A page limit that is not a number reads as 0 in an arithmetic test, which
+# refuses every listing. Say what is wrong with the setting instead.
+test_a_page_limit_that_is_not_a_number_is_refused() {
+  local listing="${SANDBOX}/badlimit.json"
+  cat > "${listing}" <<'JSON'
+{
+  "modelFiles": [{"path": "only.trtpkg", "sizeInBytes": 1}],
+  "paginationInfo": {"totalPages": 1}
+}
+JSON
+
+  local child="${SANDBOX}/badlimit-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+unset NGC_API_KEY NGC_CLI_API_KEY
+# shellcheck source=/dev/null
+source "$1"
+export SC_NGC_API_KEY="$2"
+export SC_NGC_AUTHN_HOST="https://authn.invalid"
+export SC_NGC_HOST="https://api.invalid"
+export SC_NGC_RETRIES=1
+export SC_NGC_MAX_PAGES=all
+sc_ngc_list_model_files test-model 1.0 >/dev/null
+echo "RC=$?"
+CHILD
+
+  local out
+  out="$(timeout 30 env NGC_CURL_LOG="${SANDBOX}/badlimit.log" \
+    NGC_STUB_LISTING="${listing}" \
+    bash "${child}" "${NGC_LIB}" "${MODERN_KEY}" 2>&1)"
+
+  if [[ "${out}" != *"RC=2"* ]]; then
+    t_fail "a page limit that is not a number should end the call: ${out}"
+  else
+    t_pass "a page limit that is not a number ends the call"
+  fi
+
+  if [[ "${out}" != *"SC_NGC_MAX_PAGES must be"* ]]; then
+    t_fail "the refusal did not say what is wrong with the setting: ${out}"
+  else
+    t_pass "the refusal says what SC_NGC_MAX_PAGES needs"
+  fi
+}
+
 # A page count no answer can justify must end the call with a message, not
 # with a loop that runs until the user stops it.
 test_an_absurd_page_count_is_refused() {
@@ -953,6 +1054,8 @@ test_a_refused_resume_starts_over
 test_a_failed_download_names_the_partial_file
 test_a_page_that_adds_nothing_stops_the_listing
 test_an_absurd_page_count_is_refused
+test_an_empty_middle_page_does_not_end_the_listing
+test_a_page_limit_that_is_not_a_number_is_refused
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2
