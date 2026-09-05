@@ -229,7 +229,11 @@ Fedora RPM packaging:
   `studiocast-<version>-rpm.sha256` checksum file.
 - `--container` runs rpmbuild inside a `registry.fedoraproject.org/fedora:44`
   podman or docker container. Use it on a host that is not Fedora 44. The
-  container build takes about 2.5 minutes on a 32-core machine.
+  container build takes about 2.5 minutes on a 32-core machine. The container
+  runs `packaging/rpm/container_build.sh`, which the script copies into the
+  build directory; the install test runs `packaging/rpm/install_test.sh` over
+  stdin. Both are checked-in files, so `shellcheck -x` reads them like the
+  other packaging scripts.
 - Other options: `--srpm-only` builds the source RPM only, `--with NAME` and
   `--without NAME` change a spec build conditional, `--install-builddeps` runs
   `dnf builddep` on the rendered spec before a native build (needs root or
