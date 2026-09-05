@@ -889,6 +889,28 @@ bool TestLoaderPathValue() {
   return ok;
 }
 
+// One rule about ':' in a directory name, one function. The loader path
+// builder and the hint of the effect must both read it from the same place,
+// or the two can drift apart the way they did once before.
+bool TestOneRuleForAColonInADirectoryName() {
+  using studiocast::maxine::afx::CanGoOnLoaderPath;
+  using studiocast::maxine::afx::LdLibraryPathWithDirs;
+
+  bool ok = true;
+
+  ok &= Require(CanGoOnLoaderPath("/afx/denoiser/lib"),
+                "expected an ordinary directory to be usable");
+  ok &= Require(!CanGoOnLoaderPath("/afx/od:d/lib"),
+                "expected a directory holding a colon to be refused");
+
+  // The builder must answer the same way, because it is the code that puts a
+  // directory on the loader path.
+  ok &= Require(!LdLibraryPathWithDirs("", {"/afx/od:d/lib"}).has_value(),
+                "expected the builder to leave out what the rule refuses");
+
+  return ok;
+}
+
 // `NvAFX_Run` takes one pointer per channel and the channel count. Passing a
 // plain buffer, as an earlier ABI did, made the SDK read a sample as a
 // pointer.
@@ -1220,6 +1242,7 @@ int main() {
   ok = TestTheHintForAColonDirectorySaysToRenameIt() && ok;
   ok = TestFeatureLibDirsAreListed() && ok;
   ok = TestLoaderPathValue() && ok;
+  ok = TestOneRuleForAColonInADirectoryName() && ok;
   ok = TestAFailedRestartPutsTheEnvironmentBack() && ok;
   ok = TestRunPassesChannelPointers() && ok;
   ok = TestExecPathForRestart() && ok;

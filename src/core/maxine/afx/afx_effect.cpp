@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "core/maxine/afx/afx_loader_path.h"
+
 namespace studiocast::maxine::afx {
 
 namespace {
@@ -186,18 +188,12 @@ std::vector<fs::path> FeatureLibraryCandidates(const fs::path &lib_dir,
   return out;
 }
 
-// The loader splits LD_LIBRARY_PATH on ':', so a directory whose path holds
-// one can never be found on that path.
-bool CanGoOnLoaderPath(const fs::path &dir) {
-  return dir.string().find(':') == std::string::npos;
-}
-
 // True when `dir` is on LD_LIBRARY_PATH of this process.
 //
 // This compares against the entries of the variable itself. Asking
 // LdLibraryPathWithDirs whether it wants to add the directory would answer
-// "already there" for a directory whose path holds a ':', because that
-// function leaves such a directory out for the reason above.
+// "already there" for a directory that CanGoOnLoaderPath refuses, because
+// that function leaves such a directory out.
 bool LoaderPathHasDir(const fs::path &dir) {
   if (dir.empty() || !CanGoOnLoaderPath(dir))
     return false;

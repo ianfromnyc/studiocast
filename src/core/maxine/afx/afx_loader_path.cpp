@@ -63,6 +63,10 @@ std::vector<fs::path> AfxFeatureLibDirs(const fs::path &features_dir) {
   return out;
 }
 
+bool CanGoOnLoaderPath(const fs::path &dir) {
+  return dir.string().find(':') == std::string::npos;
+}
+
 std::optional<std::string>
 LdLibraryPathWithDirs(const std::string &current,
                       const std::vector<fs::path> &dirs) {
@@ -79,11 +83,10 @@ LdLibraryPathWithDirs(const std::string &current,
     const std::string s = dir.string();
     if (s.empty() || already_there(s))
       continue;
-    // The loader splits LD_LIBRARY_PATH on ':', so a directory whose name
-    // holds one can never be found on the path it was just added to. Adding it
-    // would make the "already there" test above fail forever, and every start
-    // would end with one wasted restart.
-    if (s.find(':') != std::string::npos)
+    // A directory that can never be found on the path must not go on it:
+    // adding it would make the "already there" test above fail forever, and
+    // every start would end with one wasted restart.
+    if (!CanGoOnLoaderPath(dir))
       continue;
     if (std::find(missing.begin(), missing.end(), s) == missing.end())
       missing.push_back(s);
@@ -137,12 +140,11 @@ void EnsureAfxFeatureLibsOnLoaderPath(char **argv, std::string *note,
   // so: the effects it holds cannot load until it is renamed.
   std::string unusable;
   for (const auto &d : dirs) {
-    const std::string s = d.string();
-    if (s.find(':') == std::string::npos)
+    if (CanGoOnLoaderPath(d))
       continue;
     if (!unusable.empty())
       unusable += ", ";
-    unusable += s;
+    unusable += d.string();
   }
   auto add_unusable_note = [&unusable](std::string *out) {
     if (!out || unusable.empty())

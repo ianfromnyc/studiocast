@@ -15,6 +15,14 @@ namespace fs = std::filesystem;
 // must be on the loader path of the process that runs the effect.
 std::vector<fs::path> AfxFeatureLibDirs(const fs::path &features_dir);
 
+// True when the loader can find `dir` on LD_LIBRARY_PATH.
+//
+// The loader splits LD_LIBRARY_PATH on ':', so a directory whose name holds
+// one can never be found on the path it was added to. Every place that puts a
+// directory on the loader path, or that tells the user why a directory is not
+// on it, asks this one function, so the answers cannot drift apart.
+bool CanGoOnLoaderPath(const fs::path &dir);
+
 // The value that LD_LIBRARY_PATH needs so that the loader finds `dirs`. The
 // directories that are missing go in front, and `current` stays after them.
 // Returns nothing when `current` already holds every directory.
