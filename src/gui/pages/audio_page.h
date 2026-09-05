@@ -4,6 +4,8 @@
 #include <QStringList>
 #include <QWidget>
 
+#include <atomic>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -300,6 +302,12 @@ private:
   QThread *sourceRefreshThread_ = nullptr;
   QThread *speakerTargetRefreshThread_ = nullptr;
   QThread *monitorSinkRefreshThread_ = nullptr;
+  // Set when the page goes away. Each listing reads it between its pactl
+  // calls, so closing the window on a wedged sound server waits for the call
+  // that is running and not for all three of them. The listings hold their own
+  // reference, so the flag outlives the page.
+  std::shared_ptr<std::atomic<bool>> refreshCancelled_ =
+      std::make_shared<std::atomic<bool>>(false);
 };
 
 } // namespace studiocast::gui

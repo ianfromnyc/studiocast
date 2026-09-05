@@ -961,9 +961,12 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
 
 // The device listings run on threads that report back through the event loop.
 // A page that goes away before that loop runs would leave them inside `popen`,
-// so wait for each one here. The listing has no cancellation point, so the
-// wait is for the pactl call that is already running.
+// so wait for each one here. Each listing reads the cancellation flag between
+// its pactl calls, so the wait is for the one call that is already running and
+// not for the two that would follow it.
 AudioPage::~AudioPage() {
+  refreshCancelled_->store(true, std::memory_order_release);
+
   QThread *const threads[] = {sourceRefreshThread_, speakerTargetRefreshThread_,
                               monitorSinkRefreshThread_};
   sourceRefreshThread_ = nullptr;
@@ -1104,13 +1107,16 @@ void AudioPage::RefreshSources() {
     refreshSourcesBtn_->setEnabled(false);
 
   auto result = std::make_shared<SourceRefreshResult>();
-  auto *thread = QThread::create([result] {
+  auto cancelled = refreshCancelled_;
+  auto *thread = QThread::create([result, cancelled] {
     result->pactlOk =
         studiocast::audio::pulse::PactlAvailable(&result->pactlDetails);
-    if (!result->pactlOk)
+    if (!result->pactlOk || cancelled->load(std::memory_order_acquire))
       return;
     result->sources =
         studiocast::audio::pulse::ListSourcesDetailed(&result->listError);
+    if (cancelled->load(std::memory_order_acquire))
+      return;
     std::string defaultError;
     result->defaultSource =
         studiocast::audio::pulse::GetDefaultSourceName(&defaultError);
@@ -1244,12 +1250,15 @@ void AudioPage::RefreshSpeakerTargets() {
     refreshSpeakerTargetsBtn_->setEnabled(false);
 
   auto result = std::make_shared<SpeakerTargetRefreshResult>();
-  auto *thread = QThread::create([result] {
+  auto cancelled = refreshCancelled_;
+  auto *thread = QThread::create([result, cancelled] {
     result->pactlOk =
         studiocast::audio::pulse::PactlAvailable(&result->pactlDetails);
-    if (!result->pactlOk)
+    if (!result->pactlOk || cancelled->load(std::memory_order_acquire))
       return;
     result->sinks = studiocast::audio::pulse::ListSinks(&result->listError);
+    if (cancelled->load(std::memory_order_acquire))
+      return;
     std::string defaultError;
     result->defaultSink =
         studiocast::audio::pulse::GetDefaultSinkName(&defaultError);
@@ -1407,12 +1416,15 @@ void AudioPage::RefreshMonitorSinks() {
   UpdateMonitorControlsEnabled();
 
   auto result = std::make_shared<SpeakerTargetRefreshResult>();
-  auto *thread = QThread::create([result] {
+  auto cancelled = refreshCancelled_;
+  auto *thread = QThread::create([result, cancelled] {
     result->pactlOk =
         studiocast::audio::pulse::PactlAvailable(&result->pactlDetails);
-    if (!result->pactlOk)
+    if (!result->pactlOk || cancelled->load(std::memory_order_acquire))
       return;
     result->sinks = studiocast::audio::pulse::ListSinks(&result->listError);
+    if (cancelled->load(std::memory_order_acquire))
+      return;
     std::string defaultError;
     result->defaultSink =
         studiocast::audio::pulse::GetDefaultSinkName(&defaultError);

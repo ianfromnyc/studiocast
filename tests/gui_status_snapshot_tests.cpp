@@ -1608,6 +1608,42 @@ bool TestAudioPageWaitsForItsDeviceListings() {
   return ok;
 }
 
+// Each device listing runs three pactl calls one after the other, and each
+// call can wait its full timeout on a wedged sound server. A page that goes
+// away must stop its listings between the calls, so that closing the window
+// waits for the one call that is running and not for all three.
+bool TestAudioPageStopsItsListingsBetweenPactlCalls() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-cancel");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  std::atomic<int> commands{0};
+  ScopedPactlExecHook pactl([&commands](const std::string &) {
+    // A slow sound server, so the page goes away while a call is running.
+    std::this_thread::sleep_for(200ms);
+    commands.fetch_add(1, std::memory_order_relaxed);
+    studiocast::util::ExecResult result;
+    result.exit_code = 0;
+    return result;
+  });
+
+  {
+    studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+  }
+
+  // The page starts two listings, of three calls each. Both are inside their
+  // first call when the page goes away, so a listing that stops between the
+  // calls runs about two calls in total, and one that does not runs six.
+  const int commandsRun = commands.load(std::memory_order_relaxed);
+  const bool ok = Expect(commandsRun <= 4,
+                         "a listing should stop between its pactl calls when "
+                         "the page goes away");
+  if (!ok)
+    std::cerr << "pactl calls before the page was gone: " << commandsRun
+              << "\n";
+  return ok;
+}
+
 // The daemon owns the monitor route, so a daemon that does not report a
 // monitor refuses every write the group can make. All of the controls must go
 // dead together, not the check box alone, and they must come back when a
@@ -2200,6 +2236,7 @@ int main(int argc, char **argv) {
   ok = TestVideoPageKeepsReplaceModeSelectedWhileImagePathIsMissing() && ok;
 
   ok = TestAudioPageWaitsForItsDeviceListings() && ok;
+  ok = TestAudioPageStopsItsListingsBetweenPactlCalls() && ok;
   ok = TestAudioPageShowsTheMonitorNoteWithoutSendingUserToSupport() && ok;
   ok = TestAudioPageDebouncesTheMonitorWrites() && ok;
   ok = TestAudioPageKeepsTheMonitorControlsWhileAWriteIsPending() && ok;
