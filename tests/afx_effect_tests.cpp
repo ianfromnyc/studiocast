@@ -4,6 +4,8 @@
 // library. These tests build such a features directory and check what
 // AfxEffect::Configure resolves.
 
+#include <cerrno>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -720,6 +722,63 @@ bool TestFeatureLibDirsAreListed() {
   return ok;
 }
 
+// Stands in for execv in the check below. It fails the way execv does when the
+// program file is gone, so the function under test keeps running.
+int FailingExec(const char *, char *const[]) {
+  errno = ENOENT;
+  return -1;
+}
+
+// A restart that fails leaves this process running. The loader path and the
+// guard belong to the program that was going to start, so they must not stay
+// behind: the guard would make a later call report a restart that never
+// happened, and every child this process starts would be given the AFX
+// feature directories on its own loader path.
+bool TestAFailedRestartPutsTheEnvironmentBack() {
+  const fs::path root = TempRoot("execfail");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path afx_root = root / "Audio_Effects_SDK";
+  if (!MakeFeaturesDir(afx_root / "features") ||
+      !MakeLibrary(afx_root / "nvafx" / "lib", "core")) {
+    std::cerr << "failed to build the AFX root\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+  // AfxEffect needs no core library here, but ResolveMaxinePaths looks for
+  // one, so give it the name the resolver knows.
+  Touch(afx_root / "nvafx" / "lib" / "libnv_audiofx.so");
+
+  const std::string kOldPath = "/opt/studiocast/lib";
+  ::setenv("STUDIOCAST_AFX_SDK_ROOT", afx_root.c_str(), 1);
+  ::setenv("LD_LIBRARY_PATH", kOldPath.c_str(), 1);
+  ::unsetenv("STUDIOCAST_AFX_LOADER_PATH_REEXEC");
+
+  char program[] = "studiocast-test";
+  char *argv[] = {program, nullptr};
+  std::string note;
+  studiocast::maxine::afx::AfxLoaderPathHooks hooks;
+  hooks.exec = &FailingExec;
+  studiocast::maxine::afx::EnsureAfxFeatureLibsOnLoaderPath(argv, &note, hooks);
+
+  const char *after = std::getenv("LD_LIBRARY_PATH");
+  const char *guard = std::getenv("STUDIOCAST_AFX_LOADER_PATH_REEXEC");
+
+  bool ok = Require(after != nullptr && std::string(after) == kOldPath,
+                    "expected LD_LIBRARY_PATH to be put back, got '" +
+                        std::string(after ? after : "(unset)") + "'");
+  ok &= Require(guard == nullptr,
+                "expected the re-exec guard to be unset after a failed exec");
+  ok &= Require(note.find("Failed to restart") != std::string::npos,
+                "expected the note to report the failed restart, got: " + note);
+
+  ::unsetenv("STUDIOCAST_AFX_SDK_ROOT");
+  ::unsetenv("LD_LIBRARY_PATH");
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 // The new LD_LIBRARY_PATH keeps what is there and adds what is missing.
 bool TestLoaderPathValue() {
   using studiocast::maxine::afx::LdLibraryPathWithDirs;
@@ -1016,6 +1075,7 @@ int main() {
   ok = TestTheLoaderPathHintNamesNoProgram() && ok;
   ok = TestFeatureLibDirsAreListed() && ok;
   ok = TestLoaderPathValue() && ok;
+  ok = TestAFailedRestartPutsTheEnvironmentBack() && ok;
   ok = TestRunPassesChannelPointers() && ok;
   ok = TestExecPathForRestart() && ok;
   ok = TestAnUnexpectedSetErrorKeepsItsMessage() && ok;

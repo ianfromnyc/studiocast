@@ -31,6 +31,13 @@ LdLibraryPathWithDirs(const std::string &current,
 // target is unknown, is not absolute, or names a program file that is gone.
 fs::path ExecPathForRestart(const fs::path &self_exe_target);
 
+// Stand-ins the tests put in place of the calls this file makes. A member that
+// is null keeps the real call, which is what every program uses.
+struct AfxLoaderPathHooks {
+  // execv(3). A test uses it to see what happens when the restart fails.
+  int (*exec)(const char *path, char *const argv[]) = nullptr;
+};
+
 // Puts the AFX feature library directories on the loader path.
 //
 // glibc reads LD_LIBRARY_PATH once, at start, so a program can only change
@@ -39,7 +46,12 @@ fs::path ExecPathForRestart(const fs::path &self_exe_target);
 // there is no AFX install, when the path already holds the directories, or
 // when this process is itself the result of such a re-exec.
 //
+// A restart that fails leaves the environment as it was, so the children this
+// process starts later are not given the feature directories, and a later call
+// does not read the guard as a restart that happened.
+//
 // `note` receives a line worth logging, and stays empty when nothing happened.
-void EnsureAfxFeatureLibsOnLoaderPath(char **argv, std::string *note);
+void EnsureAfxFeatureLibsOnLoaderPath(char **argv, std::string *note,
+                                      const AfxLoaderPathHooks &hooks = {});
 
 } // namespace studiocast::maxine::afx

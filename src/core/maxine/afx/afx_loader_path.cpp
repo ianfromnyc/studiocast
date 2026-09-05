@@ -121,7 +121,8 @@ fs::path ExecPathForRestart(const fs::path &self_exe_target) {
   return self_exe_target;
 }
 
-void EnsureAfxFeatureLibsOnLoaderPath(char **argv, std::string *note) {
+void EnsureAfxFeatureLibsOnLoaderPath(char **argv, std::string *note,
+                                      const AfxLoaderPathHooks &hooks) {
   if (note)
     note->clear();
   if (!argv || !argv[0])
@@ -153,9 +154,12 @@ void EnsureAfxFeatureLibsOnLoaderPath(char **argv, std::string *note) {
             unusable + ". Rename them.";
   };
 
+  // Keep a copy, not the pointer: setenv below can move what getenv returned.
   const char *current = std::getenv("LD_LIBRARY_PATH");
-  const auto next = LdLibraryPathWithDirs(
-      current ? std::string(current) : std::string(), dirs);
+  const bool had_loader_path = current != nullptr;
+  const std::string old_loader_path = current ? std::string(current) : "";
+
+  const auto next = LdLibraryPathWithDirs(old_loader_path, dirs);
   if (!next) {
     add_unusable_note(note);
     return;
@@ -170,12 +174,27 @@ void EnsureAfxFeatureLibsOnLoaderPath(char **argv, std::string *note) {
     return;
   }
 
+  // The environment belongs to the program that starts again. This process
+  // only keeps the new values while execv is on its way; every path that
+  // returns instead puts them back, because the guard would make a later call
+  // report a restart that did not happen, and every child this process starts
+  // would be given the feature directories on its own loader path.
+  auto restore_env = [had_loader_path, &old_loader_path]() {
+    if (had_loader_path)
+      (void)::setenv("LD_LIBRARY_PATH", old_loader_path.c_str(), 1);
+    else
+      (void)::unsetenv("LD_LIBRARY_PATH");
+    (void)::unsetenv(kReexecGuard);
+  };
+
   if (::setenv("LD_LIBRARY_PATH", next->c_str(), 1) != 0 ||
       ::setenv(kReexecGuard, "1", 1) != 0) {
+    const int set_errno = errno;
+    restore_env();
     if (note) {
       *note = std::string("Failed to set LD_LIBRARY_PATH for the AFX feature "
                           "libraries: ") +
-              std::strerror(errno);
+              std::strerror(set_errno);
     }
     return;
   }
@@ -186,12 +205,16 @@ void EnsureAfxFeatureLibsOnLoaderPath(char **argv, std::string *note) {
   std::error_code ec;
   const fs::path self = fs::read_symlink(kSelfExeLink, ec);
   const fs::path program = ExecPathForRestart(ec ? fs::path() : self);
-  ::execv(program.c_str(), argv);
+  const auto exec_fn = hooks.exec ? hooks.exec : &::execv;
+  exec_fn(program.c_str(), argv);
 
+  // execv only returns when it failed, so this process keeps running.
+  const int exec_errno = errno;
+  restore_env();
   if (note) {
     *note = std::string("Failed to restart with the AFX feature libraries on "
                         "the loader path: ") +
-            std::strerror(errno);
+            std::strerror(exec_errno);
   }
 }
 
