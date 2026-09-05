@@ -314,6 +314,36 @@ jobs:
           packaging/appimage/verify_bundle.sh \
             --dist-dir "${PWD}/dist/ci-package-smoke"
 
+  # The packaging scripts are checked-in files rather than heredocs so that a
+  # linter can read them. This job is that linter, so a regression such as the
+  # one an unquoted glob caused cannot come back unnoticed.
+  shell-lint:
+    name: shellcheck (packaging scripts)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The same image the packages are built in, so the ShellCheck version is
+    # the one the packaging targets.
+    container:
+      image: registry.fedoraproject.org/fedora:44
+
+    steps:
+      - name: Install ShellCheck
+        # git is needed by the checkout action; it is not in the base image.
+        run: |
+          dnf install -y --setopt=install_weak_deps=false ShellCheck git
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint the packaging scripts
+        # -x follows a sourced file, so a helper library is read with the
+        # script that uses it. Every script under packaging/ is covered, so a
+        # new one joins the job on its own. scripts/install/dlib.sh is here as
+        # well, because the RPM build downloads the pinned dlib source with it.
+        run: |
+          mapfile -t files < <(find packaging -name '*.sh' | sort)
+          shellcheck -x "${files[@]}" scripts/install/dlib.sh
+
   # The RPM build is also the only Fedora build in push CI, so it checks the
   # sources against the Fedora compiler and the Fedora Qt 6 as well.
   rpm-package-smoke:

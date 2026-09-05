@@ -3,8 +3,8 @@
 #
 # packaging/rpm/verify_rpm.sh feeds this file to bash as root, either in a
 # container it starts or in a container the caller is already inside. It is a
-# checked-in file rather than a heredoc, so the shell linter reads it like
-# every other script here. It changes the system, so do not run it on a machine
+# checked-in file rather than a heredoc, so the shell-lint job in
+# .github/workflows/ci.yml reads it like every other script here. It changes the system, so do not run it on a machine
 # you want to keep.
 #
 # Usage: install_test.sh VERSION ARCH DIST_DIR HAS_DLIB

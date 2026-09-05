@@ -4,7 +4,8 @@
 # packaging/rpm/build_rpm.sh --container copies this file into the build
 # directory as container-build.sh, mounts that directory at /work, and runs it
 # as root in the container. It is a checked-in file rather than a heredoc, so
-# the shell linter reads it like every other script here.
+# the shell-lint job in .github/workflows/ci.yml reads it like every other
+# script here.
 #
 # Usage: container_build.sh SRPM_ONLY RUN_RPMLINT [rpmbuild argument ...]
 #   SRPM_ONLY     1 stops after the source RPM.

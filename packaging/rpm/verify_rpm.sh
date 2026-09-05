@@ -8,8 +8,9 @@ VERSION="$(tr -d '[:space:]' < "${REPO_ROOT}/VERSION")"
 ARCH="$(uname -m)"
 FEDORA_RELEASE=44
 DIST_DIR="${REPO_ROOT}/dist/rpm"
-# The install test is a checked-in script rather than a heredoc, so shellcheck
-# covers it. It runs as root, over stdin, inside the container.
+# The install test is a checked-in script rather than a heredoc, so the
+# shell-lint job in .github/workflows/ci.yml covers it. It runs as root, over
+# stdin, inside the container.
 INSTALL_TEST_SCRIPT="${SCRIPT_DIR}/install_test.sh"
 IMAGE="${STUDIOCAST_RPM_IMAGE:-}"
 IMAGE_EXPLICIT=0
