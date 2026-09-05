@@ -183,7 +183,43 @@ struct RowLayoutCase {
   // What the capture format must carry into the read path.
   std::size_t bytes_per_line;
   std::size_t size_image;
+
+  // Which arm of the `v4l2_format` union the driver filled. The mplane arm
+  // reads the row size out of `plane_fmt[0]`, not out of `fmt.pix`.
+  bool mplane = false;
 };
+
+// Writes a driver report into the union arm `mplane` names. `num_planes` is
+// meaningful on the mplane arm only, where a report of no planes has no row
+// size to read.
+void FillDriverFormat(v4l2_format *f, const RowLayoutCase &c,
+                      std::uint8_t num_planes = 1) {
+  *f = v4l2_format{};
+
+  if (!c.mplane) {
+    f->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    f->fmt.pix.width = static_cast<__u32>(c.width);
+    f->fmt.pix.height = static_cast<__u32>(c.height);
+    f->fmt.pix.pixelformat = c.fourcc;
+    f->fmt.pix.bytesperline = c.driver_bytesperline;
+    f->fmt.pix.sizeimage = c.driver_sizeimage;
+    return;
+  }
+
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
+  f->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+  f->fmt.pix_mp.width = static_cast<__u32>(c.width);
+  f->fmt.pix_mp.height = static_cast<__u32>(c.height);
+  f->fmt.pix_mp.pixelformat = c.fourcc;
+  f->fmt.pix_mp.num_planes = num_planes;
+  if (num_planes >= 1) {
+    f->fmt.pix_mp.plane_fmt[0].bytesperline = c.driver_bytesperline;
+    f->fmt.pix_mp.plane_fmt[0].sizeimage = c.driver_sizeimage;
+  }
+#else
+  (void)num_planes;
+#endif
+}
 
 // The driver fills the capture buffer before the program reads it, so the
 // stride the driver reports is the stride the frame really uses. Raising it
@@ -213,19 +249,22 @@ bool TestCaptureNegotiationKeepsTheDriverRowStride() {
        9u, 36u},
       {"MJPEG keeps the reported values", V4L2_PIX_FMT_MJPEG, 640, 480, 0,
        100000, 0u, 100000u},
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
+      {"odd YUYV width, packed driver stride, mplane", V4L2_PIX_FMT_YUYV, 3, 4,
+       6, 24, 6u, 24u, true},
+      {"YUYV padded row is kept, mplane", V4L2_PIX_FMT_YUYV, 640, 480, 1536,
+       737280, 1536u, 737280u, true},
+      {"YUYV stride below the packed row is raised, mplane", V4L2_PIX_FMT_YUYV,
+       3, 4, 4, 16, 6u, 24u, true},
+#endif
   };
 
   for (const RowLayoutCase &c : cases) {
     v4l2_format f{};
-    f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    f.fmt.pix.width = static_cast<__u32>(c.width);
-    f.fmt.pix.height = static_cast<__u32>(c.height);
-    f.fmt.pix.pixelformat = c.fourcc;
-    f.fmt.pix.bytesperline = c.driver_bytesperline;
-    f.fmt.pix.sizeimage = c.driver_sizeimage;
+    FillDriverFormat(&f, c);
 
     CaptureFormat got{};
-    if (!Expect(ParseChosenCaptureFmt(f, /*mplane=*/false, /*fps=*/30,
+    if (!Expect(ParseChosenCaptureFmt(f, c.mplane, /*fps=*/30,
                                       /*fps_num=*/1, /*fps_den=*/30, &got,
                                       nullptr),
                 "the reported capture format must parse")) {
@@ -251,17 +290,6 @@ bool TestCaptureNegotiationKeepsTheDriverRowStride() {
   return true;
 }
 
-struct BadRowLayoutCase {
-  const char *name;
-  std::uint32_t fourcc;
-  int width;
-  int height;
-
-  // What the driver reported after VIDIOC_S_FMT.
-  std::uint32_t driver_bytesperline;
-  std::uint32_t driver_sizeimage;
-};
-
 // A driver that reports more rows than its own frame size holds is out of the
 // V4L2 contract. Raising `size_image` to match the stride hides that: the read
 // path then walks a frame longer than the buffer the driver sized, which is a
@@ -270,29 +298,29 @@ bool TestCaptureNegotiationRefusesRowsTheFrameSizeCannotHold() {
   using studiocast::video::CaptureFormat;
   using studiocast::video::ParseChosenCaptureFmt;
 
-  const BadRowLayoutCase cases[] = {
+  // Only the driver report matters here, so the expected values stay 0.
+  const RowLayoutCase cases[] = {
       {"padded YUYV rows overrun the reported frame", V4L2_PIX_FMT_YUYV, 640,
-       480, 1536, 614400},
+       480, 1536, 614400, 0u, 0u},
       {"odd YUYV rows overrun the reported frame", V4L2_PIX_FMT_YUYV, 3, 4, 6,
-       16},
+       16, 0u, 0u},
       {"RGB24 rows overrun the reported frame", V4L2_PIX_FMT_RGB24, 640, 480,
-       1920, 614400},
+       1920, 614400, 0u, 0u},
       {"a stride with no frame size at all", V4L2_PIX_FMT_YUYV, 640, 480, 1280,
-       0},
+       0, 0u, 0u},
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
+      {"padded YUYV rows overrun the reported frame, mplane", V4L2_PIX_FMT_YUYV,
+       640, 480, 1536, 614400, 0u, 0u, true},
+#endif
   };
 
-  for (const BadRowLayoutCase &c : cases) {
+  for (const RowLayoutCase &c : cases) {
     v4l2_format f{};
-    f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    f.fmt.pix.width = static_cast<__u32>(c.width);
-    f.fmt.pix.height = static_cast<__u32>(c.height);
-    f.fmt.pix.pixelformat = c.fourcc;
-    f.fmt.pix.bytesperline = c.driver_bytesperline;
-    f.fmt.pix.sizeimage = c.driver_sizeimage;
+    FillDriverFormat(&f, c);
 
     CaptureFormat got{};
     std::string err;
-    if (!Expect(!ParseChosenCaptureFmt(f, /*mplane=*/false, /*fps=*/30,
+    if (!Expect(!ParseChosenCaptureFmt(f, c.mplane, /*fps=*/30,
                                        /*fps_num=*/1, /*fps_den=*/30, &got,
                                        &err),
                 "a frame size the rows overrun must fail negotiation")) {
@@ -309,6 +337,39 @@ bool TestCaptureNegotiationRefusesRowsTheFrameSizeCannotHold() {
   }
 
   return true;
+}
+
+// The mplane arm reads the row size out of `plane_fmt[0]`, so a report of no
+// planes has nothing to read. It must fail rather than take the values of a
+// plane the driver did not fill.
+bool TestCaptureNegotiationRefusesAnMplaneReportWithNoPlanes() {
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
+  using studiocast::video::CaptureFormat;
+  using studiocast::video::ParseChosenCaptureFmt;
+
+  const RowLayoutCase c = {"mplane report with no planes",
+                           V4L2_PIX_FMT_YUYV,
+                           640,
+                           480,
+                           1280,
+                           614400,
+                           0u,
+                           0u,
+                           true};
+
+  v4l2_format f{};
+  FillDriverFormat(&f, c, /*num_planes=*/0);
+
+  CaptureFormat got{};
+  std::string err;
+  return Expect(!ParseChosenCaptureFmt(f, /*mplane=*/true, /*fps=*/30,
+                                       /*fps_num=*/1, /*fps_den=*/30, &got,
+                                       &err),
+                "an mplane report with no planes must fail negotiation") &&
+         Expect(!err.empty(), "the refusal must name the reason");
+#else
+  return true;
+#endif
 }
 
 // `size_image` is the length the read path walks, and the mapped buffer is
@@ -392,6 +453,10 @@ bool TestV4l2CaptureNegotiationKeepsTheDriverRowStride() {
 
 bool TestV4l2CaptureNegotiationRefusesRowsTheFrameSizeCannotHold() {
   return TestCaptureNegotiationRefusesRowsTheFrameSizeCannotHold();
+}
+
+bool TestV4l2CaptureNegotiationRefusesAnMplaneReportWithNoPlanes() {
+  return TestCaptureNegotiationRefusesAnMplaneReportWithNoPlanes();
 }
 
 bool TestV4l2CaptureBufferMustHoldTheNegotiatedFrame() {
