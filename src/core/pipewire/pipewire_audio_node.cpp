@@ -110,9 +110,11 @@ struct PipeWireAudioNode::Impl {
   // Set when the server reported an error or took the stream down. Such a node
   // never comes back, so a blocked Read or Write must not wait for it.
   std::atomic<bool> stream_down{false};
-  // Set by the pipeline thread when it is the producer, applied by the
-  // real-time callback, which is the consumer on such a node.
-  std::atomic<bool> flush_pending{false};
+  // How many bytes a flush asked the real-time callback to drop. The pipeline
+  // thread sets it when it is the producer, and the callback, which is the
+  // consumer on such a node, applies it on its next pass. Zero means no flush
+  // is waiting. See Flush.
+  std::atomic<std::size_t> flush_bytes{0};
   NodeLinkCounter links;
   std::atomic<std::uint64_t> latency_us{0};
   std::atomic<std::uint64_t> overflow_count{0};
@@ -253,10 +255,13 @@ void OnStreamProcess(void *data) {
   const std::size_t stride = impl->stride;
 
   if (ProducesSamples(impl->cfg.role)) {
-    // This callback is the consumer of the ring, so it is the one that empties
-    // it for a Flush from the pipeline thread.
-    if (impl->flush_pending.exchange(false, std::memory_order_acquire))
-      impl->ring.Clear();
+    // This callback is the consumer of the ring, so it is the one that drops
+    // samples for a Flush from the pipeline thread. It drops what the ring
+    // held when the flush was asked for, and nothing written since.
+    const std::size_t flush =
+        impl->flush_bytes.exchange(0, std::memory_order_acquire);
+    if (flush != 0)
+      impl->ring.Discard(flush);
 
     // The server asks for samples. Give it what the ring holds and pad the
     // rest with silence, so an underrun is a short gap and not a stall.
@@ -432,6 +437,7 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
   impl_->links.Reset(LinkEndForRole(cfg.role));
   impl_->latency_valid.store(false, std::memory_order_relaxed);
   impl_->overflow_count.store(0, std::memory_order_relaxed);
+  impl_->flush_bytes.store(0, std::memory_order_relaxed);
   impl_->stride = AudioFrameBytes(1, cfg.channels);
   impl_->ring.Reset(
       AudioRingCapacityBytes(cfg.frame_samples, cfg.channels, cfg.ring_frames));
@@ -695,9 +701,11 @@ void PipeWireAudioNode::ClearStopRequest() {
 
 void PipeWireAudioNode::Flush() {
   if (ProducesSamples(impl_->cfg.role)) {
-    // The real-time callback reads this ring, and only the reader may empty
-    // it. Ask the callback to do it on its next pass.
-    impl_->flush_pending.store(true, std::memory_order_release);
+    // The real-time callback reads this ring, and only the reader may drop
+    // anything. Tell it how much there is to drop now: a node with no consumer
+    // is not driven, so that pass can come long after this call, and the
+    // samples written in between are the ones the caller wants to keep.
+    impl_->flush_bytes.store(impl_->ring.Readable(), std::memory_order_release);
     return;
   }
   impl_->ring.Clear();

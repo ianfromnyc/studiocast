@@ -102,9 +102,13 @@ public:
   // block and keeps what it holds. See core/pipewire/spsc_byte_ring.h.
   std::uint64_t OverflowCount() const;
 
-  // Drops everything the ring holds. On a node that StudioCast writes into,
-  // the real-time callback reads the ring, so it empties the ring on its next
-  // pass instead of emptying it here.
+  // Drops everything the ring holds at the moment of the call.
+  //
+  // On a node that StudioCast writes into, the real-time callback is the one
+  // that reads the ring, so only it may drop anything, and it does so on its
+  // next pass. Nothing drives a node with no consumer, so that pass can be a
+  // long time later: the call therefore records how much the ring held, and
+  // the callback drops that much and keeps every sample written since.
   void Flush();
 
   // Best-effort graph latency in microseconds.

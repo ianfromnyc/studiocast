@@ -82,6 +82,22 @@ public:
     return true;
   }
 
+  // Consumer end. Throws away up to `bytes` bytes, oldest first. Fewer bytes
+  // go when the ring holds fewer.
+  //
+  // A caller that asks for what the ring held at some earlier moment drops
+  // exactly that much and keeps everything written since, which is what a
+  // flush means for a node whose consumer is a real-time callback.
+  void Discard(std::size_t bytes) {
+    if (buf_.empty())
+      return;
+    const std::size_t take = std::min(bytes, Readable());
+    if (take == 0)
+      return;
+    const std::size_t t = tail_.load(std::memory_order_relaxed);
+    tail_.store((t + take) % buf_.size(), std::memory_order_release);
+  }
+
   // Consumer end. Throws away everything the ring holds.
   void Clear() {
     tail_.store(head_.load(std::memory_order_acquire),

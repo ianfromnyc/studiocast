@@ -1516,6 +1516,35 @@ struct RingFrame {
 // ring has no other way to make room.
 // A ring that nobody sized yet holds nothing, so both ends must say no
 // instead of dividing by its zero size.
+// A flush on a node that StudioCast writes into is applied by the real-time
+// callback, which may be a long time later. It must drop what the ring held
+// when the flush was asked for and nothing that arrived after it.
+bool TestRingDiscardsOnlyWhatItWasAskedFor() {
+  studiocast::pw::SpscByteRing ring;
+  ring.Reset(8);
+
+  const std::array<std::uint8_t, 4> older{1, 2, 3, 4};
+  const std::array<std::uint8_t, 4> newer{5, 6, 7, 8};
+  (void)ring.Push(older.data(), older.size());
+  const std::size_t at_flush = ring.Readable();
+  (void)ring.Push(newer.data(), newer.size());
+
+  ring.Discard(at_flush);
+  const std::size_t left = ring.Readable();
+
+  std::array<std::uint8_t, 4> out{};
+  const bool popped = ring.Pop(out.data(), out.size());
+
+  ring.Discard(1000);
+  const std::size_t emptied = ring.Readable();
+
+  return Expect(left == newer.size(),
+                "a discard must leave what arrived after the flush") &&
+         Expect(popped && out == newer,
+                "the bytes left must be the ones written after the flush") &&
+         Expect(emptied == 0, "a discard of more than the ring holds empties it");
+}
+
 bool TestRingRefusesWorkBeforeItIsSized() {
   studiocast::pw::SpscByteRing ring;
   std::array<std::uint8_t, 4> data{1, 2, 3, 4};
@@ -1695,6 +1724,8 @@ int main() {
        &TestSocketProbeReportsAMissingRuntimeDirectory},
       {"stream state rule reports a down node",
        &TestStreamStateRuleReportsADownNode},
+      {"ring discards only what it was asked for",
+       &TestRingDiscardsOnlyWhatItWasAskedFor},
       {"ring refuses work before it is sized",
        &TestRingRefusesWorkBeforeItIsSized},
       {"ring drops the newest bytes when it is full",
