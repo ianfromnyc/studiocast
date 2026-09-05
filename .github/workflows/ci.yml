@@ -224,6 +224,7 @@ jobs:
           grep -F 'Open CUDA backend enabled' build/configure.log
           grep -F 'Open Audio backend enabled' build/configure.log
           grep -F 'dlib found' build/configure.log
+          grep -F 'native PipeWire backends enabled' build/configure.log
 
       - name: Build
         run: |
@@ -236,6 +237,39 @@ jobs:
       - name: Self-test
         run: |
           ./build/studiocast-probe --self-test
+
+      # libpipewire is installed above, so the option defaults to ON and
+      # nothing else in this workflow compiles the path without it. StudioCast
+      # promises that build behaves as it did before the native backends, so
+      # it is built and tested here as well.
+      - name: Configure (native PipeWire backends off)
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: |
+          mkdir -p build-pipewire-off
+          cmake -S . -B build-pipewire-off -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSTUDIOCAST_ENABLE_OPEN_AUDIO=OFF \
+            -DSTUDIOCAST_ENABLE_DLIB=OFF \
+            -DSTUDIOCAST_ENABLE_PIPEWIRE=OFF 2>&1 \
+            | tee build-pipewire-off/configure.log
+
+          grep -Eq '^STUDIOCAST_ENABLE_PIPEWIRE:BOOL=OFF$' \
+            build-pipewire-off/CMakeCache.txt
+          grep -F 'Native PipeWire backends disabled' \
+            build-pipewire-off/configure.log
+
+      - name: Build (native PipeWire backends off)
+        run: |
+          cmake --build build-pipewire-off
+
+      - name: Run tests (native PipeWire backends off)
+        run: |
+          ctest --test-dir build-pipewire-off --output-on-failure
+
+      - name: Self-test (native PipeWire backends off)
+        run: |
+          ./build-pipewire-off/studiocast-probe --self-test
 
   # Push CI intentionally keeps CUDA smoke skips portable on no-GPU runners.
   # Enable this only on a GPU runner when CUDA runtime failures should fail CI.
