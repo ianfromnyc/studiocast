@@ -178,19 +178,39 @@ EOF
 #
 # Fedora's onnxruntime-devel owns /usr/lib64/pkgconfig/libonnxruntime.pc, a
 # different name, so the link never collides with a package file.
+# Arguments: [bootstrap .pc file]  (default: the file written above)
+#
+# The link is a convenience, so nothing here may end the caller. A pkg-config
+# that fails, or that names no search path, falls back to the two directories
+# its list almost always starts with, the same fallback that
+# scripts/uninstall/uninstall.sh uses.
 sc_ort_link_pkgconfig() {
+  local pc_file="${1:-/usr/local/lib/pkgconfig/onnxruntime.pc}"
+
   command -v pkg-config >/dev/null 2>&1 || return 0
-  [[ -f /usr/local/lib/pkgconfig/onnxruntime.pc ]] || return 0
+  [[ -f "${pc_file}" ]] || return 0
 
   if pkg-config --exists onnxruntime; then
     return 0
   fi
 
-  local dir
-  dir="$(pkg-config --variable pc_path pkg-config | tr ':' '\n' | grep -v '^$' | head -n 1)"
-  [[ -n "${dir}" ]] || return 0
+  local pc_path=""
+  pc_path="$(pkg-config --variable pc_path pkg-config 2>/dev/null || true)"
 
-  sc_ort_log "pkg-config does not search /usr/local/lib/pkgconfig; linking into ${dir}."
-  sc_ort_priv mkdir -p "${dir}"
-  sc_ort_priv ln -sfn /usr/local/lib/pkgconfig/onnxruntime.pc "${dir}/onnxruntime.pc"
+  local -a dirs=()
+  if [[ -n "${pc_path}" ]]; then
+    mapfile -t dirs < <(printf '%s\n' "${pc_path}" | tr ':' '\n' | grep -v '^$' || true)
+  fi
+  if [[ "${#dirs[@]}" -eq 0 ]]; then
+    dirs=(/usr/lib64/pkgconfig /usr/lib/pkgconfig)
+  fi
+
+  local dir="${dirs[0]}"
+  sc_ort_log "pkg-config does not search $(dirname "${pc_file}"); linking into ${dir}."
+  if ! sc_ort_priv mkdir -p "${dir}" ||
+    ! sc_ort_priv ln -sfn "${pc_file}" "${dir}/onnxruntime.pc"; then
+    sc_ort_log "Could not link onnxruntime.pc into ${dir}; going on without it."
+  fi
+
+  return 0
 }

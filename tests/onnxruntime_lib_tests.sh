@@ -243,10 +243,66 @@ test_libdir_follows_the_layout_of_the_root() {
   fi
 }
 
+# Linking onnxruntime.pc is best effort. A pkg-config that fails, and a
+# pkg-config that names no search path, must both leave the caller running
+# under set -e.
+test_pkgconfig_link_survives_a_broken_pkg_config() {
+  local child="${SANDBOX}/pkgconfig-link-child.sh"
+  cat > "${child}" <<'CHILD'
+set -euo pipefail
+sc_ort_log() { :; }
+sc_ort_priv() { :; }
+# shellcheck source=/dev/null
+source "$1"
+sc_ort_link_pkgconfig "$2"
+echo HELPER_RETURNED_0
+echo CALLER_CONTINUED
+CHILD
+
+  local mode
+  for mode in fail empty; do
+    local casedir="${SANDBOX}/pkgconfig-${mode}"
+    mkdir -p "${casedir}/bin" "${casedir}/pkgconfig"
+
+    local pc_file="${casedir}/pkgconfig/onnxruntime.pc"
+    printf 'Name: onnxruntime\n' > "${pc_file}"
+
+    # --exists must report the module missing, so the helper goes on to link.
+    # Every other call either fails, as it does without a pkg-config.pc file,
+    # or prints nothing.
+    cat > "${casedir}/bin/pkg-config" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == "--exists" ]]; then
+  exit 1
+fi
+if [[ "${mode}" == "fail" ]]; then
+  echo "stub pkg-config: no pkg-config.pc here" >&2
+  exit 1
+fi
+exit 0
+STUB
+    chmod +x "${casedir}/bin/pkg-config"
+
+    local out rc=0
+    out="$(PATH="${casedir}/bin:${PATH}" bash "${child}" "${ORT_LIB}" \
+      "${pc_file}" 2>/dev/null)" || rc=$?
+
+    if [[ "${rc}" -ne 0 ]]; then
+      t_fail "the ${mode} pkg-config stub ended the caller with status ${rc}"
+    elif [[ "${out}" != *HELPER_RETURNED_0* ]] ||
+      [[ "${out}" != *CALLER_CONTINUED* ]]; then
+      t_fail "the ${mode} pkg-config stub stopped the caller: ${out}"
+    else
+      t_pass "the ${mode} pkg-config stub leaves the caller running"
+    fi
+  done
+}
+
 test_repeated_calls_clean_up_and_keep_the_caller_trap
 test_download_failure_cleans_up_and_runs_the_caller_trap
 test_a_caller_return_trap_survives_the_call
 test_libdir_follows_the_layout_of_the_root
+test_pkgconfig_link_survives_a_broken_pkg_config
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2
