@@ -179,6 +179,19 @@ sudo dnf remove onnxruntime-devel
 present, which makes CMake use it whatever else is installed. Use the same
 option in your own `cmake` commands.
 
+Fedora `pkg-config` searches `/usr/lib64/pkgconfig` and `/usr/share/pkgconfig`
+only, so the helper also links `onnxruntime.pc` into the first of them. No rpm
+owns that link. It has another name than the `libonnxruntime.pc` file of
+`onnxruntime-devel` (checked against `onnxruntime-devel-1.22.2-2.fc44`), so
+`dnf` reports no file conflict. `./scripts/uninstall.sh --greedy` removes the
+link. To keep `/usr/lib64` free of files no rpm owns, remove the link and point
+`pkg-config` at the bootstrap file instead:
+
+```bash
+sudo rm /usr/lib64/pkgconfig/onnxruntime.pc
+export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
+```
+
 ### CUDA 13 runtime for the gpu flavor
 
 ONNX Runtime 1.29 with the CUDA execution provider needs CUDA 13.x, cuDNN 9.x

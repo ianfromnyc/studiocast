@@ -194,8 +194,11 @@ EOF
 # directory pkg-config does search. Debian and Ubuntu already search
 # /usr/local/lib/pkgconfig, so this is a no-op for them.
 #
-# Fedora's onnxruntime-devel owns /usr/lib64/pkgconfig/libonnxruntime.pc, a
-# different name, so the link never collides with a package file.
+# The link belongs to no rpm. Fedora's onnxruntime-devel owns
+# /usr/lib64/pkgconfig/libonnxruntime.pc, another name, so dnf reports no file
+# conflict (checked against onnxruntime-devel-1.22.2-2.fc44). docs/SETUP.md
+# says how to work without the link, and scripts/uninstall/uninstall.sh removes
+# it.
 # Arguments: [bootstrap .pc file]  (default: the file written above)
 #
 # The link is a convenience, so nothing here may end the caller. A pkg-config
