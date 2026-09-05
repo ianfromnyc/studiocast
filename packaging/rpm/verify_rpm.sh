@@ -15,6 +15,8 @@ USE_CONTAINER=0
 NO_CONTAINER_CHECK=0
 # Set from the binary RPM metadata in main(); 1 when the package bundles dlib.
 HAS_DLIB=0
+# Set the same way; 1 when the package was built with the libyuv conditional.
+HAS_LIBYUV=0
 
 usage() {
   cat <<EOF
@@ -50,6 +52,10 @@ Checks:
   A package built with dlib declares Provides: bundled(dlib). For such a
   package the checks also expect the dlib license file, the FlexiBLAS run-time
   dependency, and the "MPL-2.0 AND BSL-1.0" license tag.
+
+  A package built with libyuv declares Provides: studiocast(libyuv). For such a
+  package the checks also expect the libyuv run-time dependency, and a package
+  without that provide must not depend on libyuv at all.
 
   The install test also checks that the package installs with dnf while the
   weak dependency v4l2loopback is unavailable, that the programs run, that the
@@ -154,6 +160,14 @@ package_recommends() {
 package_bundles_dlib() {
   local package="$1"
   package_declares "${package}" --provides 'bundled(dlib)'
+}
+
+# True when the package was built with the libyuv build conditional. The spec
+# declares Provides: studiocast(libyuv) for it, which is the only metadata that
+# names the choice; the soname dependency below is the result to check against.
+package_uses_libyuv() {
+  local package="$1"
+  package_declares "${package}" --provides 'studiocast(libyuv)'
 }
 
 find_container_runtime() {
@@ -310,6 +324,15 @@ verify_dependencies() {
     # The static dlib calls CBLAS and LAPACK through FlexiBLAS, so rpmbuild
     # must have found the FlexiBLAS soname in the programs.
     package_requires "${rpm_file}" "libflexiblas.so.3()(64bit)"
+  fi
+
+  # The libyuv build conditional must decide the binary, both ways. A build
+  # with libyuv links it, so the soname has to be in the dependencies; a build
+  # without it must not pick a libyuv up from the build machine.
+  if [[ "${HAS_LIBYUV}" -eq 1 ]]; then
+    package_requires "${rpm_file}" "libyuv.so.0()(64bit)"
+  elif package_declares "${rpm_file}" --requires "libyuv.so.0()(64bit)"; then
+    die "$(basename "${rpm_file}") requires libyuv although it was built without the libyuv conditional"
   fi
 }
 
@@ -468,6 +491,14 @@ main() {
   else
     HAS_DLIB=0
     log "The package was built without dlib; skipping the dlib checks."
+  fi
+
+  if package_uses_libyuv "${rpm_file}"; then
+    HAS_LIBYUV=1
+    log "The package was built with libyuv; expecting the libyuv dependency."
+  else
+    HAS_LIBYUV=0
+    log "The package was built without libyuv; expecting no libyuv dependency."
   fi
 
   verify_metadata "${srpm}" "${rpm_file}"

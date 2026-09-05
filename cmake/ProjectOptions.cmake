@@ -24,6 +24,17 @@ option(STUDIOCAST_ENABLE_OPEN_AUDIO "Enable Open Audio backend (requires ONNX Ru
 # unavailable (Maxine AR may still provide Eye Contact when present).
 option(STUDIOCAST_ENABLE_DLIB "Enable dlib support (face landmarks)" ON)
 
+# Optional dependency used for an extra, optimized RGB/YUV conversion backend.
+#
+#   AUTO  Use libyuv when the machine has it, and fall back to the built-in
+#         scalar, SSSE3 and AVX2 backends when it does not. This is the default.
+#   ON    Require libyuv. A missing libyuv is a configure error. A package
+#         build passes this, so the source package decides what the binary gets.
+#   OFF   Skip the detection, even on a machine that has libyuv.
+set(STUDIOCAST_ENABLE_LIBYUV "AUTO" CACHE STRING
+    "Use libyuv for RGB/YUV conversion: AUTO, ON or OFF")
+set_property(CACHE STUDIOCAST_ENABLE_LIBYUV PROPERTY STRINGS AUTO ON OFF)
+
 function(studiocast_setup_options)
   # Intentionally light for now; expand later
 endfunction()

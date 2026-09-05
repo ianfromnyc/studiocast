@@ -26,7 +26,10 @@
 #   libyuv     (default on)   Build against libyuv for an extra, optimized RGB
 #                             to YUYV conversion backend. Turn it off to build
 #                             with the project scalar, SSSE3 and AVX2 backends
-#                             only.
+#                             only. The conditional sets
+#                             STUDIOCAST_ENABLE_LIBYUV, so an on build fails
+#                             the configure step when libyuv is missing and an
+#                             off build ignores a libyuv that is installed.
 #   tests      (default on)   Build the test suite and run ctest in %%check.
 #   installer  (default off)  The GUI installer and its backend. The backend is
 #                             an apt-based script for Ubuntu, so it is useless
@@ -80,6 +83,14 @@ Source1:        https://github.com/davisking/dlib/archive/refs/tags/v%{dlib_vers
 # dlib is compiled into the programs as a static library, so declare the bundle
 # as the Fedora bundling guidelines ask.
 Provides:       bundled(dlib) = %{dlib_version}
+%endif
+
+%if %{with libyuv}
+# The optimized RGB to YUYV backend is a build-time choice that leaves no other
+# mark on the metadata. packaging/rpm/verify_rpm.sh reads this provide to tell
+# the two builds apart, the same way it reads bundled(dlib), and then expects
+# the libyuv soname in the run-time dependencies.
+Provides:       studiocast(libyuv) = %{version}-%{release}
 %endif
 
 BuildRequires:  cmake
@@ -201,6 +212,7 @@ cp -p dlib-%{dlib_version}/LICENSE.txt dlib-LICENSE.txt
     -DSTUDIOCAST_ENABLE_OPEN_CUDA=%{?with_open_cuda:ON}%{!?with_open_cuda:OFF} \
     -DSTUDIOCAST_ENABLE_OPEN_AUDIO=%{?with_open_audio:ON}%{!?with_open_audio:OFF} \
     -DSTUDIOCAST_ENABLE_DLIB=%{?with_dlib:ON}%{!?with_dlib:OFF} \
+    -DSTUDIOCAST_ENABLE_LIBYUV=%{?with_libyuv:ON}%{!?with_libyuv:OFF} \
 %if %{with dlib}
     -Ddlib_DIR=%{dlib_prefix}/%{_lib}/cmake/dlib \
 %endif
