@@ -1248,6 +1248,10 @@ void VirtualAudioService::ThreadMain() {
       const bool wantMonitor =
           monitorCfg.enabled && cfg.enabled && mic_created_;
       const auto monitorNow = steady_clock::now();
+      // The consumer snapshot for this pass was taken before this block runs,
+      // so it knows only the route that was already loaded. Split the counts
+      // by that, not by the route this pass is about to load or unload.
+      const bool monitorRanWhenConsumersWereCounted = monitor_running_;
 
       auto setMonitorError = [&](std::string msg) {
         std::lock_guard<std::mutex> lock(mu_);
@@ -1426,7 +1430,9 @@ void VirtualAudioService::ThreadMain() {
       {
         std::lock_guard<std::mutex> lock(mu_);
         st_.mic_monitor_consumer_count =
-            (monitor_running_ && st_.mic_consumer_count > 0) ? 1 : 0;
+            (monitorRanWhenConsumersWereCounted && st_.mic_consumer_count > 0)
+                ? 1
+                : 0;
         st_.mic_app_consumer_count = std::max(
             0, st_.mic_consumer_count - st_.mic_monitor_consumer_count);
       }
