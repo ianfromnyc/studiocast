@@ -229,7 +229,11 @@ Fedora RPM packaging:
   `studiocast-<version>-rpm.sha256` checksum file.
 - `--container` runs rpmbuild inside a `registry.fedoraproject.org/fedora:44`
   podman or docker container. Use it on a host that is not Fedora 44. The
-  container build takes about 2.5 minutes on a 32-core machine.
+  container build takes about 2.5 minutes on a 32-core machine. The container
+  runs `packaging/rpm/container_build.sh`, which the script copies into the
+  build directory; the install test runs `packaging/rpm/install_test.sh` over
+  stdin. Both are checked-in files, so `shellcheck -x` reads them like the
+  other packaging scripts.
 - Other options: `--srpm-only` builds the source RPM only, `--with NAME` and
   `--without NAME` change a spec build conditional, `--install-builddeps` runs
   `dnf builddep` on the rendered spec before a native build (needs root or
@@ -241,6 +245,13 @@ Fedora RPM packaging:
   `dlib` (on), and `tests` (on); `installer` (off). With `tests`, `%check`
   runs the full ctest suite. `installer` stays off because the installer
   backend is Ubuntu-only. The spec is `ExclusiveArch: x86_64`.
+- Every conditional reaches the configure step, so the source package decides
+  the binary. `libyuv` sets `STUDIOCAST_ENABLE_LIBYUV`, a three-way option:
+  `AUTO` is the default for a plain source build and falls back to the built-in
+  scalar, SSSE3 and AVX2 conversion; `ON`, which `--with libyuv` passes, fails
+  the configure step when libyuv is missing; `OFF`, which `--without libyuv`
+  passes, ignores a libyuv that the build machine has installed. A build with
+  libyuv also declares `Provides: studiocast(libyuv)`.
 
 Bundled dlib in the RPM:
 
@@ -284,7 +295,8 @@ Bundled dlib in the RPM:
   entry, an icon, the license files, and the systemd user unit.
 - Run-time `Requires` are `pulseaudio-utils`, `v4l-utils`, and
   `hicolor-icon-theme`, plus the soname dependencies that rpmbuild finds for
-  Qt6, libpulse, ONNX Runtime, libjpeg, libpng, sqlite, and libyuv.
+  Qt6, libpulse, ONNX Runtime, libjpeg, libpng, and libyuv, plus FlexiBLAS in
+  a dlib build. Nothing links sqlite, so the package has no sqlite dependency.
   `Recommends: v4l2loopback` is a weak dependency, so `dnf` installs the package
   when it is absent. The module comes from RPM Fusion Free as
   `akmod-v4l2loopback`, and the virtual camera needs it.
@@ -307,12 +319,17 @@ Bundled dlib in the RPM:
   removes the package again. That test needs root, so use `--container` to run
   it in a Fedora 44 container. `--no-container-check` lets it run directly on a
   disposable root system, such as a CI container job.
-- The script reads `rpm -qp --provides` for `bundled(dlib)` and adapts. For a
-  dlib package it also expects the license tag, the dlib license file, and the
-  FlexiBLAS dependency, and the install test looks for dlib type names inside
+- The script reads `rpm -qp --provides` for `bundled(dlib)` and for
+  `studiocast(libyuv)`, and adapts. For a dlib package it also expects the
+  license tag, the dlib license file, and the FlexiBLAS dependency, and the
+  install test looks for dlib type names inside
   `/usr/bin/studiocastd`. That binary check is the cheapest observable: dlib
   shows up in the product only through Open Video Eye Contact, which needs a
   running daemon, a camera, and an installed model pack.
+- For a libyuv package the script expects the `libyuv.so.0` dependency, and for
+  a package without the provide it expects no libyuv dependency at all. The two
+  checks together prove that the build conditional, not the build machine,
+  decided the backend.
 - CI: `.github/workflows/release-packaging.yml` has the `rpm-fedora-44` job. It
   runs in a `registry.fedoraproject.org/fedora:44` container, always on release
   events, and on `workflow_dispatch` when the `build_rpm` input is true, which
