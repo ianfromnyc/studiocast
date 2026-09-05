@@ -59,10 +59,34 @@ public:
     if (!data || frame_bytes_ == 0 || bytes < frame_bytes_)
       return false;
     std::memcpy(slots_[back_].data(), data, frame_bytes_);
-    const std::uint32_t replaced = handover_.exchange(
-        static_cast<std::uint32_t>(back_) | kFresh, std::memory_order_acq_rel);
-    back_ = replaced & kIndexMask;
-    return (replaced & kFresh) != 0;
+    return Offer();
+  }
+
+  // Producer end. Copies one frame in row by row, so a source whose rows sit
+  // `source_stride` bytes apart lands packed at `row_bytes`.
+  //
+  // A camera pipeline writes into a buffer the loopback driver sized, and that
+  // buffer can hold padding after every row. A copy that took the bytes in one
+  // run would read every row after the first from the wrong offset, which
+  // shears the picture a consumer receives.
+  //
+  // Returns the same "replaced an untaken frame" answer as Publish, or false
+  // when the source is too small for the rows it says it holds.
+  bool PublishRows(const std::uint8_t *data, std::size_t bytes,
+                   std::size_t source_stride, std::size_t row_bytes,
+                   std::size_t rows) {
+    if (!data || frame_bytes_ == 0 || rows == 0 || row_bytes == 0)
+      return false;
+    if (source_stride < row_bytes || row_bytes * rows != frame_bytes_)
+      return false;
+    // The last row needs its own bytes only, not the padding behind it.
+    if (bytes < source_stride * (rows - 1) + row_bytes)
+      return false;
+
+    std::uint8_t *dst = slots_[back_].data();
+    for (std::size_t y = 0; y < rows; ++y)
+      std::memcpy(dst + y * row_bytes, data + y * source_stride, row_bytes);
+    return Offer();
   }
 
   // Consumer end. Returns the newest frame, or the last one when no new frame
@@ -78,6 +102,16 @@ public:
   }
 
 private:
+  // Producer end. Offers the slot the producer just filled and takes the slot
+  // the consumer left. Returns true when the frame it replaced had not been
+  // taken yet.
+  bool Offer() {
+    const std::uint32_t replaced = handover_.exchange(
+        static_cast<std::uint32_t>(back_) | kFresh, std::memory_order_acq_rel);
+    back_ = replaced & kIndexMask;
+    return (replaced & kFresh) != 0;
+  }
+
   // The hand-over word holds a slot index and one bit that says the slot holds
   // a frame the consumer has not taken.
   static constexpr std::uint32_t kIndexMask = 0x3;

@@ -7,12 +7,14 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include <sys/resource.h>
+#include <unistd.h>
 
 #include "core/audio/pipewire/pipewire_audio_devices.h"
 #include "core/audio/mic_monitor.h"
@@ -1092,15 +1094,74 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
          Expect(taken > 0, "the consumer should have read something");
 }
 
+// The pipeline hands the node its own output buffer, whose rows sit
+// bytes_per_line apart. A copy that took the bytes in one run would read every
+// row after the first from the wrong offset, and the error grows down the
+// frame: the picture a consumer sees is sheared.
+bool TestFrameBufferDropsTheRowPadding() {
+  constexpr std::size_t kRowBytes = 6;
+  constexpr std::size_t kRows = 4;
+  constexpr std::size_t kSourceStride = kRowBytes + 5;
+
+  // Row y holds the byte y + 1, and the padding holds a byte no row uses. A
+  // copy that ignored the padding would shift row 1 onwards.
+  std::vector<std::uint8_t> source(kSourceStride * kRows, 0xee);
+  for (std::size_t y = 0; y < kRows; ++y) {
+    for (std::size_t x = 0; x < kRowBytes; ++x)
+      source[y * kSourceStride + x] = static_cast<std::uint8_t>(y + 1);
+  }
+
+  studiocast::pw::TripleFrameBuffer buffer;
+  buffer.Reset(kRowBytes * kRows);
+  (void)buffer.PublishRows(source.data(), source.size(), kSourceStride,
+                           kRowBytes, kRows);
+
+  const std::uint8_t *frame = buffer.Acquire();
+  if (!Expect(frame != nullptr, "the consumer should have a frame"))
+    return false;
+
+  for (std::size_t y = 0; y < kRows; ++y) {
+    for (std::size_t x = 0; x < kRowBytes; ++x) {
+      const std::uint8_t got = frame[y * kRowBytes + x];
+      if (!Expect(got == static_cast<std::uint8_t>(y + 1),
+                  "row " + std::to_string(y) + " byte " + std::to_string(x) +
+                      " is " + std::to_string(static_cast<int>(got)) +
+                      ", so the padding was copied as picture"))
+        return false;
+    }
+  }
+
+  // A frame too short for the last row must not be read past its end. A
+  // refused frame offers nothing, so the consumer still holds the frame above.
+  std::vector<std::uint8_t> other(source.size(), 0x77);
+  (void)buffer.PublishRows(other.data(),
+                           kSourceStride * (kRows - 1) + kRowBytes - 1,
+                           kSourceStride, kRowBytes, kRows);
+  return Expect(buffer.Acquire()[0] == 1,
+                "a frame shorter than the last row must be refused");
+}
+
 bool TestCameraFrameByteArithmetic() {
   using studiocast::video::PixelFormat;
   using studiocast::video::pw_backend::CameraFrameBytes;
+  using studiocast::video::pw_backend::CameraStrideBytes;
   return Expect(CameraFrameBytes(1280, 720, PixelFormat::rgb24) ==
                     1280u * 720u * 3u,
                 "rgb24 is three bytes a pixel") &&
          Expect(CameraFrameBytes(1280, 720, PixelFormat::yuyv) ==
                     1280u * 720u * 2u,
-                "yuyv is two bytes a pixel");
+                "yuyv is two bytes a pixel") &&
+         // YUYV writes the last pixel pair whole, so an odd width fills two
+         // more bytes than the pixel count asks for. The node must count the
+         // row the same way the loopback writer does, or a frame of an odd
+         // width reaches a consumer sheared.
+         Expect(CameraStrideBytes(1281, PixelFormat::yuyv) ==
+                    studiocast::video::MinBytesPerLine(1281, PixelFormat::yuyv),
+                "an odd yuyv row must match the writer row") &&
+         Expect(CameraFrameBytes(641, 480, PixelFormat::yuyv) ==
+                    studiocast::video::MinBytesPerLine(641, PixelFormat::yuyv) *
+                        480u,
+                "an odd yuyv frame is its row size times its height");
 }
 
 bool TestLiveVirtualCameraNodeReachesTheGraph() {
@@ -1247,6 +1308,130 @@ bool TestLiveVirtualCameraFeedsAGstreamerConsumer() {
          Expect(consumers > 0, "no consumer link was counted") &&
          Expect(drops_ok, "a consumer that keeps up must not see drops, got " +
                               std::to_string(drops));
+}
+
+// Proves the frame layout survives the hand-off, which the test above cannot
+// see: it fills every byte alike, so a row read from the wrong offset looks the
+// same as a correct one.
+//
+// The pipeline gives the node its own output buffer, whose rows are
+// bytes_per_line apart. Here the source rows carry a byte each and the padding
+// carries a byte no row uses, so a consumer that receives a sheared frame
+// fails this.
+bool TestLiveVirtualCameraKeepsTheRowLayout() {
+  static constexpr const char *kName = "studiocast_camera_layout_probe";
+  static constexpr int kWidth = 160;
+  static constexpr int kHeight = 120;
+  static constexpr int kFrames = 8;
+  // 160 * 3 is a multiple of four, so GStreamer keeps the rows packed too and
+  // the bytes in the file are the bytes the node handed out.
+  static constexpr std::size_t kRowBytes =
+      static_cast<std::size_t>(kWidth) * 3u;
+  static constexpr std::size_t kFrameBytes =
+      kRowBytes * static_cast<std::size_t>(kHeight);
+  static constexpr std::size_t kPadding = 16u;
+  static constexpr std::uint8_t kPaddingByte = 0xee;
+
+  if (!LiveServerAvailable("live virtual camera keeps the row layout"))
+    return true;
+  if (RunCapture("command -v gst-launch-1.0 2>/dev/null").empty()) {
+    std::cout << "[SKIP] live virtual camera keeps the row layout: "
+                 "gst-launch-1.0 is not installed\n";
+    return true;
+  }
+
+  studiocast::video::pw_backend::CameraNodeConfig cfg;
+  cfg.node_name = kName;
+  cfg.width = kWidth;
+  cfg.height = kHeight;
+  cfg.fps = 30;
+  cfg.format = studiocast::video::PixelFormat::rgb24;
+  cfg.stride_bytes = kRowBytes + kPadding;
+
+  studiocast::video::pw_backend::PipeWireCameraNode node;
+  std::string error;
+  if (!Expect(node.Start(cfg, &error), "camera node start failed: " + error))
+    return false;
+
+  // Row y holds the byte y + 1 everywhere, so one byte says which row a
+  // consumer really got.
+  std::vector<std::uint8_t> source(cfg.stride_bytes *
+                                       static_cast<std::size_t>(kHeight),
+                                   kPaddingByte);
+  for (int y = 0; y < kHeight; ++y) {
+    std::uint8_t *row = source.data() + static_cast<std::size_t>(y) *
+                                            cfg.stride_bytes;
+    std::fill(row, row + kRowBytes, static_cast<std::uint8_t>(y + 1));
+  }
+
+  std::atomic<bool> stop{false};
+  std::thread feeder([&] {
+    std::string err;
+    while (!stop.load(std::memory_order_acquire)) {
+      (void)node.WriteFrame(source.data(), source.size(), &err);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1000 / cfg.fps));
+    }
+  });
+
+  const std::filesystem::path out_file =
+      std::filesystem::temp_directory_path() /
+      ("studiocast_camera_layout_probe_" + std::to_string(::getpid()) + ".raw");
+  const std::string cmd =
+      std::string("timeout 20 gst-launch-1.0 pipewiresrc target-object=") +
+      kName + " num-buffers=" + std::to_string(kFrames) +
+      " ! video/x-raw,format=RGB ! filesink location=" + out_file.string() +
+      " 2>&1; echo rc=$?";
+  const std::string gst_out = RunCapture(cmd);
+
+  stop.store(true, std::memory_order_release);
+  feeder.join();
+  node.Stop();
+
+  std::vector<std::uint8_t> got;
+  {
+    std::ifstream in(out_file, std::ios::binary);
+    got.assign(std::istreambuf_iterator<char>(in),
+               std::istreambuf_iterator<char>());
+  }
+  std::error_code ec;
+  std::filesystem::remove(out_file, ec);
+
+  if (!Expect(gst_out.find("rc=0") != std::string::npos,
+              "the GStreamer consumer did not finish cleanly: " + gst_out))
+    return false;
+  if (!Expect(got.size() >= kFrameBytes,
+              "the consumer wrote " + std::to_string(got.size()) +
+                  " bytes, less than one frame"))
+    return false;
+
+  // The first cycles can run before the feeder stages anything, and those
+  // frames are black by design. One frame that carries the pattern whole is
+  // what proves the layout.
+  std::string first_bad;
+  for (std::size_t f = 0; f + kFrameBytes <= got.size(); f += kFrameBytes) {
+    const std::uint8_t *frame = got.data() + f;
+    bool matches = true;
+    for (int y = 0; y < kHeight && matches; ++y) {
+      for (std::size_t x = 0; x < kRowBytes; ++x) {
+        if (frame[static_cast<std::size_t>(y) * kRowBytes + x] !=
+            static_cast<std::uint8_t>(y + 1)) {
+          matches = false;
+          if (first_bad.empty()) {
+            first_bad = "row " + std::to_string(y) + " byte " +
+                        std::to_string(x) + " is " +
+                        std::to_string(static_cast<int>(
+                            frame[static_cast<std::size_t>(y) * kRowBytes + x]));
+          }
+          break;
+        }
+      }
+    }
+    if (matches)
+      return true;
+  }
+
+  return Expect(false, "no frame reached the consumer with its rows in place: " +
+                           first_bad);
 }
 
 // Restores the real pactl runner when the test ends.
@@ -1846,12 +2031,16 @@ int main() {
        &TestFrameBufferReportsAFrameThatWasNeverTaken},
       {"frame buffer survives a producer and a consumer",
        &TestFrameBufferSurvivesAProducerAndAConsumer},
+      {"frame buffer drops the row padding",
+       &TestFrameBufferDropsTheRowPadding},
       {"camera frame byte arithmetic", &TestCameraFrameByteArithmetic},
       {"camera node rejects a short frame", &TestCameraNodeRejectsAShortFrame},
       {"live virtual camera node reaches the graph",
        &TestLiveVirtualCameraNodeReachesTheGraph},
       {"live virtual camera feeds a GStreamer consumer",
        &TestLiveVirtualCameraFeedsAGstreamerConsumer},
+      {"live virtual camera keeps the row layout",
+       &TestLiveVirtualCameraKeepsTheRowLayout},
   };
 
   int failed = 0;

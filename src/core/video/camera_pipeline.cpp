@@ -797,7 +797,8 @@ PipeWireNodePlan PlanPipeWireNode(bool wanted, const ActualFormat &output,
 
   if (current.running && current.width == output.width &&
       current.height == output.height && current.fps == fps &&
-      current.format == output.format) {
+      current.format == output.format &&
+      current.stride == output.bytes_per_line) {
     return plan;
   }
 
@@ -806,6 +807,10 @@ PipeWireNodePlan PlanPipeWireNode(bool wanted, const ActualFormat &output,
   plan.node.height = output.height;
   plan.node.fps = fps;
   plan.node.format = output.format;
+  // The node reads the pipeline's own output buffer, and a loopback can pad
+  // every row. A node that took the width alone would read each row after the
+  // first from the wrong offset.
+  plan.node.stride_bytes = output.bytes_per_line;
   return plan;
 }
 
@@ -829,6 +834,7 @@ internal::PipeWireNodePlan CameraPipeline::PlanPipeWireOutputLocked() const {
   current.height = pw_node_height_;
   current.fps = pw_node_fps_;
   current.format = pw_node_format_;
+  current.stride = pw_node_stride_;
   return internal::PlanPipeWireNode(
       pw_output_wanted_.load(std::memory_order_acquire), writer_.Actual(),
       current);
@@ -876,6 +882,7 @@ void CameraPipeline::ApplyPipeWireOutputPlan(
       pw_node_height_ = plan.node.height;
       pw_node_fps_ = plan.node.fps;
       pw_node_format_ = plan.node.format;
+      pw_node_stride_ = plan.node.stride_bytes;
     } else {
       pw_node_error_ = err;
     }

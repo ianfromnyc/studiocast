@@ -27,34 +27,20 @@
 
 namespace studiocast::video::pw_backend {
 
+std::size_t CameraStrideBytes(int width, PixelFormat format) {
+  // The loopback writer already holds this rule, and the two must agree: the
+  // pipeline sizes its output buffer with MinBytesPerLine, so an odd YUYV
+  // width has a row two bytes longer than the pixel count alone gives.
+  return studiocast::video::MinBytesPerLine(width, format);
+}
+
 std::size_t CameraFrameBytes(int width, int height, PixelFormat format) {
   if (width <= 0 || height <= 0)
     return 0;
-  const std::size_t pixels =
-      static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-  switch (format) {
-  case PixelFormat::rgb24:
-    return pixels * 3;
-  case PixelFormat::yuyv:
-    return pixels * 2;
-  }
-  return 0;
+  return CameraStrideBytes(width, format) * static_cast<std::size_t>(height);
 }
 
 namespace {
-
-std::size_t CameraStrideBytes(int width, PixelFormat format) {
-  if (width <= 0)
-    return 0;
-  const std::size_t w = static_cast<std::size_t>(width);
-  switch (format) {
-  case PixelFormat::rgb24:
-    return w * 3;
-  case PixelFormat::yuyv:
-    return w * 2;
-  }
-  return 0;
-}
 
 #if STUDIOCAST_HAVE_PIPEWIRE
 
@@ -80,7 +66,12 @@ std::uint32_t SpaFormatFor(PixelFormat format) {
 struct PipeWireCameraNode::Impl {
   CameraNodeConfig cfg;
   std::size_t frame_bytes = 0;
+  // Row size the node hands its consumers, and the row size of the frames the
+  // pipeline hands the node. The second is the first or more, and the copy in
+  // WriteFrame drops the difference.
   std::size_t stride_bytes = 0;
+  std::size_t source_stride_bytes = 0;
+  std::size_t rows = 0;
 
   // The frame hand-off between the pipeline thread and the real-time callback.
   //
@@ -368,6 +359,10 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
   impl_->cfg = cfg;
   impl_->frame_bytes = bytes;
   impl_->stride_bytes = CameraStrideBytes(cfg.width, cfg.format);
+  impl_->rows = static_cast<std::size_t>(cfg.height);
+  // A source that says nothing about its rows has them packed.
+  impl_->source_stride_bytes =
+      std::max<std::size_t>(cfg.stride_bytes, impl_->stride_bytes);
   impl_->links.Reset(studiocast::pw::LinkEnd::kOutput);
   impl_->frames_sent.store(0, std::memory_order_relaxed);
   impl_->frames_dropped.store(0, std::memory_order_relaxed);
@@ -536,14 +531,22 @@ bool PipeWireCameraNode::WriteFrame(const std::uint8_t *data,
       *error = "The PipeWire camera node is not running.";
     return false;
   }
-  if (!data || bytes < impl_->frame_bytes) {
+  // The rows of the source can be further apart than the rows the node hands
+  // out, so the frame is copied row by row. PublishRows refuses a frame that
+  // is too short for the rows it should hold.
+  const std::size_t needed =
+      impl_->rows == 0 ? impl_->frame_bytes
+                       : impl_->source_stride_bytes * (impl_->rows - 1) +
+                             impl_->stride_bytes;
+  if (!data || bytes < needed) {
     if (error)
       *error = "The frame is smaller than the negotiated camera format.";
     return false;
   }
 
   // A frame that replaced one the callback never took is a dropped frame.
-  if (impl_->frames.Publish(data, bytes))
+  if (impl_->frames.PublishRows(data, bytes, impl_->source_stride_bytes,
+                                impl_->stride_bytes, impl_->rows))
     impl_->frames_dropped.fetch_add(1, std::memory_order_relaxed);
 
 #if STUDIOCAST_HAVE_PIPEWIRE

@@ -249,6 +249,10 @@ struct PipeWireNodeState {
   int height = 0;
   int fps = 0;
   PixelFormat format = PixelFormat::rgb24;
+  // Row size of the buffer the node was told to read. A renegotiation that
+  // changes the padding alone changes nothing else here, so without this the
+  // node would keep reading the rows at the old distance.
+  std::size_t stride = 0;
 };
 
 // What the camera node needs next.
@@ -450,6 +454,7 @@ private:
   int pw_node_height_ = 0;
   int pw_node_fps_ = 0;
   PixelFormat pw_node_format_ = PixelFormat::rgb24;
+  std::size_t pw_node_stride_ = 0;
 
   // Idle keepalive frames: while the heavy pipeline is stopped, periodically
   // write a black frame to keep consumers from closing/re-opening due to a

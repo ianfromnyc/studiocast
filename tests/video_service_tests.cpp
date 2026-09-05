@@ -1055,6 +1055,62 @@ bool TestPipeWireCameraNodePlanFollowsTheNegotiatedOutput() {
   return true;
 }
 
+// The node reads the pipeline's own output buffer, whose rows are
+// bytes_per_line apart. A node that assumed a packed row would read every row
+// after the first from the wrong offset, so the row size belongs in the plan
+// and a new row size alone must make a running node stale.
+bool TestPipeWireCameraNodePlanCarriesTheOutputRowSize() {
+  using studiocast::video::ActualFormat;
+  using studiocast::video::PixelFormat;
+  using studiocast::video::internal::PipeWireNodePlan;
+  using studiocast::video::internal::PipeWireNodeState;
+  using studiocast::video::internal::PlanPipeWireNode;
+  using Action = PipeWireNodePlan::Action;
+
+  // A loopback that pads its rows, which is what RefreshActual reports after a
+  // consumer renegotiates the format.
+  ActualFormat padded;
+  padded.width = 1280;
+  padded.height = 720;
+  padded.fps = 30;
+  padded.format = PixelFormat::rgb24;
+  padded.bytes_per_line = 1280u * 3u + 16u;
+  padded.size_image = padded.bytes_per_line * 720u;
+
+  const auto first = PlanPipeWireNode(true, padded, PipeWireNodeState{});
+  if (first.action != Action::restart ||
+      first.node.stride_bytes != padded.bytes_per_line) {
+    std::cerr << "the node should be told the row size of the output buffer\n";
+    return false;
+  }
+
+  PipeWireNodeState running;
+  running.running = true;
+  running.width = 1280;
+  running.height = 720;
+  running.fps = 30;
+  running.format = PixelFormat::rgb24;
+  running.stride = padded.bytes_per_line;
+  if (PlanPipeWireNode(true, padded, running).action != Action::keep) {
+    std::cerr << "a node that also matches the row size should be kept\n";
+    return false;
+  }
+
+  // Only the padding changed. The size, the rate and the format stay the same,
+  // so nothing but the row size can make this a restart.
+  ActualFormat packed = padded;
+  packed.bytes_per_line = 1280u * 3u;
+  packed.size_image = packed.bytes_per_line * 720u;
+  const auto repacked = PlanPipeWireNode(true, packed, running);
+  if (repacked.action != Action::restart ||
+      repacked.node.stride_bytes != packed.bytes_per_line) {
+    std::cerr << "a new row size alone should restart the node\n";
+    return false;
+  }
+
+  return true;
+}
+
 bool TestStandaloneGpuScalerPolicySkipsInactiveBackendTransfers() {
   using studiocast::video::ShouldRunStandaloneGpuScaler;
 
@@ -1136,6 +1192,8 @@ int main() {
        &TestVideoOutputOpenFailureDoesNotStartPipeline},
       {"PipeWire camera node plan follows the negotiated output",
        &TestPipeWireCameraNodePlanFollowsTheNegotiatedOutput},
+      {"camera node plan carries the output row size",
+       &TestPipeWireCameraNodePlanCarriesTheOutputRowSize},
       {"PipeWire output state reports a write failure",
        &TestPipeWireOutputStateReportsAWriteFailure},
       {"video start failure backs off", &TestVideoStartFailureBacksOff},

@@ -22,6 +22,16 @@ struct CameraNodeConfig {
 
   // rgb24 maps to SPA_VIDEO_FORMAT_RGB, yuyv maps to SPA_VIDEO_FORMAT_YUY2.
   PixelFormat format = PixelFormat::rgb24;
+
+  // Bytes between two rows of the frames WriteFrame receives. Zero means the
+  // rows are packed.
+  //
+  // The camera pipeline hands over the buffer it writes to the loopback
+  // device, and the driver can ask for padding after every row. The node hands
+  // its consumers packed rows, so it drops that padding on the way in. A node
+  // that assumed a packed source would read every row after the first from the
+  // wrong offset, which shears the picture.
+  std::size_t stride_bytes = 0;
 };
 
 // A PipeWire Video/Source node fed with the processed camera frames.
@@ -70,7 +80,12 @@ private:
   std::unique_ptr<Impl> impl_;
 };
 
-// Bytes one frame of this format needs.
+// Bytes one packed row of this format needs, which is the row size the node
+// hands its consumers. It is the same rule the loopback writer follows, so an
+// odd YUYV width counts the last pixel pair whole.
+std::size_t CameraStrideBytes(int width, PixelFormat format);
+
+// Bytes one frame of this format needs, with the rows packed.
 std::size_t CameraFrameBytes(int width, int height, PixelFormat format);
 
 } // namespace studiocast::video::pw_backend
