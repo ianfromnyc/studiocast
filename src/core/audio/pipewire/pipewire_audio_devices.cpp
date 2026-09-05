@@ -199,6 +199,7 @@ bool UnloadStalePulseDeviceModules(std::vector<std::string> *removed,
 
 struct NativeAudioDevices::State {
   mutable std::mutex mu;
+  NativeAudioDeviceOptions options;
   std::unique_ptr<PipeWireAudioNode> mic;
   std::unique_ptr<PipeWireAudioNode> speaker;
 
@@ -225,6 +226,16 @@ NativeAudioDevices &NativeAudioDevices::Instance() {
   return instance;
 }
 
+void NativeAudioDevices::SetOptions(const NativeAudioDeviceOptions &options) {
+  std::lock_guard<std::mutex> lock(state_->mu);
+  state_->options = options;
+}
+
+NativeAudioDeviceOptions NativeAudioDevices::Options() const {
+  std::lock_guard<std::mutex> lock(state_->mu);
+  return state_->options;
+}
+
 bool NativeAudioDevices::CreateVirtualMic(std::string *error) {
   // The node the daemon already has is the answer. The Pulse scan below forks
   // pactl twice, and the supervisor asks for this device on every poll, so it
@@ -243,8 +254,13 @@ bool NativeAudioDevices::CreateVirtualMic(std::string *error) {
 
   AudioNodeConfig cfg;
   cfg.role = AudioNodeRole::kVirtualSource;
-  cfg.node_name = std::string(studiocast::pw::kVirtualMicNodeName);
-  cfg.node_description = std::string(studiocast::pw::kVirtualMicDescription);
+  cfg.node_name =
+      state_->options.node_name_suffix.empty()
+          ? std::string(studiocast::pw::kVirtualMicNodeName)
+          : std::string(studiocast::pw::kVirtualMicNodeName) +
+                state_->options.node_name_suffix;
+  cfg.node_description = std::string(studiocast::pw::kVirtualMicDescription) +
+                         state_->options.node_name_suffix;
   cfg.sample_rate = kSampleRate;
   cfg.channels = kMicChannels;
   cfg.frame_samples = kFrameSamples;
@@ -280,9 +296,14 @@ bool NativeAudioDevices::CreateVirtualSpeaker(std::string *error) {
 
   AudioNodeConfig cfg;
   cfg.role = AudioNodeRole::kVirtualSink;
-  cfg.node_name = std::string(studiocast::pw::kVirtualSpeakerNodeName);
+  cfg.node_name =
+      state_->options.node_name_suffix.empty()
+          ? std::string(studiocast::pw::kVirtualSpeakerNodeName)
+          : std::string(studiocast::pw::kVirtualSpeakerNodeName) +
+                state_->options.node_name_suffix;
   cfg.node_description =
-      std::string(studiocast::pw::kVirtualSpeakerDescription);
+      std::string(studiocast::pw::kVirtualSpeakerDescription) +
+      state_->options.node_name_suffix;
   cfg.sample_rate = kSampleRate;
   cfg.channels = kSpeakerChannels;
   cfg.frame_samples = kFrameSamples;
@@ -328,8 +349,9 @@ bool NativeAudioDevices::StartSpeakerLoopback(
 
   AudioNodeConfig cfg;
   cfg.role = AudioNodeRole::kPlayback;
-  cfg.node_name = "studiocast_speakers_route";
-  cfg.node_description = "StudioCast Speakers Route";
+  cfg.node_name = "studiocast_speakers_route" + state_->options.node_name_suffix;
+  cfg.node_description =
+      "StudioCast Speakers Route" + state_->options.node_name_suffix;
   cfg.target_object = target_sink_name;
   cfg.sample_rate = kSampleRate;
   cfg.channels = kSpeakerChannels;
@@ -391,6 +413,15 @@ bool NativeAudioDevices::StopSpeakerLoopback(std::string *error) {
 }
 
 void NativeAudioDevices::RemoveStalePulseDevices() {
+  {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    // A caller that shares the machine with another StudioCast leaves the
+    // sound server alone: the modules it would remove may belong to a running
+    // daemon on the Pulse backend.
+    if (!state_->options.remove_stale_pulse_devices)
+      return;
+  }
+
   std::vector<std::string> removed;
   std::string error;
   const bool ok = UnloadStalePulseDeviceModules(&removed, &error);

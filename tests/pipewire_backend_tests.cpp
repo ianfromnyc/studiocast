@@ -462,34 +462,90 @@ bool TestPipeWireIoRefusesToOpenWithoutTheVirtualMic() {
          Expect(!error.empty(), "the failure must explain itself");
 }
 
+// The suffix every device-level test gives its nodes. A daemon on this machine
+// owns `studiocast_mic` and `studiocast_speakers`, so a test must never create
+// a second node under those names, and must never assert on them: the daemon's
+// node would answer for it.
+constexpr const char *kTestDeviceSuffix = "_devtest";
+
+// Gives the process device owner the test identities and takes the daemon's
+// sound server out of its reach, then puts the defaults back.
+class ScopedTestDeviceOptions {
+public:
+  ScopedTestDeviceOptions()
+      : previous_(
+            studiocast::audio::pw_backend::NativeAudioDevices::Instance()
+                .Options()) {
+    studiocast::audio::pw_backend::NativeAudioDeviceOptions options;
+    options.node_name_suffix = kTestDeviceSuffix;
+    options.remove_stale_pulse_devices = false;
+    studiocast::audio::pw_backend::NativeAudioDevices::Instance().SetOptions(
+        options);
+  }
+
+  ~ScopedTestDeviceOptions() {
+    studiocast::audio::pw_backend::NativeAudioDevices::Instance().SetOptions(
+        previous_);
+  }
+
+  ScopedTestDeviceOptions(const ScopedTestDeviceOptions &) = delete;
+  ScopedTestDeviceOptions &operator=(const ScopedTestDeviceOptions &) = delete;
+
+private:
+  studiocast::audio::pw_backend::NativeAudioDeviceOptions previous_;
+};
+
+// Waits until the server has given the node an id.
+std::uint32_t WaitForNodeId(const studiocast::pw::PipeWireAudioNode &node) {
+  for (int i = 0; i < 100; ++i) {
+    const std::uint32_t id = node.NodeId();
+    if (id != 0)
+      return id;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  return 0;
+}
+
 bool TestLiveNativeVirtualMicRoundTrip() {
   if (!LiveServerAvailable("live native virtual mic round trip"))
     return true;
 
+  ScopedTestDeviceOptions options;
   auto &devices = studiocast::audio::pw_backend::NativeAudioDevices::Instance();
   std::string error;
   if (!Expect(devices.CreateVirtualMic(&error),
               "creating the native virtual microphone failed: " + error))
     return false;
 
-  const std::string dump = RunCapture("pw-dump 2>/dev/null");
-  const auto consumers = devices.DetectMicrophoneConsumers();
   const bool created = devices.MicNode() != nullptr;
-
+  std::uint32_t id = 0;
   bool wrote = false;
   if (created) {
+    id = WaitForNodeId(*devices.MicNode());
     std::vector<float> frame(480, 0.0f);
     wrote = devices.MicNode()->Write(frame.data(), frame.size() * sizeof(float),
                                      &error);
   }
 
+  // Ask the server about the one node this test made, by the id it got. A
+  // grep of the whole graph would be answered by the daemon's own node.
+  const std::string dump =
+      id == 0 ? std::string()
+              : RunCapture("pw-dump " + std::to_string(id) + " 2>/dev/null");
+  const auto consumers = devices.DetectMicrophoneConsumers();
+
   (void)devices.DestroyVirtualMic(&error);
 
+  const std::string wantName =
+      std::string(studiocast::pw::kVirtualMicNodeName) + kTestDeviceSuffix;
+  const std::string wantDescription =
+      std::string(studiocast::pw::kVirtualMicDescription) + kTestDeviceSuffix;
   return Expect(created, "the virtual microphone node was not created") &&
-         Expect(dump.find("studiocast_mic") != std::string::npos,
-                "pw-dump did not list studiocast_mic") &&
-         Expect(dump.find("StudioCast Microphone") != std::string::npos,
-                "pw-dump did not list the canonical description") &&
+         Expect(id != 0, "the virtual microphone never reached the graph") &&
+         Expect(dump.find(wantName) != std::string::npos,
+                "pw-dump of the node id did not list " + wantName) &&
+         Expect(dump.find(wantDescription) != std::string::npos,
+                "pw-dump of the node id did not list " + wantDescription) &&
          Expect(wrote,
                 "writing into the virtual microphone failed: " + error) &&
          Expect(consumers.error.empty(),
@@ -936,10 +992,14 @@ bool TestStalePulseModuleCleanupIsQuietWhenNothingIsLoaded() {
 }
 
 bool TestPulseBackendTearsDownNativeNodes() {
+  if (!LiveServerAvailable("pulse backend tears down native nodes"))
+    return true;
+
+  ScopedTestDeviceOptions options;
   auto &devices = studiocast::audio::pw_backend::NativeAudioDevices::Instance();
 
-  // On a machine with a server this really creates a node; without one the
-  // create fails and the teardown still has to be safe.
+  // The nodes carry the test suffix, so this creates and removes nodes of its
+  // own, never the ones a running daemon owns.
   std::string error;
   (void)devices.CreateVirtualMic(&error);
   (void)devices.CreateVirtualSpeaker(&error);

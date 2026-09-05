@@ -43,6 +43,21 @@ std::vector<StalePulseModule> DetectStalePulseDeviceModules(std::string *error);
 bool UnloadStalePulseDeviceModules(std::vector<std::string> *removed,
                                    std::string *error);
 
+// What a process wants from the native device owner.
+//
+// The daemon keeps the defaults: canonical node names, and a clean-up of the
+// PulseAudio device modules an earlier Pulse-backend run left behind. A test
+// changes both, so that it never stands beside a running daemon: its nodes
+// carry a suffix of their own, and it removes nothing from the sound server.
+struct NativeAudioDeviceOptions {
+  // Appended to the node name and to the node description of every device
+  // this owner creates. Empty gives the canonical identities.
+  std::string node_name_suffix;
+
+  // Whether a create removes the stale Pulse device modules first.
+  bool remove_stale_pulse_devices = true;
+};
+
 // Owns the native PipeWire virtual devices of the process.
 //
 // The Pulse path keeps its devices in the sound server, so they live longer
@@ -52,6 +67,11 @@ bool UnloadStalePulseDeviceModules(std::vector<std::string> *removed,
 class NativeAudioDevices final {
 public:
   static NativeAudioDevices &Instance();
+
+  // Takes effect on the next create. A device that already exists keeps the
+  // name it was created with.
+  void SetOptions(const NativeAudioDeviceOptions &options);
+  NativeAudioDeviceOptions Options() const;
 
   bool CreateVirtualMic(std::string *error);
   bool DestroyVirtualMic(std::string *error);
