@@ -644,19 +644,6 @@ sc_ngc_file_is_verified() {
   printf '%s' "${checked}"
 }
 
-# True when a curl exit code means the transfer stopped on the way. The bytes
-# already in the partial file are still good, so the next attempt resumes them.
-#
-# Arguments: <curl exit code>
-sc_ngc_curl_error_keeps_part() {
-  case "$1" in
-    # 6 host not found, 7 could not connect, 18 transfer ended early,
-    # 28 timeout, 35 TLS handshake, 52 empty answer, 55 send, 56 receive.
-    6|7|18|28|35|52|55|56) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 # Download one file of one item version into <dest>.
 #
 # Arguments: <kind> <name> <version> <file path> <dest> [sha256hex] [size in bytes]
@@ -671,7 +658,7 @@ sc_ngc_download_kind_file() {
   local dest="$5"
   local sha256="${6:-}"
   local size="${7:-}"
-  local url encoded part attempt status checked
+  local url encoded part attempt status http_code checked
   local vrc restarted=0
   local -a progress=(--silent --show-error)
 
@@ -717,13 +704,17 @@ sc_ngc_download_kind_file() {
     # --continue-at - resumes a part file from an earlier run. curl drops the
     # Authorization header on the redirect to the signed storage URL, which is
     # what we want: the signed URL carries its own credentials.
+    # --write-out prints the status of the answer on stdout. --fail turns
+    # every status at or above 400 into the same exit code, 22, so the status
+    # is the only way to tell one refusal from another below.
     status=0
-    curl --fail --location "${progress[@]}" \
+    http_code="$(curl --fail --location "${progress[@]}" \
       --config <(_sc_ngc_auth_config) \
       --retry "${SC_NGC_RETRIES}" --retry-delay 2 --retry-connrefused \
       --continue-at - \
+      --write-out '%{http_code}' \
       --output "${part}" \
-      "${url}" || status=$?
+      "${url}")" || status=$?
 
     if [[ "${status}" -ne 0 ]]; then
       # curl exit 33 means the server refuses a resume; start over.
@@ -731,19 +722,25 @@ sc_ngc_download_kind_file() {
         rm -f "${part}"
         continue
       fi
-      # Every other failure that is not a network error can also be a refused
-      # resume: a storage backend answers HTTP 416 instead, and --fail turns
-      # that into exit 22. Throw the partial file away and start over, one
-      # time. Without this the same refusal comes back in every later run,
-      # because the partial file stays where it is.
-      if [[ "${restarted}" -eq 0 ]] && \
-        ! sc_ngc_curl_error_keeps_part "${status}" && [[ -s "${part}" ]]; then
+      # A storage backend refuses a resume with HTTP 416 instead. Throw the
+      # partial file away and start over, one time. Without this the same
+      # refusal comes back in every later run, because the partial file stays
+      # where it is.
+      #
+      # Only 416. An expired token (401), a signed URL that went stale (403),
+      # a backend that is down (503) and a disk that filled up (exit 23) all
+      # leave good bytes in the partial file, and the next run resumes them.
+      if [[ "${http_code}" == "416" && "${restarted}" -eq 0 && -s "${part}" ]]; then
         restarted=1
-        sc_ngc_err "download of ${relpath} failed (curl exit ${status}). Removing ${part} and starting over."
+        sc_ngc_err "download of ${relpath} failed (HTTP 416, the server refuses to resume). Removing ${part} and starting over."
         rm -f "${part}"
         continue
       fi
-      sc_ngc_err "download of ${relpath} failed (curl exit ${status})."
+      if [[ "${http_code}" =~ ^[0-9]+$ ]] && [[ "${http_code}" != "000" ]]; then
+        sc_ngc_err "download of ${relpath} failed (HTTP ${http_code}, curl exit ${status})."
+      else
+        sc_ngc_err "download of ${relpath} failed (curl exit ${status})."
+      fi
       continue
     fi
 

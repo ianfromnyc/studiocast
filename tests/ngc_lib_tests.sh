@@ -84,6 +84,17 @@ fi
 # exit 22. A transfer that starts from nothing is served as usual.
 if [[ -n "${NGC_STUB_REFUSE_RESUME:-}" && -s "${out}" ]]; then
   printf 'curl: (22) The requested URL returned error: 416\n' >&2
+  [[ "${write_out}" -eq 0 ]] || printf '416'
+  exit 22
+fi
+
+# ${NGC_STUB_HTTP_FAIL} answers with another status at or above 400, which
+# --fail turns into curl exit 22 as well. The bytes already transferred stay
+# where they are, the way curl leaves them.
+if [[ -n "${NGC_STUB_HTTP_FAIL:-}" ]]; then
+  printf 'curl: (22) The requested URL returned error: %s\n' \
+    "${NGC_STUB_HTTP_FAIL}" >&2
+  [[ "${write_out}" -eq 0 ]] || printf '%s' "${NGC_STUB_HTTP_FAIL}"
   exit 22
 fi
 
@@ -714,6 +725,41 @@ test_a_failed_download_names_the_partial_file() {
   fi
 }
 
+# --fail turns every HTTP status at or above 400 into curl exit 22, so the
+# exit code alone cannot tell a refused resume from an expired token, a stale
+# signed URL or a backend that is down. Only a refused resume may throw the
+# bytes away; every other answer must keep them for the next run.
+test_a_rejected_download_keeps_the_partial_file() {
+  local dir="${SANDBOX}/rejected"
+  local dest="${dir}/model.trtpkg"
+  rm -rf "${dir}"
+  mkdir -p "${dir}"
+  printf 'BYTES FROM A TRANSFER THAT STOPPED' > "${dest}.part"
+
+  local out
+  export NGC_STUB_HTTP_FAIL=403
+  out="$(run_single_file_download "${dest}" "" "${STUB_PAYLOAD_BYTES}")"
+  unset NGC_STUB_HTTP_FAIL
+
+  if [[ "${out}" != *"RC=2"* ]]; then
+    t_fail "a download the server refuses should return 2: ${out}"
+  else
+    t_pass "a download the server refuses returns 2"
+  fi
+
+  if [[ ! -s "${dest}.part" ]]; then
+    t_fail "HTTP 403 threw away the bytes that were already there"
+  else
+    t_pass "an HTTP status that is not 416 keeps the partial file"
+  fi
+
+  if [[ "${out}" != *"HTTP 403"* ]]; then
+    t_fail "the failure did not name the HTTP status: ${out}"
+  else
+    t_pass "the failure names the HTTP status"
+  fi
+}
+
 # NGC answers a long file list one page at a time. The helper must walk every
 # page and join them, and must drop a repeat, because an API that ignores the
 # page number would otherwise serve page 0 forever.
@@ -1052,6 +1098,7 @@ test_a_size_only_check_is_named_a_size_check
 test_an_unrelated_md5_in_the_destination_is_left_alone
 test_a_refused_resume_starts_over
 test_a_failed_download_names_the_partial_file
+test_a_rejected_download_keeps_the_partial_file
 test_a_page_that_adds_nothing_stops_the_listing
 test_an_absurd_page_count_is_refused
 test_an_empty_middle_page_does_not_end_the_listing
