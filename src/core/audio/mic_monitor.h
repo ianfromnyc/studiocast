@@ -65,6 +65,13 @@ ChooseSafeMicMonitorSinkName(const std::string &configured_sink,
                              const std::string &mic_source_name,
                              std::string *error);
 
+// Says whether `sink_name` is still one of the output sinks the sound server
+// offers. No value means the answer is not known — there is no sound server to
+// ask, the sink list could not be read, or the name is "auto", which names no
+// sink. A caller must not read "not known" as "gone".
+std::optional<bool> MicMonitorSinkPresent(const std::string &sink_name,
+                                          std::string *error);
+
 // Property value that tags the monitor loopback streams. It carries no space
 // because the Pulse module argument parser keeps only the text before the
 // first space.

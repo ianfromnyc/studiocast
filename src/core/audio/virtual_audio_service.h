@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -211,6 +212,8 @@ struct VirtualAudioServiceHooks {
   std::function<bool(std::string *)> stop_mic_monitor;
   std::function<bool(int, int, std::string *)> set_mic_monitor_volume;
   std::function<MicMonitorState(std::string *)> detect_mic_monitor;
+  std::function<std::optional<bool>(const std::string &, std::string *)>
+      mic_monitor_sink_present;
   std::function<AudioBackendAvailability(const VirtualAudioServiceConfig &)>
       probe_microphone_backend_availability;
   std::function<AudioBackendAvailability(const VirtualAudioServiceConfig &)>
@@ -265,6 +268,8 @@ private:
   bool SetMicMonitorRouteVolume(int module_id, int volume,
                                 std::string *error) const;
   MicMonitorState DetectMicMonitorRoute(std::string *error) const;
+  std::optional<bool> MicMonitorSinkPresentRoute(const std::string &sink_name,
+                                                 std::string *error) const;
   AudioBackendAvailability ProbeMicrophoneBackendAvailability(
       const VirtualAudioServiceConfig &cfg) const;
   AudioBackendAvailability

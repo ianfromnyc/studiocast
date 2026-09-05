@@ -651,6 +651,15 @@ VirtualAudioService::DetectMicMonitorRoute(std::string *error) const {
   return studiocast::audio::DetectMicMonitor(error);
 }
 
+std::optional<bool>
+VirtualAudioService::MicMonitorSinkPresentRoute(const std::string &sink_name,
+                                                std::string *error) const {
+  if (hooks_.mic_monitor_sink_present) {
+    return hooks_.mic_monitor_sink_present(sink_name, error);
+  }
+  return studiocast::audio::MicMonitorSinkPresent(sink_name, error);
+}
+
 AudioBackendAvailability
 VirtualAudioService::ProbeMicrophoneBackendAvailability(
     const VirtualAudioServiceConfig &cfg) const {
@@ -1289,6 +1298,45 @@ void VirtualAudioService::ThreadMain() {
         monitor_latency_ms_ = 0;
         monitor_volume_ = 0;
       };
+      // True only when the sound server answered and the sink was not in its
+      // list. A sound server that cannot be reached gives no answer at all,
+      // and then the monitor keeps its pin and retries: a monitor that waits
+      // for the sound server comes back on its own, while a lost output needs
+      // the user.
+      auto monitorOutputIsGone = [&](const std::string &sink) {
+        std::string presentErr;
+        const auto present = MicMonitorSinkPresentRoute(sink, &presentErr);
+        return present.has_value() && !*present;
+      };
+      // The output the monitor played on is gone, for example because the
+      // headset was unplugged. A configured sink of "auto" would now resolve
+      // to whatever the Pulse default has become, usually the built-in
+      // speakers, which is a feedback loop the user never asked for. Stop
+      // instead and say what happened.
+      //
+      // The pin on the resolved output goes with the output it names, so the
+      // next explicit restart resolves "auto" afresh instead of asking for a
+      // sink that is gone.
+      //
+      // This is the failure the feature is designed for, and the sentence says
+      // what to do about it. It goes in the note, which the GUI prints as
+      // written. An error would become "The monitor needs attention. Open
+      // Support for technical details."
+      // `lost_sink` is taken by value because a caller may hand in
+      // `monitor_sink_resolved_`, which this drops.
+      auto reportMonitorOutputLost = [&](std::string lost_sink) {
+        clearMonitorRouteState();
+        monitor_route_may_exist_ = false;
+        monitor_output_lost_ = true;
+        monitor_sink_resolved_.clear();
+        monitorStartFailures = 0;
+        nextMonitorStartRetry = steady_clock::time_point{};
+        setMonitorError(std::string());
+        setMonitorNote("The monitor output '" + lost_sink +
+                       "' disappeared, so the monitor stopped. Choose another "
+                       "output, or turn the monitor off and on again to use "
+                       "the system default.");
+      };
 
       if (!wantMonitor) {
         if (monitor_output_lost_) {
@@ -1384,25 +1432,10 @@ void VirtualAudioService::ThreadMain() {
             setMonitorError("Failed to check the microphone monitor: " +
                             detectErr);
           } else if (!live.active) {
-            // The output is gone. A configured sink of "auto" would now
-            // resolve to whatever the Pulse default has become, usually the
-            // built-in speakers, which is a feedback loop the user never
-            // asked for. Stop instead and say what happened.
-            const std::string lost = monitor_sink_resolved_.empty()
-                                         ? monitorCfg.sink
-                                         : monitor_sink_resolved_;
-            clearMonitorRouteState();
-            monitor_route_may_exist_ = false;
-            monitor_output_lost_ = true;
-            // This is the failure the feature is designed for, and the
-            // sentence says what to do about it. It goes in the note, which
-            // the GUI prints as written. An error would become "The monitor
-            // needs attention. Open Support for technical details."
-            setMonitorError(std::string());
-            setMonitorNote("The monitor output '" + lost +
-                           "' disappeared, so the monitor stopped. Choose "
-                           "another output, or turn the monitor off and on "
-                           "again to use the system default.");
+            // Pulse unloads the loopback when the output disappears.
+            reportMonitorOutputLost(monitor_sink_resolved_.empty()
+                                        ? monitorCfg.sink
+                                        : monitor_sink_resolved_);
           }
         }
 
@@ -1441,7 +1474,9 @@ void VirtualAudioService::ThreadMain() {
           // move the monitor onto the new Pulse default, which is the feedback
           // loop the lost-output stop exists to prevent.
           MicMonitorConfig startCfg = monitorCfg;
-          if (!monitorSettingsChanged && !monitor_sink_resolved_.empty())
+          const bool startUsedThePin =
+              !monitorSettingsChanged && !monitor_sink_resolved_.empty();
+          if (startUsedThePin)
             startCfg.sink = monitor_sink_resolved_;
 
           MicMonitorState state;
@@ -1469,6 +1504,13 @@ void VirtualAudioService::ThreadMain() {
               st_.monitor_latency_ms_active = state.latency_ms;
               st_.monitor_last_error = state.warning;
             }
+          } else if (startUsedThePin && monitorOutputIsGone(startCfg.sink)) {
+            // A pinned start that fails is the moment to ask whether the
+            // output the pin names is still there. A failed route check
+            // already stopped the route without noticing the loss, so this is
+            // the only place the loss can still be found: retrying it would
+            // ask a sink that no longer exists for the rest of the run.
+            reportMonitorOutputLost(startCfg.sink);
           } else {
             monitorStartFailures = std::min(monitorStartFailures + 1, 8);
             nextMonitorStartRetry =

@@ -149,6 +149,46 @@ ChooseSafeMicMonitorSinkName(const std::string &configured_sink,
   return std::nullopt;
 }
 
+std::optional<bool> MicMonitorSinkPresent(const std::string &sink_name,
+                                          std::string *error) {
+  if (error)
+    error->clear();
+
+  const std::string wanted = Trimmed(sink_name);
+  if (wanted.empty() || wanted == "auto") {
+    // "auto" names no sink, so there is nothing to look for.
+    return std::nullopt;
+  }
+
+  // A sound server that cannot be reached tells nothing about its sinks. This
+  // must stay apart from "the sink is gone": a monitor that waits for the
+  // sound server to come back recovers on its own, while a lost output needs
+  // the user.
+  std::string details;
+  bool timedOut = false;
+  if (!pulse::PactlAvailable(&details, &timedOut)) {
+    if (error) {
+      *error = timedOut ? "The sound server did not answer in time."
+                        : ("pactl not available: " + details);
+    }
+    return std::nullopt;
+  }
+
+  std::string listErr;
+  const auto sinks = pulse::ListSinks(&listErr);
+  if (!listErr.empty()) {
+    if (error)
+      *error = "Failed to list the output sinks: " + listErr;
+    return std::nullopt;
+  }
+
+  for (const auto &sink : sinks) {
+    if (sink.name == wanted)
+      return true;
+  }
+  return false;
+}
+
 std::string MicMonitorStreamName() { return kMonitorStreamName; }
 
 std::vector<std::string> BuildMicMonitorLoadModuleArgs(const std::string &sink,

@@ -538,6 +538,16 @@ loop on its own. When the output disappears the monitor stops and writes what
 happened to `monitor.note`, not to `monitor.last_error`, because the GUI prints
 the note as written and turns any error into a request to open Support.
 
+The pin does not outlive the output it names. A start that used the pinned name
+and failed asks the sound server whether that sink is still in its list. While
+the sink is there the pin holds and the start is retried, so a sound server
+hiccup cannot move the monitor. When the sink is gone the service reports the
+lost output, drops the pin and stops, so the next explicit restart resolves
+`"auto"` afresh instead of asking for a sink that no longer exists. A sound
+server that cannot be reached gives no answer at all, and no answer keeps the
+pin: a monitor that only waits for the sound server comes back on its own,
+while a lost output needs the user.
+
 The daemon never writes the monitor setting back. A safety check that finds no
 usable output gives a warning and leaves `monitor.enabled` as the user wrote
 it, because the same check fails when the sound server is only unreadable for a

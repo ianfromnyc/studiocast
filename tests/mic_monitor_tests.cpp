@@ -7,6 +7,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -492,6 +493,14 @@ void HookMonitor(VirtualAudioServiceHooks *hooks, MonitorRecorder *rec) {
     if (error)
       error->clear();
     return true;
+  };
+  // Every output the tests ask about is there unless the test says otherwise.
+  // Without this the service would ask the real sound server of the person who
+  // runs the tests.
+  hooks->mic_monitor_sink_present = [](const std::string &, std::string *error) {
+    if (error)
+      error->clear();
+    return std::optional<bool>(true);
   };
   hooks->detect_mic_monitor = [rec](std::string *error) {
     MicMonitorState state;
@@ -1435,6 +1444,169 @@ bool TestServiceWaitsForTheVirtualMicrophoneBeforeMonitoring() {
   return ok;
 }
 
+// The output the last start really used is pinned across a restart the user
+// did not ask for, but the pin must not outlive the output it names. While the
+// output is there a failed start keeps the pin, because a sound server hiccup
+// must not move the monitor. Once the output is gone the pin goes with it:
+// the service stops, says what happened, and a later restart resolves "auto"
+// afresh. Without the expiry a headset unplugged in the same window as a
+// failed check leaves the monitor asking for a dead sink for ever.
+bool TestServiceDropsThePinnedOutputOnlyWhenItIsGone() {
+  MonitorRecorder rec;
+  std::atomic<bool> headset_present{true};
+  std::atomic<bool> start_fails{false};
+  std::mutex asked_mu;
+  std::string asked_sink;
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  // "auto" resolves to the headset while it is plugged in, and to the built-in
+  // speakers once it is gone, the way the Pulse default sink moves.
+  auto start_monitor = hooks.start_mic_monitor;
+  hooks.start_mic_monitor = [&](const MicMonitorConfig &cfg,
+                                const std::string &source, MicMonitorState *out,
+                                std::string *error) {
+    MicMonitorConfig resolved = cfg;
+    if (resolved.sink == "auto") {
+      resolved.sink = headset_present.load(std::memory_order_relaxed)
+                          ? std::string("headset_test_sink")
+                          : std::string("speaker_test_sink");
+    }
+    {
+      std::lock_guard<std::mutex> lock(asked_mu);
+      asked_sink = resolved.sink;
+    }
+    const bool gone = resolved.sink == "headset_test_sink" &&
+                      !headset_present.load(std::memory_order_relaxed);
+    if (gone || start_fails.load(std::memory_order_relaxed)) {
+      rec.starts.fetch_add(1, std::memory_order_relaxed);
+      if (error)
+        *error = "sink '" + resolved.sink + "' does not exist";
+      return false;
+    }
+    return start_monitor(resolved, source, out, error);
+  };
+  hooks.mic_monitor_sink_present = [&](const std::string &sink,
+                                       std::string *error) {
+    if (error)
+      error->clear();
+    if (sink == "headset_test_sink")
+      return std::optional<bool>(
+          headset_present.load(std::memory_order_relaxed));
+    return std::optional<bool>(true);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            return service.Status().monitor_sink_active == "headset_test_sink";
+          },
+          1000ms)) {
+    std::cerr << "the monitor did not start on the headset\n";
+    service.Stop();
+    return false;
+  }
+
+  // The check fails, so the restart path takes over, and the start fails too
+  // while the headset is still plugged in.
+  bool ok = true;
+  int starts_before = rec.starts.load(std::memory_order_relaxed);
+  start_fails.store(true, std::memory_order_relaxed);
+  rec.fail_detect.store(true, std::memory_order_relaxed);
+  if (!WaitUntil(
+          [&] {
+            return rec.starts.load(std::memory_order_relaxed) >=
+                   starts_before + 2;
+          },
+          6000ms)) {
+    std::cerr << "the service stopped retrying while the output was there\n";
+    service.Stop();
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(asked_mu);
+    if (asked_sink != "headset_test_sink") {
+      std::cerr << "a failed start moved the monitor to '" << asked_sink
+                << "' while the headset was still there\n";
+      ok = false;
+    }
+  }
+  if (!service.Status().monitor_note.empty()) {
+    std::cerr << "a failed start reported a lost output while the output was "
+                 "there: '"
+              << service.Status().monitor_note << "'\n";
+    ok = false;
+  }
+
+  // The headset is unplugged. The check is still failing, so the lost output
+  // can only be found by the start that asks for it.
+  headset_present.store(false, std::memory_order_relaxed);
+  start_fails.store(false, std::memory_order_relaxed);
+  if (!WaitUntil(
+          [&] {
+            const auto st = service.Status();
+            return !st.monitor_active &&
+                   st.monitor_note.find("headset_test_sink") !=
+                       std::string::npos;
+          },
+          6000ms)) {
+    const auto st = service.Status();
+    std::cerr << "the lost monitor output was not reported: note='"
+              << st.monitor_note << "' error='" << st.monitor_last_error
+              << "'\n";
+    service.Stop();
+    return false;
+  }
+  if (!service.Status().monitor_last_error.empty()) {
+    std::cerr << "the lost output was also reported as an error: '"
+              << service.Status().monitor_last_error << "'\n";
+    ok = false;
+  }
+
+  // Nothing may go on asking the sound server for a sink that is gone.
+  starts_before = rec.starts.load(std::memory_order_relaxed);
+  std::this_thread::sleep_for(1000ms);
+  if (rec.starts.load(std::memory_order_relaxed) != starts_before) {
+    std::cerr << "the monitor kept retrying the output that is gone\n";
+    ok = false;
+  }
+
+  // Turning the monitor off and on again is an explicit restart, and the pin
+  // is gone, so the service resolves the default afresh.
+  rec.fail_detect.store(false, std::memory_order_relaxed);
+  cfg.monitor.enabled = false;
+  service.UpdateConfig(cfg);
+  if (!WaitUntil([&] { return service.Status().monitor_note.empty(); },
+                 2000ms)) {
+    std::cerr << "the lost-output note survived turning the monitor off\n";
+    ok = false;
+  }
+  cfg.monitor.enabled = true;
+  service.UpdateConfig(cfg);
+  if (!WaitUntil(
+          [&] {
+            return service.Status().monitor_sink_active == "speaker_test_sink";
+          },
+          2000ms)) {
+    std::cerr << "the monitor did not resolve the default again after the "
+                 "output was lost\n";
+    ok = false;
+  }
+
+  service.Stop();
+  return ok;
+}
+
 // A monitor setting that can never work would otherwise run about four pactl
 // processes every retry, for the whole life of the daemon. Repeated failures
 // must space the retries out.
@@ -1870,6 +2042,8 @@ int main() {
        &TestServiceReportsALostOutputAsANote},
       {"service keeps the resolved output across a failed check",
        &TestServiceKeepsTheResolvedOutputAcrossAFailedCheck},
+      {"service drops the pinned output only when it is gone",
+       &TestServiceDropsThePinnedOutputOnlyWhenItIsGone},
       {"service backs off repeated monitor start failures",
        &TestServiceBacksOffRepeatedMonitorStartFailures},
       {"service backs off repeated monitor stop failures",
