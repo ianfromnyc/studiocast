@@ -344,15 +344,18 @@ jobs:
         # its own.
         #
         # A directory that is renamed away must fail the job, not leave it
-        # linting the other two and reporting success. find complains on
-        # stderr inside a process substitution that nobody reads, so each
-        # directory is asserted on its own first. The empty-list guard is the
-        # second net: mapfile reports its own status, not the status of find.
+        # linting the others and reporting success. find complains on stderr
+        # inside a process substitution that nobody reads, so each directory
+        # is asserted on its own first. The dirs array gives the assert and
+        # the find one list, so a new directory cannot go in only one of them.
+        # The empty-list guard is the second net: mapfile reports its own
+        # status, not the status of find.
         run: |
-          for dir in packaging scripts tests; do
+          dirs=(packaging scripts tests)
+          for dir in "${dirs[@]}"; do
             [[ -d "${dir}" ]] || { echo "no ${dir} directory"; exit 1; }
           done
-          mapfile -t files < <(find packaging scripts tests -name '*.sh' | sort)
+          mapfile -t files < <(find "${dirs[@]}" -name '*.sh' | sort)
           (( ${#files[@]} > 0 )) || { echo "no shell scripts found"; exit 1; }
           shellcheck -x "${files[@]}"
 
