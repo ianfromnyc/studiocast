@@ -875,6 +875,12 @@ void CameraPipeline::PublishToPipeWire(const std::uint8_t *data,
   if (!data || bytes == 0)
     return;
 
+  // Nothing to publish, and nothing to lock for. A build with
+  // STUDIOCAST_ENABLE_PIPEWIRE=OFF never wants the node, so its frame loop
+  // stays exactly as it was before the node existed.
+  if (!pw_output_wanted_.load(std::memory_order_acquire))
+    return;
+
   // Copy the reference out under a short lock. The supervisor thread can swap
   // the node at any time, and this reference keeps the node that was current
   // alive until the frame is staged. The write itself stays outside the lock.
