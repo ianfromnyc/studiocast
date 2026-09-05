@@ -164,16 +164,10 @@ std::optional<bool> MicMonitorSinkPresent(const std::string &sink_name,
   // must stay apart from "the sink is gone": a monitor that waits for the
   // sound server to come back recovers on its own, while a lost output needs
   // the user.
-  std::string details;
-  bool timedOut = false;
-  if (!pulse::PactlAvailable(&details, &timedOut)) {
-    if (error) {
-      *error = timedOut ? "The sound server did not answer in time."
-                        : ("pactl not available: " + details);
-    }
-    return std::nullopt;
-  }
-
+  //
+  // The sink list gives both answers, so the question is one pactl process. A
+  // second one would only add its own deadline to the wait of the audio
+  // supervisor, which asks this question on every failed pinned start.
   std::string listErr;
   const auto sinks = pulse::ListSinks(&listErr);
   if (!listErr.empty()) {

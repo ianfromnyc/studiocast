@@ -431,6 +431,61 @@ bool TestStartReportsATimedOutPactlAsABusySoundServer() {
   return true;
 }
 
+// The sink question blocks the audio supervisor, and a failed pinned start
+// asks it every time. Each pactl process carries its own deadline, so two of
+// them are twice the wait of a wedged sound server, and a stop the user asked
+// for waits behind them. The sink list answers the question on its own.
+bool TestSinkPresentAsksTheSoundServerOnce() {
+  std::vector<std::string> log;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    log.push_back(command);
+    if (command == "pactl list short sinks 2>&1") {
+      return ExecResult(0, "3\theadset_test_sink\tmodule-alsa-card.c\t"
+                           "s16le 2ch 48000Hz\tSUSPENDED\n");
+    }
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  std::string error;
+  const auto present =
+      studiocast::audio::MicMonitorSinkPresent("headset_test_sink", &error);
+  if (!present.has_value() || !*present) {
+    std::cerr << "the sink in the list was not reported as present: error='"
+              << error << "'\n";
+    return false;
+  }
+  if (log.size() != 1) {
+    std::cerr << "the sink question ran " << log.size()
+              << " pactl commands, want 1\n";
+    return false;
+  }
+  return ExpectEq("the sink question command", log.front(),
+                  "pactl list short sinks 2>&1");
+}
+
+// One question is enough only while a sound server that cannot be run at all
+// still gives no answer. A pactl that is not installed must not read as a sink
+// that is gone.
+bool TestSinkPresentGivesNoAnswerWithoutPactl() {
+  ScopedPactlExecHook hook([](const std::string &) {
+    return ExecResult(127, "sh: pactl: command not found\n");
+  });
+
+  std::string error;
+  const auto present =
+      studiocast::audio::MicMonitorSinkPresent("headset_test_sink", &error);
+  if (present.has_value()) {
+    std::cerr << "a missing pactl answered '" << (*present ? "present" : "gone")
+              << "'\n";
+    return false;
+  }
+  if (error.empty()) {
+    std::cerr << "the unanswered sink question said nothing about why\n";
+    return false;
+  }
+  return true;
+}
+
 // The sink question has three answers, and the pin rule depends on all three.
 // A `pactl list short sinks` that runs out of time prints nothing at all, so
 // an empty list must not read as "the sink is gone": the monitor would stop
@@ -2189,6 +2244,10 @@ int main() {
        &TestStopReportsAFailureWhenPactlTimesOut},
       {"monitor start reports a timed-out pactl as a busy sound server",
        &TestStartReportsATimedOutPactlAsABusySoundServer},
+      {"monitor sink question asks the sound server once",
+       &TestSinkPresentAsksTheSoundServerOnce},
+      {"monitor sink question gives no answer without pactl",
+       &TestSinkPresentGivesNoAnswerWithoutPactl},
       {"monitor sink question gives no answer when the sink list times out",
        &TestSinkPresentGivesNoAnswerWhenTheSinkListTimesOut},
       {"service starts and stops the monitor with config",
