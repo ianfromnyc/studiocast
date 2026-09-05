@@ -492,12 +492,15 @@ CHILD
 # probe that finds it. A shell that sources the helper, which is what the guard
 # is for, has no flavor at all. Reading one must not stop that shell under
 # "set -u": with no flavor there is no gpu run, and thus no bootstrap root.
+#
+# The arch and the CUDA major get their defaults below the guard as well, so a
+# sourced caller that sets a gpu flavor and nothing else must not stop there
+# either. The root such a caller gets is not a useful one; the point is that
+# the shell stays alive to see it.
 test_a_sourced_caller_needs_no_flavor() {
   local child="${SANDBOX}/no-flavor-child.sh"
   cat > "${child}" <<'CHILD'
 set -uo pipefail
-export ORT_ARCH=x64
-export CUDA_MAJOR=13
 # shellcheck source=/dev/null
 source "$1"
 log() { :; }
@@ -507,10 +510,11 @@ echo "REQUESTED_[$(requested_onnxruntime_root)]"
 CHILD
 
   local out rc=0
-  out="$(env -u ORT_FLAVOR STUDIOCAST_ORT_INSTALL_DIR="${SANDBOX}/no-flavor" \
+  out="$(env -u ORT_FLAVOR -u ORT_ARCH -u CUDA_MAJOR \
+    STUDIOCAST_ORT_INSTALL_DIR="${SANDBOX}/no-flavor" \
     bash "${child}" "${FEDORA_SETUP}" 2>&1)" || rc=$?
 
-  if [[ "${out}" == *"ORT_FLAVOR: unbound variable"* ]]; then
+  if [[ "${out}" == *"unbound variable"* ]]; then
     t_fail "a sourced caller without a flavor should get no error, got: ${out}"
   elif [[ "${rc}" -ne 0 ]]; then
     t_fail "a sourced caller without a flavor ended with status ${rc}: ${out}"
@@ -518,6 +522,19 @@ CHILD
     t_fail "no flavor should ask for no bootstrap root, got: ${out}"
   else
     t_pass "a sourced caller without a flavor asks for no bootstrap root"
+  fi
+
+  rc=0
+  out="$(env -u ORT_ARCH -u CUDA_MAJOR ORT_FLAVOR=gpu \
+    STUDIOCAST_ORT_INSTALL_DIR="${SANDBOX}/no-flavor" \
+    bash "${child}" "${FEDORA_SETUP}" 2>&1)" || rc=$?
+
+  if [[ "${out}" == *"unbound variable"* ]]; then
+    t_fail "a sourced caller with only a flavor should get no error, got: ${out}"
+  elif [[ "${rc}" -ne 0 ]]; then
+    t_fail "a sourced caller with only a flavor ended with status ${rc}: ${out}"
+  else
+    t_pass "a sourced caller with only a flavor keeps its shell alive"
   fi
 }
 
