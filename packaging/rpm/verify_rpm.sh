@@ -182,6 +182,16 @@ package_recommends() {
     die "$(basename "${package}") does not recommend ${requirement}"
 }
 
+# True when the package depends on a libyuv shared library, whatever the
+# soname version is. The negative check needs every version: an exact
+# libyuv.so.0 match would let a libyuv.so.1 from the build machine through,
+# which is the very thing the check is there to find.
+package_depends_on_libyuv() {
+  local package="$1"
+  read_package_list "${package}" --requires
+  awk '{ print $1 }' <<<"${PACKAGE_LIST}" | grep -Eq '^libyuv\.so\.'
+}
+
 # True when the package was built with the dlib build conditional. The spec
 # declares the static dlib with Provides: bundled(dlib), so the provide is the
 # one piece of metadata that always tells the two builds apart.
@@ -359,7 +369,7 @@ verify_dependencies() {
   # without it must not pick a libyuv up from the build machine.
   if [[ "${HAS_LIBYUV}" -eq 1 ]]; then
     package_requires "${rpm_file}" "libyuv.so.0()(64bit)"
-  elif package_declares "${rpm_file}" --requires "libyuv.so.0()(64bit)"; then
+  elif package_depends_on_libyuv "${rpm_file}"; then
     die "$(basename "${rpm_file}") requires libyuv although it was built without the libyuv conditional"
   fi
 }
