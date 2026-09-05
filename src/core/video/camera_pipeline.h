@@ -338,6 +338,14 @@ public:
   // node reference out and, if the write fails, to report the error.
   void PublishToPipeWire(const std::uint8_t *data, std::size_t bytes);
 
+  // Puts the output node back when the server took it down.
+  //
+  // A node that left the graph never comes back by itself, and the plan was
+  // only decided when the output opened, so a node lost in the middle of a run
+  // stayed lost for the whole run. The frame thread calls this, and only the
+  // frame thread touches the three members below it.
+  void MaintainPipeWireOutput();
+
   CameraPipelineStatus Status() const override;
 
   // Live update of effects while running.
@@ -428,6 +436,13 @@ private:
   // while Status reads it under `mu_` for the daemon, and the daemon polls the
   // status all the time.
   std::atomic<bool> pw_output_wanted_{false};
+
+  // Frame thread only. When to look at the node again, when a failed start may
+  // be tried again, and how many tries went by, so a server that stays away is
+  // not asked on every frame.
+  std::chrono::steady_clock::time_point next_pw_check_at_{};
+  std::chrono::steady_clock::time_point next_pw_restart_at_{};
+  int pw_restart_attempts_ = 0;
 
   // Format the running node negotiated, so a renegotiated v4l2loopback format
   // restarts the node instead of sending frames of the wrong size.

@@ -110,6 +110,11 @@ public:
   // Best-effort graph latency in microseconds.
   bool GetLatencyUs(std::uint64_t *latency_us) const;
 
+  // True while the node is connected to the graph. It turns false for good
+  // when the server takes the stream down, and such a node never comes back by
+  // itself: the owner must make a new one.
+  bool IsRunning() const;
+
   // The format the node was started with. A caller that moves samples through
   // it must bring the same one. Only meaningful after a Start that succeeded.
   AudioNodeConfig Format() const;

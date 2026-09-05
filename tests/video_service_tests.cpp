@@ -957,6 +957,9 @@ bool TestPipeWireOutputStateReportsAWriteFailure() {
       {"a node that is asked for but not up yet", true, false, "", "starting"},
       {"a node that failed to start", true, false, "start failed",
        "start failed"},
+      {"a node the server took down", true, false, "the server took the node "
+                                                   "down",
+       "the server took the node down"},
       {"a node that takes frames", true, true, "", "running"},
       {"a node that refuses frames", true, true, "write failed",
        "write failed"},

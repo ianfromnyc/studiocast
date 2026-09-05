@@ -272,6 +272,22 @@ Verified on Fedora 44, PipeWire 1.6.8:
         num-buffers=20 ! videoconvert ! jpegenc ! multifilesink ...
     # 20 frames written
 
+## When the server takes a node down
+
+`systemctl --user restart pipewire` drops every node in the graph, and a node
+that left never comes back by itself.
+
+Each node reports that it is no longer running as soon as the server takes its
+stream down. The audio supervisor sees that on its next poll, lets the dead
+device go, reports `mic_present` or `speakers_present` as false with the reason
+in the status, and creates the device again; a speaker route that read the old
+node is started again with the new one. The camera pipeline decides the same
+thing once a second inside its frame loop, and `video.pipewire_output.state`
+carries the reason while the node is away.
+
+Both wait longer between attempts while the server stays away: nothing, then
+half a second, then double each time up to eight seconds.
+
 ## Future work
 
 PipeWire camera capture, as an alternative to V4L2 capture, is not done. The
@@ -290,6 +306,7 @@ today.
 Other gaps:
 
 - Fall back to PulseAudio when an available native backend fails to start, not
-  only when no server answers the probe.
+  only when no server answers the probe. A node the server takes down later is
+  handled, see *When the server takes a node down*.
 - Node-only camera output, so `video.output.backend = pipewire` can leave
   v4l2loopback closed.

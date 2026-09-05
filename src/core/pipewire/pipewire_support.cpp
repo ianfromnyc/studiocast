@@ -7,6 +7,18 @@
 
 namespace studiocast::pw {
 
+std::chrono::milliseconds NodeRestartDelay(int attempts) {
+  constexpr int kFirstWaitMs = 500;
+  constexpr int kCapMs = 8000;
+  if (attempts <= 0)
+    return std::chrono::milliseconds(0);
+
+  int wait = kFirstWaitMs;
+  for (int i = 1; i < attempts && wait < kCapMs; ++i)
+    wait *= 2;
+  return std::chrono::milliseconds(std::min(wait, kCapMs));
+}
+
 bool StreamWentDown(StreamState from, StreamState to) {
   // A stream that was already down cannot go down again.
   if (from == StreamState::kError || from == StreamState::kUnconnected)

@@ -453,8 +453,15 @@ CameraPipelineStatus CameraPipeline::Status() const {
   s.input_device = input_device_;
   s.output_device = output_device_;
   const bool wanted = pw_output_wanted_.load(std::memory_order_acquire);
-  s.pipewire_output_state = internal::PipeWireOutputStateText(
-      wanted, pw_node_ != nullptr, pw_node_error_);
+  // A node the server took down is still held here until the frame thread
+  // replaces it, so the state must come from the node and not from the
+  // pointer, and the node's own reason must reach the status.
+  const bool node_up = pw_node_ && pw_node_->IsRunning();
+  std::string node_error = pw_node_error_;
+  if (node_error.empty() && pw_node_ && !node_up)
+    node_error = pw_node_->LastError();
+  s.pipewire_output_state =
+      internal::PipeWireOutputStateText(wanted, node_up, node_error);
   if (wanted && pw_node_) {
     s.pipewire_node_id = pw_node_->NodeId();
     s.pipewire_consumer_count = pw_node_->ConsumerCount();
@@ -921,6 +928,44 @@ void CameraPipeline::PublishToPipeWire(const std::uint8_t *data,
   std::lock_guard<std::mutex> lock(mu_);
   if (node == pw_node_)
     pw_node_error_ = std::move(err);
+}
+
+void CameraPipeline::MaintainPipeWireOutput() {
+  if (!pw_output_wanted_.load(std::memory_order_acquire))
+    return;
+
+  const auto now = std::chrono::steady_clock::now();
+  if (now < next_pw_check_at_)
+    return;
+  next_pw_check_at_ = now + std::chrono::seconds(1);
+
+  internal::PipeWireNodePlan plan;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    plan = PlanPipeWireOutputLocked();
+  }
+  if (plan.action == internal::PipeWireNodePlan::Action::keep)
+    return;
+  if (now < next_pw_restart_at_)
+    return;
+
+  // Starting a node talks to the server, so this happens with the mutex
+  // released, the same way the supervisor does it.
+  ApplyPipeWireOutputPlan(plan);
+
+  bool up = false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    up = pw_node_ && pw_node_->IsRunning();
+  }
+  if (up) {
+    pw_restart_attempts_ = 0;
+    next_pw_restart_at_ = std::chrono::steady_clock::time_point{};
+    return;
+  }
+  ++pw_restart_attempts_;
+  next_pw_restart_at_ =
+      now + studiocast::pw::NodeRestartDelay(pw_restart_attempts_);
 }
 
 bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig &cfg,
@@ -9453,6 +9498,10 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
         break;
       }
     }
+
+    // A server restart takes the node with it. Nothing else in the run looks
+    // at the node again, so the frame loop is where it comes back.
+    MaintainPipeWireOutput();
 
     const auto t_write_end = Clock::now();
     const double write_ms = ToMs(t_write_end - t_write_start);

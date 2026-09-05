@@ -129,6 +129,12 @@ public:
   // What the last clean-up removed, one line for each module.
   std::vector<std::string> LastPulseCleanupLog() const;
 
+  // True when the device was created and the node the server gave it has left
+  // the graph. A create then makes a new node instead of answering with the
+  // dead one.
+  bool MicWentDown() const;
+  bool SpeakerWentDown() const;
+
   AudioConsumerSnapshot DetectMicrophoneConsumers() const;
   AudioConsumerSnapshot DetectSpeakerConsumers() const;
 

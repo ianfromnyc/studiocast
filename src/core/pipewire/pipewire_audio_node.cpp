@@ -709,6 +709,15 @@ std::uint64_t PipeWireAudioNode::OverflowCount() const {
   return impl_->overflow_count.load(std::memory_order_relaxed);
 }
 
+bool PipeWireAudioNode::IsRunning() const {
+#if STUDIOCAST_HAVE_PIPEWIRE
+  return impl_->stream != nullptr &&
+         !impl_->stream_down.load(std::memory_order_acquire);
+#else
+  return false;
+#endif
+}
+
 AudioNodeConfig PipeWireAudioNode::Format() const { return impl_->cfg; }
 
 std::uint32_t PipeWireAudioNode::NodeId() const {

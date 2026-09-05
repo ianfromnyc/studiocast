@@ -611,6 +611,18 @@ bool VirtualAudioService::UseNativePipeWire() const {
   return transport_active_ == studiocast::pw::AudioTransport::kPipeWire;
 }
 
+bool VirtualAudioService::NativeVirtualMicWentDown() const {
+  if (hooks_.create_virtual_mic || !UseNativePipeWire())
+    return false;
+  return pw_backend::NativeAudioDevices::Instance().MicWentDown();
+}
+
+bool VirtualAudioService::NativeVirtualSpeakerWentDown() const {
+  if (hooks_.create_virtual_speaker || !UseNativePipeWire())
+    return false;
+  return pw_backend::NativeAudioDevices::Instance().SpeakerWentDown();
+}
+
 bool VirtualAudioService::CreateVirtualMicDevice(std::string *error) const {
   if (hooks_.create_virtual_mic) {
     return hooks_.create_virtual_mic(error);
@@ -810,6 +822,13 @@ void VirtualAudioService::ThreadMain() {
   // step that works clears that error, and only that one.
   bool monitorVolumeFailed = false;
   steady_clock::time_point nextMonitorVerify{};
+
+  // A PipeWire server restart takes every node with it. These count the
+  // attempts to put the devices back, so the wait between them can grow.
+  steady_clock::time_point nextMicRecreate{};
+  steady_clock::time_point nextSpeakerRecreate{};
+  int micRecreateAttempts = 0;
+  int speakerRecreateAttempts = 0;
   std::string speakerLoopbackStopRetryError;
   std::string speakerDestroyRetryError;
 
@@ -977,10 +996,35 @@ void VirtualAudioService::ThreadMain() {
     bool speakerLoopbackStopBlockedProcessing = false;
     std::string speakerLoopbackStopError;
     {
+      // A node the server took down never comes back by itself, and the device
+      // owner still holds it, so the status would keep saying the microphone
+      // is there while every write failed. Let it go and let the create below
+      // make a new one, with a wait that grows while the server stays away.
+      if (mic_created_ && NativeVirtualMicWentDown()) {
+        const auto downNow = steady_clock::now();
+        if (downNow >= nextMicRecreate) {
+          std::string err;
+          (void)pw_backend::NativeAudioDevices::Instance().DestroyVirtualMic(
+              &err);
+          mic_created_ = false;
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            st_.mic_present = false;
+          }
+          SetLastError("The PipeWire server took the virtual microphone down; "
+                       "creating it again.");
+          ++micRecreateAttempts;
+          nextMicRecreate =
+              downNow + studiocast::pw::NodeRestartDelay(micRecreateAttempts);
+        }
+      }
+
       // Mic device.
       if (cfg.create_virtual_mic && !mic_created_) {
         std::string err;
         if (CreateVirtualMicDevice(&err)) {
+          micRecreateAttempts = 0;
+          nextMicRecreate = steady_clock::time_point{};
           std::lock_guard<std::mutex> lock(mu_);
           mic_created_ = true;
           st_.mic_present = true;
@@ -1072,9 +1116,38 @@ void VirtualAudioService::ThreadMain() {
       const bool wantSpeakersDevice =
           cfg.create_virtual_speakers || cfg.speakers_enabled;
 
+      // See the microphone above: a node the server dropped is replaced, and
+      // the route that read it has to be started again with it.
+      if (speakers_created_ && NativeVirtualSpeakerWentDown()) {
+        const auto downNow = steady_clock::now();
+        if (downNow >= nextSpeakerRecreate) {
+          std::string err;
+          (void)pw_backend::NativeAudioDevices::Instance()
+              .DestroyVirtualSpeaker(&err);
+          speakers_created_ = false;
+          speakers_loopback_running_ = false;
+          speakers_loopback_target_.clear();
+          speakers_loopback_latency_ms_ = 0;
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            st_.speakers_present = false;
+            st_.speakers_routing_active = false;
+            st_.speaker_target_sink_active.clear();
+          }
+          setSpeakersError("The PipeWire server took the virtual speakers "
+                           "down; creating them again.");
+          ++speakerRecreateAttempts;
+          nextSpeakerRecreate =
+              downNow +
+              studiocast::pw::NodeRestartDelay(speakerRecreateAttempts);
+        }
+      }
+
       if (wantSpeakersDevice && !speakers_created_) {
         std::string err;
         if (CreateVirtualSpeakerDevice(&err)) {
+          speakerRecreateAttempts = 0;
+          nextSpeakerRecreate = steady_clock::time_point{};
           speakers_created_ = true;
           {
             std::lock_guard<std::mutex> lock(mu_);

@@ -276,6 +276,12 @@ private:
   void SleepFor(std::chrono::milliseconds d) const;
   std::unique_ptr<AudioPipelineRunner>
   CreatePipeline(AudioProcessor *processor) const;
+  // True when a native device the service created has left the graph. A node
+  // the server took down never comes back by itself, so the supervisor makes a
+  // new one. A test that drives the devices through hooks answers false.
+  bool NativeVirtualMicWentDown() const;
+  bool NativeVirtualSpeakerWentDown() const;
+
   bool CreateVirtualMicDevice(std::string *error) const;
   bool CreateVirtualSpeakerDevice(std::string *error) const;
   bool StartSpeakerLoopbackRoute(const std::string &target_sink_name,

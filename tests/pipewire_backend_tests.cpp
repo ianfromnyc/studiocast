@@ -636,6 +636,70 @@ std::uint32_t WaitForNodeId(const studiocast::pw::PipeWireAudioNode &node) {
   return 0;
 }
 
+// A server that goes away takes every node with it, and the daemon then tries
+// to put them back. The wait between attempts grows, so a server that stays
+// away is not asked again on every supervisor poll.
+bool TestNodeRestartDelayBacksOff() {
+  using studiocast::pw::NodeRestartDelay;
+  const auto ms = [](int attempts) { return NodeRestartDelay(attempts).count(); };
+
+  return Expect(ms(0) == 0, "the first attempt must not wait") &&
+         Expect(ms(1) == 500, "the second attempt waits half a second") &&
+         Expect(ms(2) == 1000, "the wait doubles") &&
+         Expect(ms(3) == 2000, "the wait doubles again") &&
+         Expect(ms(20) == 8000, "the wait must stop at the cap") &&
+         Expect(ms(-3) == 0, "a negative count must not wait");
+}
+
+// A node the server destroys never comes back by itself. The device owner has
+// to notice and make a new one, or the daemon reports a microphone that
+// carries nothing until it restarts.
+bool TestLiveDeviceComesBackAfterTheServerDropsIt() {
+  if (!LiveServerAvailable("live device comes back after the server drops it"))
+    return true;
+  if (RunCapture("command -v pw-cli 2>/dev/null").empty()) {
+    std::cout << "[SKIP] live device comes back after the server drops it: "
+                 "pw-cli is not installed\n";
+    return true;
+  }
+
+  ScopedTestDeviceOptions options;
+  auto &devices = studiocast::audio::pw_backend::NativeAudioDevices::Instance();
+  std::string error;
+  if (!Expect(devices.CreateVirtualMic(&error),
+              "creating the native virtual microphone failed: " + error))
+    return false;
+
+  const std::uint32_t first = WaitForNodeId(*devices.MicNode());
+  const bool healthyAtFirst = !devices.MicWentDown();
+
+  // Take the node out of the graph the way a server restart would.
+  (void)RunCapture("pw-cli destroy " + std::to_string(first) +
+                   " 2>/dev/null");
+
+  bool noticed = false;
+  for (int i = 0; i < 200 && !noticed; ++i) {
+    noticed = devices.MicWentDown();
+    if (!noticed)
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  const bool recreated = devices.CreateVirtualMic(&error);
+  const std::uint32_t second =
+      recreated && devices.MicNode() ? WaitForNodeId(*devices.MicNode()) : 0;
+  const bool healthyAgain = recreated && !devices.MicWentDown();
+
+  (void)devices.DestroyVirtualMic(&error);
+
+  return Expect(first != 0, "the first node never reached the graph") &&
+         Expect(healthyAtFirst, "a fresh node must not read as down") &&
+         Expect(noticed, "the owner never noticed the node had gone") &&
+         Expect(recreated, "creating the device again failed: " + error) &&
+         Expect(second != 0, "the new node never reached the graph") &&
+         Expect(second != first, "the owner kept the node the server dropped") &&
+         Expect(healthyAgain, "the new node reads as down");
+}
+
 bool TestLiveNativeVirtualMicRoundTrip() {
   if (!LiveServerAvailable("live native virtual mic round trip"))
     return true;
@@ -1664,6 +1728,9 @@ int main() {
        &TestAudioFormatMismatchNamesTheDifference},
       {"pipewire io refuses to open without the virtual mic",
        &TestPipeWireIoRefusesToOpenWithoutTheVirtualMic},
+      {"node restart delay backs off", &TestNodeRestartDelayBacksOff},
+      {"live device comes back after the server drops it",
+       &TestLiveDeviceComesBackAfterTheServerDropsIt},
       {"live native virtual mic round trip",
        &TestLiveNativeVirtualMicRoundTrip},
       {"live speaker loopback cycle leaves the speakers usable",

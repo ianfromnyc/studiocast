@@ -293,20 +293,24 @@ NativeAudioDeviceOptions NativeAudioDevices::Options() const {
 }
 
 bool NativeAudioDevices::CreateVirtualMic(std::string *error) {
-  // The node the daemon already has is the answer. The Pulse scan below forks
-  // pactl twice, and the supervisor asks for this device on every poll, so it
-  // must not run for a device that is already there.
+  // The node the daemon already has is the answer, as long as it is still in
+  // the graph. The Pulse scan below forks pactl twice, and the supervisor asks
+  // for this device on every poll, so it must not run for a device that is
+  // already there.
   {
     std::lock_guard<std::mutex> lock(state_->mu);
-    if (state_->mic)
+    if (state_->mic && state_->mic->IsRunning())
       return true;
   }
 
   RemoveStalePulseDevices();
 
   std::lock_guard<std::mutex> lock(state_->mu);
-  if (state_->mic)
+  if (state_->mic && state_->mic->IsRunning())
     return true;
+  // A node the server took down never comes back by itself, so let it go and
+  // make a new one below.
+  state_->mic.reset();
 
   AudioNodeConfig cfg;
   cfg.role = AudioNodeRole::kVirtualSource;
@@ -337,18 +341,28 @@ bool NativeAudioDevices::DestroyVirtualMic(std::string *error) {
 }
 
 bool NativeAudioDevices::CreateVirtualSpeaker(std::string *error) {
-  // See CreateVirtualMic: no Pulse scan for a device that already exists.
+  // See CreateVirtualMic: no Pulse scan for a device that is already there,
+  // and a node the server dropped is replaced instead of answered with.
+  bool went_down = false;
   {
     std::lock_guard<std::mutex> lock(state_->mu);
-    if (state_->speaker)
+    if (state_->speaker && state_->speaker->IsRunning())
       return true;
+    went_down = state_->speaker != nullptr;
+  }
+
+  if (went_down) {
+    // The route pump reads that node, so it has to end before the node goes.
+    std::string ignored;
+    (void)StopSpeakerLoopback(&ignored);
   }
 
   RemoveStalePulseDevices();
 
   std::lock_guard<std::mutex> lock(state_->mu);
-  if (state_->speaker)
+  if (state_->speaker && state_->speaker->IsRunning())
     return true;
+  state_->speaker.reset();
 
   AudioNodeConfig cfg;
   cfg.role = AudioNodeRole::kVirtualSink;
@@ -517,6 +531,16 @@ void NativeAudioDevices::RemoveStalePulseDevices() {
 std::vector<std::string> NativeAudioDevices::LastPulseCleanupLog() const {
   std::lock_guard<std::mutex> lock(state_->mu);
   return state_->cleanup_log;
+}
+
+bool NativeAudioDevices::MicWentDown() const {
+  std::lock_guard<std::mutex> lock(state_->mu);
+  return state_->mic && !state_->mic->IsRunning();
+}
+
+bool NativeAudioDevices::SpeakerWentDown() const {
+  std::lock_guard<std::mutex> lock(state_->mu);
+  return state_->speaker && !state_->speaker->IsRunning();
 }
 
 AudioConsumerSnapshot NativeAudioDevices::DetectMicrophoneConsumers() const {

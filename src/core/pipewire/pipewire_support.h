@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -152,6 +153,11 @@ enum class StreamState {
   kPaused,
   kStreaming,
 };
+
+// How long to wait before putting a node back in the graph, after `attempts`
+// tries already went by. The wait starts at nothing, then grows by doubling up
+// to a cap, so a server that stays away is not asked again on every poll.
+std::chrono::milliseconds NodeRestartDelay(int attempts);
 
 // True when a state change means the node is no longer connected to the graph:
 // the server reported an error, or it took a stream down that was connecting
