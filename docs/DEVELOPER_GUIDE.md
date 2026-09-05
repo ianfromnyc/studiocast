@@ -528,6 +528,14 @@ Safety reuses the speaker target rules and adds one more: the monitor refuses a
 sink whose monitor source is the selected microphone input, because that is a
 feedback loop.
 
+The monitor talks to Pulse directly: `StartMicMonitor` and `StopMicMonitor`
+call `pactl` and know `module-loopback` and the name `studiocast_mic`.
+`VirtualAudioServiceHooks` gives a seam for the tests, but there is no
+transport seam, so the monitor needs `pipewire-pulse` (or a real PulseAudio
+server) even when the rest of the audio path uses another backend. A native
+transport would need a second implementation of the route, which the monitor
+does not have yet.
+
 The monitor is a consumer of `studiocast_mic`, so it starts the microphone
 pipeline on its own. Status reports `mic_app_consumer_count` and
 `mic_monitor_consumer_count` next to `mic_consumer_count` so readiness text can
