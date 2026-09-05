@@ -1058,10 +1058,13 @@ bool TestLiveVirtualCameraFeedsAGstreamerConsumer() {
   // sampled while it runs.
   std::atomic<int> peak_consumers{0};
   // A frame is dropped only when it replaces a frame the callback never took.
-  // The consumer takes one frame per staged frame here, so the count must stay
-  // near zero. It only means something while the consumer runs, so it is
-  // sampled as soon as a few frames have gone out.
+  // Before a consumer links there is no callback at all, so every frame the
+  // writer stages while GStreamer starts up is a drop and says nothing about
+  // the hand-off. Only the drops between the first frame the node handed out
+  // and a few frames later are counted.
+  std::atomic<std::uint64_t> drops_at_first_frame{0};
   std::atomic<std::uint64_t> drops_while_streaming{0};
+  std::atomic<bool> drops_started{false};
   std::atomic<bool> drops_sampled{false};
   const std::size_t bytes = studiocast::video::pw_backend::CameraFrameBytes(
       cfg.width, cfg.height, cfg.format);
@@ -1073,10 +1076,18 @@ bool TestLiveVirtualCameraFeedsAGstreamerConsumer() {
       const int seen = node.ConsumerCount();
       if (seen > peak_consumers.load(std::memory_order_relaxed))
         peak_consumers.store(seen, std::memory_order_relaxed);
-      if (!drops_sampled.load(std::memory_order_relaxed) &&
-          node.FramesSent() >= 3) {
-        drops_while_streaming.store(node.FramesDropped(),
-                                    std::memory_order_relaxed);
+      const std::uint64_t sent_now = node.FramesSent();
+      if (!drops_started.load(std::memory_order_relaxed) && sent_now >= 1) {
+        drops_at_first_frame.store(node.FramesDropped(),
+                                   std::memory_order_relaxed);
+        drops_started.store(true, std::memory_order_relaxed);
+      } else if (drops_started.load(std::memory_order_relaxed) &&
+                 !drops_sampled.load(std::memory_order_relaxed) &&
+                 sent_now >= 4) {
+        drops_while_streaming.store(
+            node.FramesDropped() -
+                drops_at_first_frame.load(std::memory_order_relaxed),
+            std::memory_order_relaxed);
         drops_sampled.store(true, std::memory_order_relaxed);
       }
       // One frame period. A faster writer would drop frames the consumer
