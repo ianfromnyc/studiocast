@@ -368,6 +368,36 @@ bool TestStopReportsNothingToCleanWithoutPactl() {
   return true;
 }
 
+// A sound server that does not answer is not a sound server that is absent.
+// "Nothing to clean" is only true when pactl cannot be run at all: a `pactl
+// --version` that runs out of time says nothing about the loopback, which may
+// still play the microphone into the speakers. The stop must fail, so the
+// service keeps coming back to the route and cleans it at shutdown.
+bool TestStopReportsAFailureWhenPactlTimesOut() {
+  std::vector<std::string> log;
+  ScopedPactlExecHook hook([&](const std::string &command) {
+    log.push_back(command);
+    if (command == "pactl --version 2>&1") {
+      auto result = ExecResult(-1);
+      result.timed_out = true;
+      return result;
+    }
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  std::string error;
+  if (studiocast::audio::StopMicMonitor(&error)) {
+    std::cerr << "the stop reported the monitor removed after pactl timed "
+                 "out\n";
+    return false;
+  }
+  if (error.empty()) {
+    std::cerr << "the failed stop said nothing about why\n";
+    return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Service lifecycle
 // ---------------------------------------------------------------------------
@@ -1816,6 +1846,8 @@ int main() {
        &TestStopUnloadsOnlyMonitorModules},
       {"monitor stop reports nothing to clean without pactl",
        &TestStopReportsNothingToCleanWithoutPactl},
+      {"monitor stop reports a failure when pactl times out",
+       &TestStopReportsAFailureWhenPactlTimesOut},
       {"service starts and stops the monitor with config",
        &TestServiceStartsAndStopsMonitorWithConfig},
       {"service restarts the monitor on a sink change",

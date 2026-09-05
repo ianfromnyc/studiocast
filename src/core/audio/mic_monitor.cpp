@@ -217,7 +217,21 @@ MicMonitorState DetectMicMonitor(std::string *error) {
 
 bool StopMicMonitor(std::string *error) {
   std::string details;
-  if (!pulse::PactlAvailable(&details)) {
+  bool pactlTimedOut = false;
+  if (!pulse::PactlAvailable(&details, &pactlTimedOut)) {
+    if (pactlTimedOut) {
+      // A sound server that did not answer is not a sound server that is
+      // absent. The loopback can still be loaded and still play the
+      // microphone into the speakers, so this is a failed stop: the caller
+      // must keep the route in mind and try again.
+      if (error) {
+        *error = "The sound server did not answer in time, so the microphone "
+                 "monitor loopback was not removed.";
+        if (!details.empty())
+          *error += " Details: " + details;
+      }
+      return false;
+    }
     // No pactl means no Pulse, and no Pulse means there is no loopback to
     // remove. That is nothing to clean, not a failure: a failure would tell a
     // user who never turned the monitor on that it needs attention, and would

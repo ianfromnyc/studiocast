@@ -162,14 +162,20 @@ ParseDefaultFromPactlInfo(const std::string &pactl_info_text,
 }
 
 bool PactlAvailable(std::string *details) {
+  return PactlAvailable(details, nullptr);
+}
+
+bool PactlAvailable(std::string *details, bool *timed_out) {
+  if (timed_out)
+    *timed_out = false;
   auto res = RunPactlCommand("pactl --version 2>&1");
-  if (res.exit_code != 0) {
-    if (details)
-      *details = util::TrimCopy(res.stdout_str);
-    return false;
-  }
   if (details)
     *details = util::TrimCopy(res.stdout_str);
+  if (res.timed_out || res.exit_code != 0) {
+    if (timed_out)
+      *timed_out = res.timed_out;
+    return false;
+  }
   return true;
 }
 

@@ -62,6 +62,13 @@ bool SetSourcePort(const std::string &source_name, const std::string &port_name,
 
 bool PactlAvailable(std::string *details);
 
+// Same check, but it also says why `pactl` is unavailable. `timed_out` is set
+// when `pactl --version` ran but did not answer in time. Only an unavailable
+// `pactl` that did not time out means there is no sound server to talk to: a
+// sound server that is slow or wedged is still there, with its modules and
+// its streams.
+bool PactlAvailable(std::string *details, bool *timed_out);
+
 using PactlExecCaptureHook =
     std::function<studiocast::util::ExecResult(const std::string &)>;
 
