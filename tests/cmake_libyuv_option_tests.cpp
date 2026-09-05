@@ -3,7 +3,9 @@
 // build: ON has to fail the configure step when libyuv is missing, and OFF has
 // to leave libyuv alone even on a machine that has it.
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <system_error>
 
@@ -41,6 +43,13 @@ bool ExpectContains(const std::string &name, const std::string &haystack,
   return true;
 }
 
+std::string ReadFile(const fs::path &path) {
+  std::ifstream in(path);
+  std::ostringstream out;
+  out << in.rdbuf();
+  return out.str();
+}
+
 std::string ShellQuote(const std::string &value) {
   std::string out = "'";
   for (char ch : value) {
@@ -54,6 +63,21 @@ std::string ShellQuote(const std::string &value) {
   return out;
 }
 
+// Every optional backend is named, so only the libyuv option of the case is
+// left to decide the result. A default would tie the case to what the machine
+// has: the package build runs these tests in %check, and a detection failure
+// that has nothing to do with libyuv would then fail the package build in a
+// confusing place.
+const char kFixedOptions[] = " -DBUILD_TESTING=OFF"
+                             " -DSTUDIOCAST_ENABLE_DLIB=OFF"
+                             " -DSTUDIOCAST_ENABLE_OPEN_CUDA=OFF"
+                             " -DSTUDIOCAST_ENABLE_OPEN_AUDIO=OFF"
+                             " -DSTUDIOCAST_ENABLE_CUDA_KERNELS=OFF"
+                             " -DSTUDIOCAST_BUILD_BENCHMARKS=OFF"
+                             " -DSTUDIOCAST_ENABLE_WERROR=OFF"
+                             " -DSTUDIOCAST_ENABLE_LTO=OFF"
+                             " -DSTUDIOCAST_ENABLE_SANITIZERS=OFF ";
+
 // Configures the repository into a throwaway build directory. Nothing is
 // built, so a case costs one configure step.
 studiocast::util::ExecResult
@@ -63,8 +87,7 @@ ConfigureRepository(const fs::path &build_dir, const std::string &extra_args,
   const std::string command =
       env_prefix + ShellQuote(STUDIOCAST_CMAKE_COMMAND) + " -S " +
       ShellQuote(repo.string()) + " -B " + ShellQuote(build_dir.string()) +
-      " -DBUILD_TESTING=OFF -DSTUDIOCAST_ENABLE_DLIB=OFF " + extra_args +
-      " 2>&1";
+      kFixedOptions + extra_args + " 2>&1";
 
   studiocast::util::ExecCaptureOptions options;
   options.timeout_ms = 180000;
@@ -120,14 +143,26 @@ bool TestDisabledLibyuvSkipsDetection() {
   if (!Expect(temp.ok(), temp.error().c_str()))
     return false;
 
-  const auto result = ConfigureRepository(temp.path() / "build",
-                                          "-DSTUDIOCAST_ENABLE_LIBYUV=OFF", "");
+  const fs::path build_dir = temp.path() / "build";
+  const auto result =
+      ConfigureRepository(build_dir, "-DSTUDIOCAST_ENABLE_LIBYUV=OFF", "");
 
   if (!Expect(result.exit_code == 0,
               "configure with STUDIOCAST_ENABLE_LIBYUV=OFF must succeed")) {
     std::cerr << result.stdout_str << "\n";
     return false;
   }
+
+  // The libyuv option must be the only thing the case leaves open. The cache
+  // says so: every other optional backend is off, whatever the machine has.
+  const std::string cache = ReadFile(build_dir / "CMakeCache.txt");
+  if (!ExpectContains("nested CMake cache", cache,
+                      "STUDIOCAST_ENABLE_OPEN_CUDA:BOOL=OFF") ||
+      !ExpectContains("nested CMake cache", cache,
+                      "STUDIOCAST_ENABLE_OPEN_AUDIO:BOOL=OFF") ||
+      !ExpectContains("nested CMake cache", cache,
+                      "STUDIOCAST_ENABLE_DLIB:BOOL=OFF"))
+    return false;
 
   return ExpectContains("disabled libyuv configure output", result.stdout_str,
                         "libyuv disabled") &&
