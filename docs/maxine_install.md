@@ -267,7 +267,7 @@ After an AFX install, `doctor` reports the AFX root, the `libnv_audiofx.so` libr
 
 Recent Linux Maxine releases name the core libraries `libVideoFX.so` (VFX) and `libnvARPose.so` (AR). StudioCast finds those names, and still accepts older ones such as `libnvvfx.so`, `libNvVFX.so`, `libnvar.so` and `libNvAR.so`.
 
-> `doctor` looks for a `models` directory at the top of each SDK root. SDK 1.x installs the VFX and AR engine files in `<SDK root>/lib/models` instead, so `doctor` can report that directory as missing while the effects are in fact installed.
+> `doctor` looks for the VFX and AR engine files in `<SDK root>/models` first, then in `<SDK root>/lib/models`, and prints the name of the directory it found. SDK Core 1.x installs them in `<SDK root>/lib/models`, so that is the name it reports for a 1.x install.
 
 ## 9. Result of an install
 
