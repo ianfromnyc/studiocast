@@ -33,8 +33,10 @@
 #   SC_NGC_ALT_RESOURCES  Resource names printed when NGC answers 402.
 #   sc_ngc_log            Log function. The default prints "[ngc] <message>".
 #
-# The key is never printed. Every command this file logs shows the
-# Authorization header as "Bearer <redacted>".
+# The key is never printed, and it never goes on curl's command line: it
+# reaches curl through a --config file on a pipe, because /proc/<pid>/cmdline
+# is world-readable. Every command this file logs shows the Authorization
+# header as "Bearer <redacted>".
 #
 # Every function returns 0 on success and 2 on failure. No function calls exit,
 # so the caller keeps control of the exit code.
@@ -168,6 +170,26 @@ sc_ngc_redacted_cmd() {
   printf 'curl%s\n' "${out}"
 }
 
+# Escape one value for the quoted form of a curl config file.
+_sc_ngc_config_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s' "${value}"
+}
+
+# Print a curl config that carries the Authorization header.
+#
+# The token must not go on curl's command line. /proc/<pid>/cmdline is
+# world-readable, so anything that can read the proc tree could take the token
+# while a transfer runs. The callers hand this to "--config" through a process
+# substitution, so curl reads it from a pipe: it is never on disk and never in
+# the process table.
+_sc_ngc_auth_config() {
+  printf 'header = "Authorization: Bearer %s"\n' \
+    "$(_sc_ngc_config_escape "${_SC_NGC_TOKEN}")"
+}
+
 # GET one URL with the current token. Prints the HTTP status code.
 _sc_ngc_curl_status() {
   local url="$1"
@@ -175,8 +197,8 @@ _sc_ngc_curl_status() {
   local status
 
   status="$(curl --silent --show-error --location \
+    --config <(_sc_ngc_auth_config) \
     --retry "${SC_NGC_RETRIES}" --retry-delay 2 --retry-connrefused \
-    --header "Authorization: Bearer ${_SC_NGC_TOKEN}" \
     --header "Accept: application/json" \
     --output "${out}" --write-out '%{http_code}' \
     "${url}")" || status="000"
@@ -191,9 +213,11 @@ _sc_ngc_exchange_token() {
   local out status token
 
   out="$(mktemp)"
+  # The raw key goes in the same way, for the same reason.
   status="$(curl --silent --show-error --location \
+    --config <(printf "user = \"\$oauthtoken:%s\"\n" \
+      "$(_sc_ngc_config_escape "${key}")") \
     --retry "${SC_NGC_RETRIES}" --retry-delay 2 \
-    --user "\$oauthtoken:${key}" \
     --header "Accept: application/json" \
     --output "${out}" --write-out '%{http_code}' \
     "${url}" 2>/dev/null)" || status="000"
@@ -312,7 +336,8 @@ sc_ngc_api_get() {
   # These two lines go to stderr, because a caller may read the answer of this
   # function through a command substitution.
   if [[ "${SC_NGC_DRY_RUN}" == "1" ]]; then
-    sc_ngc_log "GET $(sc_ngc_redacted_cmd --silent --header "Authorization: x" "${url}")" >&2
+    sc_ngc_log "GET $(sc_ngc_redacted_cmd --silent \
+      --config "<file holding: Authorization: x>" "${url}")" >&2
   fi
 
   status="$(_sc_ngc_curl_status "${url}" "${out}")"
@@ -630,7 +655,7 @@ sc_ngc_download_kind_file() {
   if [[ "${SC_NGC_DRY_RUN}" == "1" ]]; then
     sc_ngc_log "Would download ${relpath} ($(sc_ngc_human_bytes "${size:-0}")) to ${dest}"
     sc_ngc_log "  $(sc_ngc_redacted_cmd --fail --location --continue-at - \
-      --header "Authorization: x" --output "${part}" "${url}")"
+      --config "<file holding: Authorization: x>" --output "${part}" "${url}")"
     return 0
   fi
 
@@ -650,9 +675,9 @@ sc_ngc_download_kind_file() {
     # what we want: the signed URL carries its own credentials.
     status=0
     curl --fail --location "${progress[@]}" \
+      --config <(_sc_ngc_auth_config) \
       --retry "${SC_NGC_RETRIES}" --retry-delay 2 --retry-connrefused \
       --continue-at - \
-      --header "Authorization: Bearer ${_SC_NGC_TOKEN}" \
       --output "${part}" \
       "${url}" || status=$?
 

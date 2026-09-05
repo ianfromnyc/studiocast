@@ -28,17 +28,28 @@ trap 'rm -rf "${SANDBOX}"' EXIT
 # A curl that never leaves the machine. It appends every call to
 # ${NGC_CURL_LOG}, answers a token exchange with a JWT, and writes a payload
 # for anything else.
+#
+# The log keeps the command line and the config file apart, so a check can say
+# where a credential was: "argv: " is the command line, which any process on
+# the machine can read from /proc, and "config: " is the file curl was handed,
+# which no other process sees.
 STUB_BIN="${SANDBOX}/bin"
 mkdir -p "${STUB_BIN}"
 cat > "${STUB_BIN}/curl" <<'STUB'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "${NGC_CURL_LOG}"
+printf 'argv: %s\n' "$*" >> "${NGC_CURL_LOG}"
 
 out=""
 url=""
+config=""
 write_out=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -K|--config)
+      config="$2"
+      shift 2
+      continue
+      ;;
     -o|--output)
       out="$2"
       shift 2
@@ -55,6 +66,12 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ -n "${config}" && -r "${config}" ]]; then
+  while IFS= read -r config_line; do
+    printf 'config: %s\n' "${config_line}" >> "${NGC_CURL_LOG}"
+  done < "${config}"
+fi
 
 if [[ "${url}" == *"/token?"* ]]; then
   [[ -z "${out}" ]] || printf '{"token": "stub-jwt"}' > "${out}"
@@ -150,6 +167,14 @@ test_a_first_call_download_sets_the_token() {
   else
     t_pass "the download sends the key as a bearer token"
   fi
+
+  # /proc/<pid>/cmdline is world-readable, so a credential on curl's command
+  # line can be read by anything on the machine while the transfer runs.
+  if grep -q "^argv:.*${MODERN_KEY}" "${log}"; then
+    t_fail "the key went on curl's command line: $(grep '^argv:' "${log}")"
+  else
+    t_pass "the key stays off curl's command line"
+  fi
 }
 
 # An older key is not a bearer token, so a first call download must go through
@@ -181,6 +206,14 @@ test_a_first_call_download_exchanges_an_older_key() {
     t_fail "the download did not send the JWT: $(cat "${log}")"
   else
     t_pass "the download sends the JWT"
+  fi
+
+  # The token exchange sends the raw key, which must stay off the command line
+  # as well.
+  if grep -q "^argv:.*${LEGACY_KEY}" "${log}"; then
+    t_fail "the older key went on curl's command line: $(grep '^argv:' "${log}")"
+  else
+    t_pass "the older key stays off curl's command line"
   fi
 }
 
