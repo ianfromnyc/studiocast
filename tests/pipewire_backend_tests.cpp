@@ -881,8 +881,8 @@ bool TestStalePulseModuleCleanupIsQuietWhenNothingIsLoaded() {
     if (command == "pactl --version 2>&1")
       return studiocast::util::ExecResult{0, false, "pactl 17.0\n"};
     if (command == "pactl list short modules 2>&1")
-      return studiocast::util::ExecResult(
-          0, "536870922\tmodule-null-sink\tsink_name=other_app_sink\n");
+      return studiocast::util::ExecResult{
+          0, false, "536870922\tmodule-null-sink\tsink_name=other_app_sink\n"};
     return studiocast::util::ExecResult{99, false, "unexpected command: " + command};
   });
 
