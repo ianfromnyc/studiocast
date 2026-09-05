@@ -73,6 +73,20 @@ if [[ -n "${config}" && -r "${config}" ]]; then
   done < "${config}"
 fi
 
+# ${NGC_STUB_CURL_EXIT} fails the way curl does, and writes nothing.
+if [[ -n "${NGC_STUB_CURL_EXIT:-}" ]]; then
+  printf 'curl: (%s) stub failure\n' "${NGC_STUB_CURL_EXIT}" >&2
+  exit "${NGC_STUB_CURL_EXIT}"
+fi
+
+# ${NGC_STUB_REFUSE_RESUME} answers a resume of a file that already holds
+# bytes the way a storage backend does: HTTP 416, which --fail turns into curl
+# exit 22. A transfer that starts from nothing is served as usual.
+if [[ -n "${NGC_STUB_REFUSE_RESUME:-}" && -s "${out}" ]]; then
+  printf 'curl: (22) The requested URL returned error: 416\n' >&2
+  exit 22
+fi
+
 # ${NGC_STUB_STATUS} answers with an HTTP status other than 200, for the
 # checks of the message that each status produces.
 status="${NGC_STUB_STATUS:-200}"
@@ -635,6 +649,71 @@ test_a_size_only_check_is_named_a_size_check() {
   fi
 }
 
+# A transfer that stops leaves a .part file, and the next run resumes it. A
+# storage backend that refuses that resume answers HTTP 416, which --fail
+# turns into curl exit 22, not the exit 33 of a plain refusal. The helper must
+# drop the partial file and start over, or every later run repeats the same
+# refusal and the download never finishes.
+test_a_refused_resume_starts_over() {
+  local dir="${SANDBOX}/refused-resume"
+  local dest="${dir}/model.trtpkg"
+  rm -rf "${dir}"
+  mkdir -p "${dir}"
+  printf 'BYTES FROM A TRANSFER THAT STOPPED' > "${dest}.part"
+
+  local out
+  export NGC_STUB_REFUSE_RESUME=1
+  out="$(run_single_file_download "${dest}" "" "${STUB_PAYLOAD_BYTES}")"
+  unset NGC_STUB_REFUSE_RESUME
+
+  if [[ "${out}" != *"RC=0"* ]]; then
+    t_fail "a refused resume should start over and succeed: ${out}"
+  else
+    t_pass "a refused resume starts over and succeeds"
+  fi
+
+  if [[ -e "${dest}.part" ]]; then
+    t_fail "the stale partial file was kept: $(cat "${dest}.part")"
+  else
+    t_pass "the stale partial file is gone"
+  fi
+}
+
+# A download that gives up with the partial file still there must name it, so
+# the user can remove it instead of watching every later run fail the same way.
+test_a_failed_download_names_the_partial_file() {
+  local dir="${SANDBOX}/kept-part"
+  local dest="${dir}/model.trtpkg"
+  rm -rf "${dir}"
+  mkdir -p "${dir}"
+  printf 'BYTES FROM A TRANSFER THAT STOPPED' > "${dest}.part"
+
+  # curl exit 7 is "could not connect". The bytes already there are still
+  # good, so the helper keeps them for the next resume.
+  local out
+  export NGC_STUB_CURL_EXIT=7
+  out="$(run_single_file_download "${dest}" "" "${STUB_PAYLOAD_BYTES}")"
+  unset NGC_STUB_CURL_EXIT
+
+  if [[ "${out}" != *"RC=2"* ]]; then
+    t_fail "a download that never connects should return 2: ${out}"
+  else
+    t_pass "a download that never connects returns 2"
+  fi
+
+  if [[ ! -e "${dest}.part" ]]; then
+    t_fail "a network error threw away the bytes that were already there"
+  else
+    t_pass "a network error keeps the partial file for a resume"
+  fi
+
+  if [[ "${out}" != *"${dest}.part"* ]]; then
+    t_fail "the failure did not name the partial file: ${out}"
+  else
+    t_pass "the failure names the partial file"
+  fi
+}
+
 # NGC answers a long file list one page at a time. The helper must walk every
 # page and join them, and must drop a repeat, because an API that ignores the
 # page number would otherwise serve page 0 forever.
@@ -767,6 +846,8 @@ test_an_absolute_path_is_refused
 test_a_file_with_no_hash_and_no_size_is_downloaded_again
 test_a_size_only_check_is_named_a_size_check
 test_an_unrelated_md5_in_the_destination_is_left_alone
+test_a_refused_resume_starts_over
+test_a_failed_download_names_the_partial_file
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2
