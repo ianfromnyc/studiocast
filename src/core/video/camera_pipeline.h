@@ -87,7 +87,9 @@ struct CameraPipelineStatus {
   std::string capture_fallback_state = "none";
   std::string capture_fallback_reason;
 
-  // Native PipeWire camera node: "off", "running", or an error text.
+  // Native PipeWire camera node: "off", "starting", "running", or the text
+  // of the last failure. A node that runs but cannot take frames reports
+  // that text, not "running".
   std::string pipewire_output_state = "off";
   std::uint32_t pipewire_node_id = 0;
   int pipewire_consumer_count = 0;
