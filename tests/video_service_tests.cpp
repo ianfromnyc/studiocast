@@ -939,6 +939,42 @@ bool TestVideoOutputRecoveryClearsUnavailableError() {
   return true;
 }
 
+// A node that runs but refuses frames must not read as "running". The status
+// text carries the failure, the way it does before the node comes up.
+bool TestPipeWireOutputStateReportsAWriteFailure() {
+  using studiocast::video::internal::PipeWireOutputStateText;
+
+  struct Case {
+    const char *name;
+    bool wanted;
+    bool has_node;
+    const char *error;
+    const char *want;
+  };
+
+  const Case cases[] = {
+      {"no node wanted", false, false, "", "off"},
+      {"a node that is asked for but not up yet", true, false, "", "starting"},
+      {"a node that failed to start", true, false, "start failed",
+       "start failed"},
+      {"a node that takes frames", true, true, "", "running"},
+      {"a node that refuses frames", true, true, "write failed",
+       "write failed"},
+  };
+
+  bool ok = true;
+  for (const auto &c : cases) {
+    const std::string got =
+        PipeWireOutputStateText(c.wanted, c.has_node, c.error);
+    if (got != c.want) {
+      std::cerr << "PipeWire output state for " << c.name << ": expected '"
+                << c.want << "', got '" << got << "'\n";
+      ok = false;
+    }
+  }
+  return ok;
+}
+
 // The pipeline decides what its PipeWire camera node needs while it holds its
 // mutex, then starts or stops the node without the mutex, because that work
 // talks to the server. This pins the decision half of that split.
@@ -1097,6 +1133,8 @@ int main() {
        &TestVideoOutputOpenFailureDoesNotStartPipeline},
       {"PipeWire camera node plan follows the negotiated output",
        &TestPipeWireCameraNodePlanFollowsTheNegotiatedOutput},
+      {"PipeWire output state reports a write failure",
+       &TestPipeWireOutputStateReportsAWriteFailure},
       {"video start failure backs off", &TestVideoStartFailureBacksOff},
       {"video start failure clears after recovery",
        &TestVideoStartFailureClearsAfterRecovery},

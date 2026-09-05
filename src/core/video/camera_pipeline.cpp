@@ -452,15 +452,11 @@ CameraPipelineStatus CameraPipeline::Status() const {
   s.starting = starting_;
   s.input_device = input_device_;
   s.output_device = output_device_;
-  if (!pw_output_wanted_) {
-    s.pipewire_output_state = "off";
-  } else if (pw_node_) {
-    s.pipewire_output_state = "running";
+  s.pipewire_output_state = internal::PipeWireOutputStateText(
+      pw_output_wanted_, pw_node_ != nullptr, pw_node_error_);
+  if (pw_output_wanted_ && pw_node_) {
     s.pipewire_node_id = pw_node_->NodeId();
     s.pipewire_consumer_count = pw_node_->ConsumerCount();
-  } else {
-    s.pipewire_output_state =
-        pw_node_error_.empty() ? std::string("starting") : pw_node_error_;
   }
   if (running_ || starting_) {
     s.capture = capture_;
@@ -805,6 +801,17 @@ PipeWireNodePlan PlanPipeWireNode(bool wanted, const ActualFormat &output,
   return plan;
 }
 
+std::string PipeWireOutputStateText(bool wanted, bool has_node,
+                                    const std::string &error) {
+  if (!wanted)
+    return "off";
+  // A node that runs but refuses frames must not read as "running". The error
+  // comes first, whether the node is up or not.
+  if (!error.empty())
+    return error;
+  return has_node ? std::string("running") : std::string("starting");
+}
+
 } // namespace internal
 
 internal::PipeWireNodePlan CameraPipeline::PlanPipeWireOutputLocked() const {
@@ -870,15 +877,29 @@ void CameraPipeline::PublishToPipeWire(const std::uint8_t *data,
   // the node at any time, and this reference keeps the node that was current
   // alive until the frame is staged. The write itself stays outside the lock.
   std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> node;
+  bool had_error = false;
   {
     std::lock_guard<std::mutex> lock(mu_);
     node = pw_node_;
+    had_error = !pw_node_error_.empty();
   }
   if (!node)
     return;
 
   std::string err;
-  if (node->WriteFrame(data, bytes, &err) || err.empty())
+  const bool wrote = node->WriteFrame(data, bytes, &err);
+  if (wrote) {
+    // A frame that got through ends the failure, so the status does not stay
+    // in error after the node takes frames again. Nothing to do in the usual
+    // case, which keeps this off the lock.
+    if (!had_error)
+      return;
+    std::lock_guard<std::mutex> lock(mu_);
+    if (node == pw_node_)
+      pw_node_error_.clear();
+    return;
+  }
+  if (err.empty())
     return;
 
   // Report the failure only while this node is still the current one, so a

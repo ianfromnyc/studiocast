@@ -273,6 +273,14 @@ struct PipeWireNodePlan {
 PipeWireNodePlan PlanPipeWireNode(bool wanted, const ActualFormat &output,
                                   const PipeWireNodeState &current);
 
+// The `pipewire_output_state` text of the pipeline status.
+//
+// `wanted` is the configured output preference, `has_node` says whether a node
+// runs now, and `error` is the last failure of that node, empty when there was
+// none.
+std::string PipeWireOutputStateText(bool wanted, bool has_node,
+                                    const std::string &error);
+
 } // namespace internal
 
 class CameraPipelineRunner {
