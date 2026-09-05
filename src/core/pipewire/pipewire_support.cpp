@@ -7,6 +7,13 @@
 
 namespace studiocast::pw {
 
+bool StreamWentDown(StreamState from, StreamState to) {
+  // A stream that was already down cannot go down again.
+  if (from == StreamState::kError || from == StreamState::kUnconnected)
+    return false;
+  return to == StreamState::kError || to == StreamState::kUnconnected;
+}
+
 namespace {
 
 // Removes the surrounding spaces and makes the text lower case, so config

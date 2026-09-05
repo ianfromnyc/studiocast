@@ -143,6 +143,22 @@ private:
   std::atomic<int> consumer_count_{0};
 };
 
+// The pw_stream states a node reacts to. The rule below is written over this
+// enumeration, so it can be checked without the PipeWire headers.
+enum class StreamState {
+  kError,
+  kUnconnected,
+  kConnecting,
+  kPaused,
+  kStreaming,
+};
+
+// True when a state change means the node is no longer connected to the graph:
+// the server reported an error, or it took a stream down that was connecting
+// or connected. A node that is down never comes back by itself, so the caller
+// must stop reporting it as running.
+bool StreamWentDown(StreamState from, StreamState to);
+
 // Which output carries the processed camera frames.
 enum class VideoOutputPreference {
   kAuto,

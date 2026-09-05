@@ -93,6 +93,9 @@ struct PipeWireAudioNode::Impl {
   SpscByteRing ring;
 
   std::atomic<bool> stop_requested{false};
+  // Set when the server reported an error or took the stream down. Such a node
+  // never comes back, so a blocked Read or Write must not wait for it.
+  std::atomic<bool> stream_down{false};
   // Set by the pipeline thread when it is the producer, applied by the
   // real-time callback, which is the consumer on such a node.
   std::atomic<bool> flush_pending{false};
@@ -146,10 +149,44 @@ struct PipeWireAudioNode::Impl {
 
 namespace {
 
+// The pw_stream state as the shared rule names it.
+StreamState ToStreamState(enum pw_stream_state state) {
+  switch (state) {
+  case PW_STREAM_STATE_ERROR:
+    return StreamState::kError;
+  case PW_STREAM_STATE_UNCONNECTED:
+    return StreamState::kUnconnected;
+  case PW_STREAM_STATE_CONNECTING:
+    return StreamState::kConnecting;
+  case PW_STREAM_STATE_PAUSED:
+    return StreamState::kPaused;
+  case PW_STREAM_STATE_STREAMING:
+    return StreamState::kStreaming;
+  }
+  return StreamState::kUnconnected;
+}
+
 void OnStreamStateChanged(void *data, enum pw_stream_state old,
                           enum pw_stream_state state, const char *error) {
-  (void)old;
   auto *impl = static_cast<PipeWireAudioNode::Impl *>(data);
+
+  // A node the server took down never comes back by itself. Mark it, so that a
+  // blocked Read or Write ends with the reason instead of waiting out its
+  // timeout.
+  if (StreamWentDown(ToStreamState(old), ToStreamState(state))) {
+    if (state == PW_STREAM_STATE_ERROR) {
+      impl->SetError(error ? std::string(error) : std::string("stream error"));
+    } else if (!impl->stop_requested.load(std::memory_order_acquire)) {
+      // Stop takes the stream down itself, and that is not a failure.
+      impl->SetError("The PipeWire server took the node down.");
+    }
+    impl->stream_down.store(true, std::memory_order_release);
+    // A node that left the graph has no id and no consumers any more.
+    impl->links.Reset(LinkEndForRole(impl->cfg.role));
+    impl->Wake();
+    return;
+  }
+
   if (state == PW_STREAM_STATE_ERROR) {
     impl->SetError(error ? std::string(error) : std::string("stream error"));
   } else {
@@ -485,6 +522,8 @@ bool PipeWireAudioNode::Start(const AudioNodeConfig &cfg, std::string *error) {
   const enum spa_direction direction =
       ProducesSamples(cfg.role) ? SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT;
 
+  impl_->stream_down.store(false, std::memory_order_release);
+
   const int rc = pw_stream_connect(impl_->stream, direction, PW_ID_ANY, flags,
                                      params, 1);
   pw_thread_loop_unlock(impl_->loop);
@@ -545,6 +584,11 @@ bool PipeWireAudioNode::Read(void *dst, std::size_t bytes, std::string *error) {
   const auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(impl_->cfg.io_timeout_ms);
   while (!impl_->stop_requested.load(std::memory_order_acquire)) {
+    if (impl_->stream_down.load(std::memory_order_acquire)) {
+      if (error)
+        *error = impl_->Error();
+      return false;
+    }
     if (impl_->ring.Pop(dst, bytes))
       return true;
     if (std::chrono::steady_clock::now() >= deadline) {
@@ -578,6 +622,11 @@ bool PipeWireAudioNode::Write(const void *src, std::size_t bytes,
   const auto deadline = std::chrono::steady_clock::now() +
                         std::chrono::milliseconds(impl_->cfg.io_timeout_ms);
   while (!impl_->stop_requested.load(std::memory_order_acquire)) {
+    if (impl_->stream_down.load(std::memory_order_acquire)) {
+      if (error)
+        *error = impl_->Error();
+      return false;
+    }
     if (impl_->ring.Push(src, bytes))
       return true;
     if (std::chrono::steady_clock::now() >= deadline) {

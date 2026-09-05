@@ -908,6 +908,57 @@ bool TestMicMonitorCleanupIgnoresNativePathNames() {
                 "the monitor must claim only its own tagged loopback");
 }
 
+// A node that the server took down never comes back by itself, so the state
+// rule must report it. Anything on the way up must not read as down.
+bool TestStreamStateRuleReportsADownNode() {
+  using studiocast::pw::StreamState;
+  using studiocast::pw::StreamWentDown;
+
+  bool ok = Expect(StreamWentDown(StreamState::kStreaming, StreamState::kError),
+                   "an error on a streaming node should read as down");
+  ok = Expect(StreamWentDown(StreamState::kPaused, StreamState::kError),
+              "an error on a paused node should read as down") &&
+       ok;
+  ok = Expect(StreamWentDown(StreamState::kConnecting, StreamState::kError),
+              "an error while connecting should read as down") &&
+       ok;
+  ok =
+      Expect(StreamWentDown(StreamState::kStreaming, StreamState::kUnconnected),
+             "a streaming node that the server disconnected should read as "
+             "down") &&
+      ok;
+  ok = Expect(
+           StreamWentDown(StreamState::kPaused, StreamState::kUnconnected),
+           "a paused node that the server disconnected should read as down") &&
+       ok;
+  ok = Expect(
+           StreamWentDown(StreamState::kConnecting, StreamState::kUnconnected),
+           "a connection attempt that gave up should read as down") &&
+       ok;
+
+  ok = Expect(
+           !StreamWentDown(StreamState::kUnconnected, StreamState::kConnecting),
+           "the start of a connection should not read as down") &&
+       ok;
+  ok = Expect(!StreamWentDown(StreamState::kConnecting, StreamState::kPaused),
+              "a connected node should not read as down") &&
+       ok;
+  ok = Expect(!StreamWentDown(StreamState::kPaused, StreamState::kStreaming),
+              "a streaming node should not read as down") &&
+       ok;
+  ok = Expect(!StreamWentDown(StreamState::kStreaming, StreamState::kPaused),
+              "a node that stopped streaming is still connected") &&
+       ok;
+  ok = Expect(!StreamWentDown(StreamState::kUnconnected,
+                              StreamState::kUnconnected),
+              "a node that never connected should not read as down") &&
+       ok;
+  ok = Expect(!StreamWentDown(StreamState::kError, StreamState::kUnconnected),
+              "a node that is already down should not read as down again") &&
+       ok;
+  return ok;
+}
+
 // One frame of the ring stress check: the same counter twice, so a torn or
 // overwritten frame does not read as a whole one.
 struct RingFrame {
@@ -1079,6 +1130,8 @@ int main() {
        &TestSocketProbeReportsAMissingSocket},
       {"socket probe reports a missing runtime directory",
        &TestSocketProbeReportsAMissingRuntimeDirectory},
+      {"stream state rule reports a down node",
+       &TestStreamStateRuleReportsADownNode},
       {"ring drops the newest bytes when it is full",
        &TestRingDropsTheNewestWhenItIsFull},
       {"ring wraps without losing the byte order",

@@ -127,14 +127,49 @@ struct PipeWireCameraNode::Impl {
 
 namespace {
 
+// The pw_stream state as the shared rule names it.
+studiocast::pw::StreamState ToStreamState(enum pw_stream_state state) {
+  switch (state) {
+  case PW_STREAM_STATE_ERROR:
+    return studiocast::pw::StreamState::kError;
+  case PW_STREAM_STATE_UNCONNECTED:
+    return studiocast::pw::StreamState::kUnconnected;
+  case PW_STREAM_STATE_CONNECTING:
+    return studiocast::pw::StreamState::kConnecting;
+  case PW_STREAM_STATE_PAUSED:
+    return studiocast::pw::StreamState::kPaused;
+  case PW_STREAM_STATE_STREAMING:
+    return studiocast::pw::StreamState::kStreaming;
+  }
+  return studiocast::pw::StreamState::kUnconnected;
+}
+
 void OnStreamStateChanged(void *data, enum pw_stream_state old,
                           enum pw_stream_state state, const char *error) {
-  (void)old;
   auto *impl = static_cast<PipeWireCameraNode::Impl *>(data);
+
+  // A node the server took down never comes back by itself. Say so, so that
+  // IsRunning stops reporting a dead node and the planner replaces it.
+  if (studiocast::pw::StreamWentDown(ToStreamState(old),
+                                     ToStreamState(state))) {
+    // A node that Stop took down is already not running, so it gets no
+    // message about a server that dropped it.
+    const bool was_running =
+        impl->running.exchange(false, std::memory_order_acq_rel);
+    if (state == PW_STREAM_STATE_ERROR) {
+      impl->SetError(error ? std::string(error) : std::string("stream error"));
+    } else if (was_running) {
+      impl->SetError("The PipeWire server took the camera node down.");
+    }
+    // A node that left the graph has no id and no consumers any more.
+    impl->links.Reset(studiocast::pw::LinkEnd::kOutput);
+    return;
+  }
   if (state == PW_STREAM_STATE_ERROR) {
     impl->SetError(error ? std::string(error) : std::string("stream error"));
     return;
   }
+
   // The server gives the node an id while the stream is still connecting. Take
   // it at the first state that has one, so a consumer that links right away is
   // counted.
@@ -423,6 +458,11 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
       PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS |
       PW_STREAM_FLAG_DRIVER);
 
+  // The node counts as running before the connect, while the loop lock is
+  // still held. A state change that says the node went down then clears the
+  // flag for good, instead of being overwritten by a store from this thread.
+  impl_->running.store(true, std::memory_order_release);
+
   const int rc = pw_stream_connect(impl_->stream, SPA_DIRECTION_OUTPUT,
                                      PW_ID_ANY, flags, params, 1);
   pw_thread_loop_unlock(impl_->loop);
@@ -438,7 +478,6 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
     return false;
   }
 
-  impl_->running.store(true, std::memory_order_release);
   return true;
 }
 
