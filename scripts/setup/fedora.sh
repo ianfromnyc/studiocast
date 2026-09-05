@@ -635,7 +635,11 @@ cuda_package_suffix() {
     "cuda-cudart-${CUDA_MAJOR}-*" 2>&1)" || status=$?
 
   if [[ "${status}" -ne 0 ]]; then
-    printf '%s\n' "${output}" >&2
+    # A dnf that fails without a word leaves this empty. Show nothing then: a
+    # blank line in front of the caller's hint reads like output that got lost.
+    if [[ -n "${output}" ]]; then
+      printf '%s\n' "${output}" >&2
+    fi
     return 0
   fi
 

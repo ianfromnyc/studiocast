@@ -890,6 +890,54 @@ CHILD
   fi
 }
 
+# A dnf that fails without a word gives the helper nothing to show. The helper
+# must then show nothing, and go straight to the hint. A blank line in front of
+# the hint reads like output that got lost.
+test_a_silent_dnf_failure_prints_no_blank_line() {
+  local casedir="${SANDBOX}/dnf-fails-quietly"
+  mkdir -p "${casedir}/bin"
+
+  cat > "${casedir}/bin/dnf" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+  chmod +x "${casedir}/bin/dnf"
+
+  local child="${SANDBOX}/dnf-fails-quietly-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+export ORT_FLAVOR=gpu
+export CUDA_MAJOR=13
+export ORT_ARCH=x64
+# shellcheck source=/dev/null
+source "$1"
+log() { :; }
+run_priv() { :; }
+cuda_required_libs() { printf 'libcublas.so.13\n'; }
+lib_resolves() { return 1; }
+# The helper turns these on after the source guard, so the call must run
+# under them.
+set -euo pipefail
+ensure_cuda_runtime
+echo "CALL_RETURNED_$?"
+CHILD
+
+  local out rc=0
+  out="$(PATH="${casedir}/bin:${PATH}" \
+    STUDIOCAST_ORT_INSTALL_DIR="${casedir}/onnxruntime" \
+    bash "${child}" "${FEDORA_SETUP}" 2>&1)" || rc=$?
+
+  if [[ "${rc}" -ne 2 ]]; then
+    t_fail "a silent dnf failure should stop with status 2, got ${rc}: ${out}"
+  elif [[ "${out}" != *"config-manager addrepo"* ]]; then
+    t_fail "a silent dnf failure should print the repository hint, got: ${out}"
+  elif [[ "${out}" == $'\n'* || "${out}" == *$'\n\n'* ]]; then
+    t_fail "a silent dnf failure should print no blank line, got: ${out}"
+  else
+    t_pass "a silent dnf failure prints no blank line"
+  fi
+}
+
 # The source guard promises definitions only. A shell that sources the helper
 # must keep its own shell options, and must see no output.
 test_sourcing_keeps_the_caller_shell_options() {
@@ -937,6 +985,7 @@ test_the_legacy_asset_warning_names_the_cuda_major
 test_a_cuda_repo_with_another_id_works
 test_a_missing_dnf_prints_the_repo_hint
 test_a_failing_dnf_prints_the_repo_hint
+test_a_silent_dnf_failure_prints_no_blank_line
 test_sourcing_keeps_the_caller_shell_options
 
 if [[ "${FAILURES}" -ne 0 ]]; then
