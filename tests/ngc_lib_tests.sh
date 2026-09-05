@@ -465,6 +465,94 @@ test_an_absolute_path_is_refused() {
   fi
 }
 
+# Download one file into <dest> with the sha256 and size the caller gives.
+# Print the log of the helper and the return code.
+#
+# Arguments: <dest> <sha256 or empty> <size or empty>
+run_single_file_download() {
+  local dest="$1"
+  local sha="$2"
+  local size="$3"
+
+  local child="${SANDBOX}/single-file-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+unset NGC_API_KEY NGC_CLI_API_KEY
+# shellcheck source=/dev/null
+source "$1"
+export SC_NGC_API_KEY="$2"
+export SC_NGC_AUTHN_HOST="https://authn.invalid"
+export SC_NGC_HOST="https://api.invalid"
+export SC_NGC_RETRIES=1
+sc_ngc_download_kind_file models test-model 1.0 model.trtpkg "$3" "$4" "$5"
+echo "RC=$?"
+CHILD
+
+  NGC_CURL_LOG="${SANDBOX}/single-file.log" \
+    bash "${child}" "${NGC_LIB}" "${MODERN_KEY}" "${dest}" "${sha}" "${size}" \
+    2>&1
+}
+
+# NGC reports no sha256 for many model files. A file that is already there
+# cannot be verified against nothing, so the helper must not keep it and must
+# not say it verified a sha256.
+test_a_file_with_no_hash_and_no_size_is_downloaded_again() {
+  local dest="${SANDBOX}/vacuous/model.trtpkg"
+  rm -rf "${SANDBOX}/vacuous"
+  mkdir -p "${SANDBOX}/vacuous"
+  printf 'TRUNCATED GARBAGE' > "${dest}"
+
+  local out
+  out="$(run_single_file_download "${dest}" "" "")"
+
+  if [[ "${out}" != *"RC=0"* ]]; then
+    t_fail "a download with no hash and no size should return 0: ${out}"
+  else
+    t_pass "a download with no hash and no size returns 0"
+  fi
+
+  if [[ "$(cat "${dest}")" == "TRUNCATED GARBAGE" ]]; then
+    t_fail "the unverifiable file was kept instead of downloaded again"
+  else
+    t_pass "an unverifiable file is downloaded again"
+  fi
+
+  if [[ "${out}" == *"sha256 verified"* ]]; then
+    t_fail "the log claims a sha256 check that did not happen: ${out}"
+  else
+    t_pass "the log claims no sha256 check"
+  fi
+}
+
+# When NGC reports a size but no hash, the log must name the size, not a
+# sha256 nobody checked.
+test_a_size_only_check_is_named_a_size_check() {
+  local dest="${SANDBOX}/size-only/model.trtpkg"
+  rm -rf "${SANDBOX}/size-only"
+  mkdir -p "${SANDBOX}/size-only"
+
+  local out
+  out="$(run_single_file_download "${dest}" "" "${STUB_PAYLOAD_BYTES}")"
+
+  if [[ "${out}" != *"RC=0"* ]]; then
+    t_fail "a download checked by size should return 0: ${out}"
+  else
+    t_pass "a download checked by size returns 0"
+  fi
+
+  if [[ "${out}" == *"sha256 verified"* ]]; then
+    t_fail "a size-only check was logged as a sha256 check: ${out}"
+  else
+    t_pass "a size-only check is not logged as a sha256 check"
+  fi
+
+  if [[ "${out}" != *"size verified"* ]]; then
+    t_fail "a size-only check did not name the size: ${out}"
+  else
+    t_pass "a size-only check names the size"
+  fi
+}
+
 test_a_first_call_download_sets_the_token
 test_a_first_call_download_exchanges_an_older_key
 test_no_key_is_reported
@@ -473,6 +561,8 @@ test_a_nested_md5_mismatch_fails
 test_a_missing_awk_is_reported_early
 test_a_path_that_leaves_the_destination_is_refused
 test_an_absolute_path_is_refused
+test_a_file_with_no_hash_and_no_size_is_downloaded_again
+test_a_size_only_check_is_named_a_size_check
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2

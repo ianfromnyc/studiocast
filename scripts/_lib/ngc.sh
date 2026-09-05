@@ -547,26 +547,45 @@ sc_ngc_safe_dest() {
   printf '%s\n' "${dest}"
 }
 
-# True when a file is present with the expected size and hash.
+# Compare a file with what NGC reported about it.
+#
+# NGC gives no sha256 for many model files, and sometimes no size either. A
+# file cannot be checked against nothing, so that case gets its own answer
+# instead of counting as verified.
+#
+# Return codes:
+#   0  the file is there and every value NGC gave matches. The names of the
+#      values that were compared go to stdout, for the caller's log.
+#   1  the file is not there, or a value does not match.
+#   3  the file is there, but NGC gave neither a sha256 nor a size, so nothing
+#      was compared.
+#
+# Arguments: <path> [sha256hex] [size in bytes]
 sc_ngc_file_is_verified() {
   local path="$1"
   local sha256="${2:-}"
   local size="${3:-}"
   local actual
+  local checked=""
 
   [[ -f "${path}" ]] || return 1
 
   if [[ -n "${size}" ]]; then
     actual="$(stat -c '%s' "${path}")"
     [[ "${actual}" == "${size}" ]] || return 1
+    checked="size"
   fi
 
   if [[ -n "${sha256}" ]]; then
     actual="$(sha256sum "${path}" | cut -d' ' -f1)"
     [[ "${actual}" == "${sha256}" ]] || return 1
+    [[ -z "${checked}" ]] || checked+=" and "
+    checked+="sha256"
   fi
 
-  return 0
+  [[ -n "${checked}" ]] || return 3
+
+  printf '%s' "${checked}"
 }
 
 # Download one file of one item version into <dest>.
@@ -583,7 +602,8 @@ sc_ngc_download_kind_file() {
   local dest="$5"
   local sha256="${6:-}"
   local size="${7:-}"
-  local url encoded part attempt status
+  local url encoded part attempt status checked
+  local vrc
   local -a progress=(--silent --show-error)
 
   # Show a progress bar for a person, and stay quiet in a log file.
@@ -591,9 +611,16 @@ sc_ngc_download_kind_file() {
     progress=(--progress-bar)
   fi
 
-  if sc_ngc_file_is_verified "${dest}" "${sha256}" "${size}"; then
-    sc_ngc_log "${relpath}: already downloaded, sha256 verified."
+  vrc=0
+  checked="$(sc_ngc_file_is_verified "${dest}" "${sha256}" "${size}")" || vrc=$?
+  if [[ "${vrc}" -eq 0 ]]; then
+    sc_ngc_log "${relpath}: already downloaded, ${checked} verified."
     return 0
+  fi
+  if [[ "${vrc}" -eq 3 ]]; then
+    # A file that cannot be checked is not a verified file. Fetch it again
+    # rather than keep a copy that may be truncated or from another version.
+    sc_ngc_log "${relpath}: already there, but NGC reports no sha256 and no size. Downloading it again."
   fi
 
   encoded="$(sc_ngc_url_encode_path "${relpath}")"
@@ -639,9 +666,19 @@ sc_ngc_download_kind_file() {
       continue
     fi
 
-    if sc_ngc_file_is_verified "${part}" "${sha256}" "${size}"; then
+    vrc=0
+    checked="$(sc_ngc_file_is_verified "${part}" "${sha256}" "${size}")" || vrc=$?
+    if [[ "${vrc}" -eq 0 ]]; then
       mv -f "${part}" "${dest}"
-      sc_ngc_log "${relpath}: downloaded and sha256 verified."
+      sc_ngc_log "${relpath}: downloaded and ${checked} verified."
+      return 0
+    fi
+    if [[ "${vrc}" -eq 3 ]]; then
+      # Nothing to compare the transfer with. Keep it, because a re-download
+      # would give the same unchecked bytes, and say plainly that it was not
+      # checked. A model file's .md5 companion is checked separately.
+      mv -f "${part}" "${dest}"
+      sc_ngc_log "${relpath}: downloaded. NGC reports no sha256 and no size, so nothing was checked here."
       return 0
     fi
 
