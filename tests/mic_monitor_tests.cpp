@@ -887,6 +887,86 @@ bool TestServiceStopsTheMonitorWhenTheResolvedOutputDisappears() {
   return ok;
 }
 
+// A failed check of the route is not a request from the user. The restart that
+// follows it must keep the output the last start really used: re-resolving
+// "auto" here would move the monitor onto the new Pulse default and build the
+// feedback loop the lost-output stop exists to prevent.
+bool TestServiceKeepsTheResolvedOutputAcrossAFailedCheck() {
+  MonitorRecorder rec;
+  std::atomic<bool> headset_present{true};
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  // "auto" resolves to the headset while it is plugged in, and to the built-in
+  // speakers once it is gone, the way the Pulse default sink moves.
+  auto start_monitor = hooks.start_mic_monitor;
+  hooks.start_mic_monitor = [&](const MicMonitorConfig &cfg,
+                                const std::string &source, MicMonitorState *out,
+                                std::string *error) {
+    MicMonitorConfig resolved = cfg;
+    if (resolved.sink == "auto") {
+      resolved.sink = headset_present.load(std::memory_order_relaxed)
+                          ? std::string("headset_test_sink")
+                          : std::string("speaker_test_sink");
+    }
+    return start_monitor(resolved, source, out, error);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  const auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            return service.Status().monitor_sink_active == "headset_test_sink";
+          },
+          1000ms)) {
+    std::cerr << "the monitor did not start on the headset\n";
+    service.Stop();
+    return false;
+  }
+
+  // The check fails in the same window that the Pulse default moves to the
+  // built-in speakers.
+  const int starts_before = rec.starts.load(std::memory_order_relaxed);
+  headset_present.store(false, std::memory_order_relaxed);
+  rec.fail_detect.store(true, std::memory_order_relaxed);
+
+  // The service checks the route every two seconds. `monitor_sink_active` is
+  // cleared before the restart and written after it, so it is a safe point to
+  // read the sink the restart used.
+  const bool restarted = WaitUntil(
+      [&] {
+        return rec.starts.load(std::memory_order_relaxed) > starts_before &&
+               !service.Status().monitor_sink_active.empty();
+      },
+      5000ms);
+  if (!restarted) {
+    std::cerr << "the service did not restart the monitor after the failed "
+                 "check\n";
+    service.Stop();
+    return false;
+  }
+
+  bool ok = true;
+  const auto st = service.Status();
+  if (st.monitor_sink_active != "headset_test_sink") {
+    std::cerr << "a failed check moved the monitor to '"
+              << st.monitor_sink_active << "'\n";
+    ok = false;
+  }
+
+  service.Stop();
+  return ok;
+}
+
 // A daemon that is killed while the monitor plays leaves the tagged loopback
 // loaded in Pulse. Nothing else removes it, so every service start clears it,
 // even one that starts with the monitor turned off.
@@ -1395,6 +1475,8 @@ int main() {
        &TestServiceTreatsAFailedMonitorCheckAsStopped},
       {"service stops the monitor when the resolved output disappears",
        &TestServiceStopsTheMonitorWhenTheResolvedOutputDisappears},
+      {"service keeps the resolved output across a failed check",
+       &TestServiceKeepsTheResolvedOutputAcrossAFailedCheck},
       {"service backs off repeated monitor start failures",
        &TestServiceBacksOffRepeatedMonitorStartFailures},
       {"service waits for the virtual microphone before monitoring",

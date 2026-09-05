@@ -1394,9 +1394,18 @@ void VirtualAudioService::ThreadMain() {
                                  (!monitor_running_ || monitorSettingsChanged);
 
         if (needRestart && monitorNow >= nextMonitorStartRetry) {
+          // A restart the user did not ask for keeps the output the last start
+          // really used. Only a settings change, or a monitor that was off,
+          // resolves "auto" afresh: doing it here would let a failed check
+          // move the monitor onto the new Pulse default, which is the feedback
+          // loop the lost-output stop exists to prevent.
+          MicMonitorConfig startCfg = monitorCfg;
+          if (!monitorSettingsChanged && !monitor_sink_resolved_.empty())
+            startCfg.sink = monitor_sink_resolved_;
+
           MicMonitorState state;
           std::string err;
-          if (StartMicMonitorRoute(monitorCfg, micSourceStatus.selected_source,
+          if (StartMicMonitorRoute(startCfg, micSourceStatus.selected_source,
                                    &state, &err)) {
             monitor_running_ = true;
             monitor_route_may_exist_ = true;
