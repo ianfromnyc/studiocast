@@ -1235,7 +1235,10 @@ void VirtualAudioService::ThreadMain() {
     // pipeline. The consumer counts below keep it apart from real apps.
     {
       const auto monitorCfg = NormalizeMicMonitorConfig(cfg.monitor);
-      const bool wantMonitor = monitorCfg.enabled && cfg.enabled;
+      // The monitor loops from `studiocast_mic`, so it needs the virtual
+      // microphone. Without it every start would fail, forever.
+      const bool wantMonitor =
+          monitorCfg.enabled && cfg.enabled && mic_created_;
       const auto monitorNow = steady_clock::now();
 
       auto setMonitorError = [&](std::string msg) {
@@ -1289,14 +1292,19 @@ void VirtualAudioService::ThreadMain() {
           }
         }
         nextMonitorStartRetry = steady_clock::time_point{};
-        // A monitor that waits for microphone processing is an ordinary state
-        // the user made, not a failure, so it goes in the note.
-        setMonitorNote(monitorCfg.enabled && !cfg.enabled
-                           ? std::string("Microphone processing is off, so "
-                                         "the monitor stays idle. Turn "
-                                         "microphone processing on to hear "
-                                         "the monitor.")
-                           : std::string());
+        // A monitor that waits for microphone processing, or for the virtual
+        // microphone, is an ordinary state and not a failure, so it goes in
+        // the note.
+        std::string monitorNote;
+        if (monitorCfg.enabled && !cfg.enabled) {
+          monitorNote = "Microphone processing is off, so the monitor stays "
+                        "idle. Turn microphone processing on to hear the "
+                        "monitor.";
+        } else if (monitorCfg.enabled && !mic_created_) {
+          monitorNote = "StudioCast Microphone is not available yet, so the "
+                        "monitor stays idle.";
+        }
+        setMonitorNote(std::move(monitorNote));
       } else {
         setMonitorNote(std::string());
         // A changed setting is an explicit restart by the user: it resolves

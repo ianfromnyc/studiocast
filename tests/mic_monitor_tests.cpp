@@ -1082,6 +1082,57 @@ bool TestServiceAppliesAVolumeChangeWithoutReloading() {
   return ok;
 }
 
+// The monitor loops from `studiocast_mic`. Without the virtual microphone
+// there is nothing to loop from, so the retry could never succeed. The service
+// waits instead of running pactl forever.
+bool TestServiceWaitsForTheVirtualMicrophoneBeforeMonitoring() {
+  MonitorRecorder rec;
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  VirtualAudioService service(std::move(hooks));
+  auto cfg = MonitorServiceConfig();
+  cfg.create_virtual_mic = false;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool explained = WaitUntil(
+      [&] {
+        return service.Status().monitor_note.find("StudioCast Microphone") !=
+               std::string::npos;
+      },
+      1000ms);
+  const int starts = rec.starts.load(std::memory_order_relaxed);
+
+  // The virtual microphone appears, so the monitor starts.
+  cfg.create_virtual_mic = true;
+  service.UpdateConfig(cfg);
+  const bool started =
+      WaitUntil([&] { return service.Status().monitor_active; }, 1000ms);
+  service.Stop();
+
+  bool ok = true;
+  if (!explained) {
+    std::cerr << "the missing virtual microphone was not explained\n";
+    ok = false;
+  }
+  if (starts != 0) {
+    std::cerr << "the monitor tried to start " << starts
+              << " times without a virtual microphone\n";
+    ok = false;
+  }
+  if (!started) {
+    std::cerr << "the monitor did not start once the microphone appeared\n";
+    ok = false;
+  }
+  return ok;
+}
+
 bool TestMonitorConsumerIsCountedApartFromApps() {
   MonitorRecorder rec;
   std::atomic<int> consumer_count{0};
@@ -1306,6 +1357,8 @@ int main() {
        &TestServiceTreatsAFailedMonitorCheckAsStopped},
       {"service stops the monitor when the resolved output disappears",
        &TestServiceStopsTheMonitorWhenTheResolvedOutputDisappears},
+      {"service waits for the virtual microphone before monitoring",
+       &TestServiceWaitsForTheVirtualMicrophoneBeforeMonitoring},
       {"service applies a volume change without reloading",
        &TestServiceAppliesAVolumeChangeWithoutReloading},
       {"service reports an idle monitor as a note",
