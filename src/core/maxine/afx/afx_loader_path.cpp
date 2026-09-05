@@ -79,6 +79,12 @@ LdLibraryPathWithDirs(const std::string &current,
     const std::string s = dir.string();
     if (s.empty() || already_there(s))
       continue;
+    // The loader splits LD_LIBRARY_PATH on ':', so a directory whose name
+    // holds one can never be found on the path it was just added to. Adding it
+    // would make the "already there" test above fail forever, and every start
+    // would end with one wasted restart.
+    if (s.find(':') != std::string::npos)
+      continue;
     if (std::find(missing.begin(), missing.end(), s) == missing.end())
       missing.push_back(s);
   }
@@ -126,17 +132,41 @@ void EnsureAfxFeatureLibsOnLoaderPath(char **argv, std::string *note) {
   if (dirs.empty())
     return;
 
+  // A directory whose name holds a ':' is left out of the loader path, so say
+  // so: the effects it holds cannot load until it is renamed.
+  std::string unusable;
+  for (const auto &d : dirs) {
+    const std::string s = d.string();
+    if (s.find(':') == std::string::npos)
+      continue;
+    if (!unusable.empty())
+      unusable += ", ";
+    unusable += s;
+  }
+  auto add_unusable_note = [&unusable](std::string *out) {
+    if (!out || unusable.empty())
+      return;
+    if (!out->empty())
+      *out += " ";
+    *out += "These AFX feature directories cannot go on the loader path, "
+            "because the loader splits it on ':' and their names hold one: " +
+            unusable + ". Rename them.";
+  };
+
   const char *current = std::getenv("LD_LIBRARY_PATH");
   const auto next = LdLibraryPathWithDirs(
       current ? std::string(current) : std::string(), dirs);
-  if (!next)
+  if (!next) {
+    add_unusable_note(note);
     return;
+  }
 
   if (std::getenv(kReexecGuard)) {
     if (note) {
       *note = "AFX feature libraries are still not on the loader path after a "
               "restart. Effects that need them cannot load.";
     }
+    add_unusable_note(note);
     return;
   }
 

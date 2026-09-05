@@ -760,6 +760,24 @@ bool TestLoaderPathValue() {
   ok &= Require(!LdLibraryPathWithDirs("/opt/lib", {}).has_value(),
                 "expected nothing to do without directories");
 
+  // The loader splits LD_LIBRARY_PATH on ':', so a directory whose name holds
+  // one can never be found on the path it was just added to. Adding it would
+  // make the "already there" test fail every time, so one wasted restart would
+  // follow every start.
+  const std::vector<fs::path> with_colon = {"/afx/od:d/lib",
+                                            "/afx/denoiser/lib"};
+  const auto skipped = LdLibraryPathWithDirs("", with_colon);
+  ok &= Require(skipped.has_value(),
+                "expected the directories without a colon to still be added");
+  if (skipped) {
+    ok &= Require(*skipped == "/afx/denoiser/lib",
+                  "expected the directory with a colon to be left out, got " +
+                      *skipped);
+  }
+
+  ok &= Require(!LdLibraryPathWithDirs("", {"/afx/od:d/lib"}).has_value(),
+                "expected nothing to do when every directory holds a colon");
+
   return ok;
 }
 
