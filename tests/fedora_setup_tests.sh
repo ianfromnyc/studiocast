@@ -639,6 +639,50 @@ CHILD
   fi
 }
 
+# The question is whether the CUDA packages resolve, not what the repository
+# that offers them is called. A repository with another id must work.
+test_a_cuda_repo_with_another_id_works() {
+  local casedir="${SANDBOX}/cuda-repo-id"
+  mkdir -p "${casedir}/bin"
+
+  cat > "${casedir}/bin/dnf" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  repolist) echo "nvidia-cuda    NVIDIA CUDA" ;;
+  repoquery) echo "cuda-cudart-13-3" ;;
+esac
+exit 0
+STUB
+  chmod +x "${casedir}/bin/dnf"
+
+  local child="${SANDBOX}/cuda-repo-id-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+export ORT_FLAVOR=gpu
+export CUDA_MAJOR=13
+export ORT_ARCH=x64
+# shellcheck source=/dev/null
+source "$1"
+run_priv() { :; }
+lib_resolves() { return 1; }
+cuda_search_dirs() { return 0; }
+ensure_cuda_runtime
+echo "CALL_RETURNED_$?"
+CHILD
+
+  local out rc=0
+  out="$(PATH="${casedir}/bin:${PATH}" bash "${child}" "${FEDORA_SETUP}" \
+    2>&1)" || rc=$?
+
+  if [[ "${rc}" -ne 0 ]]; then
+    t_fail "a CUDA repository with another id ended the call with status ${rc}: $(first_line "${out}")"
+  elif [[ "${out}" != *"Installing the CUDA 13.3 runtime rpms"* ]]; then
+    t_fail "the package suffix of the repository should be used, got: ${out}"
+  else
+    t_pass "a CUDA repository with another id works"
+  fi
+}
+
 # The source guard promises definitions only. A shell that sources the helper
 # must keep its own shell options, and must see no output.
 test_sourcing_keeps_the_caller_shell_options() {
@@ -680,6 +724,7 @@ test_an_option_without_a_value_says_so
 test_the_preflight_asks_pkg_config
 test_an_extracted_cudnn_tree_is_not_downloaded_again
 test_the_legacy_asset_warning_names_the_cuda_major
+test_a_cuda_repo_with_another_id_works
 test_sourcing_keeps_the_caller_shell_options
 
 if [[ "${FAILURES}" -ne 0 ]]; then

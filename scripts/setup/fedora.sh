@@ -589,11 +589,6 @@ report_cuda_preflight() {
   return 1
 }
 
-cuda_repo_enabled() {
-  command -v dnf >/dev/null 2>&1 || return 1
-  dnf repolist --enabled 2>/dev/null | grep -q '^cuda-fedora'
-}
-
 print_cuda_repo_hint() {
   cat >&2 <<EOF
 [setup] ERROR: the CUDA ${CUDA_MAJOR} runtime libraries are missing and the NVIDIA
@@ -638,15 +633,13 @@ ensure_cuda_runtime() {
 
   log "Missing CUDA runtime libraries: ${missing[*]}"
 
-  if ! cuda_repo_enabled; then
-    print_cuda_repo_hint
-    exit 2
-  fi
-
+  # Ask for the packages, not for a repository id: any enabled repository that
+  # offers them will do, and one that offers none cannot help whatever it is
+  # called.
   local suffix
   suffix="$(cuda_package_suffix)"
   if [[ -z "${suffix}" ]]; then
-    echo "[setup] ERROR: the enabled NVIDIA repository offers no cuda-cudart-${CUDA_MAJOR}-* package." >&2
+    print_cuda_repo_hint
     exit 2
   fi
 
