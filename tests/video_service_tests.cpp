@@ -1111,6 +1111,53 @@ bool TestPipeWireCameraNodePlanCarriesTheOutputRowSize() {
   return true;
 }
 
+// Two threads ask for a node, and both decide a restart before either of them
+// starts one. The second must look again after it takes the lock: a plan that
+// another caller already carried out would put a second node of the same name
+// in the graph, where a consumer can bind the one that is about to go.
+bool TestCameraNodePlanApplierDecidesInsideItsLock() {
+  using studiocast::video::internal::PipeWireNodePlan;
+  using studiocast::video::internal::PipeWireNodePlanApplier;
+  using Action = PipeWireNodePlan::Action;
+
+  PipeWireNodePlanApplier applier;
+  // Both are read and written under the applier lock only.
+  bool node_runs = false;
+  int decisions = 0;
+  int starts = 0;
+
+  const auto decide = [&] {
+    ++decisions;
+    PipeWireNodePlan plan;
+    if (!node_runs)
+      plan.action = Action::restart;
+    return plan;
+  };
+  const auto carry_out = [&](const PipeWireNodePlan &plan) {
+    (void)plan;
+    // Starting a node talks to the server, which takes time. The wait makes
+    // the second caller arrive while the first still works.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    node_runs = true;
+    ++starts;
+  };
+
+  std::thread first([&] { applier.Apply(decide, carry_out); });
+  std::thread second([&] { applier.Apply(decide, carry_out); });
+  first.join();
+  second.join();
+
+  if (decisions != 2) {
+    std::cerr << "both callers should decide, got " << decisions << "\n";
+    return false;
+  }
+  if (starts != 1) {
+    std::cerr << "only one caller should start a node, got " << starts << "\n";
+    return false;
+  }
+  return true;
+}
+
 bool TestStandaloneGpuScalerPolicySkipsInactiveBackendTransfers() {
   using studiocast::video::ShouldRunStandaloneGpuScaler;
 
@@ -1194,6 +1241,8 @@ int main() {
        &TestPipeWireCameraNodePlanFollowsTheNegotiatedOutput},
       {"camera node plan carries the output row size",
        &TestPipeWireCameraNodePlanCarriesTheOutputRowSize},
+      {"camera node plan applier decides inside its lock",
+       &TestCameraNodePlanApplierDecidesInsideItsLock},
       {"PipeWire output state reports a write failure",
        &TestPipeWireOutputStateReportsAWriteFailure},
       {"video start failure backs off", &TestVideoStartFailureBacksOff},

@@ -840,54 +840,58 @@ internal::PipeWireNodePlan CameraPipeline::PlanPipeWireOutputLocked() const {
       current);
 }
 
-void CameraPipeline::ApplyPipeWireOutputPlan(
-    const internal::PipeWireNodePlan &plan) {
+void CameraPipeline::ApplyPipeWireOutputPlan() {
   using Action = internal::PipeWireNodePlan::Action;
-  if (plan.action == Action::keep)
-    return;
 
-  // One plan at a time. Both the supervisor thread and the frame thread ask
-  // for one, and two overlapping restarts would put two nodes of the same name
-  // in the graph until the second swap, where a consumer could bind the one
-  // that is about to go.
-  std::lock_guard<std::mutex> applying(pw_apply_mu_);
+  // One plan at a time, and the plan is decided inside the applier lock. Both
+  // the supervisor thread and the frame thread ask for one, and two callers
+  // that each decided a restart before either started a node would put two
+  // nodes of the same name in the graph until the second swap, where a
+  // consumer could bind the one that is about to go.
+  pw_applier_.Apply(
+      [this] {
+        std::lock_guard<std::mutex> lock(mu_);
+        return PlanPipeWireOutputLocked();
+      },
+      [this](const internal::PipeWireNodePlan &plan) {
+        // Start the replacement first and outside `mu_`. The node that runs
+        // now keeps the frames flowing while the server answers, as it did
+        // when this work still happened under the lock.
+        std::unique_ptr<studiocast::video::pw_backend::PipeWireCameraNode>
+            fresh;
+        std::string err;
+        bool started = false;
+        if (plan.action == Action::restart) {
+          fresh = std::make_unique<
+              studiocast::video::pw_backend::PipeWireCameraNode>();
+          started = fresh->Start(plan.node, &err);
+          if (!started)
+            fresh.reset();
+        }
 
-  // Start the replacement first and outside the mutex. The node that runs now
-  // keeps the frames flowing while the server answers, as it did when this
-  // work still happened under the lock.
-  std::unique_ptr<studiocast::video::pw_backend::PipeWireCameraNode> fresh;
-  std::string err;
-  bool started = false;
-  if (plan.action == Action::restart) {
-    fresh =
-        std::make_unique<studiocast::video::pw_backend::PipeWireCameraNode>();
-    started = fresh->Start(plan.node, &err);
-    if (!started)
-      fresh.reset();
-  }
-
-  // Swap under a short lock. The old node goes out of the member first and is
-  // destroyed after the lock, because taking a node down talks to the server
-  // too.
-  std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> old;
-  {
-    std::lock_guard<std::mutex> lock(mu_);
-    old = std::move(pw_node_);
-    if (plan.action == Action::stop) {
-      pw_node_error_.clear();
-    } else if (started) {
-      pw_node_ = std::move(fresh);
-      pw_node_error_.clear();
-      pw_node_width_ = plan.node.width;
-      pw_node_height_ = plan.node.height;
-      pw_node_fps_ = plan.node.fps;
-      pw_node_format_ = plan.node.format;
-      pw_node_stride_ = plan.node.stride_bytes;
-    } else {
-      pw_node_error_ = err;
-    }
-  }
-  old.reset();
+        // Swap under a short lock. The old node goes out of the member first
+        // and is destroyed after the lock, because taking a node down talks to
+        // the server too.
+        std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> old;
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          old = std::move(pw_node_);
+          if (plan.action == Action::stop) {
+            pw_node_error_.clear();
+          } else if (started) {
+            pw_node_ = std::move(fresh);
+            pw_node_error_.clear();
+            pw_node_width_ = plan.node.width;
+            pw_node_height_ = plan.node.height;
+            pw_node_fps_ = plan.node.fps;
+            pw_node_format_ = plan.node.format;
+            pw_node_stride_ = plan.node.stride_bytes;
+          } else {
+            pw_node_error_ = err;
+          }
+        }
+        old.reset();
+      });
 }
 
 void CameraPipeline::PublishToPipeWire(const std::uint8_t *data,
@@ -946,19 +950,20 @@ void CameraPipeline::MaintainPipeWireOutput() {
     return;
   next_pw_check_at_ = now + std::chrono::seconds(1);
 
-  internal::PipeWireNodePlan plan;
+  // A cheap look first, so a node that is up costs one short lock a second and
+  // nothing else. The apply decides the plan again for itself.
   {
     std::lock_guard<std::mutex> lock(mu_);
-    plan = PlanPipeWireOutputLocked();
+    if (PlanPipeWireOutputLocked().action ==
+        internal::PipeWireNodePlan::Action::keep)
+      return;
   }
-  if (plan.action == internal::PipeWireNodePlan::Action::keep)
-    return;
   if (now < next_pw_restart_at_)
     return;
 
   // Starting a node talks to the server, so this happens with the mutex
   // released, the same way the supervisor does it.
-  ApplyPipeWireOutputPlan(plan);
+  ApplyPipeWireOutputPlan();
 
   bool up = false;
   {
@@ -1112,14 +1117,11 @@ bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig &cfg,
     return false;
   }
 
-  // Starting or stopping the node talks to the PipeWire server, so decide
-  // under the mutex and do the work with the mutex released.
-  {
-    const auto plan = PlanPipeWireOutputLocked();
-    lock.unlock();
-    ApplyPipeWireOutputPlan(plan);
-    lock.lock();
-  }
+  // Starting or stopping the node talks to the PipeWire server, so the apply
+  // needs the mutex released. It decides the plan for itself.
+  lock.unlock();
+  ApplyPipeWireOutputPlan();
+  lock.lock();
 
   last_error_.clear();
 
@@ -1287,7 +1289,6 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   auto capA = cap.Actual();
 
   // Open (or reuse) writer to v4l2loopback output.
-  internal::PipeWireNodePlan pw_plan;
   {
     std::lock_guard<std::mutex> lock(mu_);
     bool opened_or_renegotiated = false;
@@ -1315,12 +1316,11 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       cv_.notify_all();
       return;
     }
-    pw_plan = PlanPipeWireOutputLocked();
   }
 
   // Outside the mutex: the node create, connect and start can block on the
   // PipeWire server.
-  ApplyPipeWireOutputPlan(pw_plan);
+  ApplyPipeWireOutputPlan();
 
   ActualFormat outA = writer_.Actual();
 

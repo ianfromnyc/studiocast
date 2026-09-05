@@ -270,6 +270,30 @@ struct PipeWireNodePlan {
   studiocast::video::pw_backend::CameraNodeConfig node;
 };
 
+// Carries out camera node plans one at a time.
+//
+// The plan is decided inside the lock this holds, and that is the point of the
+// class. A plan decided before the lock can be stale by the time the lock is
+// free: two callers that each decided a restart would start two nodes of the
+// same name, and a consumer could bind the one that is about to go.
+//
+// `decide` answers with the plan for the state as it is now. It runs first and
+// with the lock held, and `carry_out` runs only for a plan that is not `keep`.
+class PipeWireNodePlanApplier final {
+public:
+  template <class Decide, class CarryOut>
+  void Apply(const Decide &decide, const CarryOut &carry_out) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const PipeWireNodePlan plan = decide();
+    if (plan.action == PipeWireNodePlan::Action::keep)
+      return;
+    carry_out(plan);
+  }
+
+private:
+  std::mutex mu_;
+};
+
 // The rule the pipeline follows for its camera node. It reads state only, so
 // the pipeline can decide under its mutex and do the work without it.
 //
@@ -330,10 +354,14 @@ public:
   // node that runs now.
   internal::PipeWireNodePlan PlanPipeWireOutputLocked() const;
 
-  // Carries out a plan. The caller must NOT hold `mu_`: starting and stopping
-  // a node talks to the PipeWire server, which can block. Only the swap of the
-  // node pointer and its state takes the mutex, and only for that swap.
-  void ApplyPipeWireOutputPlan(const internal::PipeWireNodePlan &plan);
+  // Decides what the node needs and carries it out. The caller must NOT hold
+  // `mu_`: starting and stopping a node talks to the PipeWire server, which
+  // can block. Only the swap of the node pointer and its state takes the
+  // mutex, and only for that swap.
+  //
+  // The plan is decided inside `pw_applier_`, so two callers cannot each
+  // carry out the same restart.
+  void ApplyPipeWireOutputPlan();
 
   // Hands one processed frame to the native camera node. It never blocks and
   // never fails the pipeline.
@@ -425,12 +453,11 @@ private:
   // released. It holds a reference for the length of one write, so a node that
   // the supervisor thread swaps out lives until that write is done.
   //
-  // Held for the whole of ApplyPipeWireOutputPlan, so two plans never start a
-  // node at the same time. The plan itself is decided under `mu_` and the node
-  // work happens with `mu_` released, which leaves a window where a second
-  // caller could start a second node of the same name. The lock order is
-  // always this one first, then `mu_`.
-  mutable std::mutex pw_apply_mu_;
+  // Holds ApplyPipeWireOutputPlan to one caller at a time, and decides the
+  // plan inside that lock, so a plan another caller already carried out is
+  // never carried out twice. The lock order is always this one first, then
+  // `mu_`.
+  internal::PipeWireNodePlanApplier pw_applier_;
 
   // `mu_` guards both the pointer and the error.
   std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> pw_node_;
