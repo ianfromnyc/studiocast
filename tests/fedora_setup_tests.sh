@@ -611,6 +611,34 @@ CHILD
   fi
 }
 
+# A version from before the CUDA split has one gpu asset, which is not the
+# CUDA major the user asked for. The warning must say that, because the CUDA
+# runtime rpms of that major are installed next to it.
+test_the_legacy_asset_warning_names_the_cuda_major() {
+  local child="${SANDBOX}/legacy-asset-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+# shellcheck source=/dev/null
+source "$1"
+onnxruntime_gpu_asset_name x64 13 1.24.0
+CHILD
+
+  local out
+  out="$(bash "${child}" "${FEDORA_SETUP}" 2>&1)"
+
+  if [[ "${out}" != *"onnxruntime-linux-x64-gpu-1.24.0"* ]]; then
+    t_fail "the legacy asset name should be used, got: ${out}"
+  else
+    t_pass "the legacy asset name is used"
+  fi
+
+  if [[ "${out}" != *"not CUDA 13"* ]]; then
+    t_fail "the warning should say the build is not CUDA 13, got: ${out}"
+  else
+    t_pass "the warning says the build is not CUDA 13"
+  fi
+}
+
 # The source guard promises definitions only. A shell that sources the helper
 # must keep its own shell options, and must see no output.
 test_sourcing_keeps_the_caller_shell_options() {
@@ -651,6 +679,7 @@ test_only_an_explicit_cuda_major_is_an_option_error
 test_an_option_without_a_value_says_so
 test_the_preflight_asks_pkg_config
 test_an_extracted_cudnn_tree_is_not_downloaded_again
+test_the_legacy_asset_warning_names_the_cuda_major
 test_sourcing_keeps_the_caller_shell_options
 
 if [[ "${FAILURES}" -ne 0 ]]; then

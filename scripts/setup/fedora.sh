@@ -200,7 +200,9 @@ onnxruntime_gpu_asset_name() {
   if version_at_least "${version}" "${split_from}"; then
     printf 'onnxruntime-linux-%s-gpu_cuda%s-%s\n' "${arch}" "${cuda_major}" "${version}"
   else
-    warn "ONNX Runtime ${version} has no gpu_cuda${cuda_major} asset; using the old 'gpu' asset name."
+    warn "ONNX Runtime ${version} has no gpu_cuda${cuda_major} asset; using the old"
+    warn "'gpu' asset name. That build is for CUDA 11 or CUDA 12, not CUDA ${cuda_major},"
+    warn "so it does not match the CUDA ${cuda_major} runtime this setup installs."
     sc_ort_legacy_asset_name "${arch}" "gpu" "${version}"
   fi
 }
@@ -272,7 +274,9 @@ ensure_onnxruntime_gpu_available() {
   local sha256
   sha256="$(onnxruntime_known_sha256 "${asset_name}.tgz")"
 
-  log "Installing ONNX Runtime ${ORT_VERSION} (gpu, CUDA ${CUDA_MAJOR}) from: ${url}"
+  # Name the asset, not the CUDA major of the options: a version from before
+  # the CUDA split has one gpu asset for every major.
+  log "Installing ONNX Runtime ${ORT_VERSION} (${asset_name}) from: ${url}"
   log "  -> ${root}"
   if [[ -z "${sha256}" ]]; then
     log "No published SHA-256 is known for this asset; the download is not checksummed."
