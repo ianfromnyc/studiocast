@@ -1,5 +1,7 @@
 #include <cstdlib>
+#include <cstring>
 #include <dlfcn.h>
+#include <elf.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -9,6 +11,7 @@
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 #include "core/maxine/afx_api.h"
 #include "core/maxine/ar_api.h"
@@ -678,6 +681,202 @@ bool TestArFeatureIdsMatchTheSdkHeaders() {
   return ok;
 }
 
+// ---------------------------------------------------------------------------
+// Crafted ELF images for the DT_NEEDED reader in sdk_runtime.cpp.
+//
+// The reader is pointed at every file that looks like an SDK library, and one
+// of those can be truncated, half written or plain wrong. No linker makes the
+// shapes below, so they are written by hand.
+// ---------------------------------------------------------------------------
+
+// Where each part of the image sits. The single PT_LOAD starts at file offset
+// 0 with virtual address 0, so an address is also an offset.
+constexpr std::size_t kElfPhOff = 64;
+constexpr std::size_t kElfDynOff = 512;
+constexpr std::size_t kElfStrOff = 1024;
+constexpr std::size_t kElfImageSize = 4096;
+
+// A well-formed ELF64 shared object that names one dependency.
+std::vector<char> BuildElfImage(const std::string &soname) {
+  std::vector<char> buf(kElfImageSize, 0);
+  auto put = [&buf](std::size_t at, const void *src, std::size_t n) {
+    std::memcpy(buf.data() + at, src, n);
+  };
+
+  // A string table starts with a NUL, so offset 0 is the empty name.
+  std::string strtab(1, '\0');
+  const std::size_t name_off = strtab.size();
+  strtab += soname;
+  strtab.push_back('\0');
+  put(kElfStrOff, strtab.data(), strtab.size());
+
+  std::vector<Elf64_Dyn> dyns(3);
+  dyns[0].d_tag = DT_STRTAB;
+  dyns[0].d_un.d_ptr = kElfStrOff;
+  dyns[1].d_tag = DT_NEEDED;
+  dyns[1].d_un.d_val = name_off;
+  dyns[2].d_tag = DT_NULL;
+  put(kElfDynOff, dyns.data(), dyns.size() * sizeof(Elf64_Dyn));
+
+  std::vector<Elf64_Phdr> phdrs(2);
+  phdrs[0].p_type = PT_LOAD;
+  phdrs[0].p_filesz = kElfImageSize;
+  phdrs[0].p_memsz = kElfImageSize;
+  phdrs[1].p_type = PT_DYNAMIC;
+  phdrs[1].p_offset = kElfDynOff;
+  phdrs[1].p_vaddr = kElfDynOff;
+  phdrs[1].p_filesz = dyns.size() * sizeof(Elf64_Dyn);
+  phdrs[1].p_memsz = phdrs[1].p_filesz;
+  put(kElfPhOff, phdrs.data(), phdrs.size() * sizeof(Elf64_Phdr));
+
+  Elf64_Ehdr eh{};
+  std::memcpy(eh.e_ident, ELFMAG, SELFMAG);
+  eh.e_ident[EI_CLASS] = ELFCLASS64;
+  eh.e_ident[EI_DATA] = ELFDATA2LSB;
+  eh.e_ident[EI_VERSION] = EV_CURRENT;
+  eh.e_type = ET_DYN;
+  eh.e_machine = EM_X86_64;
+  eh.e_version = EV_CURRENT;
+  eh.e_phoff = kElfPhOff;
+  eh.e_phentsize = sizeof(Elf64_Phdr);
+  eh.e_phnum = static_cast<Elf64_Half>(phdrs.size());
+  put(0, &eh, sizeof(eh));
+  return buf;
+}
+
+Elf64_Ehdr ElfHeaderOf(const std::vector<char> &buf) {
+  Elf64_Ehdr eh{};
+  std::memcpy(&eh, buf.data(), sizeof(eh));
+  return eh;
+}
+
+void SetElfHeader(std::vector<char> *buf, const Elf64_Ehdr &eh) {
+  std::memcpy(buf->data(), &eh, sizeof(eh));
+}
+
+Elf64_Phdr ElfProgramHeaderOf(const std::vector<char> &buf, std::size_t index) {
+  Elf64_Phdr ph{};
+  std::memcpy(&ph, buf.data() + kElfPhOff + index * sizeof(Elf64_Phdr),
+              sizeof(ph));
+  return ph;
+}
+
+void SetElfProgramHeader(std::vector<char> *buf, std::size_t index,
+                         const Elf64_Phdr &ph) {
+  std::memcpy(buf->data() + kElfPhOff + index * sizeof(Elf64_Phdr), &ph,
+              sizeof(ph));
+}
+
+// A broken ELF file must give no dependencies, and must not make the reader
+// touch memory outside the buffer it read the file into. The out-of-bounds
+// read itself is caught by an AddressSanitizer build; what this test pins is
+// that every one of these shapes is refused.
+bool TestMalformedElfIsRejected() {
+  const fs::path root =
+      fs::temp_directory_path() /
+      ("studiocast-maxine-elf-" + std::to_string(::getpid()));
+  std::error_code ec;
+  fs::remove_all(root, ec);
+  fs::create_directories(root, ec);
+  if (ec) {
+    std::cerr << "failed to create the ELF test directory: " << ec.message()
+              << "\n";
+    return false;
+  }
+
+  const std::string kSoname = "libstudiocast-not-a-real-library.so.1";
+  auto deps_of = [&root, &kSoname](const std::string &name,
+                                   const std::vector<char> &image) -> size_t {
+    const fs::path p = root / name;
+    std::ofstream out(p, std::ios::binary | std::ios::trunc);
+    out.write(image.data(), static_cast<std::streamsize>(image.size()));
+    out.close();
+    return studiocast::maxine::PreloadSdkRuntime(p).dependencies.size();
+  };
+
+  bool ok = true;
+
+  // Control: the hand-built image must still parse, or the checks below would
+  // pass for the wrong reason.
+  ok &= Require(deps_of("good.so", BuildElfImage(kSoname)) == 1,
+                "expected the well-formed ELF image to name one dependency");
+
+  {
+    // e_phoff near the end of the 64-bit range: `offset + sizeof(T)` used to
+    // wrap and pass the bounds check.
+    auto image = BuildElfImage(kSoname);
+    auto eh = ElfHeaderOf(image);
+    eh.e_phoff = 0xFFFFFFFFFFFFFFF0ULL;
+    eh.e_phnum = 1;
+    SetElfHeader(&image, eh);
+    ok &= Require(deps_of("phoff_overflow.so", image) == 0,
+                  "expected a wrapped e_phoff to give no dependencies");
+  }
+  {
+    // The file stops in the middle of the program header table.
+    auto image = BuildElfImage(kSoname);
+    image.resize(100);
+    ok &= Require(deps_of("truncated.so", image) == 0,
+                  "expected a truncated ELF file to give no dependencies");
+  }
+  {
+    // The dynamic segment starts near the end of the 64-bit range.
+    auto image = BuildElfImage(kSoname);
+    auto ph = ElfProgramHeaderOf(image, 1);
+    ph.p_offset = 0xFFFFFFFFFFFFFFF0ULL;
+    ph.p_filesz = 64;
+    SetElfProgramHeader(&image, 1, ph);
+    ok &= Require(deps_of("dyn_offset_overflow.so", image) == 0,
+                  "expected a wrapped p_offset to give no dependencies");
+  }
+  {
+    // The dynamic segment claims far more bytes than the file holds.
+    auto image = BuildElfImage(kSoname);
+    auto ph = ElfProgramHeaderOf(image, 1);
+    ph.p_filesz = 0xFFFFFFFFFFFFFF00ULL;
+    SetElfProgramHeader(&image, 1, ph);
+    ok &= Require(deps_of("dyn_huge_filesz.so", image) == 0,
+                  "expected an oversized p_filesz to give no dependencies");
+  }
+  {
+    // A big-endian file: every field this reader takes would be byte-swapped.
+    auto image = BuildElfImage(kSoname);
+    image[EI_DATA] = ELFDATA2MSB;
+    ok &= Require(deps_of("big_endian.so", image) == 0,
+                  "expected a big-endian ELF file to be refused");
+  }
+  {
+    // PN_XNUM keeps the real count in a section header. The table below is
+    // large enough that the reader would otherwise walk it and succeed.
+    auto image = BuildElfImage(kSoname);
+    const std::size_t big = kElfPhOff + 65535u * sizeof(Elf64_Phdr);
+    image.resize(big, 0);
+    auto load = ElfProgramHeaderOf(image, 0);
+    load.p_filesz = big;
+    load.p_memsz = big;
+    SetElfProgramHeader(&image, 0, load);
+    auto eh = ElfHeaderOf(image);
+    eh.e_phnum = PN_XNUM;
+    SetElfHeader(&image, eh);
+    ok &= Require(deps_of("pn_xnum.so", image) == 0,
+                  "expected PN_XNUM to be refused");
+  }
+  {
+    // A DT_NEEDED name offset that wraps past the end of the string table.
+    auto image = BuildElfImage(kSoname);
+    Elf64_Dyn d{};
+    const std::size_t at = kElfDynOff + sizeof(Elf64_Dyn);
+    std::memcpy(&d, image.data() + at, sizeof(d));
+    d.d_un.d_val = 0xFFFFFFFFFFFFFFF0ULL;
+    std::memcpy(image.data() + at, &d, sizeof(d));
+    ok &= Require(deps_of("strtab_overflow.so", image) == 0,
+                  "expected a wrapped string table offset to name nothing");
+  }
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -745,6 +944,12 @@ int main(int argc, char **argv) {
     return 1;
   }
   std::cout << "[PASS] models dir resolves from the library path\n";
+
+  if (!TestMalformedElfIsRejected()) {
+    std::cout << "[FAIL] malformed ELF files are rejected\n";
+    return 1;
+  }
+  std::cout << "[PASS] malformed ELF files are rejected\n";
 
   if (argc <= 0 || !argv || !argv[0] ||
       !TestAfxLoaderPrefersExplicitSdkRootBeforeBareLoaderPath(argv[0])) {

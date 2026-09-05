@@ -58,11 +58,29 @@ bool ReadFile(const fs::path &p, std::vector<char> *out) {
   return in.good() || in.eof();
 }
 
-template <typename T>
-bool ReadAt(const std::vector<char> &buf, size_t offset, T *out) {
-  if (offset + sizeof(T) > buf.size())
+// Every offset and count below comes out of the file, so none of it can be
+// trusted to fit. These two report an overflow instead of wrapping.
+bool AddChecked(std::uint64_t a, std::uint64_t b, std::uint64_t *out) {
+  if (b > std::numeric_limits<std::uint64_t>::max() - a)
     return false;
-  std::memcpy(out, buf.data() + offset, sizeof(T));
+  *out = a + b;
+  return true;
+}
+
+bool MulChecked(std::uint64_t a, std::uint64_t b, std::uint64_t *out) {
+  if (a != 0 && b > std::numeric_limits<std::uint64_t>::max() / a)
+    return false;
+  *out = a * b;
+  return true;
+}
+
+template <typename T>
+bool ReadAt(const std::vector<char> &buf, std::uint64_t offset, T *out) {
+  // Both tests subtract; a sum of the two would wrap for a large offset and
+  // let the copy below read outside the buffer.
+  if (offset > buf.size() || sizeof(T) > buf.size() - offset)
+    return false;
+  std::memcpy(out, buf.data() + static_cast<size_t>(offset), sizeof(T));
   return true;
 }
 
@@ -70,14 +88,19 @@ bool ReadAt(const std::vector<char> &buf, size_t offset, T *out) {
 // walking the PT_LOAD segments. Section headers may be stripped; program
 // headers never are.
 bool VaddrToOffset(const std::vector<Elf64_Phdr> &phdrs, Elf64_Addr vaddr,
-                   size_t *out) {
+                   std::uint64_t *out) {
   for (const auto &ph : phdrs) {
     if (ph.p_type != PT_LOAD)
       continue;
-    if (vaddr >= ph.p_vaddr && vaddr < ph.p_vaddr + ph.p_filesz) {
-      *out = static_cast<size_t>(vaddr - ph.p_vaddr + ph.p_offset);
-      return true;
-    }
+    // `p_vaddr + p_filesz` can wrap. The subtraction below cannot, because the
+    // first test proves that `vaddr` is not below `p_vaddr`.
+    if (vaddr < ph.p_vaddr || vaddr - ph.p_vaddr >= ph.p_filesz)
+      continue;
+    std::uint64_t off = 0;
+    if (!AddChecked(vaddr - ph.p_vaddr, ph.p_offset, &off))
+      continue;
+    *out = off;
+    return true;
   }
   return false;
 }
@@ -94,8 +117,24 @@ std::vector<std::string> ReadNeededSonames(const fs::path &library) {
   if (!ReadAt(buf, 0, &eh))
     return needed;
   if (std::memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
-      eh.e_ident[EI_CLASS] != ELFCLASS64 || eh.e_phoff == 0 ||
-      eh.e_phentsize != sizeof(Elf64_Phdr)) {
+      eh.e_ident[EI_CLASS] != ELFCLASS64 ||
+      // This reader takes every field as little-endian, which is what every
+      // platform StudioCast runs on uses. A big-endian file would give
+      // byte-swapped offsets, so refuse it instead of reading nonsense.
+      eh.e_ident[EI_DATA] != ELFDATA2LSB || eh.e_phoff == 0 ||
+      eh.e_phentsize != sizeof(Elf64_Phdr) || eh.e_phnum == 0 ||
+      // PN_XNUM says the real program header count sits in a section header,
+      // which a stripped file may not have. No SDK library needs it.
+      eh.e_phnum == PN_XNUM) {
+    return needed;
+  }
+
+  // Prove the whole program header table is in the file before any of it is
+  // read, so a wrapped offset cannot look like a short but valid table.
+  std::uint64_t ph_bytes = 0;
+  std::uint64_t ph_end = 0;
+  if (!MulChecked(eh.e_phnum, sizeof(Elf64_Phdr), &ph_bytes) ||
+      !AddChecked(eh.e_phoff, ph_bytes, &ph_end) || ph_end > buf.size()) {
     return needed;
   }
 
@@ -103,8 +142,8 @@ std::vector<std::string> ReadNeededSonames(const fs::path &library) {
   phdrs.reserve(eh.e_phnum);
   for (unsigned i = 0; i < eh.e_phnum; ++i) {
     Elf64_Phdr ph{};
-    const size_t off = static_cast<size_t>(eh.e_phoff) + i * sizeof(Elf64_Phdr);
-    if (!ReadAt(buf, off, &ph))
+    // The table fits, so this sum stays inside it and cannot wrap.
+    if (!ReadAt(buf, eh.e_phoff + i * sizeof(Elf64_Phdr), &ph))
       return needed;
     phdrs.push_back(ph);
   }
@@ -119,15 +158,21 @@ std::vector<std::string> ReadNeededSonames(const fs::path &library) {
   if (!dyn_ph)
     return needed;
 
+  // The dynamic segment must be in the file as well.
+  std::uint64_t dyn_end = 0;
+  if (!AddChecked(dyn_ph->p_offset, dyn_ph->p_filesz, &dyn_end) ||
+      dyn_end > buf.size()) {
+    return needed;
+  }
+
   // Pass 1: find the dynamic string table.
   Elf64_Addr strtab_vaddr = 0;
   std::vector<Elf64_Xword> needed_offsets;
-  const size_t dyn_count = dyn_ph->p_filesz / sizeof(Elf64_Dyn);
-  for (size_t i = 0; i < dyn_count; ++i) {
+  const std::uint64_t dyn_count = dyn_ph->p_filesz / sizeof(Elf64_Dyn);
+  for (std::uint64_t i = 0; i < dyn_count; ++i) {
     Elf64_Dyn d{};
-    const size_t off =
-        static_cast<size_t>(dyn_ph->p_offset) + i * sizeof(Elf64_Dyn);
-    if (!ReadAt(buf, off, &d))
+    // The segment fits, so this sum stays inside it and cannot wrap.
+    if (!ReadAt(buf, dyn_ph->p_offset + i * sizeof(Elf64_Dyn), &d))
       return needed;
     if (d.d_tag == DT_NULL)
       break;
@@ -139,16 +184,16 @@ std::vector<std::string> ReadNeededSonames(const fs::path &library) {
   if (strtab_vaddr == 0 || needed_offsets.empty())
     return needed;
 
-  size_t strtab_off = 0;
+  std::uint64_t strtab_off = 0;
   if (!VaddrToOffset(phdrs, strtab_vaddr, &strtab_off))
     return needed;
 
   for (const auto n : needed_offsets) {
-    const size_t at = strtab_off + static_cast<size_t>(n);
-    if (at >= buf.size())
+    std::uint64_t at = 0;
+    if (!AddChecked(strtab_off, n, &at) || at >= buf.size())
       continue;
-    const char *s = buf.data() + at;
-    const size_t max = buf.size() - at;
+    const char *s = buf.data() + static_cast<size_t>(at);
+    const size_t max = buf.size() - static_cast<size_t>(at);
     const size_t len = ::strnlen(s, max);
     if (len == 0 || len == max)
       continue;
