@@ -9,6 +9,12 @@
 # Do not run rpmbuild on the .in file. Run packaging/rpm/build_rpm.sh, or on a
 # non-Fedora host run packaging/rpm/build_rpm.sh --container.
 #
+# The spec needs rpm 4.20 or later, for the new-style %%bcond and for
+# %%{_smp_build_ncpus}. Fedora 42 and later have it. It does not parse on
+# EL9 or EL10, which stay on rpm 4.16 and 4.18: an enterprise Linux build
+# would need the old %%bcond_with spellings and a %%{?_smp_build_ncpus}
+# fallback.
+#
 # Build conditionals (pass with rpmbuild --with NAME / --without NAME, or with
 # build_rpm.sh --with NAME / --without NAME):
 #
