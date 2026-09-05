@@ -703,6 +703,14 @@ void VirtualAudioService::ThreadMain() {
   steady_clock::time_point nextSpeakerLoopbackStopRetry{};
   steady_clock::time_point nextSpeakerDestroyRetry{};
   steady_clock::time_point nextMonitorStartRetry{};
+  // Consecutive failed monitor starts. Each one spaces the next retry further
+  // out, so a setting that can never work stops running pactl every quarter
+  // second for the life of the daemon.
+  int monitorStartFailures = 0;
+  // The settings the last start attempt used, whether it worked or not. A
+  // change to them is a fresh try, so the wait starts over.
+  std::string monitorAttemptSink;
+  int monitorAttemptLatencyMs = 0;
   steady_clock::time_point nextMonitorStopRetry{};
   steady_clock::time_point nextMonitorVolumeRetry{};
   steady_clock::time_point nextMonitorVerify{};
@@ -1292,6 +1300,9 @@ void VirtualAudioService::ThreadMain() {
           }
         }
         nextMonitorStartRetry = steady_clock::time_point{};
+        monitorStartFailures = 0;
+        monitorAttemptSink.clear();
+        monitorAttemptLatencyMs = 0;
         // A monitor that waits for microphone processing, or for the virtual
         // microphone, is an ordinary state and not a failure, so it goes in
         // the note.
@@ -1314,6 +1325,13 @@ void VirtualAudioService::ThreadMain() {
             monitor_latency_ms_ != monitorCfg.latency_ms;
         if (monitorSettingsChanged)
           monitor_output_lost_ = false;
+        if (monitorAttemptSink != monitorCfg.sink ||
+            monitorAttemptLatencyMs != monitorCfg.latency_ms) {
+          monitorAttemptSink = monitorCfg.sink;
+          monitorAttemptLatencyMs = monitorCfg.latency_ms;
+          monitorStartFailures = 0;
+          nextMonitorStartRetry = steady_clock::time_point{};
+        }
 
         // The Pulse server unloads the loopback when the sink disappears, for
         // example when a headset is unplugged. Re-check now and then so the
@@ -1383,6 +1401,7 @@ void VirtualAudioService::ThreadMain() {
             monitor_module_id_ = state.module_id;
             monitor_latency_ms_ = monitorCfg.latency_ms;
             monitor_volume_ = monitorCfg.volume;
+            monitorStartFailures = 0;
             nextMonitorStartRetry = steady_clock::time_point{};
             nextMonitorVolumeRetry = steady_clock::time_point{};
             nextMonitorVerify = monitorNow + seconds(2);
@@ -1395,7 +1414,9 @@ void VirtualAudioService::ThreadMain() {
               st_.monitor_last_error = state.warning;
             }
           } else {
-            nextMonitorStartRetry = monitorNow + StartFailureRetryDelay(cfg);
+            monitorStartFailures = std::min(monitorStartFailures + 1, 8);
+            nextMonitorStartRetry =
+                monitorNow + StartFailureRetryDelay(cfg) * monitorStartFailures;
             clearMonitorRouteState();
             setMonitorError("Failed to start the microphone monitor: " + err);
           }
