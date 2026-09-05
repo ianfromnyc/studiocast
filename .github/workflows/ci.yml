@@ -343,10 +343,15 @@ jobs:
         # covered, plus the shell test suites, so a new one joins the job on
         # its own.
         #
-        # mapfile reports its own status, not the status of find, so an empty
-        # list has to fail on its own. Without that, a directory that is
-        # renamed leaves the job linting nothing and reporting success.
+        # A directory that is renamed away must fail the job, not leave it
+        # linting the other two and reporting success. find complains on
+        # stderr inside a process substitution that nobody reads, so each
+        # directory is asserted on its own first. The empty-list guard is the
+        # second net: mapfile reports its own status, not the status of find.
         run: |
+          for dir in packaging scripts tests; do
+            [[ -d "${dir}" ]] || { echo "no ${dir} directory"; exit 1; }
+          done
           mapfile -t files < <(find packaging scripts tests -name '*.sh' | sort)
           (( ${#files[@]} > 0 )) || { echo "no shell scripts found"; exit 1; }
           shellcheck -x "${files[@]}"
