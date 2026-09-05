@@ -1158,6 +1158,44 @@ bool TestCameraNodePlanApplierDecidesInsideItsLock() {
   return true;
 }
 
+// A run that ended with the PipeWire server away must not leave its wait
+// behind. The next run would inherit the whole backoff and wait seconds before
+// it first asked for a node.
+bool TestCameraNodeRestartBackoffStartsFreshOnEveryRun() {
+  using studiocast::video::internal::PipeWireRestartBackoff;
+  using Clock = std::chrono::steady_clock;
+
+  PipeWireRestartBackoff backoff;
+  const auto now = Clock::now();
+  if (!backoff.Ready(now)) {
+    std::cerr << "a backoff nothing failed on should be ready\n";
+    return false;
+  }
+
+  // Enough failures to reach the longest wait.
+  for (int i = 0; i < 8; ++i)
+    backoff.Failed(now);
+  if (backoff.Ready(now)) {
+    std::cerr << "a failed start should hold the next try back\n";
+    return false;
+  }
+
+  backoff.Reset();
+  if (!backoff.Ready(now)) {
+    std::cerr << "a new run should not inherit the wait of the last one\n";
+    return false;
+  }
+
+  // A node that came up ends the backoff the same way.
+  backoff.Failed(now);
+  backoff.Succeeded();
+  if (!backoff.Ready(now)) {
+    std::cerr << "a node that came up should end the wait\n";
+    return false;
+  }
+  return true;
+}
+
 bool TestStandaloneGpuScalerPolicySkipsInactiveBackendTransfers() {
   using studiocast::video::ShouldRunStandaloneGpuScaler;
 
@@ -1243,6 +1281,8 @@ int main() {
        &TestPipeWireCameraNodePlanCarriesTheOutputRowSize},
       {"camera node plan applier decides inside its lock",
        &TestCameraNodePlanApplierDecidesInsideItsLock},
+      {"camera node restart backoff starts fresh on every run",
+       &TestCameraNodeRestartBackoffStartsFreshOnEveryRun},
       {"PipeWire output state reports a write failure",
        &TestPipeWireOutputStateReportsAWriteFailure},
       {"video start failure backs off", &TestVideoStartFailureBacksOff},

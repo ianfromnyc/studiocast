@@ -962,7 +962,7 @@ void CameraPipeline::MaintainPipeWireOutput() {
         internal::PipeWireNodePlan::Action::keep)
       return;
   }
-  if (now < next_pw_restart_at_)
+  if (!pw_restart_backoff_.Ready(now))
     return;
 
   // Starting a node talks to the server, so this happens with the mutex
@@ -975,13 +975,10 @@ void CameraPipeline::MaintainPipeWireOutput() {
     up = pw_node_ && pw_node_->IsRunning();
   }
   if (up) {
-    pw_restart_attempts_ = 0;
-    next_pw_restart_at_ = std::chrono::steady_clock::time_point{};
+    pw_restart_backoff_.Succeeded();
     return;
   }
-  ++pw_restart_attempts_;
-  next_pw_restart_at_ =
-      now + studiocast::pw::NodeRestartDelay(pw_restart_attempts_);
+  pw_restart_backoff_.Failed(now);
 }
 
 bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig &cfg,
@@ -1291,6 +1288,12 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
   }
 
   auto capA = cap.Actual();
+
+  // The node watch belongs to this run. A run that ended with the server away
+  // would otherwise leave its wait behind, and this run would sit out the
+  // whole backoff before it first asked for a node.
+  next_pw_check_at_ = std::chrono::steady_clock::time_point{};
+  pw_restart_backoff_.Reset();
 
   // Open (or reuse) writer to v4l2loopback output.
   {

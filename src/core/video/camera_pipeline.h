@@ -270,6 +270,39 @@ struct PipeWireNodePlan {
   studiocast::video::pw_backend::CameraNodeConfig node;
 };
 
+// When the frame thread may ask for the camera node again after a start that
+// failed.
+//
+// The wait grows with every failure, so a server that stays away is not asked
+// on every frame. It belongs to one run: a run that ended with the server away
+// must not leave its wait behind, or the next run waits the whole backoff
+// before it first asks.
+class PipeWireRestartBackoff final {
+public:
+  // A new run, and the first try may happen at once.
+  void Reset() {
+    attempts_ = 0;
+    next_at_ = std::chrono::steady_clock::time_point{};
+  }
+
+  bool Ready(std::chrono::steady_clock::time_point now) const {
+    return now >= next_at_;
+  }
+
+  // The node came up. The next failure starts from the shortest wait again.
+  void Succeeded() { Reset(); }
+
+  // The node did not come up. Holds the next try back for a growing wait.
+  void Failed(std::chrono::steady_clock::time_point now) {
+    ++attempts_;
+    next_at_ = now + studiocast::pw::NodeRestartDelay(attempts_);
+  }
+
+private:
+  int attempts_ = 0;
+  std::chrono::steady_clock::time_point next_at_{};
+};
+
 // Carries out camera node plans one at a time.
 //
 // The plan is decided inside the lock this holds, and that is the point of the
@@ -468,12 +501,12 @@ private:
   // status all the time.
   std::atomic<bool> pw_output_wanted_{false};
 
-  // Frame thread only. When to look at the node again, when a failed start may
-  // be tried again, and how many tries went by, so a server that stays away is
-  // not asked on every frame.
+  // Frame thread only. When to look at the node again, and when a failed start
+  // may be tried again, so a server that stays away is not asked on every
+  // frame. ThreadMain clears both, so no run inherits the wait of the last
+  // one.
   std::chrono::steady_clock::time_point next_pw_check_at_{};
-  std::chrono::steady_clock::time_point next_pw_restart_at_{};
-  int pw_restart_attempts_ = 0;
+  internal::PipeWireRestartBackoff pw_restart_backoff_;
 
   // Format the running node negotiated, so a renegotiated v4l2loopback format
   // restarts the node instead of sending frames of the wrong size.
