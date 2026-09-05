@@ -727,6 +727,11 @@ void VirtualAudioService::ThreadMain() {
   // must not run them four times a second for the life of the daemon.
   int monitorStopFailures = 0;
   int monitorVolumeFailures = 0;
+  // The cleanup that runs while the output is lost keeps its own counter and
+  // deadline: the monitor is still wanted there, and the wait of the stop the
+  // user asks for starts over on every pass of a wanted monitor.
+  steady_clock::time_point nextMonitorLostCleanup{};
+  int monitorLostCleanupFailures = 0;
   // True while the reported error belongs to a failed volume step. A later
   // step that works clears that error, and only that one.
   bool monitorVolumeFailed = false;
@@ -1324,10 +1329,16 @@ void VirtualAudioService::ThreadMain() {
       // Support for technical details."
       // `lost_sink` is taken by value because a caller may hand in
       // `monitor_sink_resolved_`, which this drops.
+      //
+      // This says nothing about `monitor_route_may_exist_`. A lost output is
+      // an answer about the sink list, and only the module list, or a stop
+      // that worked, says whether a loopback is still loaded. A caller that
+      // has such an answer clears the flag itself.
       auto reportMonitorOutputLost = [&](std::string lost_sink) {
         clearMonitorRouteState();
-        monitor_route_may_exist_ = false;
         monitor_output_lost_ = true;
+        nextMonitorLostCleanup = steady_clock::time_point{};
+        monitorLostCleanupFailures = 0;
         monitor_sink_resolved_.clear();
         monitorStartFailures = 0;
         nextMonitorStartRetry = steady_clock::time_point{};
@@ -1432,7 +1443,10 @@ void VirtualAudioService::ThreadMain() {
             setMonitorError("Failed to check the microphone monitor: " +
                             detectErr);
           } else if (!live.active) {
-            // Pulse unloads the loopback when the output disappears.
+            // Pulse unloads the loopback when the output disappears. The
+            // check read the module list and found no tagged loopback, so
+            // nothing is left to remove.
+            monitor_route_may_exist_ = false;
             reportMonitorOutputLost(monitor_sink_resolved_.empty()
                                         ? monitorCfg.sink
                                         : monitor_sink_resolved_);
@@ -1461,6 +1475,30 @@ void VirtualAudioService::ThreadMain() {
             setMonitorError("Failed to set the microphone monitor volume: " +
                             volumeErr);
             monitorVolumeFailed = true;
+          }
+        }
+
+        // A lost output stops the monitor but removes no loopback: a stop that
+        // failed in the same window can have left one loaded, and it plays the
+        // microphone into the speakers until something unloads it. The cleanup
+        // therefore keeps its retry while the output is lost, instead of
+        // waiting for the service to stop. It stays quiet, because the note
+        // already tells the user what to do and the shutdown cleanup reports a
+        // stop that never works.
+        if (monitor_output_lost_ && monitor_route_may_exist_ &&
+            monitorNow >= nextMonitorLostCleanup) {
+          std::string cleanupErr;
+          if (StopMicMonitorRoute(&cleanupErr)) {
+            monitor_route_may_exist_ = false;
+            monitorLostCleanupFailures = 0;
+            nextMonitorLostCleanup = steady_clock::time_point{};
+            clearMonitorRouteState();
+          } else {
+            monitorLostCleanupFailures =
+                std::min(monitorLostCleanupFailures + 1, 8);
+            nextMonitorLostCleanup =
+                monitorNow +
+                StartFailureRetryDelay(cfg) * monitorLostCleanupFailures;
           }
         }
 

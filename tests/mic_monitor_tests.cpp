@@ -1313,6 +1313,110 @@ bool TestServiceStopsAMonitorItCanNoLongerSee() {
   return true;
 }
 
+// A lost output is an answer about the sink list, not about the module list,
+// so it says nothing about the loopback. A stop that failed in the same window
+// can have left one loaded, and it plays the microphone into the speakers
+// until something removes it. The service must therefore keep the knowledge
+// that a route may still play, and keep trying to remove it, while the output
+// is lost.
+bool TestServiceCleansUpTheLoopbackAfterALostOutput() {
+  MonitorRecorder rec;
+  std::atomic<bool> sink_gone{false};
+  std::atomic<bool> start_fails{false};
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  auto start_monitor = hooks.start_mic_monitor;
+  hooks.start_mic_monitor = [&](const MicMonitorConfig &cfg,
+                                const std::string &source, MicMonitorState *out,
+                                std::string *error) {
+    if (start_fails.load(std::memory_order_relaxed)) {
+      // A start that fails leaves the loopback of the last start alone: a
+      // sound server that cannot load a module cannot unload one either.
+      rec.starts.fetch_add(1, std::memory_order_relaxed);
+      if (error)
+        *error = "synthetic monitor start failure";
+      return false;
+    }
+    return start_monitor(cfg, source, out, error);
+  };
+  hooks.mic_monitor_sink_present = [&](const std::string &,
+                                       std::string *error) {
+    if (error)
+      error->clear();
+    return std::optional<bool>(!sink_gone.load(std::memory_order_relaxed));
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  const auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+  if (!WaitUntil([&] { return service.Status().monitor_active; }, 1000ms)) {
+    std::cerr << "the monitor did not start\n";
+    service.Stop();
+    return false;
+  }
+
+  // The sound server goes wrong: the check, the start and the stop all fail.
+  // The loopback of the first start is still loaded.
+  rec.fail_detect.store(true, std::memory_order_relaxed);
+  start_fails.store(true, std::memory_order_relaxed);
+  rec.fail_stop.store(true, std::memory_order_relaxed);
+  if (!WaitUntil([&] { return !service.Status().monitor_active; }, 5000ms)) {
+    std::cerr << "a failed check left the monitor state alone\n";
+    service.Stop();
+    return false;
+  }
+
+  // The output is gone as well, and only the failed start can find it.
+  sink_gone.store(true, std::memory_order_relaxed);
+  if (!WaitUntil(
+          [&] {
+            return service.Status().monitor_note.find("disappeared") !=
+                   std::string::npos;
+          },
+          6000ms)) {
+    std::cerr << "the lost monitor output was not reported: note='"
+              << service.Status().monitor_note << "'\n";
+    service.Stop();
+    return false;
+  }
+
+  const int stops_before = rec.stops.load(std::memory_order_relaxed);
+  if (!WaitUntil(
+          [&] {
+            return rec.stops.load(std::memory_order_relaxed) >= stops_before + 2;
+          },
+          4000ms)) {
+    std::cerr << "the lost output ended the cleanup of a loopback that may "
+                 "still play\n";
+    service.Stop();
+    return false;
+  }
+
+  // A stop that works removes it, without anything the user must do.
+  rec.fail_stop.store(false, std::memory_order_relaxed);
+  bool ok = true;
+  if (!WaitUntil([&] { return !rec.running.load(std::memory_order_relaxed); },
+                 4000ms)) {
+    std::cerr << "the loopback stayed loaded after the stop worked again\n";
+    ok = false;
+  }
+
+  service.Stop();
+  if (rec.running.load(std::memory_order_relaxed)) {
+    std::cerr << "a monitor loopback outlived the service\n";
+    ok = false;
+  }
+  return ok;
+}
+
 // A monitor that is on while microphone processing is off is a state the user
 // made one click ago, not a failure. It belongs in the note, so nothing sends
 // the user to Support for it.
@@ -2095,6 +2199,8 @@ int main() {
        &TestServiceClearsAStaleMonitorAtStart},
       {"service stops a monitor it can no longer see",
        &TestServiceStopsAMonitorItCanNoLongerSee},
+      {"service cleans up the loopback after a lost output",
+       &TestServiceCleansUpTheLoopbackAfterALostOutput},
       {"monitor consumer is counted apart from apps",
        &TestMonitorConsumerIsCountedApartFromApps},
       {"service drives the real helper through pactl",

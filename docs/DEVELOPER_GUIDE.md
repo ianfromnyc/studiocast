@@ -548,6 +548,14 @@ server that cannot be reached gives no answer at all, and no answer keeps the
 pin: a monitor that only waits for the sound server comes back on its own,
 while a lost output needs the user.
 
+A lost output is an answer about the sink list, and it says nothing about the
+loopback. Only a stop that worked, or a route check that read the module list
+and found no tagged loopback, clears the knowledge that one may still play. A
+stop that failed in the same window therefore keeps its retry while the output
+is lost, and the service stops the route again when it stops. A loopback that
+plays the microphone into the speakers cannot outlive the daemon because the
+output disappeared.
+
 The daemon never writes the monitor setting back. A safety check that finds no
 usable output gives a warning and leaves `monitor.enabled` as the user wrote
 it, because the same check fails when the sound server is only unreadable for a
