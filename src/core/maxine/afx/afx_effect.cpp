@@ -401,7 +401,7 @@ bool AfxEffect::SetU32Any(NvAFX_Handle handle, const char *what,
   std::ostringstream tried;
   bool first = true;
   bool any_tried = false;
-  bool all_invalid_param = true;
+  bool all_unsupported = true;
   for (const auto *sel : candidates) {
     if (!sel || std::strlen(sel) == 0)
       continue;
@@ -414,11 +414,15 @@ bool AfxEffect::SetU32Any(NvAFX_Handle handle, const char *what,
       return true;
     }
     any_tried = true;
-    if (st != NVAFX_ERR_INVALID_PARAM)
-      all_invalid_param = false;
+    // INVALID_PARAM means the effect does not take this parameter.
+    // IMMUTABLE_PARAM means it takes it but keeps the value it was loaded
+    // with. Either way there is nothing the caller can do, so both read as
+    // "not available" and only another status is a real failure.
+    if (st != NVAFX_ERR_INVALID_PARAM && st != NVAFX_ERR_IMMUTABLE_PARAM)
+      all_unsupported = false;
   }
   if (unsupported_out)
-    *unsupported_out = any_tried && all_invalid_param;
+    *unsupported_out = any_tried && all_unsupported;
   if (error_out) {
     std::ostringstream oss;
     oss << "NvAFX_SetU32 failed for " << what << " (tried: " << tried.str()
@@ -442,7 +446,7 @@ bool AfxEffect::SetFloatAny(NvAFX_Handle handle, const char *what,
   std::ostringstream tried;
   bool first = true;
   bool any_tried = false;
-  bool all_invalid_param = true;
+  bool all_unsupported = true;
   for (const auto *sel : candidates) {
     if (!sel || std::strlen(sel) == 0)
       continue;
@@ -455,11 +459,15 @@ bool AfxEffect::SetFloatAny(NvAFX_Handle handle, const char *what,
       return true;
     }
     any_tried = true;
-    if (st != NVAFX_ERR_INVALID_PARAM)
-      all_invalid_param = false;
+    // INVALID_PARAM means the effect does not take this parameter.
+    // IMMUTABLE_PARAM means it takes it but keeps the value it was loaded
+    // with. Either way there is nothing the caller can do, so both read as
+    // "not available" and only another status is a real failure.
+    if (st != NVAFX_ERR_INVALID_PARAM && st != NVAFX_ERR_IMMUTABLE_PARAM)
+      all_unsupported = false;
   }
   if (unsupported_out)
-    *unsupported_out = any_tried && all_invalid_param;
+    *unsupported_out = any_tried && all_unsupported;
   if (error_out) {
     std::ostringstream oss;
     oss << "NvAFX_SetFloat failed for " << what << " (tried: " << tried.str()

@@ -1074,6 +1074,51 @@ bool TestARealIntensityErrorFailsTheUpdate() {
   return ok;
 }
 
+// The SDK answers NVAFX_STATUS_IMMUTABLE_PARAM for a parameter that cannot
+// change after Load. That is not a failure of the update; the effect simply
+// keeps the value it was loaded with, so the update is a no-op.
+bool TestAnImmutableIntensityIsANoOp() {
+  const fs::path root = TempRoot("intensity-immutable");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  fake_afx::Reset();
+  // 4 is NVAFX_STATUS_IMMUTABLE_PARAM.
+  fake_afx::g_set_status["intensity_ratio"] = 4;
+  studiocast::maxine::afx::AfxApi api;
+  fake_afx::Install(&api);
+
+  studiocast::maxine::afx::AfxEffect fx(&api);
+  const auto cfg = MakeConfig(features, "denoiser", "denoiser");
+
+  std::string err;
+  const bool configured = fx.Configure(cfg, &err);
+  bool ok = Require(configured, "expected the denoiser to configure: " + err);
+  if (!ok) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  ok &= Require(fx.Load(&err), "expected the denoiser to load: " + err);
+
+  err.clear();
+  const bool updated = fx.UpdateIntensity(0.25f, &err);
+  ok &= Require(updated,
+                "expected an immutable intensity to be a no-op, got: " + err);
+  ok &= Require(err.empty(),
+                "expected no error for an immutable intensity, got: " + err);
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -1096,6 +1141,7 @@ int main() {
   ok = TestAnUnexpectedSetErrorKeepsItsMessage() && ok;
   ok = TestAnUnsupportedIntensityIsNotedOnce() && ok;
   ok = TestARealIntensityErrorFailsTheUpdate() && ok;
+  ok = TestAnImmutableIntensityIsANoOp() && ok;
 
   if (!ok)
     return 1;

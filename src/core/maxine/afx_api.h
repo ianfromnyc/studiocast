@@ -18,9 +18,13 @@ namespace studiocast::maxine::afx {
 using NvAFX_Status = int;
 inline constexpr NvAFX_Status NVAFX_SUCCESS = 0;
 // The status the SDK answers with when an effect does not take a parameter
-// (`NVAFX_STATUS_INVALID_PARAM` in nvAudioEffects.h). Any other status is a
-// real failure.
+// (`NVAFX_STATUS_INVALID_PARAM` in nvAudioEffects.h).
 inline constexpr NvAFX_Status NVAFX_ERR_INVALID_PARAM = 3;
+// The status for a parameter that the effect takes but cannot change after
+// NvAFX_Load (`NVAFX_STATUS_IMMUTABLE_PARAM`). For a caller that wants to set
+// a value this means the same thing as "not available": the effect keeps what
+// it was loaded with. Any other status is a real failure.
+inline constexpr NvAFX_Status NVAFX_ERR_IMMUTABLE_PARAM = 4;
 
 using NvAFX_Handle = void *;
 using NvAFX_ParameterSelector = const char *;
