@@ -1635,9 +1635,14 @@ bool TestAudioPageStopsItsListingsBetweenPactlCalls() {
   // first call when the page goes away, so a listing that stops between the
   // calls runs about two calls in total, and one that does not runs six.
   const int commandsRun = commands.load(std::memory_order_relaxed);
-  const bool ok = Expect(commandsRun <= 4,
-                         "a listing should stop between its pactl calls when "
-                         "the page goes away");
+  // The lower bound keeps the upper bound honest: a page that never listed
+  // anything would satisfy "at most four calls" without stopping a thing.
+  bool ok = Expect(commandsRun >= 1,
+                   "the page should have started its device listings");
+  ok = Expect(commandsRun <= 4,
+              "a listing should stop between its pactl calls when the page "
+              "goes away") &&
+       ok;
   if (!ok)
     std::cerr << "pactl calls before the page was gone: " << commandsRun
               << "\n";
