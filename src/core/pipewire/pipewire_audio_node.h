@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -134,5 +135,20 @@ public:
 private:
   std::unique_ptr<Impl> impl_;
 };
+
+namespace internal {
+
+// How long a write may wait for room on a full ring.
+//
+// One quantum is all the real-time callback needs to take a block, and the cap
+// keeps a node with a long frame from holding the pipeline thread. A node that
+// nothing consumes is not driven at all, so no wait would help it: there the
+// wait only costs the small delay before the frame goes.
+//
+// The pipeline thread hands over a frame every 10 ms, so this must stay well
+// under that.
+std::chrono::microseconds FullRingWait(const AudioNodeConfig &cfg);
+
+} // namespace internal
 
 } // namespace studiocast::pw

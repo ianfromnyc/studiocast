@@ -26,6 +26,19 @@
 
 namespace studiocast::pw {
 
+namespace internal {
+
+std::chrono::microseconds FullRingWait(const AudioNodeConfig &cfg) {
+  constexpr std::chrono::microseconds kCap{2000};
+  if (cfg.sample_rate <= 0 || cfg.frame_samples == 0)
+    return kCap;
+  const std::chrono::microseconds quantum{
+      static_cast<std::int64_t>(cfg.frame_samples) * 1000000 / cfg.sample_rate};
+  return std::min(quantum, kCap);
+}
+
+} // namespace internal
+
 namespace {
 
 // True when StudioCast produces the samples on this node. The
@@ -82,20 +95,6 @@ LinkEnd LinkEndForRole(AudioNodeRole role) {
 bool IsVirtualDevice(AudioNodeRole role) {
   return role == AudioNodeRole::kVirtualSource ||
          role == AudioNodeRole::kVirtualSink;
-}
-
-// How long Write may wait on a full ring. One quantum is all the real-time
-// callback needs to take a block, and the cap keeps a node with a long frame
-// from holding the pipeline thread. A node that nothing consumes is not driven
-// at all, so no wait would help it: there the wait only costs the small delay
-// below before the frame goes.
-std::chrono::microseconds FullRingWait(const AudioNodeConfig &cfg) {
-  constexpr std::chrono::microseconds kCap{2000};
-  if (cfg.sample_rate <= 0 || cfg.frame_samples == 0)
-    return kCap;
-  const std::chrono::microseconds quantum{
-      static_cast<std::int64_t>(cfg.frame_samples) * 1000000 / cfg.sample_rate};
-  return std::min(quantum, kCap);
 }
 
 #endif // STUDIOCAST_HAVE_PIPEWIRE
@@ -662,7 +661,7 @@ bool PipeWireAudioNode::Write(const void *src, std::size_t bytes,
   // A write never waits for io_timeout_ms. The pipeline thread hands over a
   // frame every 10 ms, so a full ring may hold it for one quantum at most.
   const auto deadline =
-      std::chrono::steady_clock::now() + FullRingWait(impl_->cfg);
+      std::chrono::steady_clock::now() + internal::FullRingWait(impl_->cfg);
   while (!impl_->stop_requested.load(std::memory_order_acquire)) {
     if (impl_->stream_down.load(std::memory_order_acquire)) {
       if (error)

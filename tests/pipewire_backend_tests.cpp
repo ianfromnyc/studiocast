@@ -433,9 +433,49 @@ bool TestLiveVirtualSourceAcceptsWrites() {
          Expect(consumers >= 0, "the consumer count must never be negative");
 }
 
+// The wait a write may spend on a full ring, which is the bound the pipeline
+// thread depends on. It is pinned here and not with a clock: a measurement of
+// a live write reports the scheduler and the server, not this rule.
+bool TestAFullRingWriteWaitsOneQuantumAtMost() {
+  using studiocast::pw::internal::FullRingWait;
+  constexpr auto kCap = std::chrono::microseconds(2000);
+
+  studiocast::pw::AudioNodeConfig cfg;
+  cfg.sample_rate = 48000;
+  cfg.frame_samples = 480;
+  const auto quantum = FullRingWait(cfg);
+
+  // A short frame waits its own quantum, which is under the cap.
+  studiocast::pw::AudioNodeConfig small = cfg;
+  small.frame_samples = 48;
+  const auto short_frame = FullRingWait(small);
+
+  // A config that says nothing usable falls back to the cap.
+  studiocast::pw::AudioNodeConfig unset = cfg;
+  unset.sample_rate = 0;
+  const auto fallback = FullRingWait(unset);
+
+  return Expect(quantum == kCap,
+                "a 10 ms frame must wait the cap, not the whole quantum") &&
+         Expect(short_frame == std::chrono::microseconds(1000),
+                "a 1 ms frame must wait its own quantum") &&
+         Expect(fallback == kCap, "a config with no rate must wait the cap") &&
+         Expect(quantum <= kCap && short_frame <= kCap && fallback <= kCap,
+                "no write may wait longer than the cap") &&
+         Expect(kCap < std::chrono::milliseconds(10),
+                "the wait must stay under the 10 ms the pipeline thread has");
+}
+
 // A virtual source with no consumer is not driven by the graph, so nothing
-// empties its ring. The pipeline thread writes a frame every 10 ms, so a full
-// ring must give the frame up quickly instead of holding the thread.
+// empties its ring. A full ring must therefore give the frame up instead of
+// holding the pipeline thread.
+//
+// The proof is the overflow count, not a clock: nothing empties the ring, so
+// every write after the ring filled had to drop its frame to come back at all.
+// A write that waited for room would never return. The slowest write is
+// measured and reported, but it is the scheduler and the server it measures,
+// not this code; the wait this code allows itself is pinned by
+// TestAFullRingWriteWaitsOneQuantumAtMost.
 bool TestLiveWriteToAFullRingReturnsQuickly() {
   if (!LiveServerAvailable("live write to a full ring returns quickly"))
     return true;
@@ -451,11 +491,12 @@ bool TestLiveWriteToAFullRingReturnsQuickly() {
     return false;
 
   // More writes than the ring holds, so the last ones find it full.
+  const int writes = cfg.ring_frames * 4;
   std::vector<float> frame(cfg.frame_samples, 0.0f);
   const std::size_t bytes = frame.size() * sizeof(float);
   bool ok = true;
   std::chrono::steady_clock::duration slowest{0};
-  for (int i = 0; i < cfg.ring_frames * 4 && ok; ++i) {
+  for (int i = 0; i < writes && ok; ++i) {
     const auto started = std::chrono::steady_clock::now();
     ok = node.Write(frame.data(), bytes, &error);
     slowest = std::max(slowest, std::chrono::steady_clock::now() - started);
@@ -463,14 +504,22 @@ bool TestLiveWriteToAFullRingReturnsQuickly() {
   const std::uint64_t overflows = node.OverflowCount();
   node.Stop();
 
+  // The ring holds ring_frames frames, so the writes after those had nowhere
+  // to put their frame.
+  const auto expected =
+      static_cast<std::uint64_t>(writes - cfg.ring_frames);
+
   const auto slowest_ms =
       std::chrono::duration_cast<std::chrono::milliseconds>(slowest).count();
+  std::cout << "[INFO] the slowest write took " << slowest_ms
+            << " ms (measured, not asserted)\n";
+
   return Expect(ok, "a dropped frame must still report success: " + error) &&
-         Expect(overflows > 0,
-                "a ring that nothing empties must count an overflow") &&
-         Expect(slowest_ms <= 10,
-                "a write waited " + std::to_string(slowest_ms) +
-                    " ms; a full ring must not stall the pipeline thread");
+         Expect(overflows == expected,
+                "every write into a full ring must drop its frame instead of "
+                "waiting for room; " +
+                    std::to_string(overflows) + " of " +
+                    std::to_string(expected) + " did");
 }
 
 // The pump reads the virtual speakers, and a read comes back with nothing
@@ -2184,6 +2233,8 @@ int main() {
        &TestLiveVirtualSourceNodeReachesTheGraph},
       {"live virtual source accepts writes",
        &TestLiveVirtualSourceAcceptsWrites},
+      {"a full ring write waits one quantum at most",
+       &TestAFullRingWriteWaitsOneQuantumAtMost},
       {"live write to a full ring returns quickly",
        &TestLiveWriteToAFullRingReturnsQuickly},
       {"speaker loopback pump waits after an empty read",
