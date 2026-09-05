@@ -245,6 +245,8 @@ bool TestCaptureNegotiationKeepsTheDriverRowStride() {
        16, 6u, 24u},
       {"YUYV stride of zero is raised", V4L2_PIX_FMT_YUYV, 640, 480, 0, 0,
        1280u, 614400u},
+      {"a stride with no frame size at all", V4L2_PIX_FMT_YUYV, 640, 480, 1280,
+       0, 1280u, 614400u},
       {"odd RGB24 width, packed driver stride", V4L2_PIX_FMT_RGB24, 3, 4, 9, 36,
        9u, 36u},
       {"MJPEG keeps the reported values", V4L2_PIX_FMT_MJPEG, 640, 480, 0,
@@ -306,8 +308,6 @@ bool TestCaptureNegotiationRefusesRowsTheFrameSizeCannotHold() {
        16, 0u, 0u},
       {"RGB24 rows overrun the reported frame", V4L2_PIX_FMT_RGB24, 640, 480,
        1920, 614400, 0u, 0u},
-      {"a stride with no frame size at all", V4L2_PIX_FMT_YUYV, 640, 480, 1280,
-       0, 0u, 0u},
 #ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
       {"padded YUYV rows overrun the reported frame, mplane", V4L2_PIX_FMT_YUYV,
        640, 480, 1536, 614400, 0u, 0u, true},

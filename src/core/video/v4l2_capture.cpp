@@ -642,7 +642,12 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
     // `size_image` to match the stride only hides the disagreement, and the
     // read path then walks a frame longer than the buffer the driver sized,
     // which is a read past the end of the mapping on every frame.
-    if (bpl * rows > size) {
+    //
+    // A frame size of 0 is not that disagreement: it is no report at all, and
+    // the raise below gives it the value the stride implies. The mapped
+    // buffer `VIDIOC_QUERYBUF` reports is what that value must then fit in,
+    // and `CaptureBufferHoldsFrame` is the check that compares them.
+    if (size > 0 && bpl * rows > size) {
       if (outErr)
         *outErr = "Driver reported bytesperline=" + std::to_string(bpl) +
                   " for " + std::to_string(a.height) +

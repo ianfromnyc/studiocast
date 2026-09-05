@@ -66,7 +66,9 @@ struct CaptureFormat {
 // height. Compressed MJPEG has no row size, so both values stay as reported.
 //
 // A report whose own rows do not fit its own frame size is refused, because
-// the read path would then walk past the end of the mapped buffer.
+// the read path would then walk past the end of the mapped buffer. A frame
+// size of 0 is no report at all rather than that disagreement, so it takes
+// the raise instead of the refusal.
 //
 // Exposed for tests; `V4l2Capture::Open()` is the only other caller.
 bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
