@@ -99,11 +99,20 @@ checksum_contains() {
     die "checksum file does not reference $(basename "${artifact}")"
 }
 
-rpm_query() {
+# Compare one metadata field of a package with the expected value. rpm runs on
+# its own line, outside a command substitution, so a package that rpm cannot
+# read stops the script here instead of turning into an empty field and a
+# misleading message about the field itself.
+require_query_equal() {
   local package="$1"
   local format="$2"
-  rpm -qp --qf "${format}" "${package}" 2>/dev/null ||
-    die "rpm could not read ${package}"
+  local expected="$3"
+  local context="$4"
+  local actual
+  if ! actual="$(rpm -qp --qf "${format}" "${package}" 2>&1)"; then
+    die "rpm could not read $(basename "${package}"): ${actual}"
+  fi
+  require_equal "${actual}" "${expected}" "${context}"
 }
 
 # Holds the lines that read_package_list read out of the last package.
@@ -253,24 +262,20 @@ verify_metadata() {
     license="MPL-2.0 AND BSL-1.0"
   fi
 
-  require_equal "$(rpm_query "${rpm_file}" '%{name}')" "studiocast" \
-    "binary RPM name"
-  require_equal "$(rpm_query "${rpm_file}" '%{version}')" "${VERSION}" \
+  require_query_equal "${rpm_file}" '%{name}' "studiocast" "binary RPM name"
+  require_query_equal "${rpm_file}" '%{version}' "${VERSION}" \
     "binary RPM version"
-  require_equal "$(rpm_query "${rpm_file}" '%{release}')" "${release}" \
+  require_query_equal "${rpm_file}" '%{release}' "${release}" \
     "binary RPM release"
-  require_equal "$(rpm_query "${rpm_file}" '%{license}')" "${license}" \
+  require_query_equal "${rpm_file}" '%{license}' "${license}" \
     "binary RPM license"
-  require_equal "$(rpm_query "${rpm_file}" '%{arch}')" "${ARCH}" \
+  require_query_equal "${rpm_file}" '%{arch}' "${ARCH}" \
     "binary RPM architecture"
 
-  require_equal "$(rpm_query "${srpm}" '%{name}')" "studiocast" "source RPM name"
-  require_equal "$(rpm_query "${srpm}" '%{version}')" "${VERSION}" \
-    "source RPM version"
-  require_equal "$(rpm_query "${srpm}" '%{release}')" "${release}" \
-    "source RPM release"
-  require_equal "$(rpm_query "${srpm}" '%{license}')" "${license}" \
-    "source RPM license"
+  require_query_equal "${srpm}" '%{name}' "studiocast" "source RPM name"
+  require_query_equal "${srpm}" '%{version}' "${VERSION}" "source RPM version"
+  require_query_equal "${srpm}" '%{release}' "${release}" "source RPM release"
+  require_query_equal "${srpm}" '%{license}' "${license}" "source RPM license"
 }
 
 verify_file_list() {
