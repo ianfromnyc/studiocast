@@ -736,6 +736,29 @@ bool TestModelsDirForLibrary() {
   ok &= Require(studiocast::maxine::ModelsDirForLibrary({}).empty(),
                 "expected an empty result for an empty library path");
 
+  // The resolver also searches `<root>/bin` and `<root>/<lib dir>/<triplet>`.
+  // A library found in one of those must give the same models directory as
+  // one found in `<root>/lib`, or the effect gets an empty ModelDir and the
+  // user sees only an SDK status code.
+  const fs::path other_root = root / "OtherLayout";
+  fs::create_directories(other_root / "models", ec);
+  fs::create_directories(other_root / "bin", ec);
+  fs::create_directories(other_root / "lib" / "x86_64-linux-gnu", ec);
+  if (ec || !Touch(other_root / "bin" / "libVideoFX.so") ||
+      !Touch(other_root / "lib" / "x86_64-linux-gnu" / "libVideoFX.so")) {
+    std::cerr << "failed to create the bin and triplet layout\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+  ok &= Require(studiocast::maxine::ModelsDirForLibrary(
+                    other_root / "bin" / "libVideoFX.so") ==
+                    other_root / "models",
+                "expected the models dir of a library in <root>/bin");
+  ok &= Require(studiocast::maxine::ModelsDirForLibrary(
+                    other_root / "lib" / "x86_64-linux-gnu" /
+                    "libVideoFX.so") == other_root / "models",
+                "expected the models dir of a library in <root>/lib/<triplet>");
+
   fs::remove_all(root, ec);
   return ok;
 }

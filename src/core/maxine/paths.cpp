@@ -65,20 +65,38 @@ fs::path ModelsDirForRoot(const fs::path &root, std::string *source_out) {
   return {};
 }
 
-// The SDK root that holds a library. Every layout puts the library in
-// `<root>/lib`, `<root>/lib64`, `<root>/nvafx/lib` or the root itself, so the
-// root is the first directory above those names.
+// The directory names that can stand between an SDK root and a library.
+// These are the components of the directories CandidateLibDirs builds and of
+// the `nvafx/lib` pair that ResolveMaxinePaths adds for AFX. A name that is
+// missing here makes RootForLibrary stop too early and hand back a directory
+// that holds no models, so keep the two in step.
+const char *const kLibDirNames[] = {"lib", "lib64", "bin",
+                                    "x86_64-linux-gnu", "nvafx"};
+
+bool IsLibDirName(const std::string &name) {
+  for (const char *known : kLibDirNames) {
+    if (name == known)
+      return true;
+  }
+  return false;
+}
+
+// The SDK root that holds a library. Every layout puts the library in one of
+// the directories above, or in the root itself, so the root is the first
+// directory that is not one of those names.
 fs::path RootForLibrary(const fs::path &library) {
   fs::path dir = library.parent_path();
   for (int i = 0; i < 3 && !dir.empty() && dir != dir.root_path(); ++i) {
-    const std::string name = dir.filename().string();
-    if (name != "lib" && name != "lib64" && name != "nvafx")
+    if (!IsLibDirName(dir.filename().string()))
       break;
     dir = dir.parent_path();
   }
   return dir;
 }
 
+// The directories that hold the library of one SDK root. Every component that
+// appears here is also in kLibDirNames, so RootForLibrary can walk back from
+// any library this finds.
 std::vector<fs::path> CandidateLibDirs(const fs::path &root) {
   std::vector<fs::path> dirs;
   if (root.empty())
