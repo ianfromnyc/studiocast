@@ -1413,6 +1413,96 @@ bool TestServiceBacksOffRepeatedMonitorStartFailures() {
   return ok;
 }
 
+// A sound server that cannot remove the leftover loopback keeps the stop
+// retry going. Without a backoff that retry runs about four pactl processes
+// four times a second, for ever, with the monitor turned off.
+bool TestServiceBacksOffRepeatedMonitorStopFailures() {
+  MonitorRecorder rec;
+  rec.fail_stop.store(true, std::memory_order_relaxed);
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  VirtualAudioService service(std::move(hooks));
+  auto cfg = MonitorServiceConfig(); // 250 ms floor between retries
+  // The monitor is off the whole time. The start-up cleanup still runs, and
+  // its failure hands the route to the stop retry.
+  cfg.monitor.enabled = false;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  std::this_thread::sleep_for(3000ms);
+  const int stops = rec.stops.load(std::memory_order_relaxed);
+  service.Stop();
+
+  bool ok = true;
+  if (stops < 2) {
+    std::cerr << "the monitor gave up the stop after " << stops << " tries\n";
+    ok = false;
+  }
+  // A fixed 250 ms retry would be about twelve tries in three seconds.
+  if (stops > 7) {
+    std::cerr << "the monitor tried to stop " << stops
+              << " times in three seconds, so it did not back off\n";
+    ok = false;
+  }
+  return ok;
+}
+
+// The volume retry runs `pactl list sink-inputs` on every try, so a volume
+// that can never be set must space its retries out the same way.
+bool TestServiceBacksOffRepeatedMonitorVolumeFailures() {
+  MonitorRecorder rec;
+  rec.fail_volume.store(true, std::memory_order_relaxed);
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  VirtualAudioService service(std::move(hooks));
+  auto cfg = MonitorServiceConfig(); // 250 ms floor between retries
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil([&] { return service.Status().monitor_active; }, 1000ms)) {
+    std::cerr << "the monitor did not start\n";
+    service.Stop();
+    return false;
+  }
+
+  const int calls_before = rec.volume_calls.load(std::memory_order_relaxed);
+  cfg.monitor.volume = 60;
+  service.UpdateConfig(cfg);
+
+  std::this_thread::sleep_for(3000ms);
+  const int calls =
+      rec.volume_calls.load(std::memory_order_relaxed) - calls_before;
+  service.Stop();
+
+  bool ok = true;
+  if (calls < 2) {
+    std::cerr << "the monitor gave up the volume after " << calls
+              << " tries\n";
+    ok = false;
+  }
+  // A fixed 250 ms retry would be about twelve tries in three seconds.
+  if (calls > 7) {
+    std::cerr << "the monitor tried to set the volume " << calls
+              << " times in three seconds, so it did not back off\n";
+    ok = false;
+  }
+  return ok;
+}
+
 bool TestMonitorConsumerIsCountedApartFromApps() {
   MonitorRecorder rec;
   std::atomic<int> consumer_count{0};
@@ -1647,6 +1737,10 @@ int main() {
        &TestServiceKeepsTheResolvedOutputAcrossAFailedCheck},
       {"service backs off repeated monitor start failures",
        &TestServiceBacksOffRepeatedMonitorStartFailures},
+      {"service backs off repeated monitor stop failures",
+       &TestServiceBacksOffRepeatedMonitorStopFailures},
+      {"service backs off repeated monitor volume failures",
+       &TestServiceBacksOffRepeatedMonitorVolumeFailures},
       {"service waits for the virtual microphone before monitoring",
        &TestServiceWaitsForTheVirtualMicrophoneBeforeMonitoring},
       {"service applies a volume change without reloading",
