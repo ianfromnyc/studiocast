@@ -99,6 +99,10 @@ struct VirtualAudioServiceStatus {
   std::string monitor_sink_active;
   int monitor_latency_ms_active = 0;
   int monitor_volume_active = 0;
+  // A plain sentence about an ordinary monitor state, such as the monitor
+  // waiting for microphone processing. It is not a failure, so it is kept
+  // apart from `monitor_last_error`.
+  std::string monitor_note;
   std::string monitor_last_error;
 
   bool speakers_present = false;

@@ -416,6 +416,7 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
       monitorLayout->addLayout(latencyRow);
 
       monitorStatusLabel_ = MutedLabel(QString(), monitorBox_);
+      monitorStatusLabel_->setObjectName(QStringLiteral("monitorStatusLabel"));
       monitorStatusLabel_->setVisible(false);
       monitorLayout->addWidget(monitorStatusLabel_);
 
@@ -2290,6 +2291,7 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
           monitor.value("sink_resolved").toString().trimmed();
       const QString monitorSinkError =
           monitor.value("sink_error").toString().trimmed();
+      const QString monitorNote = monitor.value("note").toString().trimmed();
       const QString monitorError =
           monitor.value("last_error").toString().trimmed();
       const int monitorLatency = monitor.value("latency_ms").toInt(20);
@@ -2340,9 +2342,13 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
                               .arg(monitorSinkResolved.isEmpty()
                                        ? QStringLiteral("system default")
                                        : monitorSinkResolved);
-        } else if (monitorEnabled) {
+        } else if (monitorEnabled && monitorNote.isEmpty()) {
           monitorLines << QStringLiteral("Monitor is on but not playing yet.");
         }
+        // The note is an ordinary state the daemon explains in plain words,
+        // so it is shown as written instead of as something to report.
+        if (!monitorNote.isEmpty())
+          monitorLines << monitorNote;
         if (!monitorSinkError.isEmpty()) {
           monitorLines << QStringLiteral(
               "The selected output cannot be used for monitoring. Choose "
@@ -2365,6 +2371,8 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
               .arg(monitorSink.isEmpty() ? "(none)" : monitorSink)
               .arg(monitorSinkResolved.isEmpty() ? "(none)"
                                                  : monitorSinkResolved);
+      if (!monitorNote.isEmpty())
+        daemonStatusText_ += "monitor_note: " + monitorNote + "\n";
       if (!monitorError.isEmpty())
         daemonStatusText_ += "monitor_last_error: " + monitorError + "\n";
       if (!monitorSinkError.isEmpty())

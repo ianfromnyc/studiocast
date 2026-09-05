@@ -714,6 +714,54 @@ bool TestAudioConfigSafetyUsesTheResolvedMicSource() {
                 "the refusal should name the feedback loop");
 }
 
+// The status keeps a plain note apart from an error, so a reader can tell an
+// ordinary idle monitor from one that needs attention.
+bool TestAudioStatusKeepsTheMonitorNoteApartFromTheError() {
+  studiocast::video::VirtualCameraServiceStatus videoStatus;
+  studiocast::video::VirtualCameraServiceConfig videoConfig;
+
+  studiocast::audio::VirtualAudioServiceStatus audioStatus;
+  audioStatus.mic_present = true;
+  audioStatus.monitor_note =
+      "Microphone processing is off, so the monitor stays idle.";
+
+  studiocast::audio::VirtualAudioServiceConfig audioConfig;
+  audioConfig.monitor.enabled = true;
+
+  studiocast::util::json::Value rootValue;
+  std::string error;
+  if (!studiocast::util::json::Parse(
+          StatusToJson(videoStatus, videoConfig, audioStatus, audioConfig,
+                       std::filesystem::path("/tmp/studiocastd-test.sock"),
+                       /*maxineJson=*/"", /*openCudaJson=*/"",
+                       /*openAudioJson=*/"", /*loopbackJson=*/""),
+          &rootValue, &error)) {
+    std::cerr << "status JSON should parse: " << error << "\n";
+    return false;
+  }
+
+  const JsonObject *root = rootValue.AsObject();
+  if (!root)
+    return false;
+  const JsonObject *audio = ObjectAt(*root, "audio", "audio object missing");
+  if (!audio)
+    return false;
+  const JsonObject *monitor =
+      ObjectAt(*audio, "monitor", "monitor object missing");
+  if (!monitor)
+    return false;
+
+  const std::string *note = StringAt(*monitor, "note", "monitor note missing");
+  const std::string *lastError =
+      StringAt(*monitor, "last_error", "monitor last_error missing");
+  if (!note || !lastError)
+    return false;
+
+  return Expect(note->find("stays idle") != std::string::npos,
+                "the note should carry the daemon sentence") &&
+         Expect(lastError->empty(), "an ordinary note is not an error");
+}
+
 bool TestAudioStatusReportsMonitor() {
   studiocast::video::VirtualCameraServiceStatus videoStatus;
   studiocast::video::VirtualCameraServiceConfig videoConfig;
@@ -871,6 +919,7 @@ int main() {
   ok = TestAudioConfigPatchRejectsUnsafeMonitorSink() && ok;
   ok = TestUnsatisfiableMonitorDoesNotRefuseAudio() && ok;
   ok = TestAudioStatusReportsMonitor() && ok;
+  ok = TestAudioStatusKeepsTheMonitorNoteApartFromTheError() && ok;
   ok = TestAudioConfigSafetyUsesTheResolvedMicSource() && ok;
   ok = TestAudioStatusFlagsMonitorFeedbackOnTheResolvedSource() && ok;
   ok = TestMicrophoneReadinessNamesMonitorOnlyListener() && ok;

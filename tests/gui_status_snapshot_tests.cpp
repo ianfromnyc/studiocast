@@ -1754,6 +1754,65 @@ bool TestAudioPageReportsAnUnavailablePactlForTheMonitorSinks() {
   return ok;
 }
 
+// A monitor that waits for microphone processing is an ordinary state the
+// user made one click ago. The page shows the daemon sentence for it and does
+// not send the user to Support.
+bool TestAudioPageShowsTheMonitorNoteWithoutSendingUserToSupport() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-note");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *statusLabel =
+      page.findChild<QLabel *>(QStringLiteral("monitorStatusLabel"));
+  if (!Expect(statusLabel != nullptr, "the monitor status label is findable"))
+    return false;
+
+  const char *const kIdleMonitor = R"({
+        "service_running":true,
+        "audio":{
+          "enabled":false,
+          "mic_present":true,
+          "source_error":"",
+          "monitor":{
+            "enabled":true,
+            "active":false,
+            "sink":"auto",
+            "latency_ms":20,
+            "volume":100,
+            "note":"Microphone processing is off, so the monitor stays idle.",
+            "last_error":""
+          },
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })";
+
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(
+      QString::fromLatin1(kIdleMonitor)));
+
+  const QString text = statusLabel->text();
+  bool ok = Expect(text.contains(QStringLiteral(
+                       "Microphone processing is off, so the monitor stays "
+                       "idle.")),
+                   "the page should show the daemon sentence for the note");
+  ok = Expect(!text.contains(QStringLiteral("Open Support")),
+              "an ordinary note must not send the user to Support") &&
+       ok;
+  if (!ok)
+    std::cerr << "monitor status was: " << text.toStdString() << "\n";
+  return ok;
+}
+
 bool TestVideoPageKeepsUserSelectedInputWhenRoutineStatusStillAuto() {
   studiocast::gui::VideoPage page;
   auto *inputCombo =
@@ -2039,6 +2098,7 @@ int main(int argc, char **argv) {
   ok = TestVideoPageKeepsReplaceModeSelectedWhileImagePathIsMissing() && ok;
 
   ok = TestAudioPageWaitsForItsDeviceListings() && ok;
+  ok = TestAudioPageShowsTheMonitorNoteWithoutSendingUserToSupport() && ok;
   ok = TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() && ok;
   ok = TestAudioPageReportsAMonitorSinkListError() && ok;
   ok = TestAudioPageReportsAnUnavailablePactlForTheMonitorSinks() && ok;

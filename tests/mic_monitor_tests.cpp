@@ -960,6 +960,57 @@ bool TestServiceStopsAMonitorItCanNoLongerSee() {
   return true;
 }
 
+// A monitor that is on while microphone processing is off is a state the user
+// made one click ago, not a failure. It belongs in the note, so nothing sends
+// the user to Support for it.
+bool TestServiceReportsAnIdleMonitorAsANote() {
+  MonitorRecorder rec;
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  VirtualAudioService service(std::move(hooks));
+  auto cfg = MonitorServiceConfig();
+  cfg.enabled = false;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool noted = WaitUntil(
+      [&] {
+        const auto st = service.Status();
+        return st.monitor_note.find("Microphone processing is off") !=
+               std::string::npos;
+      },
+      1000ms);
+  bool ok = true;
+  if (!noted) {
+    std::cerr << "the idle monitor was not reported as a note: '"
+              << service.Status().monitor_note << "'\n";
+    ok = false;
+  }
+  if (!service.Status().monitor_last_error.empty()) {
+    std::cerr << "an ordinary idle monitor was reported as an error: '"
+              << service.Status().monitor_last_error << "'\n";
+    ok = false;
+  }
+
+  // Turning microphone processing on clears the note.
+  cfg.enabled = true;
+  service.UpdateConfig(cfg);
+  if (!WaitUntil([&] { return service.Status().monitor_note.empty(); },
+                 1000ms)) {
+    std::cerr << "the idle note survived turning processing on\n";
+    ok = false;
+  }
+
+  service.Stop();
+  return ok;
+}
+
 bool TestMonitorConsumerIsCountedApartFromApps() {
   MonitorRecorder rec;
   std::atomic<int> consumer_count{0};
@@ -1184,6 +1235,8 @@ int main() {
        &TestServiceTreatsAFailedMonitorCheckAsStopped},
       {"service stops the monitor when the resolved output disappears",
        &TestServiceStopsTheMonitorWhenTheResolvedOutputDisappears},
+      {"service reports an idle monitor as a note",
+       &TestServiceReportsAnIdleMonitorAsANote},
       {"service clears a stale monitor at start",
        &TestServiceClearsAStaleMonitorAtStart},
       {"service stops a monitor it can no longer see",

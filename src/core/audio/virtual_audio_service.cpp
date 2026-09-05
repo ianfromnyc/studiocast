@@ -530,6 +530,7 @@ void VirtualAudioService::Stop() {
     st_.monitor_sink_active.clear();
     st_.monitor_latency_ms_active = 0;
     st_.monitor_volume_active = 0;
+    st_.monitor_note.clear();
     st_.monitor_last_error.clear();
     monitor_running_ = false;
     monitor_sink_requested_.clear();
@@ -1231,6 +1232,10 @@ void VirtualAudioService::ThreadMain() {
         std::lock_guard<std::mutex> lock(mu_);
         st_.monitor_last_error = std::move(msg);
       };
+      auto setMonitorNote = [&](std::string msg) {
+        std::lock_guard<std::mutex> lock(mu_);
+        st_.monitor_note = std::move(msg);
+      };
       // Forgets the live route but keeps what the last start asked for, so a
       // settings change stays tellable from a lost output.
       auto clearMonitorRouteState = [&]() {
@@ -1274,12 +1279,16 @@ void VirtualAudioService::ThreadMain() {
           }
         }
         nextMonitorStartRetry = steady_clock::time_point{};
-        if (monitorCfg.enabled && !cfg.enabled) {
-          setMonitorError("Microphone processing is off, so the monitor "
-                          "stays idle. Turn microphone processing on to hear "
-                          "the monitor.");
-        }
+        // A monitor that waits for microphone processing is an ordinary state
+        // the user made, not a failure, so it goes in the note.
+        setMonitorNote(monitorCfg.enabled && !cfg.enabled
+                           ? std::string("Microphone processing is off, so "
+                                         "the monitor stays idle. Turn "
+                                         "microphone processing on to hear "
+                                         "the monitor.")
+                           : std::string());
       } else {
+        setMonitorNote(std::string());
         // A changed setting is an explicit restart by the user: it resolves
         // the output afresh and ends a lost-output stop.
         const bool monitorSettingsChanged =

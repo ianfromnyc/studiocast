@@ -1536,6 +1536,7 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
     oss << "\"latency_ms_active\":" << ast.monitor_latency_ms_active << ",";
     oss << "\"volume\":" << acfg.monitor.volume << ",";
     oss << "\"volume_active\":" << ast.monitor_volume_active << ",";
+    oss << "\"note\":\"" << JsonEscape(ast.monitor_note) << "\",";
     oss << "\"last_error\":\"" << JsonEscape(ast.monitor_last_error) << "\"";
     oss << "},";
   }

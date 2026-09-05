@@ -241,6 +241,9 @@ void PrintAudioMonitorPretty(const Value::Object *root) {
   std::cout << "  volume: " << intField("volume") << "\n";
   if (active)
     std::cout << "  module_id: " << intField("module_id") << "\n";
+  const std::string note = stringField("note");
+  if (!note.empty())
+    std::cout << "  note: " << note << "\n";
   const std::string sinkError = stringField("sink_error");
   if (!sinkError.empty())
     std::cout << "  sink_error: " << sinkError << "\n";
