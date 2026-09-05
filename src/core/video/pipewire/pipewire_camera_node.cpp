@@ -1,5 +1,7 @@
 #include "core/video/pipewire/pipewire_camera_node.h"
 
+#include "core/pipewire/triple_frame_buffer.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cstring>
@@ -79,17 +81,16 @@ struct PipeWireCameraNode::Impl {
   std::size_t frame_bytes = 0;
   std::size_t stride_bytes = 0;
 
-  // The newest staged frame. The real-time callback takes it under this
-  // mutex, which it holds only for one copy.
+  // The frame hand-off between the pipeline thread and the real-time callback.
   //
-  // `staged_valid` says the buffer holds a frame, so a cycle without a new
-  // frame repeats the last one instead of sending black. `staged_pending`
-  // says the callback has not taken that frame yet, so staging over it loses
-  // a frame. Only that case is a drop.
-  std::mutex frame_mu;
-  std::vector<std::uint8_t> staged;
-  bool staged_valid = false;
-  bool staged_pending = false;
+  // It takes no lock on either side. The callback runs on the PipeWire data
+  // thread, which the server schedules in real time, and a full frame is
+  // megabytes: a mutex there would let a normal-priority copy hold up the
+  // whole graph. See core/pipewire/triple_frame_buffer.h.
+  //
+  // Drop policy: the newest frame wins, and a frame counts as dropped when a
+  // newer one replaced it before the callback took it.
+  studiocast::pw::TripleFrameBuffer frames;
 
   std::atomic<bool> running{false};
   // The camera node hands out frames, so it is the output end of every
@@ -231,23 +232,18 @@ void OnStreamProcess(void *data) {
   const std::size_t room =
       std::min<std::size_t>(buf->datas[0].maxsize, impl->frame_bytes);
 
-  std::size_t written = 0;
-  {
-    std::lock_guard<std::mutex> lock(impl->frame_mu);
-    if (impl->staged_valid && impl->staged.size() >= room) {
-      std::memcpy(out, impl->staged.data(), room);
-      impl->staged_pending = false;
-      written = room;
-    }
-  }
-  if (written == 0) {
+  // Take the newest frame, or the last one again when none arrived. Neither
+  // call waits for the pipeline thread.
+  const std::uint8_t *frame = impl->frames.Acquire();
+  if (frame && impl->frames.FrameBytes() >= room) {
+    std::memcpy(out, frame, room);
+    impl->frames_sent.fetch_add(1, std::memory_order_relaxed);
+  } else {
     // No frame is ready yet. A black frame keeps the consumer's timing
     // steady instead of stalling it.
     std::memset(out, 0, room);
-    written = room;
-  } else {
-    impl->frames_sent.fetch_add(1, std::memory_order_relaxed);
   }
+  const std::size_t written = room;
 
   buf->datas[0].chunk->offset = 0;
   buf->datas[0].chunk->stride = static_cast<std::int32_t>(impl->stride_bytes);
@@ -359,12 +355,7 @@ bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
   impl_->frames_sent.store(0, std::memory_order_relaxed);
   impl_->frames_dropped.store(0, std::memory_order_relaxed);
   impl_->SetError({});
-  {
-    std::lock_guard<std::mutex> lock(impl_->frame_mu);
-    impl_->staged.assign(bytes, 0);
-    impl_->staged_valid = false;
-    impl_->staged_pending = false;
-  }
+  impl_->frames.Reset(bytes);
 
   const std::string name =
       cfg.node_name.empty()
@@ -509,11 +500,8 @@ void PipeWireCameraNode::Stop() {
   }
 
   impl_->links.Reset(studiocast::pw::LinkEnd::kOutput);
-  {
-    std::lock_guard<std::mutex> lock(impl_->frame_mu);
-    impl_->staged_valid = false;
-    impl_->staged_pending = false;
-  }
+  // The data thread has stopped, so both ends of the hand-off are this one.
+  impl_->frames.Clear();
 }
 
 #endif // STUDIOCAST_HAVE_PIPEWIRE
@@ -537,14 +525,9 @@ bool PipeWireCameraNode::WriteFrame(const std::uint8_t *data,
     return false;
   }
 
-  {
-    std::lock_guard<std::mutex> lock(impl_->frame_mu);
-    if (impl_->staged_pending)
-      impl_->frames_dropped.fetch_add(1, std::memory_order_relaxed);
-    std::memcpy(impl_->staged.data(), data, impl_->frame_bytes);
-    impl_->staged_valid = true;
-    impl_->staged_pending = true;
-  }
+  // A frame that replaced one the callback never took is a dropped frame.
+  if (impl_->frames.Publish(data, bytes))
+    impl_->frames_dropped.fetch_add(1, std::memory_order_relaxed);
 
 #if STUDIOCAST_HAVE_PIPEWIRE
   // The node drives the graph, so a new frame starts a cycle.

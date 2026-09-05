@@ -24,6 +24,7 @@
 
 #include "core/pipewire/pipewire_support.h"
 #include "core/pipewire/spsc_byte_ring.h"
+#include "core/pipewire/triple_frame_buffer.h"
 
 namespace {
 
@@ -854,6 +855,115 @@ bool TestVideoOutputBackendSelection() {
                 "line");
 }
 
+// A frame of `value` bytes, so a consumer can tell one frame from another and
+// can see a copy that two writers tore apart.
+std::vector<std::uint8_t> FrameOf(std::size_t bytes, std::uint8_t value) {
+  return std::vector<std::uint8_t>(bytes, value);
+}
+
+bool TestFrameBufferHandsTheNewestFrameOver() {
+  studiocast::pw::TripleFrameBuffer buffer;
+  buffer.Reset(4);
+
+  const auto first = FrameOf(4, 0x11);
+  const auto second = FrameOf(4, 0x22);
+
+  const bool nothingBefore = buffer.Acquire() == nullptr;
+  (void)buffer.Publish(first.data(), first.size());
+  const std::uint8_t after_first = *buffer.Acquire();
+  (void)buffer.Publish(second.data(), second.size());
+  const std::uint8_t after_second = *buffer.Acquire();
+
+  return Expect(nothingBefore, "a buffer with no frame must hand out nothing") &&
+         Expect(after_first == 0x11, "the first frame did not come back") &&
+         Expect(after_second == 0x22, "the second frame did not come back");
+}
+
+// A cycle without a new frame repeats the last one, so a consumer keeps its
+// timing instead of receiving black.
+bool TestFrameBufferRepeatsTheLastFrame() {
+  studiocast::pw::TripleFrameBuffer buffer;
+  buffer.Reset(4);
+
+  const auto frame = FrameOf(4, 0x33);
+  (void)buffer.Publish(frame.data(), frame.size());
+
+  const std::uint8_t first = *buffer.Acquire();
+  const std::uint8_t again = *buffer.Acquire();
+  const std::uint8_t once_more = *buffer.Acquire();
+
+  return Expect(first == 0x33 && again == 0x33 && once_more == 0x33,
+                "a repeated read must give the last frame again");
+}
+
+// The newest frame wins. A publish over a frame nobody took is the only case
+// that loses one, and that is the case the camera counts as a drop.
+bool TestFrameBufferReportsAFrameThatWasNeverTaken() {
+  studiocast::pw::TripleFrameBuffer buffer;
+  buffer.Reset(4);
+
+  const auto first = FrameOf(4, 0x44);
+  const auto second = FrameOf(4, 0x55);
+  const auto third = FrameOf(4, 0x66);
+
+  const bool lostOnFirst = buffer.Publish(first.data(), first.size());
+  const bool lostOnSecond = buffer.Publish(second.data(), second.size());
+  const std::uint8_t taken = *buffer.Acquire();
+  const bool lostOnThird = buffer.Publish(third.data(), third.size());
+
+  return Expect(!lostOnFirst, "the first frame replaced nothing") &&
+         Expect(lostOnSecond,
+                "a frame published over an untaken one must be reported") &&
+         Expect(taken == 0x55, "the newest frame must win") &&
+         Expect(!lostOnThird,
+                "a publish after the consumer caught up loses nothing");
+}
+
+// The hand-off carries whole frames between two threads with no lock. A torn
+// frame would hold the bytes of two writes at once.
+bool TestFrameBufferSurvivesAProducerAndAConsumer() {
+  constexpr std::size_t kFrameBytes = 4096;
+  constexpr int kFrames = 20000;
+
+  studiocast::pw::TripleFrameBuffer buffer;
+  buffer.Reset(kFrameBytes);
+
+  std::atomic<bool> done{false};
+  std::atomic<std::uint64_t> dropped{0};
+  std::thread producer([&] {
+    std::vector<std::uint8_t> frame(kFrameBytes, 0);
+    for (int i = 0; i < kFrames; ++i) {
+      const auto value = static_cast<std::uint8_t>(i % 251);
+      std::fill(frame.begin(), frame.end(), value);
+      if (buffer.Publish(frame.data(), frame.size()))
+        dropped.fetch_add(1, std::memory_order_relaxed);
+    }
+    done.store(true, std::memory_order_release);
+  });
+
+  bool torn = false;
+  int taken = 0;
+  while (!done.load(std::memory_order_acquire)) {
+    const std::uint8_t *frame = buffer.Acquire();
+    if (!frame)
+      continue;
+    ++taken;
+    for (std::size_t i = 1; i < kFrameBytes; ++i) {
+      if (frame[i] != frame[0]) {
+        torn = true;
+        break;
+      }
+    }
+    if (torn)
+      break;
+  }
+
+  producer.join();
+
+  return Expect(!torn, "the consumer read a frame that two writes tore apart") &&
+         Expect(taken > 0, "the consumer should have read something");
+}
+
 bool TestCameraFrameByteArithmetic() {
   using studiocast::video::PixelFormat;
   using studiocast::video::pw_backend::CameraFrameBytes;
@@ -969,7 +1079,9 @@ bool TestLiveVirtualCameraFeedsAGstreamerConsumer() {
                                     std::memory_order_relaxed);
         drops_sampled.store(true, std::memory_order_relaxed);
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      // One frame period. A faster writer would drop frames the consumer
+      // never asked for, which says nothing about the hand-off.
+      std::this_thread::sleep_for(std::chrono::milliseconds(1000 / cfg.fps));
     }
   });
 
@@ -1526,6 +1638,14 @@ int main() {
       {"canonical node names", &TestCanonicalNodeNames},
       {"video output backend parsing", &TestVideoOutputBackendParsing},
       {"video output backend selection", &TestVideoOutputBackendSelection},
+      {"frame buffer hands the newest frame over",
+       &TestFrameBufferHandsTheNewestFrameOver},
+      {"frame buffer repeats the last frame",
+       &TestFrameBufferRepeatsTheLastFrame},
+      {"frame buffer reports a frame that was never taken",
+       &TestFrameBufferReportsAFrameThatWasNeverTaken},
+      {"frame buffer survives a producer and a consumer",
+       &TestFrameBufferSurvivesAProducerAndAConsumer},
       {"camera frame byte arithmetic", &TestCameraFrameByteArithmetic},
       {"camera node rejects a short frame", &TestCameraNodeRejectsAShortFrame},
       {"live virtual camera node reaches the graph",

@@ -309,6 +309,7 @@ add_library(studiocast_core
         src/core/pipewire/pipewire_audio_node.h
         src/core/pipewire/pipewire_audio_node.cpp
         src/core/pipewire/spsc_byte_ring.h
+        src/core/pipewire/triple_frame_buffer.h
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
         src/core/audio/pipewire/pipewire_audio_devices.h
