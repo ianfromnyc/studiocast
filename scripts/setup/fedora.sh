@@ -829,12 +829,10 @@ fi
 
 CUDA_MAJOR="${CUDA_MAJOR:-$(detect_cuda_major)}"
 
-# The GUI runs this script with the password on stdin.
-if [[ "${STUDIOCAST_GUI_SUDO_STDIN:-0}" == "1" ]]; then
-  sudo() {
-    command sudo -S -p "${STUDIOCAST_GUI_SUDO_PROMPT:-[sudo] password for %u: }" "$@"
-  }
-fi
+# The Ubuntu helper reads the sudo password from stdin for the GUI wizard. This
+# helper does not: the GUI wizard is Ubuntu-only, and every privileged write
+# here gives the file content to "tee" on stdin, which is where "sudo -S" reads
+# the password from. Use this helper from a terminal, or from a root shell.
 
 while [[ $# -gt 0 ]]; do
   if [[ "$PARSE_PASSTHRU_ARGS" -eq 1 ]]; then
