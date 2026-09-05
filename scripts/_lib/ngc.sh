@@ -73,19 +73,28 @@ if ! declare -F sc_ngc_err >/dev/null 2>&1; then
   }
 fi
 
+# Every external command the functions below run. Keep this list complete: a
+# tool that is absent must be named here, not found in the middle of a
+# download.
+_SC_NGC_TOOLS=(
+  curl python3
+  awk cut dirname head md5sum mktemp sha256sum stat tail
+  find
+)
+
 # Fail early when a tool this file needs is absent.
 sc_ngc_require_tools() {
   local -a missing=()
-  command -v curl >/dev/null 2>&1 || missing+=("curl")
-  command -v python3 >/dev/null 2>&1 || missing+=("python3")
-  command -v sha256sum >/dev/null 2>&1 || missing+=("sha256sum")
-  command -v md5sum >/dev/null 2>&1 || missing+=("md5sum")
+  local tool
+  for tool in "${_SC_NGC_TOOLS[@]}"; do
+    command -v "${tool}" >/dev/null 2>&1 || missing+=("${tool}")
+  done
 
   if [[ "${#missing[@]}" -gt 0 ]]; then
     sc_ngc_err "missing required tool(s): ${missing[*]}"
     sc_ngc_err "Install them, for example:"
-    sc_ngc_err "  Fedora: sudo dnf install curl python3 coreutils"
-    sc_ngc_err "  Ubuntu: sudo apt-get install curl python3 coreutils"
+    sc_ngc_err "  Fedora: sudo dnf install curl python3 coreutils gawk findutils"
+    sc_ngc_err "  Ubuntu: sudo apt-get install curl python3 coreutils gawk findutils"
     return 2
   fi
 }

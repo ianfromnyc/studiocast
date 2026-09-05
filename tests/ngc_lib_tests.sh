@@ -313,11 +313,54 @@ test_a_nested_md5_mismatch_fails() {
   fi
 }
 
+# The early check must name every external tool the helper runs. A PATH
+# without awk must end the call there, with a message that says which tool is
+# missing, instead of failing in the middle of a listing.
+test_a_missing_awk_is_reported_early() {
+  local toolbin="${SANDBOX}/no-awk-bin"
+  mkdir -p "${toolbin}"
+
+  # Every tool the helper runs, except awk.
+  local tool src
+  for tool in curl python3 sha256sum md5sum mktemp cut head tail stat find \
+    dirname; do
+    src="$(command -v "${tool}")" || continue
+    ln -sf "${src}" "${toolbin}/${tool}"
+  done
+
+  local child="${SANDBOX}/no-awk-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+# shellcheck source=/dev/null
+source "$1"
+export PATH="$2"
+sc_ngc_require_tools
+echo "RC=$?"
+CHILD
+
+  local bash_bin out
+  bash_bin="$(command -v bash)"
+  out="$("${bash_bin}" "${child}" "${NGC_LIB}" "${toolbin}" 2>&1)"
+
+  if [[ "${out}" != *"RC=2"* ]]; then
+    t_fail "a PATH without awk should return 2: ${out}"
+  else
+    t_pass "a PATH without awk returns 2"
+  fi
+
+  if [[ "${out}" != *awk* ]]; then
+    t_fail "the early check did not name awk: ${out}"
+  else
+    t_pass "the early check names awk"
+  fi
+}
+
 test_a_first_call_download_sets_the_token
 test_a_first_call_download_exchanges_an_older_key
 test_no_key_is_reported
 test_a_nested_md5_is_verified_and_removed
 test_a_nested_md5_mismatch_fails
+test_a_missing_awk_is_reported_early
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2
