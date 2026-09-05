@@ -80,12 +80,18 @@ if [[ -n "${NGC_STUB_CURL_EXIT:-}" ]]; then
 fi
 
 # ${NGC_STUB_REFUSE_RESUME} answers a resume of a file that already holds
-# bytes the way a storage backend does: HTTP 416, which --fail turns into curl
-# exit 22. A transfer that starts from nothing is served as usual.
+# bytes the way a storage backend does: HTTP 416. The value is the exit code
+# curl gives for that answer, because the two curl generations disagree:
+# curl 7.x makes --fail turn the 416 into exit 22, while curl 8.x calls the
+# same answer a success and exits 0. Both write nothing to the output file.
+# A transfer that starts from nothing is served as usual.
 if [[ -n "${NGC_STUB_REFUSE_RESUME:-}" && -s "${out}" ]]; then
-  printf 'curl: (22) The requested URL returned error: 416\n' >&2
+  if [[ "${NGC_STUB_REFUSE_RESUME}" -ne 0 ]]; then
+    printf 'curl: (%s) The requested URL returned error: 416\n' \
+      "${NGC_STUB_REFUSE_RESUME}" >&2
+  fi
   [[ "${write_out}" -eq 0 ]] || printf '416'
-  exit 22
+  exit "${NGC_STUB_REFUSE_RESUME}"
 fi
 
 # ${NGC_STUB_HTTP_FAIL} answers with another status at or above 400, which
@@ -665,28 +671,87 @@ test_a_size_only_check_is_named_a_size_check() {
 # turns into curl exit 22, not the exit 33 of a plain refusal. The helper must
 # drop the partial file and start over, or every later run repeats the same
 # refusal and the download never finishes.
-test_a_refused_resume_starts_over() {
-  local dir="${SANDBOX}/refused-resume"
+#
+# ${1} is the exit code curl gives for that 416: 22 on curl 7.x, 0 on curl
+# 8.x, which calls the answer a success. The helper must start over for both,
+# because the answer is the same event.
+run_refused_resume_check() {
+  local curl_exit="$1"
+  local dir="${SANDBOX}/refused-resume-${curl_exit}"
   local dest="${dir}/model.trtpkg"
   rm -rf "${dir}"
   mkdir -p "${dir}"
   printf 'BYTES FROM A TRANSFER THAT STOPPED' > "${dest}.part"
 
   local out
-  export NGC_STUB_REFUSE_RESUME=1
-  out="$(run_single_file_download "${dest}" "" "${STUB_PAYLOAD_BYTES}")"
+  export NGC_STUB_REFUSE_RESUME="${curl_exit}"
+  # No sha256 and no size, which is what NGC reports for many model files.
+  # Nothing but the restart can then tell a whole file from a stale part.
+  out="$(run_single_file_download "${dest}" "" "")"
   unset NGC_STUB_REFUSE_RESUME
 
   if [[ "${out}" != *"RC=0"* ]]; then
-    t_fail "a refused resume should start over and succeed: ${out}"
+    t_fail "a refused resume (curl exit ${curl_exit}) should start over and succeed: ${out}"
   else
-    t_pass "a refused resume starts over and succeeds"
+    t_pass "a refused resume (curl exit ${curl_exit}) starts over and succeeds"
   fi
 
   if [[ -e "${dest}.part" ]]; then
-    t_fail "the stale partial file was kept: $(cat "${dest}.part")"
+    t_fail "the stale partial file was kept (curl exit ${curl_exit}): $(cat "${dest}.part")"
   else
-    t_pass "the stale partial file is gone"
+    t_pass "the stale partial file is gone (curl exit ${curl_exit})"
+  fi
+
+  if [[ "$(cat "${dest}" 2>/dev/null)" != "stub payload" ]]; then
+    t_fail "the stale part was promoted (curl exit ${curl_exit}): $(cat "${dest}" 2>/dev/null)"
+  else
+    t_pass "the restart wrote the whole file (curl exit ${curl_exit})"
+  fi
+}
+
+# curl 7.x: --fail turns the 416 into exit 22.
+test_a_refused_resume_starts_over() {
+  run_refused_resume_check 22
+}
+
+# curl 8.x, which Fedora 44 ships: the same 416 is a success to curl, so the
+# status is the only sign of it. A helper that reads the exit code alone
+# promotes the stale part and calls the run a success.
+test_a_refused_resume_starts_over_on_curl_8() {
+  run_refused_resume_check 0
+}
+
+# curl exit 0 does not mean the file arrived. A status that carries no body
+# for us, such as 204, still exits 0 with --fail, and leaves an empty or a
+# stale partial file. The helper must refuse such a transfer instead of
+# moving what is there to the destination and calling the run a success.
+test_a_transfer_that_curl_calls_a_success_needs_a_200() {
+  local dir="${SANDBOX}/no-content"
+  local dest="${dir}/model.trtpkg"
+  rm -rf "${dir}"
+  mkdir -p "${dir}"
+
+  local out
+  export NGC_STUB_STATUS=204
+  out="$(run_single_file_download "${dest}" "" "")"
+  unset NGC_STUB_STATUS
+
+  if [[ "${out}" != *"RC=2"* ]]; then
+    t_fail "a status that is not 200 or 206 should fail the download: ${out}"
+  else
+    t_pass "a status that is not 200 or 206 fails the download"
+  fi
+
+  if [[ "${out}" != *"HTTP 204"* ]]; then
+    t_fail "the failure did not name the HTTP status: ${out}"
+  else
+    t_pass "the failure of a curl that exits 0 names the HTTP status"
+  fi
+
+  if [[ -e "${dest}" ]]; then
+    t_fail "an empty transfer was moved to the destination"
+  else
+    t_pass "an empty transfer is not moved to the destination"
   fi
 }
 
@@ -1097,6 +1162,8 @@ test_a_file_with_no_hash_and_no_size_is_downloaded_again
 test_a_size_only_check_is_named_a_size_check
 test_an_unrelated_md5_in_the_destination_is_left_alone
 test_a_refused_resume_starts_over
+test_a_refused_resume_starts_over_on_curl_8
+test_a_transfer_that_curl_calls_a_success_needs_a_200
 test_a_failed_download_names_the_partial_file
 test_a_rejected_download_keeps_the_partial_file
 test_a_page_that_adds_nothing_stops_the_listing

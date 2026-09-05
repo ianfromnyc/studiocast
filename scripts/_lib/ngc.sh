@@ -716,23 +716,32 @@ sc_ngc_download_kind_file() {
       --output "${part}" \
       "${url}")" || status=$?
 
-    if [[ "${status}" -ne 0 ]]; then
-      # curl exit 33 means the server refuses a resume; start over.
-      if [[ "${status}" -eq 33 ]]; then
+    # A storage backend refuses a resume with HTTP 416. Throw the partial file
+    # away and start over, one time. Without this the same refusal comes back
+    # in every later run, because the partial file stays where it is.
+    #
+    # The status decides this, not the exit code, because the two curl
+    # generations disagree about a 416: curl 7.x makes --fail turn it into
+    # exit 22, while curl 8.x, which Fedora 44 ships, calls the same answer a
+    # success. The answer is the same event for both.
+    #
+    # Only 416. An expired token (401), a signed URL that went stale (403),
+    # a backend that is down (503) and a disk that filled up (exit 23) all
+    # leave good bytes in the partial file, and the next run resumes them.
+    if [[ "${http_code}" == "416" ]]; then
+      if [[ "${restarted}" -eq 0 && -s "${part}" ]]; then
+        restarted=1
+        sc_ngc_err "download of ${relpath} failed (HTTP 416, the server refuses to resume). Removing ${part} and starting over."
         rm -f "${part}"
         continue
       fi
-      # A storage backend refuses a resume with HTTP 416 instead. Throw the
-      # partial file away and start over, one time. Without this the same
-      # refusal comes back in every later run, because the partial file stays
-      # where it is.
-      #
-      # Only 416. An expired token (401), a signed URL that went stale (403),
-      # a backend that is down (503) and a disk that filled up (exit 23) all
-      # leave good bytes in the partial file, and the next run resumes them.
-      if [[ "${http_code}" == "416" && "${restarted}" -eq 0 && -s "${part}" ]]; then
-        restarted=1
-        sc_ngc_err "download of ${relpath} failed (HTTP 416, the server refuses to resume). Removing ${part} and starting over."
+      sc_ngc_err "download of ${relpath} failed (HTTP 416, the server refuses to resume)."
+      continue
+    fi
+
+    if [[ "${status}" -ne 0 ]]; then
+      # curl exit 33 means the server refuses a resume; start over.
+      if [[ "${status}" -eq 33 ]]; then
         rm -f "${part}"
         continue
       fi
@@ -741,6 +750,15 @@ sc_ngc_download_kind_file() {
       else
         sc_ngc_err "download of ${relpath} failed (curl exit ${status})."
       fi
+      continue
+    fi
+
+    # curl exit 0 is not proof that the file arrived. Only 200 (the whole
+    # file) and 206 (a resume the server honoured) put the bytes of the file
+    # in the partial file. Keep the partial file, because a status that is not
+    # a refused resume leaves the bytes of the earlier run where they are.
+    if [[ "${http_code}" != "200" && "${http_code}" != "206" ]]; then
+      sc_ngc_err "download of ${relpath} failed (HTTP ${http_code})."
       continue
     fi
 
