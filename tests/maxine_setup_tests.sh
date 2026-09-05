@@ -184,10 +184,45 @@ test_install_afx_features_falls_back_to_the_rest_api() {
   fi
 }
 
+# Every download route can fall through to the NGC REST API, which needs
+# curl, python3 and the rest. --install-features must say which tool is
+# absent, and say it before it looks at the features directories, the same
+# way --download-features and --install-afx-features do.
+test_install_features_checks_the_tools_first() {
+  local base="${SANDBOX}/toolcheck"
+  rm -rf "${base}"
+
+  # A PATH that holds the ordinary tools but no python3. Everything the
+  # script runs before the check is in this directory, so the run gets that
+  # far and no further.
+  local stub="${SANDBOX}/toolcheck-bin"
+  rm -rf "${stub}"
+  mkdir -p "${stub}"
+  local tool path
+  for tool in awk basename bash cat chmod cp curl cut date dirname env find grep \
+    head ln ls md5sum mkdir mktemp mv printf realpath rm sed sha256sum sort \
+    stat tail tee tr uname; do
+    path="$(command -v "${tool}" 2>/dev/null)" || continue
+    ln -sf "${path}" "${stub}/${tool}"
+  done
+
+  local out
+  out="$(PATH="${stub}" NGC_API_KEY="not-a-real-key" \
+    bash "${MAXINE_SH}" --base "${base}" --cache-dir "${SANDBOX}/toolcache" \
+    --sm 86 --install-features --dry-run 2>&1)"
+
+  if [[ "${out}" != *"missing required tool(s)"* || "${out}" != *python3* ]]; then
+    t_fail "--install-features did not name the absent tool: ${out}"
+  else
+    t_pass "--install-features names the absent tool"
+  fi
+}
+
 test_pinning_a_root_with_special_characters
 test_pinning_a_root_that_looks_like_a_pattern
 test_a_dry_run_makes_no_directory
 test_install_afx_features_falls_back_to_the_rest_api
+test_install_features_checks_the_tools_first
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2

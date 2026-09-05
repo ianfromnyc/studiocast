@@ -1251,6 +1251,7 @@ fi
 
 if [[ "$DO_INSTALL_FEATURES" -eq 1 ]]; then
   require_key "--install-features"
+  sc_ngc_require_tools || exit 2
 
   if [[ ! -d "${VFX_ROOT}/features" ]]; then
     err "VFX features directory not found at ${VFX_ROOT}/features"
