@@ -399,6 +399,38 @@ bool TestStopReportsAFailureWhenPactlTimesOut() {
   return true;
 }
 
+// A `pactl --version` that only ran out of time is not a pactl that is
+// missing. A killed pactl prints nothing, so "pactl not available: " ended
+// with the colon, and the GUI made it "The monitor needs attention. Open
+// Support for technical details." for a sound server that is only busy.
+bool TestStartReportsATimedOutPactlAsABusySoundServer() {
+  ScopedPactlExecHook hook([](const std::string &command) {
+    if (command == "pactl --version 2>&1") {
+      auto result = ExecResult(-1);
+      result.timed_out = true;
+      return result;
+    }
+    return ExecResult(99, "unexpected command: " + command);
+  });
+
+  MicMonitorConfig cfg;
+  cfg.enabled = true;
+  cfg.sink = "headset_test_sink";
+
+  studiocast::audio::MicMonitorState state;
+  std::string error;
+  if (studiocast::audio::StartMicMonitor(cfg, "physical_test_mic", &state,
+                                         &error)) {
+    std::cerr << "the start reported success while pactl timed out\n";
+    return false;
+  }
+  if (error.find("in time") == std::string::npos) {
+    std::cerr << "the failed start blamed a missing pactl: '" << error << "'\n";
+    return false;
+  }
+  return true;
+}
+
 // The sink question has three answers, and the pin rule depends on all three.
 // A `pactl list short sinks` that runs out of time prints nothing at all, so
 // an empty list must not read as "the sink is gone": the monitor would stop
@@ -2155,6 +2187,8 @@ int main() {
        &TestStopReportsNothingToCleanWithoutPactl},
       {"monitor stop reports a failure when pactl times out",
        &TestStopReportsAFailureWhenPactlTimesOut},
+      {"monitor start reports a timed-out pactl as a busy sound server",
+       &TestStartReportsATimedOutPactlAsABusySoundServer},
       {"monitor sink question gives no answer when the sink list times out",
        &TestSinkPresentGivesNoAnswerWhenTheSinkListTimesOut},
       {"service starts and stops the monitor with config",
