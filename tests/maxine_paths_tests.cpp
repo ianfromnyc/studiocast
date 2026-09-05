@@ -407,17 +407,29 @@ bool BuildSharedLib(const fs::path &out, const std::string &soname,
     } else {
       // `--as-needed` drops the C library as well, so use it. A library with
       // no dependency at all would make the system-library tests say nothing.
+      //
+      // The compiler works out the length of a string it can see, and then
+      // the library calls nothing after all. The name below is of a variable
+      // that no test sets, so the length can only be worked out while the
+      // program runs.
+      f << "#include <cstdlib>\n";
       f << "#include <cstring>\n";
-      f << "extern \"C\" int " << symbol
-        << "() { return static_cast<int>(std::strlen(\"42\")); }\n";
+      f << "extern \"C\" int " << symbol << "() {\n";
+      f << "  const char *v = std::getenv(\"STUDIOCAST_NO_SUCH_VARIABLE\");\n";
+      f << "  return static_cast<int>(std::strlen(v ? v : \"42\"));\n";
+      f << "}\n";
     }
     if (!f.good())
       return false;
   }
 
+  // Debian and its derivatives give the linker `--as-needed` by default, and
+  // Fedora does not. Ask for it here, so every distribution builds the same
+  // fixture and a test cannot pass on one and fail on the other.
   std::ostringstream cmd;
-  cmd << ShellQuote(STUDIOCAST_CXX_COMPILER) << " -shared -fPIC "
-      << ShellQuote(src.string()) << " -Wl,-soname," << ShellQuote(soname);
+  cmd << ShellQuote(STUDIOCAST_CXX_COMPILER)
+      << " -shared -fPIC -Wl,--as-needed " << ShellQuote(src.string())
+      << " -Wl,-soname," << ShellQuote(soname);
   if (!link_against.empty()) {
     cmd << " " << ShellQuote(link_against.string());
   }
@@ -655,6 +667,12 @@ bool TestSdkRuntimePreloadSkipsSystemLibraries() {
   const auto report = studiocast::maxine::PreloadSdkRuntime(target);
 
   bool ok = true;
+  // The fixture is built with `--as-needed` and calls strlen on a string the
+  // compiler cannot read, so it names libc.so.6 and nothing else. The pre-load
+  // must leave every such soname to the system loader, so it must report no
+  // dependency at all.
+  ok &= Require(report.dependencies.empty(),
+                "expected the pre-load to report no system dependency");
   for (const auto &d : report.dependencies) {
     ok &= Require(!d.loaded, "expected no system library to be pre-loaded, but "
                              "the pre-load took " +
