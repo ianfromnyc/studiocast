@@ -54,6 +54,28 @@ bool Contains(const std::string &hay, const std::string &needle) {
   return hay.find(needle) != std::string::npos;
 }
 
+// True when the module arguments hold `key=value` as a whole whitespace
+// delimited token. A plain substring search would also accept a longer name
+// that starts the same, such as `sink_name=studiocast_sink_backup`, and this
+// file unloads what it matches.
+bool HasArgument(const std::string &args, const std::string &key,
+                 const std::string &value) {
+  static constexpr const char *kSpace = " \t\n";
+  const std::string want = key + "=" + value;
+  std::size_t pos = 0;
+  while (pos <= args.size()) {
+    const std::size_t end = args.find_first_of(kSpace, pos);
+    const std::size_t len =
+        end == std::string::npos ? std::string::npos : end - pos;
+    if (args.compare(pos, len, want) == 0)
+      return true;
+    if (end == std::string::npos)
+      break;
+    pos = end + 1;
+  }
+  return false;
+}
+
 // Names the Pulse device path uses. They are the same strings the pactl
 // helpers in core/audio/virtual_mic.cpp and virtual_speaker.cpp load.
 constexpr const char *kPulseSinkName = "studiocast_sink";
@@ -102,25 +124,24 @@ std::vector<StalePulseModule> DetectStalePulseDeviceModules(
     if (m.name == "module-loopback") {
       // The legacy pass-through into the StudioCast sink, and the Pulse
       // speaker route out of the virtual speakers.
-      if (Contains(m.args, std::string("sink=") + kPulseSinkName) ||
-          Contains(m.args,
-                   std::string("source=") + kPulseSpeakersSinkName +
-                       ".monitor")) {
+      if (HasArgument(m.args, "sink", kPulseSinkName) ||
+          HasArgument(m.args,
+                      "source", std::string(kPulseSpeakersSinkName) +
+                                    ".monitor")) {
         loopbacks.push_back(entry);
       }
       continue;
     }
 
     if (m.name == "module-remap-source" &&
-        Contains(m.args, std::string("source_name=") + kPulseMicSourceName)) {
+        HasArgument(m.args, "source_name", kPulseMicSourceName)) {
       remaps.push_back(entry);
       continue;
     }
 
     if (m.name == "module-null-sink" &&
-        (Contains(m.args, std::string("sink_name=") + kPulseSinkName) ||
-         Contains(m.args,
-                  std::string("sink_name=") + kPulseSpeakersSinkName))) {
+        (HasArgument(m.args, "sink_name", kPulseSinkName) ||
+         HasArgument(m.args, "sink_name", kPulseSpeakersSinkName))) {
       sinks.push_back(entry);
       continue;
     }

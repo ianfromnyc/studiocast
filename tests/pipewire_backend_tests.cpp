@@ -822,6 +822,39 @@ bool TestStalePulseModuleDetectionSkipsTheMonitorAndOtherApps() {
                     }());
 }
 
+// The clean-up unloads modules, so a name that only starts the same must not
+// match. Every module below belongs to another application whose names begin
+// with the StudioCast ones.
+bool TestStalePulseModuleDetectionMatchesWholeArgumentValues() {
+  ScopedPactlHook hook([](const std::string &command) {
+    if (command == "pactl --version 2>&1")
+      return studiocast::util::ExecResult{0, false, "pactl 17.0\n"};
+    if (command == "pactl list short modules 2>&1") {
+      return studiocast::util::ExecResult{
+          0, false,
+          "20\tmodule-null-sink\tsink_name=studiocast_sink_backup\n"
+          "21\tmodule-null-sink\tsink_name=studiocast_speakersfoo\n"
+          "22\tmodule-remap-source\tsource_name=studiocast_mic2\n"
+          "23\tmodule-loopback\tsink=studiocast_sinkfoo latency_msec=10\n"
+          "24\tmodule-loopback\tsource=studiocast_speakers.monitor.other\n"};
+    }
+    return studiocast::util::ExecResult{99, false,
+                                        "unexpected command: " + command};
+  });
+
+  std::string error;
+  const auto stale =
+      studiocast::audio::pw_backend::DetectStalePulseDeviceModules(&error);
+
+  std::string ids;
+  for (const auto &m : stale)
+    ids += std::to_string(m.id) + " ";
+
+  return Expect(error.empty(), "detection reported an error: " + error) &&
+         Expect(stale.empty(),
+                "a name that only starts the same must not match; got " + ids);
+}
+
 bool TestStalePulseModuleCleanupIssuesTheRightPactlCalls() {
   std::vector<std::string> commands;
   ScopedPactlHook hook([&commands](const std::string &command) {
@@ -1233,6 +1266,8 @@ int main() {
        &TestDaemonConfigRoundTripsTheAudioBackendKey},
       {"stale pulse module detection skips the monitor and other apps",
        &TestStalePulseModuleDetectionSkipsTheMonitorAndOtherApps},
+      {"stale pulse module detection matches whole argument values",
+       &TestStalePulseModuleDetectionMatchesWholeArgumentValues},
       {"stale pulse module cleanup issues the right pactl calls",
        &TestStalePulseModuleCleanupIssuesTheRightPactlCalls},
       {"stale pulse module cleanup is quiet when nothing is loaded",
