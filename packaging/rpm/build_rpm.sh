@@ -50,7 +50,9 @@ Options:
   --clean-outside-repo      Let --clean remove a build or dist directory that
                             is outside the repository. Without it, --clean
                             refuses such a path, so a typo in --build-dir or
-                            --dist-dir cannot delete something else.
+                            --dist-dir cannot delete something else. A
+                            top-level directory and a system directory such as
+                            /usr stay refused with the flag as well.
   --build-dir DIR           Working directory for the private rpmbuild tree.
                             Default: ${BUILD_DIR}
   --dist-dir DIR            Artifact output directory.
@@ -503,6 +505,16 @@ report_artifacts() {
   log "  ${CHECKSUM_FILE}"
 }
 
+# System directories that never hold a build tree. --clean-outside-repo says
+# the caller knows the path is outside the repository; it does not say the
+# path is safe to remove, so these stay refused whatever the flag says.
+CLEAN_PROTECTED_PREFIXES=(/usr /etc /boot /bin /sbin /lib /lib64 /opt /srv
+                          /proc /sys /dev /run /var)
+
+# The one place inside that list that holds throwaway trees. rpmbuild itself
+# works there, so a build directory under it is a normal choice.
+CLEAN_ALLOWED_PREFIXES=(/var/tmp)
+
 # --clean removes the build directory and the artifact directory, so check
 # first that the path is one this script made. A path outside the repository
 # needs --clean-outside-repo, which keeps a typo in --build-dir or --dist-dir
@@ -520,6 +532,27 @@ require_safe_clean_target() {
     die "--clean refuses to remove the root directory (${label})"
   [[ -z "${HOME:-}" || "${resolved}" != "${HOME}" ]] ||
     die "--clean refuses to remove the home directory (${label})"
+
+  # A path with one component is a top-level directory such as /usr or /home,
+  # and no build tree lives there.
+  local parts
+  IFS='/' read -r -a parts <<<"${resolved#/}"
+  [[ "${#parts[@]}" -ge 2 ]] ||
+    die "--clean refuses the top-level ${label} path ${resolved}"
+
+  local prefix allowed=0
+  for prefix in "${CLEAN_ALLOWED_PREFIXES[@]}"; do
+    if [[ "${resolved}" == "${prefix}/"* ]]; then
+      allowed=1
+      break
+    fi
+  done
+  if [[ "${allowed}" -eq 0 ]]; then
+    for prefix in "${CLEAN_PROTECTED_PREFIXES[@]}"; do
+      [[ "${resolved}" != "${prefix}/"* ]] ||
+        die "--clean refuses the ${label} path ${resolved}, which is inside the system directory ${prefix}"
+    done
+  fi
 
   if [[ "${ALLOW_CLEAN_OUTSIDE_REPO}" -eq 0 && "${resolved}" != "${REPO_ROOT}/"* ]]; then
     die "--clean refuses the ${label} path ${resolved}, which is outside ${REPO_ROOT}. Add --clean-outside-repo to allow it."
