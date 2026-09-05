@@ -1198,6 +1198,7 @@ bool TestCameraNodePlanApplierDecidesInsideItsLock() {
 // it first asked for a node.
 bool TestCameraNodeRestartBackoffStartsFreshOnEveryRun() {
   using studiocast::video::internal::PipeWireRestartBackoff;
+  using studiocast::video::internal::StartOutcome;
   using Clock = std::chrono::steady_clock;
 
   PipeWireRestartBackoff backoff;
@@ -1224,7 +1225,7 @@ bool TestCameraNodeRestartBackoffStartsFreshOnEveryRun() {
   // A node that came up ends the backoff the same way.
   backoff.Failed(now);
   backoff.Started();
-  backoff.Settle(true, now);
+  backoff.Settle(StartOutcome::held, now);
   if (!backoff.Ready(now)) {
     std::cerr << "a node that came up should end the wait\n";
     return false;
@@ -1239,6 +1240,7 @@ bool TestCameraNodeRestartBackoffStartsFreshOnEveryRun() {
 // once a second for ever with the wait never growing.
 bool TestCameraNodeRestartBackoffWaitsATickBeforeItTrustsAStart() {
   using studiocast::video::internal::PipeWireRestartBackoff;
+  using studiocast::video::internal::StartOutcome;
   using Clock = std::chrono::steady_clock;
 
   PipeWireRestartBackoff backoff;
@@ -1250,7 +1252,7 @@ bool TestCameraNodeRestartBackoffWaitsATickBeforeItTrustsAStart() {
   }
 
   // A settle with no start behind it must change nothing.
-  backoff.Settle(false, now);
+  backoff.Settle(StartOutcome::gone, now);
   if (!backoff.Ready(now)) {
     std::cerr << "a verdict for a start that never happened must not wait\n";
     return false;
@@ -1269,7 +1271,7 @@ bool TestCameraNodeRestartBackoffWaitsATickBeforeItTrustsAStart() {
 
   // The node went down before the next tick, so the start failed and the wait
   // grows. A mismatch that repeats therefore backs off instead of churning.
-  backoff.Settle(false, now);
+  backoff.Settle(StartOutcome::gone, now);
   if (backoff.Pending()) {
     std::cerr << "a verdict must be given once only\n";
     return false;
@@ -1281,9 +1283,68 @@ bool TestCameraNodeRestartBackoffWaitsATickBeforeItTrustsAStart() {
 
   const auto first_wait_over = now + std::chrono::seconds(30);
   backoff.Started();
-  backoff.Settle(false, first_wait_over);
+  backoff.Settle(StartOutcome::gone, first_wait_over);
   if (backoff.Ready(first_wait_over + std::chrono::milliseconds(1))) {
     std::cerr << "a second failed start should wait longer than the first\n";
+    return false;
+  }
+  return true;
+}
+
+// The supervisor thread applies a camera node plan too, so it can replace the
+// node between the tick that started one and the tick that judges it. That
+// node is not the one the frame thread started, but the graph is healthy: a
+// replacement the supervisor made on purpose must not count against the wait,
+// or a later genuine restart sits out a backoff it did not earn.
+bool TestCameraNodeRestartBackoffIgnoresAReplacedNode() {
+  using studiocast::video::internal::PipeWireRestartBackoff;
+  using studiocast::video::internal::StartOutcome;
+  using studiocast::video::internal::StartOutcomeOf;
+  using Clock = std::chrono::steady_clock;
+
+  if (StartOutcomeOf(/*same_node=*/true, /*current_running=*/true) !=
+      StartOutcome::held) {
+    std::cerr << "the node that started and still runs must have held\n";
+    return false;
+  }
+  if (StartOutcomeOf(/*same_node=*/false, /*current_running=*/true) !=
+      StartOutcome::replaced) {
+    std::cerr << "another node that runs in its place is a replacement\n";
+    return false;
+  }
+  if (StartOutcomeOf(/*same_node=*/true, /*current_running=*/false) !=
+      StartOutcome::gone) {
+    std::cerr << "the node that started and went down must be gone\n";
+    return false;
+  }
+  if (StartOutcomeOf(/*same_node=*/false, /*current_running=*/false) !=
+      StartOutcome::gone) {
+    std::cerr << "no node running at all must be gone\n";
+    return false;
+  }
+
+  PipeWireRestartBackoff backoff;
+  const auto now = Clock::now();
+
+  // One failed start, so there is a wait to watch.
+  backoff.Started();
+  backoff.Settle(StartOutcome::gone, now);
+  const auto first_wait = studiocast::pw::NodeRestartDelay(1);
+
+  // The supervisor replaced the next start. The wait must neither grow nor go.
+  backoff.Started();
+  backoff.Settle(StartOutcome::replaced, now);
+  if (backoff.Pending()) {
+    std::cerr << "a verdict must be given once only\n";
+    return false;
+  }
+  if (backoff.Ready(now + first_wait - std::chrono::milliseconds(1))) {
+    std::cerr << "a replacement must not end the wait of the failure "
+                 "before it\n";
+    return false;
+  }
+  if (!backoff.Ready(now + first_wait)) {
+    std::cerr << "a replacement must not make the wait grow\n";
     return false;
   }
   return true;
@@ -1378,6 +1439,8 @@ int main() {
        &TestCameraNodeRestartBackoffStartsFreshOnEveryRun},
       {"camera node restart backoff waits a tick before it trusts a start",
        &TestCameraNodeRestartBackoffWaitsATickBeforeItTrustsAStart},
+      {"camera node restart backoff ignores a replaced node",
+       &TestCameraNodeRestartBackoffIgnoresAReplacedNode},
       {"PipeWire output state reports a write failure",
        &TestPipeWireOutputStateReportsAWriteFailure},
       {"pipewire output status hides the numbers of a down node",

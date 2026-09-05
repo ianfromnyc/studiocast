@@ -270,6 +270,31 @@ struct PipeWireNodePlan {
   studiocast::video::pw_backend::CameraNodeConfig node;
 };
 
+// What became of the node a start installed, as the next tick finds it.
+enum class StartOutcome {
+  // The node that start installed is still the node that runs. The start
+  // succeeded.
+  held,
+  // Another node runs in its place. The supervisor thread applies a plan too,
+  // so it replaces the node on purpose; the start has no verdict, and the
+  // graph is healthy.
+  replaced,
+  // The node went down, or no node runs at all. A format the server refuses
+  // ends here.
+  gone,
+};
+
+// Reads the outcome from what the tick can see.
+//
+// `same_node` is true only for the very node the start installed. A node the
+// server took down reads as gone whether or not something replaced it, so a
+// format mismatch that repeats still walks the wait up.
+inline StartOutcome StartOutcomeOf(bool same_node, bool current_running) {
+  if (!current_running)
+    return StartOutcome::gone;
+  return same_node ? StartOutcome::held : StartOutcome::replaced;
+}
+
 // When the frame thread may ask for the camera node again after a start that
 // failed.
 //
@@ -303,22 +328,29 @@ public:
   // True while a start waits for its verdict.
   bool Pending() const { return pending_; }
 
-  // The verdict for the start that Started recorded. `up` must be true only
-  // for the node that start installed, and only while it still runs: a node
-  // that went down, or that something replaced, is a failed start.
+  // The verdict for the start that Started recorded.
   //
   // Does nothing when no start is waiting.
-  void Settle(bool up, std::chrono::steady_clock::time_point now) {
+  void Settle(StartOutcome outcome, std::chrono::steady_clock::time_point now) {
     if (!pending_)
       return;
     pending_ = false;
-    if (up) {
+    switch (outcome) {
+    case StartOutcome::held:
       // The node came up. The next failure starts from the shortest wait
       // again.
       Reset();
       return;
+    case StartOutcome::replaced:
+      // The supervisor put another node in its place, which it does on
+      // purpose and only for a healthy graph. There is no verdict to give, so
+      // the wait stays where it was: a replacement must neither excuse the
+      // failures before it nor add one of its own.
+      return;
+    case StartOutcome::gone:
+      Failed(now);
+      return;
     }
-    Failed(now);
   }
 
   // The node did not come up. Holds the next try back for a growing wait.

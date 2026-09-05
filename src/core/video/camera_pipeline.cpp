@@ -971,18 +971,21 @@ void CameraPipeline::MaintainPipeWireOutput() {
   // from before pw_stream_connect, so the tick that starts one cannot judge
   // it: the server takes a node whose format differs down later, on the node's
   // own loop thread. This tick asks whether the node that start installed is
-  // still the node that runs. A node that went down, or that something
-  // replaced, is a failed start, and the wait grows, which is what stops a
-  // format mismatch from churning a node once a second for ever.
+  // still the node that runs. A node that went down is a failed start, and the
+  // wait grows, which is what stops a format mismatch from churning a node
+  // once a second for ever.
   if (pw_restart_backoff_.Pending()) {
-    bool held = false;
+    bool same_node = false;
+    bool current_running = false;
     {
       std::lock_guard<std::mutex> lock(mu_);
       const auto started = pw_started_node_.lock();
-      held = started && started == pw_node_ && started->IsRunning();
+      same_node = started && started == pw_node_;
+      current_running = pw_node_ && pw_node_->IsRunning();
     }
     pw_started_node_.reset();
-    pw_restart_backoff_.Settle(held, now);
+    pw_restart_backoff_.Settle(
+        internal::StartOutcomeOf(same_node, current_running), now);
   }
 
   // A cheap look first, so a node that is up costs one short lock a second and
