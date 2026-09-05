@@ -230,7 +230,13 @@ when `audio.backend` is `pipewire`. Almost every desktop has it.
 
 - `audio.transport_backend`: `pulse` or `pipewire`.
 - `audio.transport_backend_note`: the reason for a fallback, if any.
-- `video.output_backends`: an array with `v4l2loopback`, `pipewire`, or both.
+- `video.pipewire_output.state`: `off` when no node is asked for, `starting`
+  while one is on its way, `running` once it carries frames, or the reason it
+  cannot.
+- `video.pipewire_output.node_id`: the graph id of the camera node, 0 while
+  there is none.
+- `video.pipewire_output.consumer_count`: how many applications are linked to
+  the camera node.
 
 The GUI shows the same values on the Audio page and the Video page.
 
@@ -257,17 +263,17 @@ continuous integration and the RPM `%check` stay green.
 Verified on Fedora 44, PipeWire 1.6.8:
 
     $ pw-dump | ... # application.name == "StudioCast"
-    {"id": 130, "node.name": "studiocast_mic",
+    {"id": 152, "node.name": "studiocast_mic",
      "node.description": "StudioCast Microphone", "media.class": "Audio/Source",
      "node.virtual": true, "node.latency": "480/48000", "node.rate": "1/48000"}
-    {"id": 93,  "node.name": "studiocast_speakers",
+    {"id": 169, "node.name": "studiocast_speakers",
      "node.description": "StudioCast Speakers", "media.class": "Audio/Sink",
      "node.virtual": true, "node.latency": "480/48000", "node.rate": "1/48000"}
-    {"id": 93,  "node.name": "studiocast_camera",
+    {"id": 183, "node.name": "studiocast_camera",
      "node.description": "StudioCast Camera", "media.class": "Video/Source",
      "node.virtual": true, "media.role": "Camera"}
 
-    $ pw-cat --record --target 130 cap.wav    # 757804 bytes in 4 s
+    $ pw-cat --record --target 152 cap.wav    # 757804 bytes in 4 s
     $ gst-launch-1.0 pipewiresrc target-object=studiocast_camera \
         num-buffers=20 ! videoconvert ! jpegenc ! multifilesink ...
     # 20 frames written
