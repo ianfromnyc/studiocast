@@ -1343,12 +1343,23 @@ bool TestVirtualAudioServiceReportsResolvedAutoSourceAndWarnings() {
     return false;
   }
 
+  // The service clears a leftover monitor loopback at every start, before
+  // anything else. Those calls are not part of the resolution under test.
+  std::vector<std::string> resolutionCommands;
+  for (const auto &command : commands) {
+    if (command == "pactl --version 2>&1" ||
+        command == "pactl list short modules 2>&1")
+      continue;
+    resolutionCommands.push_back(command);
+  }
+
   const std::vector<std::string> expected = {
       "pactl get-default-source 2>&1",
       "pactl list short sources 2>&1",
   };
-  if (commands.size() < expected.size() ||
-      !std::equal(expected.begin(), expected.end(), commands.begin())) {
+  if (resolutionCommands.size() < expected.size() ||
+      !std::equal(expected.begin(), expected.end(),
+                  resolutionCommands.begin())) {
     std::cerr << "unexpected source resolution command prefix\n";
     for (const auto &command : commands)
       std::cerr << "  " << command << "\n";
@@ -1414,11 +1425,22 @@ bool TestVirtualAudioServicePreservesUnavailableConfiguredSource() {
     return false;
   }
 
+  // The service clears a leftover monitor loopback at every start, before
+  // anything else. Those calls are not part of the resolution under test.
+  std::vector<std::string> resolutionCommands;
+  for (const auto &command : commands) {
+    if (command == "pactl --version 2>&1" ||
+        command == "pactl list short modules 2>&1")
+      continue;
+    resolutionCommands.push_back(command);
+  }
+
   const std::vector<std::string> expected = {
       "pactl list short sources 2>&1",
   };
-  if (commands.size() < expected.size() ||
-      !std::equal(expected.begin(), expected.end(), commands.begin())) {
+  if (resolutionCommands.size() < expected.size() ||
+      !std::equal(expected.begin(), expected.end(),
+                  resolutionCommands.begin())) {
     std::cerr << "unexpected unavailable-source command prefix\n";
     for (const auto &command : commands)
       std::cerr << "  " << command << "\n";
