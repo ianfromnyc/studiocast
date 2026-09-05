@@ -184,13 +184,19 @@ package_recommends() {
 }
 
 # True when the package depends on a libyuv shared library, whatever the
-# soname version is. The negative check needs every version: an exact
-# libyuv.so.0 match would let a libyuv.so.1 from the build machine through,
-# which is the very thing the check is there to find.
+# soname is. The negative check needs every spelling: an exact libyuv.so.0
+# match would let a libyuv.so.1 from the build machine through, and a
+# versioned-only match would let an unversioned libyuv.so through, which is
+# what a local libyuv build gives. Both are the very thing the check is there
+# to find. The requires list goes through one command rather than a pipe,
+# because grep -q leaves at the first match and the SIGPIPE that gives awk
+# would come back as the pipeline status under `set -o pipefail`.
 package_depends_on_libyuv() {
   local package="$1"
+  local requirements
   read_package_list "${package}" --requires
-  awk '{ print $1 }' <<<"${PACKAGE_LIST}" | grep -Eq '^libyuv\.so\.'
+  requirements="$(awk '{ print $1 }' <<<"${PACKAGE_LIST}")"
+  grep -Eq '^libyuv\.so(\.|\()' <<<"${requirements}"
 }
 
 # True when the package was built with the dlib build conditional. The spec
