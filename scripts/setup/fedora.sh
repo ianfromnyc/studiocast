@@ -6,9 +6,11 @@
 # distribution, and is tested on Fedora 44. It installs build/runtime
 # prerequisites and configures v4l2loopback.
 #
-# Everything down to the source guard is definitions only. The shell options,
-# the system probes and the option defaults come after the guard, so that a
-# shell which sources this file keeps its own settings.
+# Everything down to the source guard is definitions and plain defaults, plus
+# scripts/_lib/onnxruntime.sh, which this file sources. The tests read those
+# defaults. The shell options, the system probes and the option parsing come
+# after the guard, so that a shell which sources this file keeps its own
+# settings.
 #
 # Differences from the Ubuntu helper:
 # - The cpu ONNX Runtime flavor comes from the distro package onnxruntime-devel.
@@ -776,9 +778,9 @@ EOF
 # Argument parsing
 # ---------------------------------------------------------------------------
 
-# Everything above is definitions. Stop here when the file is sourced, so that
-# tests/fedora_setup_tests.sh can call single functions without running a setup
-# and without a change to the shell of the caller.
+# Everything above is definitions and plain defaults. Stop here when the file
+# is sourced, so that tests/fedora_setup_tests.sh can call single functions
+# without running a setup and without a change to the shell of the caller.
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
   return 0
 fi
