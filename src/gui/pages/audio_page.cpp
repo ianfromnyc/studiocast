@@ -1562,6 +1562,9 @@ void AudioPage::UpdateMonitorControlsEnabled() {
 void AudioPage::PushDaemonMonitorConfig() {
   if (monitorWriteDebounceTimer_ && monitorWriteDebounceTimer_->isActive())
     monitorWriteDebounceTimer_->stop();
+  // The guard must cover this write even when it was not scheduled, so the
+  // status that answers it cannot arrive before the write is settled.
+  audioWriteGuard_.MarkPending();
   if (!daemonAiSupported_ || !monitorEnableCheck_) {
     audioWriteGuard_.MarkWriteRejected();
     return;
@@ -2313,11 +2316,6 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
       const QString monitorNote = monitor.value("note").toString().trimmed();
       const QString monitorError =
           monitor.value("last_error").toString().trimmed();
-      const int monitorLatency = monitor.value("latency_ms").toInt(20);
-      const int monitorVolume = monitor.value("volume").toInt(100);
-
-      const bool sinkChanged = daemonMonitorSink_ != monitorSink;
-      daemonMonitorSink_ = monitorSink;
 
       // The safe sinks depend on the microphone input, so build the list again
       // when the input changes.
@@ -2329,27 +2327,8 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
       daemonMonitorReported_ = monitorReported;
       UpdateMonitorControlsEnabled();
 
-      updatingMonitorUi_ = true;
-      monitorEnableCheck_->setChecked(monitorEnabled);
-      if (monitorLatencySpin_ && !monitorLatencySpin_->hasFocus())
-        monitorLatencySpin_->setValue(monitorLatency);
-      if (monitorVolumeSpin_ && !monitorVolumeSpin_->hasFocus())
-        monitorVolumeSpin_->setValue(monitorVolume);
-      updatingMonitorUi_ = false;
-
-      if (sinkChanged && monitorSinkCombo_ && monitorSinkCombo_->count() > 0) {
-        // Re-select only; a full list refresh happens on the Refresh button.
-        updatingMonitorUi_ = true;
-        int index = 0;
-        for (int i = 0; i < monitorSinkCombo_->count(); ++i) {
-          if (monitorSinkCombo_->itemData(i).toString() == monitorSink) {
-            index = i;
-            break;
-          }
-        }
-        monitorSinkCombo_->setCurrentIndex(index);
-        updatingMonitorUi_ = false;
-      }
+      // The control values themselves are written below the pending-write
+      // guard, with the rest of the daemon-backed controls.
 
       if (monitorStatusLabel_) {
         QStringList monitorLines;
@@ -2747,6 +2726,38 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
 
   if (!forceControlResync && !audioWriteGuard_.ShouldApplyRoutineStatus())
     return;
+
+  // Microphone monitor controls. A status that was already in flight when the
+  // user clicked must not undo the click, so these follow the guard like every
+  // other daemon-backed control on this page.
+  if (monitorEnableCheck_) {
+    const auto monitor = audio.value("monitor").toObject();
+    const QString monitorSink = monitor.value("sink").toString();
+    const bool sinkChanged = daemonMonitorSink_ != monitorSink;
+    daemonMonitorSink_ = monitorSink;
+
+    updatingMonitorUi_ = true;
+    monitorEnableCheck_->setChecked(monitor.value("enabled").toBool(false));
+    if (monitorLatencySpin_ && !monitorLatencySpin_->hasFocus())
+      monitorLatencySpin_->setValue(monitor.value("latency_ms").toInt(20));
+    if (monitorVolumeSpin_ && !monitorVolumeSpin_->hasFocus())
+      monitorVolumeSpin_->setValue(monitor.value("volume").toInt(100));
+    updatingMonitorUi_ = false;
+
+    if (sinkChanged && monitorSinkCombo_ && monitorSinkCombo_->count() > 0) {
+      // Re-select only; a full list refresh happens on the Refresh button.
+      updatingMonitorUi_ = true;
+      int index = 0;
+      for (int i = 0; i < monitorSinkCombo_->count(); ++i) {
+        if (monitorSinkCombo_->itemData(i).toString() == monitorSink) {
+          index = i;
+          break;
+        }
+      }
+      monitorSinkCombo_->setCurrentIndex(index);
+      updatingMonitorUi_ = false;
+    }
+  }
 
   // Sync UI from daemon config.
   const auto fx = audio.value("audio_effects").toObject();

@@ -1853,6 +1853,68 @@ bool TestAudioPageDebouncesTheMonitorWrites() {
   return ok;
 }
 
+// The status a daemon with the monitor turned on sends.
+const char *const kAudioStatusWithMonitorOn = R"({
+        "service_running":true,
+        "audio":{
+          "enabled":true,
+          "mic_present":true,
+          "source_error":"",
+          "monitor":{
+            "enabled":true,
+            "active":true,
+            "sink":"auto",
+            "sink_resolved":"physical_test_sink",
+            "latency_ms":20,
+            "volume":100,
+            "note":"",
+            "last_error":""
+          },
+          "pipeline":{"running":true,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })";
+
+// A routine status that was already in flight when the user clicked must not
+// undo the click. Every other daemon-backed control on this page is behind
+// `PendingDaemonWriteGuard`, and the monitor controls belong there too.
+bool TestAudioPageKeepsTheMonitorControlsWhileAWriteIsPending() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-guard");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *enableCheck =
+      page.findChild<QCheckBox *>(QStringLiteral("monitorEnableCheck"));
+  if (!Expect(enableCheck != nullptr, "the monitor check box is findable"))
+    return false;
+
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(
+      QString::fromLatin1(kAudioStatusWithMonitorOn)));
+  if (!Expect(enableCheck->isChecked(),
+              "the page should follow a daemon that reports the monitor on"))
+    return false;
+
+  // The user turns the monitor off. The write to the daemon is in flight.
+  enableCheck->setChecked(false);
+
+  // A routine status from before the click arrives.
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(
+      QString::fromLatin1(kAudioStatusWithMonitorOn)));
+
+  return Expect(!enableCheck->isChecked(),
+                "a routine status must not undo the user's click");
+}
+
 bool TestVideoPageKeepsUserSelectedInputWhenRoutineStatusStillAuto() {
   studiocast::gui::VideoPage page;
   auto *inputCombo =
@@ -2140,6 +2202,7 @@ int main(int argc, char **argv) {
   ok = TestAudioPageWaitsForItsDeviceListings() && ok;
   ok = TestAudioPageShowsTheMonitorNoteWithoutSendingUserToSupport() && ok;
   ok = TestAudioPageDebouncesTheMonitorWrites() && ok;
+  ok = TestAudioPageKeepsTheMonitorControlsWhileAWriteIsPending() && ok;
   ok = TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() && ok;
   ok = TestAudioPageReportsAMonitorSinkListError() && ok;
   ok = TestAudioPageReportsAnUnavailablePactlForTheMonitorSinks() && ok;
