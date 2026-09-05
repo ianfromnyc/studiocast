@@ -28,35 +28,67 @@ bool FileExists(const fs::path &p) {
   return !p.empty() && fs::exists(p, ec) && !fs::is_directory(p, ec);
 }
 
-// Reads the whole file into memory. The ELF header and the program headers
-// always sit near the start, but the dynamic segment they point at, and the
-// dynamic string table it names, can sit anywhere in the file. A capped read
-// could stop before either one, so the reader takes all of it. SDK libraries
-// are large, so this buffer is large as well.
-bool ReadFile(const fs::path &p, std::vector<char> *out) {
-  std::ifstream in(p, std::ios::binary);
-  if (!in)
-    return false;
-  in.seekg(0, std::ios::end);
-  const std::streamoff size = in.tellg();
-  if (size <= 0)
-    return false;
-  // tellg gives a std::streamoff, but read takes a std::streamsize and resize
-  // takes a size_t. Either can be narrower, so refuse a file that does not fit
-  // in both instead of converting past their range.
-  const auto want = static_cast<std::uintmax_t>(size);
-  if (want > static_cast<std::uintmax_t>(
-                 std::numeric_limits<std::streamsize>::max()) ||
-      want > static_cast<std::uintmax_t>(
-                 std::numeric_limits<std::size_t>::max())) {
-    return false;
+// The longest DT_NEEDED name this reader accepts. A soname is a file name, so
+// this is well above anything a linker writes.
+constexpr std::uint64_t kMaxSonameLength = 4096;
+
+// Reads small pieces of a file where they are.
+//
+// The ELF header and the program headers sit near the start, but the dynamic
+// segment they point at, and the dynamic string table it names, can sit
+// anywhere. Reading the whole file to find them would mean a copy of every SDK
+// library in memory, and `libnvinfer.so.10` alone is over 600 MB. This reader
+// seeks instead, so it takes a few kilobytes per library.
+class FileReader {
+public:
+  explicit FileReader(const fs::path &p) : in_(p, std::ios::binary) {
+    if (!in_)
+      return;
+    in_.seekg(0, std::ios::end);
+    const std::streamoff end = in_.tellg();
+    if (end > 0)
+      size_ = static_cast<std::uint64_t>(end);
   }
 
-  in.seekg(0, std::ios::beg);
-  out->resize(static_cast<std::size_t>(size));
-  in.read(out->data(), static_cast<std::streamsize>(size));
-  return in.good() || in.eof();
-}
+  // False when the file could not be opened or holds nothing.
+  bool Ok() const { return size_ > 0; }
+  std::uint64_t Size() const { return size_; }
+
+  // Reads `n` bytes from `offset`. False when that range is not in the file.
+  bool Read(std::uint64_t offset, void *out, std::uint64_t n) {
+    // Both tests subtract; a sum of the two would wrap for a large offset and
+    // let a read start outside the file.
+    if (offset > size_ || n > size_ - offset)
+      return false;
+    in_.clear();
+    in_.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    if (!in_)
+      return false;
+    in_.read(static_cast<char *>(out), static_cast<std::streamsize>(n));
+    return in_.good();
+  }
+
+  // Reads the NUL-terminated name at `offset`. False when there is no
+  // terminator within reach, or when the name is empty.
+  bool ReadName(std::uint64_t offset, std::string *out) {
+    if (offset >= size_)
+      return false;
+    const std::uint64_t want = std::min(kMaxSonameLength, size_ - offset);
+    std::vector<char> raw(static_cast<std::size_t>(want));
+    if (!Read(offset, raw.data(), want))
+      return false;
+    const std::size_t len =
+        ::strnlen(raw.data(), static_cast<std::size_t>(want));
+    if (len == 0 || len == want)
+      return false;
+    out->assign(raw.data(), len);
+    return true;
+  }
+
+private:
+  std::ifstream in_;
+  std::uint64_t size_ = 0;
+};
 
 // Every offset and count below comes out of the file, so none of it can be
 // trusted to fit. These two report an overflow instead of wrapping.
@@ -75,13 +107,8 @@ bool MulChecked(std::uint64_t a, std::uint64_t b, std::uint64_t *out) {
 }
 
 template <typename T>
-bool ReadAt(const std::vector<char> &buf, std::uint64_t offset, T *out) {
-  // Both tests subtract; a sum of the two would wrap for a large offset and
-  // let the copy below read outside the buffer.
-  if (offset > buf.size() || sizeof(T) > buf.size() - offset)
-    return false;
-  std::memcpy(out, buf.data() + static_cast<size_t>(offset), sizeof(T));
-  return true;
+bool ReadAt(FileReader &file, std::uint64_t offset, T *out) {
+  return file.Read(offset, out, sizeof(T));
 }
 
 // Turns a virtual address from the dynamic section into a file offset by
@@ -109,12 +136,12 @@ bool VaddrToOffset(const std::vector<Elf64_Phdr> &phdrs, Elf64_Addr vaddr,
 std::vector<std::string> ReadNeededSonames(const fs::path &library) {
   std::vector<std::string> needed;
 
-  std::vector<char> buf;
-  if (!ReadFile(library, &buf))
+  FileReader file(library);
+  if (!file.Ok())
     return needed;
 
   Elf64_Ehdr eh{};
-  if (!ReadAt(buf, 0, &eh))
+  if (!ReadAt(file, 0, &eh))
     return needed;
   if (std::memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0 ||
       eh.e_ident[EI_CLASS] != ELFCLASS64 ||
@@ -134,7 +161,7 @@ std::vector<std::string> ReadNeededSonames(const fs::path &library) {
   std::uint64_t ph_bytes = 0;
   std::uint64_t ph_end = 0;
   if (!MulChecked(eh.e_phnum, sizeof(Elf64_Phdr), &ph_bytes) ||
-      !AddChecked(eh.e_phoff, ph_bytes, &ph_end) || ph_end > buf.size()) {
+      !AddChecked(eh.e_phoff, ph_bytes, &ph_end) || ph_end > file.Size()) {
     return needed;
   }
 
@@ -143,7 +170,7 @@ std::vector<std::string> ReadNeededSonames(const fs::path &library) {
   for (unsigned i = 0; i < eh.e_phnum; ++i) {
     Elf64_Phdr ph{};
     // The table fits, so this sum stays inside it and cannot wrap.
-    if (!ReadAt(buf, eh.e_phoff + i * sizeof(Elf64_Phdr), &ph))
+    if (!ReadAt(file, eh.e_phoff + i * sizeof(Elf64_Phdr), &ph))
       return needed;
     phdrs.push_back(ph);
   }
@@ -161,7 +188,7 @@ std::vector<std::string> ReadNeededSonames(const fs::path &library) {
   // The dynamic segment must be in the file as well.
   std::uint64_t dyn_end = 0;
   if (!AddChecked(dyn_ph->p_offset, dyn_ph->p_filesz, &dyn_end) ||
-      dyn_end > buf.size()) {
+      dyn_end > file.Size()) {
     return needed;
   }
 
@@ -172,7 +199,7 @@ std::vector<std::string> ReadNeededSonames(const fs::path &library) {
   for (std::uint64_t i = 0; i < dyn_count; ++i) {
     Elf64_Dyn d{};
     // The segment fits, so this sum stays inside it and cannot wrap.
-    if (!ReadAt(buf, dyn_ph->p_offset + i * sizeof(Elf64_Dyn), &d))
+    if (!ReadAt(file, dyn_ph->p_offset + i * sizeof(Elf64_Dyn), &d))
       return needed;
     if (d.d_tag == DT_NULL)
       break;
@@ -190,14 +217,10 @@ std::vector<std::string> ReadNeededSonames(const fs::path &library) {
 
   for (const auto n : needed_offsets) {
     std::uint64_t at = 0;
-    if (!AddChecked(strtab_off, n, &at) || at >= buf.size())
+    std::string soname;
+    if (!AddChecked(strtab_off, n, &at) || !file.ReadName(at, &soname))
       continue;
-    const char *s = buf.data() + static_cast<size_t>(at);
-    const size_t max = buf.size() - static_cast<size_t>(at);
-    const size_t len = ::strnlen(s, max);
-    if (len == 0 || len == max)
-      continue;
-    needed.emplace_back(s, len);
+    needed.push_back(std::move(soname));
   }
   return needed;
 }
