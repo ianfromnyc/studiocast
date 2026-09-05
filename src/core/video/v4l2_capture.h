@@ -65,10 +65,22 @@ struct CaptureFormat {
 // packed row size, and `size_image` is raised to the row size times the
 // height. Compressed MJPEG has no row size, so both values stay as reported.
 //
+// A report whose own rows do not fit its own frame size is refused, because
+// the read path would then walk past the end of the mapped buffer.
+//
 // Exposed for tests; `V4l2Capture::Open()` is the only other caller.
 bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
                            int fps_num, int fps_den, CaptureFormat *out,
                            std::string *outErr);
+
+// True when a buffer VIDIOC_QUERYBUF reported is long enough to hold the frame
+// `fmt` describes. The read path walks `fmt.size_image` bytes of the mapping,
+// so a shorter buffer is a read past the end of it. This is the length the
+// walk must stay inside, and negotiation alone cannot know it.
+//
+// Exposed for tests; `V4l2Capture::Open()` is the only other caller.
+bool CaptureBufferHoldsFrame(std::size_t mapped_length,
+                             const CaptureFormat &fmt, std::string *outErr);
 
 struct CapturedFrameView {
   const std::uint8_t *data = nullptr;

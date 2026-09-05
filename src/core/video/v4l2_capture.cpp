@@ -627,6 +627,22 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
     a.bytes_per_line = bpl;
     a.size_image = size;
   } else {
+    const std::size_t rows =
+        a.height > 0 ? static_cast<std::size_t>(a.height) : 0u;
+
+    // The driver's own report must hold together: the rows it says the frame
+    // has must fit in the frame size it says the buffer holds. Raising
+    // `size_image` to match the stride only hides the disagreement, and the
+    // read path then walks a frame longer than the buffer the driver sized,
+    // which is a read past the end of the mapping on every frame.
+    if (bpl * rows > size) {
+      if (outErr)
+        *outErr = "Driver reported bytesperline=" + std::to_string(bpl) +
+                  " for " + std::to_string(a.height) +
+                  " rows, which does not fit sizeimage=" + std::to_string(size);
+      return false;
+    }
+
     // Keep the stride the driver laid the frame out with. Raising it above
     // the driver's value does not make the row longer, it only makes the read
     // path walk the frame at a stride the data does not use. Only a row too
@@ -636,7 +652,11 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
       bpl = packedBpl;
     a.bytes_per_line = bpl;
 
-    const std::size_t minSize = bpl * static_cast<std::size_t>(a.height);
+    // A raised stride is the one case where the walk is not the driver's own
+    // layout, so the frame size follows it. `V4l2Capture::Open()` then checks
+    // the mapped buffer against this value, which is the length the walk must
+    // stay inside.
+    const std::size_t minSize = bpl * rows;
     if (size < minSize)
       size = minSize;
     a.size_image = size;
@@ -644,6 +664,18 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
 
   *out = a;
   return true;
+}
+
+bool CaptureBufferHoldsFrame(std::size_t mapped_length,
+                             const CaptureFormat &fmt, std::string *outErr) {
+  if (mapped_length >= fmt.size_image)
+    return true;
+
+  if (outErr)
+    *outErr = "Driver mapped a capture buffer of " +
+              std::to_string(mapped_length) + " bytes for a frame of " +
+              std::to_string(fmt.size_image) + " bytes";
+  return false;
 }
 
 bool ShouldPreferMjpegForResolution(int width, int height) {
@@ -997,6 +1029,16 @@ bool V4l2Capture::Open(const std::string &device, int width, int height,
         return false;
       }
 
+      // The mapping is the only place the negotiated frame size has to fit.
+      std::string lenErr;
+      if (!CaptureBufferHoldsFrame(static_cast<std::size_t>(b.length), actual_,
+                                   &lenErr)) {
+        if (error)
+          *error = lenErr;
+        Close();
+        return false;
+      }
+
       void *start = ::mmap(nullptr, static_cast<std::size_t>(b.length),
                            PROT_READ | PROT_WRITE, MAP_SHARED, fd_,
                            static_cast<off_t>(b.m.offset));
@@ -1037,6 +1079,15 @@ bool V4l2Capture::Open(const std::string &device, int width, int height,
 
       const std::size_t len = static_cast<std::size_t>(planes[0].length);
       const off_t off = static_cast<off_t>(planes[0].m.mem_offset);
+
+      // The mapping is the only place the negotiated frame size has to fit.
+      std::string lenErr;
+      if (!CaptureBufferHoldsFrame(len, actual_, &lenErr)) {
+        if (error)
+          *error = lenErr + " (mplane)";
+        Close();
+        return false;
+      }
 
       void *start =
           ::mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, off);

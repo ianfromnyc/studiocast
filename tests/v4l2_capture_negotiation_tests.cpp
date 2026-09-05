@@ -6,6 +6,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <linux/videodev2.h>
@@ -250,6 +251,107 @@ bool TestCaptureNegotiationKeepsTheDriverRowStride() {
   return true;
 }
 
+struct BadRowLayoutCase {
+  const char *name;
+  std::uint32_t fourcc;
+  int width;
+  int height;
+
+  // What the driver reported after VIDIOC_S_FMT.
+  std::uint32_t driver_bytesperline;
+  std::uint32_t driver_sizeimage;
+};
+
+// A driver that reports more rows than its own frame size holds is out of the
+// V4L2 contract. Raising `size_image` to match the stride hides that: the read
+// path then walks a frame longer than the buffer the driver sized, which is a
+// read past the end of the mapping on every frame. Refuse the report instead.
+bool TestCaptureNegotiationRefusesRowsTheFrameSizeCannotHold() {
+  using studiocast::video::CaptureFormat;
+  using studiocast::video::ParseChosenCaptureFmt;
+
+  const BadRowLayoutCase cases[] = {
+      {"padded YUYV rows overrun the reported frame", V4L2_PIX_FMT_YUYV, 640,
+       480, 1536, 614400},
+      {"odd YUYV rows overrun the reported frame", V4L2_PIX_FMT_YUYV, 3, 4, 6,
+       16},
+      {"RGB24 rows overrun the reported frame", V4L2_PIX_FMT_RGB24, 640, 480,
+       1920, 614400},
+      {"a stride with no frame size at all", V4L2_PIX_FMT_YUYV, 640, 480, 1280,
+       0},
+  };
+
+  for (const BadRowLayoutCase &c : cases) {
+    v4l2_format f{};
+    f.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    f.fmt.pix.width = static_cast<__u32>(c.width);
+    f.fmt.pix.height = static_cast<__u32>(c.height);
+    f.fmt.pix.pixelformat = c.fourcc;
+    f.fmt.pix.bytesperline = c.driver_bytesperline;
+    f.fmt.pix.sizeimage = c.driver_sizeimage;
+
+    CaptureFormat got{};
+    std::string err;
+    if (!Expect(!ParseChosenCaptureFmt(f, /*mplane=*/false, /*fps=*/30,
+                                       /*fps_num=*/1, /*fps_den=*/30, &got,
+                                       &err),
+                "a frame size the rows overrun must fail negotiation")) {
+      std::cerr << "  case " << c.name << ": got bytes_per_line "
+                << got.bytes_per_line << ", size_image " << got.size_image
+                << "\n";
+      return false;
+    }
+
+    if (!Expect(!err.empty(), "the refusal must name the reason")) {
+      std::cerr << "  case " << c.name << "\n";
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// `size_image` is the length the read path walks, and the mapped buffer is
+// the only place that length has to fit. A driver that reports a row size
+// below the packed row leaves the negotiated frame larger than the frame the
+// driver sized, so the buffer it maps is the value that decides.
+bool TestCaptureBufferMustHoldTheNegotiatedFrame() {
+  using studiocast::video::CaptureBufferHoldsFrame;
+  using studiocast::video::CaptureFormat;
+
+  CaptureFormat fmt;
+  fmt.width = 3;
+  fmt.height = 4;
+  fmt.format = CapturePixelFormat::yuyv;
+  fmt.bytes_per_line = 6;
+  fmt.size_image = 24;
+
+  std::string err;
+  if (!Expect(CaptureBufferHoldsFrame(24u, fmt, &err),
+              "a buffer exactly the frame size must be accepted"))
+    return false;
+
+  if (!Expect(CaptureBufferHoldsFrame(4096u, fmt, &err),
+              "a buffer longer than the frame must be accepted"))
+    return false;
+
+  // The driver reported bytesperline=4, sizeimage=16 for this 3x4 YUYV frame,
+  // so negotiation raised the stride to the packed row and the frame to 24.
+  // The buffer the driver mapped still holds only 16 bytes.
+  err.clear();
+  if (!Expect(!CaptureBufferHoldsFrame(16u, fmt, &err),
+              "a buffer shorter than the frame must be refused"))
+    return false;
+
+  if (!Expect(!err.empty(), "the refusal must name the reason"))
+    return false;
+
+  return Expect(!CaptureBufferHoldsFrame(0u, fmt, nullptr),
+                "an empty buffer must be refused") &&
+         Expect(CaptureBufferHoldsFrame(0u, CaptureFormat{}, nullptr),
+                "a frame of no bytes must not refuse an empty buffer");
+}
+
 } // namespace
 
 bool TestV4l2CapturePreferenceTreats720pAsMjpegWorthy() {
@@ -286,6 +388,14 @@ bool TestV4l2MjpegDecodeFailureFallsBackToRawOnce() {
 
 bool TestV4l2CaptureNegotiationKeepsTheDriverRowStride() {
   return TestCaptureNegotiationKeepsTheDriverRowStride();
+}
+
+bool TestV4l2CaptureNegotiationRefusesRowsTheFrameSizeCannotHold() {
+  return TestCaptureNegotiationRefusesRowsTheFrameSizeCannotHold();
+}
+
+bool TestV4l2CaptureBufferMustHoldTheNegotiatedFrame() {
+  return TestCaptureBufferMustHoldTheNegotiatedFrame();
 }
 
 } // namespace studiocast::tests
