@@ -39,8 +39,9 @@ Options:
                           runs inside a container.
   --container[=IMAGE]     Run the install test inside a podman (or docker)
                           container. Implies --install-test.
-  --image IMAGE           Container image for the install test. Overrides the
-                          default and \$STUDIOCAST_RPM_IMAGE.
+  --image IMAGE           Container image for the install test. Implies
+                          --container, and overrides the default and
+                          \$STUDIOCAST_RPM_IMAGE.
   --help                  Show this help.
 
 Checks:
@@ -231,6 +232,10 @@ parse_args() {
         ;;
       --image)
         [[ $# -ge 2 ]] || die "--image requires an image name"
+        # The image is only used by the container install test, so imply
+        # --container as --container=IMAGE does.
+        USE_CONTAINER=1
+        INSTALL_TEST=1
         IMAGE="$2"
         IMAGE_EXPLICIT=1
         shift 2

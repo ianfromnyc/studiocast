@@ -58,8 +58,8 @@ Options:
                             and the expected %{dist} tag. Default: ${FEDORA_RELEASE}
   --container[=IMAGE]       Run rpmbuild inside a podman (or docker) container.
                             Use this on a host that is not Fedora ${FEDORA_RELEASE}.
-  --image IMAGE             Container image to use. Overrides the default and
-                            \$STUDIOCAST_RPM_IMAGE.
+  --image IMAGE             Container image to use. Implies --container, and
+                            overrides the default and \$STUDIOCAST_RPM_IMAGE.
   --install-builddeps       Install the spec BuildRequires with dnf builddep
                             before the build. Needs root, or sudo. Container
                             mode installs them by itself, so this option is
@@ -180,6 +180,9 @@ parse_args() {
         ;;
       --image)
         [[ $# -ge 2 ]] || die "--image requires an image name"
+        # An image is only used in container mode, and a caller who names one
+        # means to use it, so imply --container as --container=IMAGE does.
+        USE_CONTAINER=1
         IMAGE="$2"
         IMAGE_EXPLICIT=1
         shift 2
