@@ -499,12 +499,16 @@ collect_artifacts() {
     return 0
   fi
 
+  # Only this version. A tree that kept an older build would otherwise put
+  # those packages in dist/ and in the checksum file, and the verify script
+  # then fails on a package that this run never made. The pattern also covers
+  # studiocast-debuginfo and studiocast-debugsource.
   local -a artifacts=()
   local path
   while IFS= read -r path; do
     artifacts+=("${path}")
-  done < <(find "${TOPDIR}/SRPMS" "${TOPDIR}/RPMS" -type f -name '*.rpm' -print |
-    sort)
+  done < <(find "${TOPDIR}/SRPMS" "${TOPDIR}/RPMS" -type f \
+    -name "studiocast-*${VERSION}-*.rpm" -print | sort)
 
   [[ ${#artifacts[@]} -gt 0 ]] ||
     die "rpmbuild produced no packages under ${TOPDIR}"
@@ -537,7 +541,8 @@ report_artifacts() {
         log "  WARNING: unexpected dist tag; expected .fc${FEDORA_RELEASE}"
         ;;
     esac
-  done < <(find "${DIST_DIR}" -maxdepth 1 -type f -name '*.rpm' -print | sort)
+  done < <(find "${DIST_DIR}" -maxdepth 1 -type f \
+    -name "studiocast-*${VERSION}-*.rpm" -print | sort)
   log "  ${CHECKSUM_FILE}"
 }
 
