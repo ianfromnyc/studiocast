@@ -120,8 +120,37 @@ test_pinning_a_root_that_looks_like_a_pattern() {
   fi
 }
 
+# docs/maxine_install.md says a dry run writes nothing. The script must
+# therefore make no directory of its own under --base or --cache-dir. This
+# runs with no key, so it stops at the refusal and reaches no network.
+test_a_dry_run_makes_no_directory() {
+  local base="${SANDBOX}/dry/base"
+  local cache="${SANDBOX}/dry/cache"
+  rm -rf "${SANDBOX}/dry"
+
+  local out
+  out="$(NGC_API_KEY="" NGC_CLI_API_KEY="" SC_NGC_API_KEY="" \
+    bash "${MAXINE_SH}" --base "${base}" --cache-dir "${cache}" \
+    --download vfx --dry-run 2>&1)"
+
+  if [[ "${out}" != *"needs an NGC API key"* ]]; then
+    t_fail "expected the no-key refusal, got: ${out}"
+  else
+    t_pass "a dry run without a key refuses and says why"
+  fi
+
+  local made
+  made="$(find "${SANDBOX}/dry" 2>/dev/null | sort)"
+  if [[ -n "${made}" ]]; then
+    t_fail "a dry run made directories: ${made}"
+  else
+    t_pass "a dry run makes no directory"
+  fi
+}
+
 test_pinning_a_root_with_special_characters
 test_pinning_a_root_that_looks_like_a_pattern
+test_a_dry_run_makes_no_directory
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2

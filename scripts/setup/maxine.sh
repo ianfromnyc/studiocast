@@ -40,6 +40,15 @@ sc_ngc_err() {
   err "$@"
 }
 
+# mkdir -p, unless this is a dry run.
+#
+# docs/maxine_install.md says that a dry run writes nothing, so every
+# directory this script would make goes through here.
+ensure_dir() {
+  [[ "${DRY_RUN}" -ne 1 ]] || return 0
+  mkdir -p "$1"
+}
+
 # shellcheck source=scripts/_lib/ngc.sh
 source "${REPO_ROOT}/scripts/_lib/ngc.sh"
 
@@ -422,7 +431,7 @@ if [[ -n "${LIST_VERSIONS_COMPONENT}" ]]; then
   exit 0
 fi
 
-mkdir -p "$BASE"
+ensure_dir "$BASE"
 
 VFX_ROOT="${BASE}/VideoFX"
 AR_ROOT="${BASE}/ARSDK"
@@ -781,7 +790,7 @@ rest_download_afx_features() {
   pattern="$(feature_version_pattern afx)"
 
   log "AFX: downloading feature packs for sm${sm}: ${effects}"
-  mkdir -p "${features_dir}"
+  ensure_dir "${features_dir}"
 
   local -a wanted=()
   IFS=',' read -r -a wanted <<< "${effects}"
@@ -816,9 +825,14 @@ rest_download_afx_features() {
     fi
 
     log "AFX ${entry}: library ${libver}, models ${modelver}"
-    mkdir -p "${dir}"
+    ensure_dir "${dir}"
 
-    tmp="$(mktemp -d)"
+    # A dry run makes no staging directory; it only needs a name to print.
+    if [[ "${DRY_RUN}" -eq 1 ]]; then
+      tmp="${CACHE_DIR}/would-stage/${model}-${libver}"
+    else
+      tmp="$(mktemp -d)"
+    fi
     if ! sc_ngc_download_model_version "${model}" "${libver}" "${tmp}"; then
       rm -rf "${tmp}"
       return 2
@@ -831,7 +845,7 @@ rest_download_afx_features() {
     rm -rf "${tmp}"
 
     mdir="${dir}/models/sm_${sm}"
-    mkdir -p "${mdir}"
+    ensure_dir "${mdir}"
     sc_ngc_download_model_version "${model}" "${modelver}" "${mdir}" || return 2
 
     # The SDK links every model to a name without the trailing size, because
@@ -910,7 +924,7 @@ rest_download_sdk_features() {
   fi
 
   log "${label}: downloading feature packs for sm${sm}: ${models[*]}"
-  mkdir -p "${features_dir}"
+  ensure_dir "${features_dir}"
 
   # A feature can need another feature. The list grows while it is walked, so
   # that a narrowed list still gets everything it needs.
@@ -928,7 +942,12 @@ rest_download_sdk_features() {
     log "${label} ${name}: library ${libver:-none}, models ${modelver:-none}"
 
     if [[ -n "${libver}" ]]; then
-      tmp="$(mktemp -d)"
+      # A dry run makes no staging directory; it only needs a name to print.
+      if [[ "${DRY_RUN}" -eq 1 ]]; then
+        tmp="${CACHE_DIR}/would-stage/${name}-${libver}"
+      else
+        tmp="$(mktemp -d)"
+      fi
       if ! sc_ngc_download_model_version "${name}" "${libver}" "${tmp}"; then
         rm -rf "${tmp}"
         return 2
@@ -943,7 +962,7 @@ rest_download_sdk_features() {
     fi
 
     if [[ -n "${modelver}" ]]; then
-      mkdir -p "${models_dir}"
+      ensure_dir "${models_dir}"
       sc_ngc_download_model_version "${name}" "${modelver}" "${models_dir}" || return 2
     fi
   done
