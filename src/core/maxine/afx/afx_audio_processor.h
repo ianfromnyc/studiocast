@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <limits>
 #include <string>
 
 #include "core/audio/audio_processor.h"
@@ -29,14 +28,17 @@ public:
       return false;
     }
 
-    const std::uint64_t samples64 = static_cast<std::uint64_t>(frames) *
-                                    static_cast<std::uint64_t>(channels);
-    if (samples64 > std::numeric_limits<std::uint32_t>::max()) {
-      if (error)
-        *error = "frame is too large";
+    // AfxEffect runs one channel, and Configure and Run both refuse anything
+    // else, so the sample count it takes is the frame count. Interleaved
+    // stereo would need one call per channel over de-interleaved buffers.
+    if (channels != 1) {
+      if (error) {
+        *error = "AFX effects run 1 channel; the pipeline gave " +
+                 std::to_string(channels) + ".";
+      }
       return false;
     }
-    if (!effect_->Run(in, out, static_cast<std::uint32_t>(samples64), error)) {
+    if (!effect_->Run(in, out, frames, error)) {
       return false;
     }
 

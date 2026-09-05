@@ -753,6 +753,21 @@ bool AfxEffect::Run(const float *input, float *output,
     return false;
   }
 
+  // Load handed the SDK cfg_.frame_samples as num_samples_per_input_frame, so
+  // the effect reads and writes exactly that many samples per channel. A
+  // different count here would make it run past the buffers, or leave part of
+  // them untouched. Say which counts disagree instead of leaving it to the
+  // SDK's return status.
+  if (num_samples != cfg_.frame_samples) {
+    if (error_out) {
+      std::ostringstream oss;
+      oss << "AFX Run received " << num_samples << " samples; the effect was "
+          << "loaded for " << cfg_.frame_samples << " per frame.";
+      *error_out = oss.str();
+    }
+    return false;
+  }
+
   // The SDK takes an array of channel pointers. StudioCast runs the AFX
   // effects with one channel; a stereo caller splits the channels itself.
   const float *in_channels[1] = {input};

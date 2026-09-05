@@ -884,6 +884,21 @@ bool TestRunPassesChannelPointers() {
                 "expected 480 samples per channel");
   ok &= Require(fake_afx::g_run_channels == 1, "expected one channel");
 
+  // Load told the SDK how many samples a frame holds. A different count here
+  // must be refused before the SDK sees it, with a message that names both.
+  fake_afx::g_run_samples = 0;
+  err.clear();
+  std::vector<float> short_in(240, 0.25f);
+  std::vector<float> short_out(240, 0.0f);
+  const bool short_ran =
+      fx.Run(short_in.data(), short_out.data(), 240, &err);
+  ok &= Require(!short_ran, "expected a wrong sample count to be refused");
+  ok &= Require(err.find("240") != std::string::npos &&
+                    err.find("480") != std::string::npos,
+                "expected the error to name both counts, got: " + err);
+  ok &= Require(fake_afx::g_run_samples == 0,
+                "expected the SDK not to be called with a wrong count");
+
   fs::remove_all(root, ec);
   return ok;
 }
