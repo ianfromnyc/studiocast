@@ -73,17 +73,31 @@ if [[ -n "${config}" && -r "${config}" ]]; then
   done < "${config}"
 fi
 
-if [[ "${url}" == *"/token?"* ]]; then
+# ${NGC_STUB_STATUS} answers with an HTTP status other than 200, for the
+# checks of the message that each status produces.
+status="${NGC_STUB_STATUS:-200}"
+
+if [[ "${status}" != 200 ]]; then
+  [[ -z "${out}" ]] || : > "${out}"
+elif [[ "${url}" == *"/token?"* ]]; then
   [[ -z "${out}" ]] || printf '{"token": "stub-jwt"}' > "${out}"
 elif [[ "${url}" == */files || "${url}" == */files\?* ]]; then
-  [[ -z "${out}" ]] || cat "${NGC_STUB_LISTING:-/dev/null}" > "${out}"
+  # Page N of a listing comes from "${NGC_STUB_LISTING}.pageN" when that file
+  # is there, so a check can serve more than one page.
+  listing="${NGC_STUB_LISTING:-/dev/null}"
+  if [[ "${url}" == *page-number=* ]]; then
+    page="${url##*page-number=}"
+    page="${page%%&*}"
+    [[ ! -f "${listing}.page${page}" ]] || listing="${listing}.page${page}"
+  fi
+  [[ -z "${out}" ]] || cat "${listing}" > "${out}"
 elif [[ "${url}" == *.md5 ]]; then
   [[ -z "${out}" ]] || printf '%s  payload\n' "${NGC_STUB_MD5:-}" > "${out}"
 else
   [[ -z "${out}" ]] || printf 'stub payload\n' > "${out}"
 fi
 
-[[ "${write_out}" -eq 0 ]] || printf '200'
+[[ "${write_out}" -eq 0 ]] || printf '%s' "${status}"
 exit 0
 STUB
 chmod +x "${STUB_BIN}/curl"
@@ -621,8 +635,129 @@ test_a_size_only_check_is_named_a_size_check() {
   fi
 }
 
+# NGC answers a long file list one page at a time. The helper must walk every
+# page and join them, and must drop a repeat, because an API that ignores the
+# page number would otherwise serve page 0 forever.
+test_a_file_list_walks_every_page() {
+  local listing="${SANDBOX}/paged.json"
+  cat > "${listing}" <<'JSON'
+{
+  "modelFiles": [{"path": "first.trtpkg", "sizeInBytes": 1}],
+  "paginationInfo": {"totalPages": 2}
+}
+JSON
+  cat > "${listing}.page1" <<'JSON'
+{
+  "modelFiles": [
+    {"path": "first.trtpkg", "sizeInBytes": 1},
+    {"path": "second.trtpkg", "sizeInBytes": 2}
+  ],
+  "paginationInfo": {"totalPages": 2}
+}
+JSON
+
+  local child="${SANDBOX}/paged-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+unset NGC_API_KEY NGC_CLI_API_KEY
+sc_ngc_log() { :; }
+sc_ngc_err() { :; }
+# shellcheck source=/dev/null
+source "$1"
+export SC_NGC_API_KEY="$2"
+export SC_NGC_AUTHN_HOST="https://authn.invalid"
+export SC_NGC_HOST="https://api.invalid"
+export SC_NGC_RETRIES=1
+sc_ngc_list_model_files test-model 1.0
+CHILD
+
+  local log="${SANDBOX}/paged.log"
+  : > "${log}"
+  local out
+  out="$(NGC_CURL_LOG="${log}" NGC_STUB_LISTING="${listing}" \
+    bash "${child}" "${NGC_LIB}" "${MODERN_KEY}" 2>/dev/null)"
+
+  if ! grep -q 'page-number=1' "${log}"; then
+    t_fail "the listing did not ask for the second page"
+  else
+    t_pass "the listing asks for every page"
+  fi
+
+  if [[ "${out}" != *first.trtpkg* || "${out}" != *second.trtpkg* ]]; then
+    t_fail "the listing lost a file: ${out}"
+  else
+    t_pass "the listing holds the files of both pages"
+  fi
+
+  local first_count
+  first_count="$(grep -c '^first\.trtpkg' <<< "${out}")"
+  if [[ "${first_count}" != "1" ]]; then
+    t_fail "a repeated file was listed ${first_count} times: ${out}"
+  else
+    t_pass "a file that both pages hold is listed once"
+  fi
+}
+
+# Every HTTP status NGC answers with must turn into a line the user can act
+# on, not a bare number.
+test_each_refusal_is_explained() {
+  local child="${SANDBOX}/status-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+unset NGC_API_KEY NGC_CLI_API_KEY
+# shellcheck source=/dev/null
+source "$1"
+export SC_NGC_API_KEY="$2"
+export SC_NGC_AUTHN_HOST="https://authn.invalid"
+export SC_NGC_HOST="https://api.invalid"
+export SC_NGC_RETRIES=1
+SC_NGC_ALT_RESOURCES=("other_resource_name")
+sc_ngc_list_model_files test-model 1.0
+echo "RC=$?"
+CHILD
+
+  local status want
+  # The word each message must hold, per status.
+  for status in 401 402 403 404; do
+    case "${status}" in
+      401) want="API key" ;;
+      402) want="entitlement" ;;
+      403) want="refused" ;;
+      404) want="no such resource" ;;
+    esac
+
+    local out
+    out="$(NGC_CURL_LOG="${SANDBOX}/status.log" NGC_STUB_STATUS="${status}" \
+      bash "${child}" "${NGC_LIB}" "${MODERN_KEY}" 2>&1)"
+
+    if [[ "${out}" != *"RC=2"* ]]; then
+      t_fail "HTTP ${status} should end the listing with 2: ${out}"
+    else
+      t_pass "HTTP ${status} ends the listing with 2"
+    fi
+
+    if [[ "${out}" != *"${want}"* ]]; then
+      t_fail "HTTP ${status} did not explain itself ('${want}'): ${out}"
+    else
+      t_pass "HTTP ${status} is explained"
+    fi
+  done
+
+  # 402 and 403 also list the other names the caller knows for the component.
+  local alt
+  alt="$(NGC_CURL_LOG="${SANDBOX}/status.log" NGC_STUB_STATUS=402 \
+    bash "${child}" "${NGC_LIB}" "${MODERN_KEY}" 2>&1)"
+  if [[ "${alt}" != *other_resource_name* ]]; then
+    t_fail "HTTP 402 did not list the alternate names: ${alt}"
+  else
+    t_pass "HTTP 402 lists the alternate names"
+  fi
+}
+
 test_a_first_call_download_sets_the_token
 test_a_first_call_download_exchanges_an_older_key
+test_a_file_list_walks_every_page
+test_each_refusal_is_explained
 test_no_key_is_reported
 test_a_nested_md5_is_verified_and_removed
 test_a_nested_md5_mismatch_fails
