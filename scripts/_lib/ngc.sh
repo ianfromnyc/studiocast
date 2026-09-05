@@ -78,7 +78,7 @@ fi
 # download.
 _SC_NGC_TOOLS=(
   curl python3
-  awk cut dirname head md5sum mktemp sha256sum stat tail
+  awk cut dirname head md5sum mktemp realpath sha256sum stat tail
   find
 )
 
@@ -492,6 +492,61 @@ sc_ngc_list_model_files() {
   sc_ngc_list_kind_files models "$1" "$2"
 }
 
+# Join a destination directory with one file path that NGC reported.
+#
+# The path comes from the answer of a server, and it goes straight into a local
+# file name. A path that is absolute, or that holds a ".." component, would put
+# the file outside the destination directory and overwrite whatever is there.
+# A path with a tab or a newline also breaks the tab separated listing that
+# carried it. All of those are refused here, before anything is created.
+#
+# Prints the joined path. Returns 2 and says why when the path is not usable.
+#
+# Arguments: <dest dir> <path from the listing>
+sc_ngc_safe_dest() {
+  local destdir="$1"
+  local path="$2"
+  local dest real_dest real_base
+
+  if [[ -z "${path}" ]]; then
+    sc_ngc_err "the file list holds an empty path. Refusing it."
+    return 2
+  fi
+
+  if [[ "${path}" == /* ]]; then
+    sc_ngc_err "the file list holds an absolute path: '${path}'. Refusing it."
+    return 2
+  fi
+
+  if [[ "${path}" == *$'\t'* || "${path}" == *$'\n'* ]]; then
+    sc_ngc_err "the file list holds a path with a tab or a newline. Refusing it."
+    return 2
+  fi
+
+  # The slashes on both ends make this test whole components, so a name such
+  # as "..config" is kept and "a/../b" is not.
+  case "/${path}/" in
+    */../*)
+      sc_ngc_err "the file list holds a path that leaves the destination: '${path}'. Refusing it."
+      return 2
+      ;;
+  esac
+
+  dest="${destdir}/${path}"
+
+  # A symlink in the destination, or a name this check did not think of, could
+  # still lead out. Compare the resolved paths as well. -m works on names that
+  # are not there yet, which is the normal case before a download.
+  real_base="$(realpath -m -- "${destdir}")" || return 2
+  real_dest="$(realpath -m -- "${dest}")" || return 2
+  if [[ "${real_dest}" != "${real_base}/"* ]]; then
+    sc_ngc_err "'${path}' would land outside ${destdir}. Refusing it."
+    return 2
+  fi
+
+  printf '%s\n' "${dest}"
+}
+
 # True when a file is present with the expected size and hash.
 sc_ngc_file_is_verified() {
   local path="$1"
@@ -627,7 +682,7 @@ sc_ngc_download_model_version() {
 
   while IFS=$'\t' read -r path size sha; do
     [[ -n "${path}" ]] || continue
-    dest="${destdir}/${path}"
+    dest="$(sc_ngc_safe_dest "${destdir}" "${path}")" || return 2
     sc_ngc_download_model_file "${model}" "${version}" "${path}" "${dest}" "${sha}" "${size}" || return 2
   done <<< "${listing}"
 

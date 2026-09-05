@@ -656,7 +656,7 @@ download_component() {
   dir="${CACHE_DIR}/${resource}/${version}"
   while IFS=$'\t' read -r path size sha; do
     [[ -n "${path}" ]] || continue
-    dest="${dir}/${path}"
+    dest="$(sc_ngc_safe_dest "${dir}" "${path}")" || return 2
     sc_ngc_download_file "${resource}" "${version}" "${path}" "${dest}" "${sha}" "${size}" || return 2
     case "${path}" in
       *.tar.gz|*.tgz|*.tar|*.tar.xz|*.tar.bz2|*.tar.zst)
