@@ -713,6 +713,9 @@ void VirtualAudioService::ThreadMain() {
   int monitorAttemptLatencyMs = 0;
   steady_clock::time_point nextMonitorStopRetry{};
   steady_clock::time_point nextMonitorVolumeRetry{};
+  // True while the reported error belongs to a failed volume step. A later
+  // step that works clears that error, and only that one.
+  bool monitorVolumeFailed = false;
   steady_clock::time_point nextMonitorVerify{};
   std::string speakerLoopbackStopRetryError;
   std::string speakerDestroyRetryError;
@@ -1254,6 +1257,9 @@ void VirtualAudioService::ThreadMain() {
       const bool monitorRanWhenConsumersWereCounted = monitor_running_;
 
       auto setMonitorError = [&](std::string msg) {
+        // Any other write owns the reported error from here on, so a later
+        // volume step must not clear it.
+        monitorVolumeFailed = false;
         std::lock_guard<std::mutex> lock(mu_);
         st_.monitor_last_error = std::move(msg);
       };
@@ -1302,6 +1308,11 @@ void VirtualAudioService::ThreadMain() {
             nextMonitorStopRetry = monitorNow + StartFailureRetryDelay(cfg);
             setMonitorError("Failed to stop the microphone monitor: " + err);
           }
+        } else if (!monitor_running_ && !monitor_route_may_exist_) {
+          // Nothing plays and nothing is wanted, so an older failure, a failed
+          // start included, is history. Keeping it would tell the user for
+          // ever that a monitor they turned off needs attention.
+          setMonitorError(std::string());
         }
         nextMonitorStartRetry = steady_clock::time_point{};
         monitorStartFailures = 0;
@@ -1383,10 +1394,15 @@ void VirtualAudioService::ThreadMain() {
                                        &volumeErr)) {
             monitor_volume_ = monitorCfg.volume;
             nextMonitorVolumeRetry = steady_clock::time_point{};
+            if (monitorVolumeFailed) {
+              monitorVolumeFailed = false;
+              setMonitorError(std::string());
+            }
           } else {
             nextMonitorVolumeRetry = monitorNow + StartFailureRetryDelay(cfg);
             setMonitorError("Failed to set the microphone monitor volume: " +
                             volumeErr);
+            monitorVolumeFailed = true;
           }
         }
 
@@ -1418,6 +1434,7 @@ void VirtualAudioService::ThreadMain() {
             nextMonitorStartRetry = steady_clock::time_point{};
             nextMonitorVolumeRetry = steady_clock::time_point{};
             nextMonitorVerify = monitorNow + seconds(2);
+            monitorVolumeFailed = false;
             {
               std::lock_guard<std::mutex> lock(mu_);
               st_.monitor_active = true;

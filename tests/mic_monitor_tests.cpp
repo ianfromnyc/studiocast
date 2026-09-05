@@ -367,6 +367,7 @@ struct MonitorRecorder {
   std::atomic<bool> running{false};
   std::atomic<bool> fail_start{false};
   std::atomic<bool> fail_stop{false};
+  std::atomic<bool> fail_volume{false};
   std::atomic<bool> fail_detect{false};
   std::mutex mu;
   std::string last_sink;
@@ -419,6 +420,11 @@ void HookMonitor(VirtualAudioServiceHooks *hooks, MonitorRecorder *rec) {
   };
   hooks->set_mic_monitor_volume = [rec](int, int volume, std::string *error) {
     rec->volume_calls.fetch_add(1, std::memory_order_relaxed);
+    if (rec->fail_volume.load(std::memory_order_relaxed)) {
+      if (error)
+        *error = "synthetic monitor volume failure";
+      return false;
+    }
     {
       std::lock_guard<std::mutex> lock(rec->mu);
       rec->last_volume = volume;
@@ -645,6 +651,110 @@ bool TestServiceRetriesMonitorAndReportsError() {
   }
   return rec.starts.load(std::memory_order_relaxed) >
          starts_after_first_failure;
+}
+
+// A user who reacts to a failed start by turning the monitor off must not be
+// told for ever that the monitor needs attention. A monitor that is not wanted
+// and has no route left to remove reports nothing.
+bool TestServiceClearsAStartFailureWhenTheMonitorIsTurnedOff() {
+  MonitorRecorder rec;
+  rec.fail_start.store(true, std::memory_order_relaxed);
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  VirtualAudioService service(std::move(hooks));
+  auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool reported = WaitUntil(
+      [&] {
+        return service.Status().monitor_last_error.find(
+                   "synthetic monitor start failure") != std::string::npos;
+      },
+      1000ms);
+  if (!reported) {
+    std::cerr << "the monitor start failure was not reported\n";
+    service.Stop();
+    return false;
+  }
+
+  cfg.monitor.enabled = false;
+  service.UpdateConfig(cfg);
+
+  const bool cleared = WaitUntil(
+      [&] { return service.Status().monitor_last_error.empty(); }, 1000ms);
+  if (!cleared) {
+    std::cerr << "a start failure survived turning the monitor off: '"
+              << service.Status().monitor_last_error << "'\n";
+    service.Stop();
+    return false;
+  }
+
+  service.Stop();
+  return true;
+}
+
+// A volume step that fails and a later step that works are one control the
+// user moves. The error from the failed step must go when a step succeeds,
+// because the monitor plays and nothing needs attention.
+bool TestServiceClearsAVolumeErrorAfterALaterStepWorks() {
+  MonitorRecorder rec;
+  rec.fail_volume.store(true, std::memory_order_relaxed);
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  VirtualAudioService service(std::move(hooks));
+  auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil([&] { return service.Status().monitor_active; }, 1000ms)) {
+    std::cerr << "the monitor did not start\n";
+    service.Stop();
+    return false;
+  }
+
+  cfg.monitor.volume = 60;
+  service.UpdateConfig(cfg);
+
+  const bool reported = WaitUntil(
+      [&] {
+        return service.Status().monitor_last_error.find(
+                   "synthetic monitor volume failure") != std::string::npos;
+      },
+      1000ms);
+  if (!reported) {
+    std::cerr << "the monitor volume failure was not reported\n";
+    service.Stop();
+    return false;
+  }
+
+  rec.fail_volume.store(false, std::memory_order_relaxed);
+
+  const bool cleared = WaitUntil(
+      [&] { return service.Status().monitor_last_error.empty(); }, 2000ms);
+  if (!cleared) {
+    std::cerr << "a volume error survived a later volume step that worked: '"
+              << service.Status().monitor_last_error << "'\n";
+    service.Stop();
+    return false;
+  }
+
+  service.Stop();
+  return true;
 }
 
 // A stopped service reports no monitor state at all, so the error that the
@@ -1469,6 +1579,10 @@ int main() {
        &TestServiceStopsMonitorWhenServiceStops},
       {"service retries the monitor and reports the error",
        &TestServiceRetriesMonitorAndReportsError},
+      {"service clears a start failure when the monitor is turned off",
+       &TestServiceClearsAStartFailureWhenTheMonitorIsTurnedOff},
+      {"service clears a volume error after a later step works",
+       &TestServiceClearsAVolumeErrorAfterALaterStepWorks},
       {"service clears the monitor error when it stops",
        &TestServiceClearsMonitorErrorWhenItStops},
       {"service treats a failed monitor check as stopped",
