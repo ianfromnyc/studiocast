@@ -77,8 +77,15 @@ public:
   bool Start(const AudioNodeConfig &cfg, std::string *error);
   void Stop();
 
-  // Wakes a blocked Read or Write. Safe to call from another thread.
+  // Wakes a blocked Read or Write and makes every later one fail. Safe to
+  // call from another thread.
+  //
+  // The flag stays set until Start or ClearStopRequest, so a caller that wakes
+  // a node it does not own must put it back with ClearStopRequest.
   void RequestStop();
+
+  // Takes the stop request back, so the node carries samples again.
+  void ClearStopRequest();
 
   // Transfer of exactly `bytes` bytes of interleaved float32.
   //

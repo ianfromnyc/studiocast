@@ -669,6 +669,10 @@ void PipeWireAudioNode::RequestStop() {
   impl_->Wake();
 }
 
+void PipeWireAudioNode::ClearStopRequest() {
+  impl_->stop_requested.store(false, std::memory_order_release);
+}
+
 void PipeWireAudioNode::Flush() {
   if (ProducesSamples(impl_->cfg.role)) {
     // The real-time callback reads this ring, and only the reader may empty

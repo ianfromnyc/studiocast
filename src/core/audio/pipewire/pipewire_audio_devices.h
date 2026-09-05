@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,6 +43,34 @@ std::vector<StalePulseModule> DetectStalePulseDeviceModules(std::string *error);
 // human-readable line for each module that went away.
 bool UnloadStalePulseDeviceModules(std::vector<std::string> *removed,
                                    std::string *error);
+
+namespace internal {
+
+// What the speaker pass-through pump needs from the outside.
+//
+// The pump is written over these hooks, so its rules can be checked without a
+// PipeWire server.
+struct SpeakerLoopbackPumpHooks {
+  // True when the pump must end.
+  std::function<bool()> cancelled;
+
+  // Takes one frame out of the virtual speakers. False when no frame came.
+  std::function<bool()> read_frame;
+
+  // Hands that frame to the route node. False when the node refused it.
+  std::function<bool()> write_frame;
+
+  // Waits about one frame. A call that came back with nothing must not be
+  // repeated at once, or the thread spins on a full core.
+  std::function<void()> backoff;
+};
+
+// Moves frames from the virtual speakers to the route node until `cancelled`
+// says stop. Every step that fails is followed by a wait, because the usual
+// reason for a failure is that nothing plays into the virtual speakers.
+void RunSpeakerLoopbackPump(const SpeakerLoopbackPumpHooks &hooks);
+
+} // namespace internal
 
 // What a process wants from the native device owner.
 //

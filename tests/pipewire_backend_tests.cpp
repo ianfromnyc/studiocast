@@ -12,6 +12,8 @@
 #include <thread>
 #include <vector>
 
+#include <sys/resource.h>
+
 #include "core/audio/pipewire/pipewire_audio_devices.h"
 #include "core/audio/mic_monitor.h"
 #include "core/audio/pulse/pactl.h"
@@ -446,6 +448,62 @@ bool TestLiveWriteToAFullRingReturnsQuickly() {
                     " ms; a full ring must not stall the pipeline thread");
 }
 
+// The pump reads the virtual speakers, and a read comes back with nothing
+// whenever no application plays into them. It must wait before it asks again,
+// or the thread burns a whole core for as long as the route is up.
+bool TestSpeakerLoopbackPumpWaitsAfterAnEmptyRead() {
+  int checks = 0;
+  int reads = 0;
+  int writes = 0;
+  int waits = 0;
+
+  studiocast::audio::pw_backend::internal::SpeakerLoopbackPumpHooks hooks;
+  hooks.cancelled = [&checks] { return ++checks > 3; };
+  hooks.read_frame = [&reads] {
+    ++reads;
+    return false;
+  };
+  hooks.write_frame = [&writes] {
+    ++writes;
+    return true;
+  };
+  hooks.backoff = [&waits] { ++waits; };
+
+  studiocast::audio::pw_backend::internal::RunSpeakerLoopbackPump(hooks);
+
+  return Expect(reads == 3, "the pump should have read on every pass") &&
+         Expect(waits == 3, "a read that found nothing must be followed by a "
+                            "wait, otherwise the pump spins") &&
+         Expect(writes == 0, "the pump must not write a frame it never read");
+}
+
+// A frame that arrived goes straight on, with no wait in between, so the route
+// keeps the latency the node was configured for.
+bool TestSpeakerLoopbackPumpPassesOnTheFrameItRead() {
+  int checks = 0;
+  int reads = 0;
+  int writes = 0;
+  int waits = 0;
+
+  studiocast::audio::pw_backend::internal::SpeakerLoopbackPumpHooks hooks;
+  hooks.cancelled = [&checks] { return ++checks > 3; };
+  hooks.read_frame = [&reads] {
+    ++reads;
+    return true;
+  };
+  hooks.write_frame = [&writes] {
+    ++writes;
+    return true;
+  };
+  hooks.backoff = [&waits] { ++waits; };
+
+  studiocast::audio::pw_backend::internal::RunSpeakerLoopbackPump(hooks);
+
+  return Expect(reads == 3, "the pump should have read on every pass") &&
+         Expect(writes == 3, "every frame that arrived must be written") &&
+         Expect(waits == 0, "a pump that moves frames must not wait");
+}
+
 bool TestPipeWireIoRefusesToOpenWithoutTheVirtualMic() {
   auto io = studiocast::audio::pw_backend::CreatePipeWireAudioIo();
   if (!Expect(io != nullptr, "the PipeWire I/O factory returned nothing"))
@@ -550,6 +608,94 @@ bool TestLiveNativeVirtualMicRoundTrip() {
                 "writing into the virtual microphone failed: " + error) &&
          Expect(consumers.error.empty(),
                 "consumer detection reported an error: " + consumers.error);
+}
+
+// Processor time this process has used, in milliseconds. A pump that spins
+// shows up here and nowhere else.
+long ProcessCpuMs() {
+  struct rusage usage {};
+  if (::getrusage(RUSAGE_SELF, &usage) != 0)
+    return 0;
+  const auto ms = [](const struct timeval &t) {
+    return static_cast<long>(t.tv_sec) * 1000 + t.tv_usec / 1000;
+  };
+  return ms(usage.ru_utime) + ms(usage.ru_stime);
+}
+
+// The virtual speakers belong to the service and outlive every route. A stop
+// and a second start must leave them able to carry samples, and the pump they
+// feed must sit still while no application plays into them.
+bool TestLiveSpeakerLoopbackCycleLeavesTheSpeakersUsable() {
+  if (!LiveServerAvailable("live speaker loopback cycle leaves the speakers "
+                           "usable"))
+    return true;
+
+  ScopedTestDeviceOptions options;
+  auto &devices = studiocast::audio::pw_backend::NativeAudioDevices::Instance();
+  std::string error;
+  if (!Expect(devices.CreateVirtualSpeaker(&error),
+              "creating the native virtual speakers failed: " + error))
+    return false;
+
+  // Nothing plays into the virtual speakers, so a read must wait out its
+  // timeout and say that it timed out. A node that carries a stop request
+  // comes back at once with nothing to say.
+  std::vector<float> frame(480 * 2, 0.0f);
+  const std::size_t bytes = frame.size() * sizeof(float);
+  auto readOnce = [&](std::string *err) {
+    const auto started = std::chrono::steady_clock::now();
+    (void)devices.SpeakerNode()->Read(frame.data(), bytes, err);
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - started)
+        .count();
+  };
+
+  std::string firstError;
+  const auto firstMs = readOnce(&firstError);
+
+  // The route the daemon starts for a pass-through: an empty target sink name
+  // means the default device.
+  bool started = devices.StartSpeakerLoopback("", &error);
+  const std::string firstStartError = error;
+  bool stopped = started && devices.StopSpeakerLoopback(&error);
+  const std::string stopError = error;
+  bool restarted = stopped && devices.StartSpeakerLoopback("", &error);
+  const std::string secondStartError = error;
+
+  // With the route up again and nothing playing, the pump must be waiting,
+  // not asking the node millions of times a second.
+  long cpuMs = 0;
+  if (restarted) {
+    const long before = ProcessCpuMs();
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    cpuMs = ProcessCpuMs() - before;
+  }
+
+  (void)devices.StopSpeakerLoopback(&error);
+
+  std::string secondError;
+  const auto secondMs = readOnce(&secondError);
+
+  (void)devices.DestroyVirtualSpeaker(&error);
+
+  return Expect(started,
+                "starting the speaker route failed: " + firstStartError) &&
+         Expect(stopped, "stopping the speaker route failed: " + stopError) &&
+         Expect(restarted,
+                "starting the speaker route again failed: " +
+                    secondStartError) &&
+         Expect(firstMs >= 100,
+                "a read of an idle node must wait; it took " +
+                    std::to_string(firstMs) + " ms") &&
+         Expect(secondMs >= 100,
+                "a read after a route cycle must still wait; it took " +
+                    std::to_string(secondMs) + " ms") &&
+         Expect(secondError == firstError,
+                "a route cycle changed what a read reports: '" + firstError +
+                    "' became '" + secondError + "'") &&
+         Expect(cpuMs < 100,
+                "the pump used " + std::to_string(cpuMs) +
+                    " ms of processor time in 400 ms; it is spinning");
 }
 
 bool TestServiceTransportFollowsTheConfiguredPreference() {
@@ -1314,10 +1460,16 @@ int main() {
        &TestLiveVirtualSourceAcceptsWrites},
       {"live write to a full ring returns quickly",
        &TestLiveWriteToAFullRingReturnsQuickly},
+      {"speaker loopback pump waits after an empty read",
+       &TestSpeakerLoopbackPumpWaitsAfterAnEmptyRead},
+      {"speaker loopback pump passes on the frame it read",
+       &TestSpeakerLoopbackPumpPassesOnTheFrameItRead},
       {"pipewire io refuses to open without the virtual mic",
        &TestPipeWireIoRefusesToOpenWithoutTheVirtualMic},
       {"live native virtual mic round trip",
        &TestLiveNativeVirtualMicRoundTrip},
+      {"live speaker loopback cycle leaves the speakers usable",
+       &TestLiveSpeakerLoopbackCycleLeavesTheSpeakersUsable},
       {"service transport follows the configured preference",
        &TestServiceTransportFollowsTheConfiguredPreference},
       {"service transport defaults to pulse",

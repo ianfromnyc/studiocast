@@ -1,6 +1,7 @@
 #include "core/audio/pipewire/pipewire_audio_devices.h"
 
 #include <atomic>
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -193,6 +194,27 @@ bool UnloadStalePulseDeviceModules(std::vector<std::string> *removed,
   return ok;
 }
 
+namespace internal {
+
+void RunSpeakerLoopbackPump(const SpeakerLoopbackPumpHooks &hooks) {
+  if (!hooks.cancelled || !hooks.read_frame || !hooks.write_frame ||
+      !hooks.backoff)
+    return;
+
+  while (!hooks.cancelled()) {
+    // A read that found nothing is the usual case: no application plays into
+    // the virtual speakers. Wait one frame, or this loop spins.
+    if (!hooks.read_frame()) {
+      hooks.backoff();
+      continue;
+    }
+    if (!hooks.write_frame())
+      hooks.backoff();
+  }
+}
+
+} // namespace internal
+
 // ---------------------------------------------------------------------------
 // NativeAudioDevices
 // ---------------------------------------------------------------------------
@@ -364,6 +386,10 @@ bool NativeAudioDevices::StartSpeakerLoopback(
   state_->loopback_playback = std::move(playback);
   state_->loopback_stop.store(false, std::memory_order_release);
 
+  // An earlier route woke the shared node to end its pump. The node belongs to
+  // the service and carries samples again from here.
+  state_->speaker->ClearStopRequest();
+
   PipeWireAudioNode *from = state_->speaker.get();
   PipeWireAudioNode *to = state_->loopback_playback.get();
   state_->loopback_thread = std::thread([this, from, to] {
@@ -373,15 +399,20 @@ bool NativeAudioDevices::StartSpeakerLoopback(
         static_cast<std::size_t>(kFrameSamples) * kSpeakerChannels, 0.0f);
     const std::size_t bytes = frame.size() * sizeof(float);
     std::string err;
-    while (!state_->loopback_stop.load(std::memory_order_acquire)) {
-      if (!from->Read(frame.data(), bytes, &err)) {
-        // No application is playing into the virtual speakers, so there is
-        // nothing to move. Try again on the next frame.
-        continue;
-      }
-      if (!to->Write(frame.data(), bytes, &err))
-        continue;
-    }
+
+    internal::SpeakerLoopbackPumpHooks hooks;
+    hooks.cancelled = [this] {
+      return state_->loopback_stop.load(std::memory_order_acquire);
+    };
+    hooks.read_frame = [&] { return from->Read(frame.data(), bytes, &err); };
+    hooks.write_frame = [&] { return to->Write(frame.data(), bytes, &err); };
+    hooks.backoff = [] {
+      // One frame. A node that nothing drives answers at once, so without this
+      // the loop would ask a few million times a second.
+      std::this_thread::sleep_for(std::chrono::milliseconds(
+          kFrameSamples * 1000 / static_cast<std::uint32_t>(kSampleRate)));
+    };
+    internal::RunSpeakerLoopbackPump(hooks);
   });
 
   return true;
@@ -392,13 +423,17 @@ bool NativeAudioDevices::StopSpeakerLoopback(std::string *error) {
     error->clear();
 
   std::thread worker;
+  PipeWireAudioNode *speaker = nullptr;
   {
     std::lock_guard<std::mutex> lock(state_->mu);
     if (!state_->loopback_thread.joinable() && !state_->loopback_playback)
       return true;
     state_->loopback_stop.store(true, std::memory_order_release);
-    if (state_->speaker)
-      state_->speaker->RequestStop();
+    // The pump can sit in a read of the shared node for the whole read
+    // timeout, so wake it. The wake-up is taken back below.
+    speaker = state_->speaker.get();
+    if (speaker)
+      speaker->RequestStop();
     if (state_->loopback_playback)
       state_->loopback_playback->RequestStop();
     worker = std::move(state_->loopback_thread);
@@ -408,6 +443,12 @@ bool NativeAudioDevices::StopSpeakerLoopback(std::string *error) {
     worker.join();
 
   std::lock_guard<std::mutex> lock(state_->mu);
+  // The virtual speakers belong to the service, not to this route. A stop
+  // request that stayed on them would make every later read and write of the
+  // node fail at once: the next pump would spin, and the processed speaker
+  // pipeline, which reads the same node, would never carry a sample again.
+  if (speaker && speaker == state_->speaker.get())
+    speaker->ClearStopRequest();
   state_->loopback_playback.reset();
   return true;
 }
@@ -502,6 +543,9 @@ public:
           *error = "The native PipeWire virtual speakers are not created.";
         return false;
       }
+      // A node the service owns may still carry the stop request of whoever
+      // woke it last. It carries samples for this pipeline from here.
+      read_node_->ClearStopRequest();
 
       AudioNodeConfig out;
       out.role = AudioNodeRole::kPlayback;
@@ -530,6 +574,9 @@ public:
         *error = "The native PipeWire virtual microphone is not created.";
       return false;
     }
+    // See the speakers path: the service owns this node, so a stop request
+    // left on it must not outlive the caller that made it.
+    write_node_->ClearStopRequest();
 
     const auto resolution = ResolveSafeInputSourceName(cfg.source_name);
     if (!resolution.ok) {
