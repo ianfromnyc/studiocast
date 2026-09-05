@@ -564,6 +564,53 @@ CHILD
   done
 }
 
+# The cuDNN archive is about 850 MB. An extracted tree whose ld.so.conf.d entry
+# is gone, which is what ./scripts/uninstall.sh --greedy leaves, must not be
+# downloaded again. The curl stub fails here, so a call that returns 0 proves
+# that no download ran.
+test_an_extracted_cudnn_tree_is_not_downloaded_again() {
+  local base="${SANDBOX}/cudnn-installed"
+  local root="${base}/${FAKE_CUDNN_VERSION}/cudnn-linux-x86_64-${FAKE_CUDNN_VERSION}_cuda13-archive"
+  mkdir -p "${root}/lib"
+  : > "${root}/lib/libcudnn.so.9"
+
+  local tmproot="${SANDBOX}/cudnn-installed-tmp"
+  mkdir -p "${tmproot}"
+
+  local child="${SANDBOX}/cudnn-installed-child.sh"
+  {
+    echo 'set -euo pipefail'
+    echo "${CHILD_PREAMBLE}"
+    cat <<'CHILD'
+export TMPDIR="$2"
+export CUDNN_VERSION="$3"
+ensure_cudnn_available
+echo CALL_RETURNED_0
+CHILD
+  } > "${child}"
+
+  local out rc=0
+  out="$(STUB_CURL_FAIL=1 STUDIOCAST_CUDNN_INSTALL_DIR="${base}" \
+    bash "${child}" "${FEDORA_SETUP}" "${tmproot}" "${FAKE_CUDNN_VERSION}" \
+    2>/dev/null)" || rc=$?
+
+  if [[ "${rc}" -ne 0 ]]; then
+    t_fail "an extracted cuDNN tree should need no download, status ${rc}"
+  elif [[ "${out}" != *CALL_RETURNED_0* ]]; then
+    t_fail "an extracted cuDNN tree should end the call with 0, got: $(first_line "${out}")"
+  else
+    t_pass "an extracted cuDNN tree is not downloaded again"
+  fi
+
+  local leftovers
+  leftovers="$(leftover_entries "${tmproot}")"
+  if [[ -n "${leftovers}" ]]; then
+    t_fail "the skip path made a temporary directory: ${leftovers}"
+  else
+    t_pass "the skip path makes no temporary directory"
+  fi
+}
+
 # The source guard promises definitions only. A shell that sources the helper
 # must keep its own shell options, and must see no output.
 test_sourcing_keeps_the_caller_shell_options() {
@@ -603,6 +650,7 @@ test_the_options_pick_the_bootstrap_root
 test_only_an_explicit_cuda_major_is_an_option_error
 test_an_option_without_a_value_says_so
 test_the_preflight_asks_pkg_config
+test_an_extracted_cudnn_tree_is_not_downloaded_again
 test_sourcing_keeps_the_caller_shell_options
 
 if [[ "${FAILURES}" -ne 0 ]]; then

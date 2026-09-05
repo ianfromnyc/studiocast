@@ -212,7 +212,9 @@ the command above and installs nothing.
 Neither Fedora nor NVIDIA has a cuDNN rpm for Fedora 44, so the helper installs
 the NVIDIA cuDNN redistributable tarball and checks its SHA-256 against the
 NVIDIA redistributable index. It skips this step when `libcudnn.so.9` already
-resolves through `ldconfig`.
+resolves through `ldconfig`. When the tree is there but nothing resolves, for
+example after `./scripts/uninstall.sh --greedy` removed the `ld.so.conf.d`
+file, it writes that file again instead of downloading the archive.
 
 `--check-cuda` reports the state without installing anything and without
 `sudo`. It exits non-zero when a check fails, so you can use it in scripts:

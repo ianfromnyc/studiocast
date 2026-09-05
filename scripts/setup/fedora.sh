@@ -103,6 +103,10 @@ warn() { echo "[setup] WARNING: $*" >&2; }
 ORT_VERSION="${ORT_VERSION:-1.29.0}"
 CUDNN_VERSION="${CUDNN_VERSION:-9.25.1.1}"
 
+# Where the cuDNN redistributable installs live. Tests can point this at a
+# sandbox; everything else uses the real directory.
+CUDNN_INSTALL_DIR="${STUDIOCAST_CUDNN_INSTALL_DIR:-/opt/studiocast/cudnn}"
+
 # CUDA major version of the installed toolkit, or 13 when there is none.
 detect_cuda_major() {
   local version_json="/usr/local/cuda/version.json"
@@ -325,20 +329,40 @@ cudnn_published_sha256() {
     || true
 }
 
+# Point ldconfig at the cuDNN libraries of one install.
+write_cudnn_ld_conf() {
+  run_priv tee /etc/ld.so.conf.d/studiocast-cudnn.conf >/dev/null <<EOF
+$1
+EOF
+  run_priv ldconfig
+}
+
 ensure_cudnn_available() {
   if lib_resolves libcudnn.so.9; then
     log "libcudnn.so.9 already resolves through ldconfig; skipping the cuDNN install."
     return 0
   fi
 
-  require_cmd curl
-  require_cmd tar
-
   local archive arch
   archive="$(cudnn_archive_name)"
   arch="$(cudnn_arch)"
-  local prefix="/opt/studiocast/cudnn/${CUDNN_VERSION}"
+  local prefix="${CUDNN_INSTALL_DIR}/${CUDNN_VERSION}"
   local root="${prefix}/${archive}"
+  local libdir="${root}/lib"
+
+  # The tree can be there while the ld.so.conf.d entry is gone, which is what
+  # ./scripts/uninstall.sh --greedy leaves. The path names the version, the
+  # architecture and the CUDA major, so a tree here is the archive this call
+  # would fetch. Write the entry again instead of downloading 850 MB again.
+  if [[ -e "${libdir}/libcudnn.so.9" ]]; then
+    log "cuDNN ${CUDNN_VERSION} is already installed at ${root}; skipping the download."
+    write_cudnn_ld_conf "${libdir}"
+    return 0
+  fi
+
+  require_cmd curl
+  require_cmd tar
+
   local url="https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-${arch}/${archive}.tar.xz"
 
   log "Installing cuDNN ${CUDNN_VERSION} (CUDA ${CUDA_MAJOR}) from: ${url}"
@@ -378,16 +402,12 @@ ensure_cudnn_available() {
   run_priv mkdir -p "${prefix}"
   run_priv tar -xJf "${tmpdir}/${archive}.tar.xz" -C "${prefix}"
 
-  local libdir="${root}/lib"
   if [[ ! -e "${libdir}/libcudnn.so.9" ]]; then
     echo "[setup] ERROR: libcudnn.so.9 not found under ${libdir}" >&2
     return 1
   fi
 
-  run_priv tee /etc/ld.so.conf.d/studiocast-cudnn.conf >/dev/null <<EOF
-${libdir}
-EOF
-  run_priv ldconfig
+  write_cudnn_ld_conf "${libdir}"
 
   log "cuDNN installed at ${root}."
 }
