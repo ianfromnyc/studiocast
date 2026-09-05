@@ -591,9 +591,16 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
     w = static_cast<int>(f.fmt.pix_mp.width);
     h = static_cast<int>(f.fmt.pix_mp.height);
     fourcc = f.fmt.pix_mp.pixelformat;
-    if (f.fmt.pix_mp.num_planes < 1) {
+    // The read path maps and walks plane 0 alone, so any other plane count
+    // describes a frame this code cannot read. Name the count here: without
+    // this the open runs on and stops at `VIDIOC_QUERYBUF`, where the kernel
+    // answers EINVAL and the user is told nothing about the layout.
+    if (f.fmt.pix_mp.num_planes != 1) {
       if (outErr)
-        *outErr = "mplane format returned num_planes=0";
+        *outErr = "mplane format returned num_planes=" +
+                  std::to_string(static_cast<unsigned>(
+                      f.fmt.pix_mp.num_planes)) +
+                  ", only one plane is supported";
       return false;
     }
     bpl = static_cast<std::size_t>(f.fmt.pix_mp.plane_fmt[0].bytesperline);

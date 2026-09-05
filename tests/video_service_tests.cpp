@@ -42,7 +42,7 @@ bool TestV4l2FakeNegotiationUsesOrderedFallback();
 bool TestV4l2MjpegDecodeFailureFallsBackToRawOnce();
 bool TestV4l2CaptureNegotiationKeepsTheDriverRowStride();
 bool TestV4l2CaptureNegotiationRefusesRowsTheFrameSizeCannotHold();
-bool TestV4l2CaptureNegotiationRefusesAnMplaneReportWithNoPlanes();
+bool TestV4l2CaptureNegotiationRefusesAnMplaneReportWithoutOnePlane();
 bool TestV4l2CaptureBufferMustHoldTheNegotiatedFrame();
 bool TestYuyvToRgb24MatchesBt601AndPreservesPadding();
 bool TestYuyvToRgb24TailStaysInsideAPackedOddWidthRow();
@@ -1134,9 +1134,9 @@ int main() {
       {"V4L2 capture negotiation refuses rows the frame size cannot hold",
        &studiocast::tests::
            TestV4l2CaptureNegotiationRefusesRowsTheFrameSizeCannotHold},
-      {"V4L2 capture negotiation refuses an mplane report with no planes",
+      {"V4L2 capture negotiation refuses an mplane report without one plane",
        &studiocast::tests::
-           TestV4l2CaptureNegotiationRefusesAnMplaneReportWithNoPlanes},
+           TestV4l2CaptureNegotiationRefusesAnMplaneReportWithoutOnePlane},
       {"V4L2 capture buffer must hold the negotiated frame",
        &studiocast::tests::TestV4l2CaptureBufferMustHoldTheNegotiatedFrame},
       {"YUYV->RGB tail stays inside a packed odd width row",

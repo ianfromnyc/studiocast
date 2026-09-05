@@ -339,15 +339,17 @@ bool TestCaptureNegotiationRefusesRowsTheFrameSizeCannotHold() {
   return true;
 }
 
-// The mplane arm reads the row size out of `plane_fmt[0]`, so a report of no
-// planes has nothing to read. It must fail rather than take the values of a
-// plane the driver did not fill.
-bool TestCaptureNegotiationRefusesAnMplaneReportWithNoPlanes() {
+// The read path holds one plane only, so the mplane arm reads `plane_fmt[0]`
+// and nothing else. A report of no planes has nothing to read, and a report of
+// more than one plane describes a frame plane 0 does not hold. Both must fail
+// here, where the plane count can be named, and not later at VIDIOC_QUERYBUF
+// where the kernel answers EINVAL alone.
+bool TestCaptureNegotiationRefusesAnMplaneReportWithoutOnePlane() {
 #ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
   using studiocast::video::CaptureFormat;
   using studiocast::video::ParseChosenCaptureFmt;
 
-  const RowLayoutCase c = {"mplane report with no planes",
+  const RowLayoutCase c = {"mplane report with the wrong plane count",
                            V4L2_PIX_FMT_YUYV,
                            640,
                            480,
@@ -357,16 +359,28 @@ bool TestCaptureNegotiationRefusesAnMplaneReportWithNoPlanes() {
                            0u,
                            true};
 
-  v4l2_format f{};
-  FillDriverFormat(&f, c, /*num_planes=*/0);
+  for (const int num_planes : {0, 2, 3}) {
+    v4l2_format f{};
+    FillDriverFormat(&f, c, static_cast<std::uint8_t>(num_planes));
 
-  CaptureFormat got{};
-  std::string err;
-  return Expect(!ParseChosenCaptureFmt(f, /*mplane=*/true, /*fps=*/30,
+    CaptureFormat got{};
+    std::string err;
+    if (!Expect(!ParseChosenCaptureFmt(f, /*mplane=*/true, /*fps=*/30,
                                        /*fps_num=*/1, /*fps_den=*/30, &got,
                                        &err),
-                "an mplane report with no planes must fail negotiation") &&
-         Expect(!err.empty(), "the refusal must name the reason");
+                "an mplane report of other than one plane must fail "
+                "negotiation")) {
+      std::cerr << "  num_planes " << num_planes << "\n";
+      return false;
+    }
+
+    if (!Expect(!err.empty(), "the refusal must name the reason")) {
+      std::cerr << "  num_planes " << num_planes << "\n";
+      return false;
+    }
+  }
+
+  return true;
 #else
   return true;
 #endif
@@ -455,8 +469,8 @@ bool TestV4l2CaptureNegotiationRefusesRowsTheFrameSizeCannotHold() {
   return TestCaptureNegotiationRefusesRowsTheFrameSizeCannotHold();
 }
 
-bool TestV4l2CaptureNegotiationRefusesAnMplaneReportWithNoPlanes() {
-  return TestCaptureNegotiationRefusesAnMplaneReportWithNoPlanes();
+bool TestV4l2CaptureNegotiationRefusesAnMplaneReportWithoutOnePlane() {
+  return TestCaptureNegotiationRefusesAnMplaneReportWithoutOnePlane();
 }
 
 bool TestV4l2CaptureBufferMustHoldTheNegotiatedFrame() {
