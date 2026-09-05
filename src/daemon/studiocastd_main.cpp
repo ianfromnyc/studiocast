@@ -2045,10 +2045,12 @@ bool ApplyAudioConfigPatchJsonText(
   return true;
 }
 
-// Checks an audio config the daemon is about to apply. `cfg` may be corrected:
-// a microphone monitor that no output can satisfy is turned off with a warning
-// rather than refusing the whole config, because that would also refuse
-// microphone processing.
+// Checks an audio config the daemon is about to apply. A microphone monitor
+// that no output can satisfy gives a warning rather than a refusal, because a
+// refusal would also refuse microphone processing, the feature the user asked
+// for. The monitor setting itself is left alone: the caller writes this object
+// to the config file, and the check also fails when the sound server is only
+// unreadable for a moment.
 bool ValidateAudioConfigSafetyForDaemon(
     studiocast::audio::VirtualAudioServiceConfig *cfg_inout,
     const std::string &resolved_source_name, std::vector<std::string> *warnings,
@@ -2113,13 +2115,14 @@ bool ValidateAudioConfigSafetyForDaemon(
     if (!studiocast::audio::ChooseSafeMicMonitorSinkName(
             cfg.monitor.sink, micSource, &monitorErr)) {
       // The monitor only lets the user hear the effects. Refusing the config
-      // would also refuse microphone processing, so turn the monitor off and
-      // say why instead.
-      cfg.monitor.enabled = false;
+      // would also refuse microphone processing, so warn instead. The setting
+      // stays as the user wrote it: the audio service re-checks the output on
+      // every start attempt and reports what it finds, so a sound server that
+      // comes back makes the monitor play again with no further action.
       if (warnings) {
         warnings->push_back(
-            "The microphone monitor was turned off because no safe output "
-            "was found: " +
+            "The microphone monitor cannot start because no safe output was "
+            "found: " +
             (monitorErr.empty() ? std::string("no safe physical output sink "
                                               "was found")
                                 : monitorErr));

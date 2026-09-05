@@ -662,8 +662,12 @@ bool TestUnsatisfiableMonitorDoesNotRefuseAudio() {
   bool ok = Expect(safe, "microphone processing should still be allowed");
   if (!ok)
     std::cerr << "the refusal was: " << error << "\n";
-  ok = Expect(!cfg.monitor.enabled,
-              "the monitor that cannot be satisfied should be turned off") &&
+  // The check fails whenever the sound server cannot be read, which a pactl
+  // that is missing, a server that restarts and a timeout under load all do.
+  // Writing the correction back would lose a saved setting for good, and the
+  // caller hands this same object to the config file.
+  ok = Expect(cfg.monitor.enabled,
+              "the saved monitor setting should survive the check") &&
        ok;
 
   bool named = false;
