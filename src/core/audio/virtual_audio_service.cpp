@@ -1246,7 +1246,14 @@ void VirtualAudioService::ThreadMain() {
           std::string detectErr;
           const auto live = DetectMicMonitorRoute(&detectErr);
           nextMonitorVerify = monitorNow + seconds(2);
-          if (detectErr.empty() && !live.active) {
+          if (!detectErr.empty()) {
+            // A failed check says nothing about the loopback, so the status
+            // must not go on claiming an active monitor. Report the failure
+            // and let the restart path below try again.
+            clearMonitorRouteState();
+            setMonitorError("Failed to check the microphone monitor: " +
+                            detectErr);
+          } else if (!live.active) {
             clearMonitorRouteState();
             setMonitorError("The microphone monitor stopped. StudioCast is "
                             "starting it again.");

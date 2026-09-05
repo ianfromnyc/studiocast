@@ -365,6 +365,7 @@ struct MonitorRecorder {
   std::atomic<int> stops{0};
   std::atomic<bool> running{false};
   std::atomic<bool> fail_start{false};
+  std::atomic<bool> fail_detect{false};
   std::mutex mu;
   std::string last_sink;
   int last_latency_ms = 0;
@@ -410,6 +411,13 @@ void HookMonitor(VirtualAudioServiceHooks *hooks, MonitorRecorder *rec) {
   };
   hooks->detect_mic_monitor = [rec](std::string *error) {
     MicMonitorState state;
+    if (rec->fail_detect.load(std::memory_order_relaxed)) {
+      // A failed check reports nothing about the route, so the state stays
+      // empty. Pulse behaves this way when pactl is gone.
+      if (error)
+        *error = "synthetic monitor check failure";
+      return state;
+    }
     state.active = rec->running.load(std::memory_order_relaxed);
     state.module_id = state.active ? 551 : -1;
     if (error)
@@ -659,6 +667,97 @@ bool TestServiceClearsMonitorErrorWhenItStops() {
   return true;
 }
 
+// A failed check of the monitor route says nothing about the loopback, so the
+// status must not go on claiming an active monitor. The service reports the
+// failure and hands the route to the restart path.
+bool TestServiceTreatsAFailedMonitorCheckAsStopped() {
+  MonitorRecorder rec;
+  VirtualAudioService *service_ptr = nullptr;
+  std::mutex seen_mu;
+  std::string error_at_restart;
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  // Read the reported error at the start of the restart, which is the one
+  // moment the failed check is the newest thing that happened.
+  auto start_monitor = hooks.start_mic_monitor;
+  hooks.start_mic_monitor = [&](const MicMonitorConfig &cfg,
+                                const std::string &source, MicMonitorState *out,
+                                std::string *error) {
+    if (service_ptr != nullptr &&
+        rec.fail_detect.load(std::memory_order_relaxed)) {
+      const std::string reported = service_ptr->Status().monitor_last_error;
+      std::lock_guard<std::mutex> lock(seen_mu);
+      if (error_at_restart.empty())
+        error_at_restart = reported;
+    }
+    return start_monitor(cfg, source, out, error);
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  service_ptr = &service;
+  const auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil([&] { return service.Status().monitor_active; }, 1000ms)) {
+    std::cerr << "the monitor did not start\n";
+    service.Stop();
+    return false;
+  }
+
+  // The restart fails as well, so that the state after a failed check stays
+  // readable instead of being repaired in the same pass.
+  const int starts_before = rec.starts.load(std::memory_order_relaxed);
+  rec.fail_start.store(true, std::memory_order_relaxed);
+  rec.fail_detect.store(true, std::memory_order_relaxed);
+
+  // The service checks the route every two seconds.
+  const bool reported = WaitUntil(
+      [&] {
+        const auto st = service.Status();
+        return !st.monitor_active && !st.monitor_last_error.empty() &&
+               rec.starts.load(std::memory_order_relaxed) > starts_before;
+      },
+      5000ms);
+  if (!reported) {
+    const auto st = service.Status();
+    std::cerr << "a failed check left the monitor state alone: active="
+              << st.monitor_active << " error='" << st.monitor_last_error
+              << "' starts=" << rec.starts.load(std::memory_order_relaxed)
+              << " (was " << starts_before << ")\n";
+    service.Stop();
+    return false;
+  }
+
+  bool ok = true;
+  {
+    std::lock_guard<std::mutex> lock(seen_mu);
+    if (error_at_restart.find("synthetic monitor check failure") ==
+        std::string::npos) {
+      std::cerr << "the failed check was not reported: '" << error_at_restart
+                << "'\n";
+      ok = false;
+    }
+  }
+
+  rec.fail_detect.store(false, std::memory_order_relaxed);
+  rec.fail_start.store(false, std::memory_order_relaxed);
+  if (!WaitUntil([&] { return service.Status().monitor_active; }, 2000ms)) {
+    std::cerr << "the monitor did not come back after the check recovered\n";
+    ok = false;
+  }
+
+  service.Stop();
+  return ok;
+}
+
 bool TestMonitorConsumerIsCountedApartFromApps() {
   MonitorRecorder rec;
   std::atomic<int> consumer_count{0};
@@ -879,6 +978,8 @@ int main() {
        &TestServiceRetriesMonitorAndReportsError},
       {"service clears the monitor error when it stops",
        &TestServiceClearsMonitorErrorWhenItStops},
+      {"service treats a failed monitor check as stopped",
+       &TestServiceTreatsAFailedMonitorCheckAsStopped},
       {"monitor consumer is counted apart from apps",
        &TestMonitorConsumerIsCountedApartFromApps},
       {"service drives the real helper through pactl",
