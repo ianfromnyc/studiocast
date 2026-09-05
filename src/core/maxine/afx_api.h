@@ -17,6 +17,10 @@ namespace studiocast::maxine::afx {
 
 using NvAFX_Status = int;
 inline constexpr NvAFX_Status NVAFX_SUCCESS = 0;
+// The status the SDK answers with when an effect does not take a parameter
+// (`NVAFX_STATUS_INVALID_PARAM` in nvAudioEffects.h). Any other status is a
+// real failure.
+inline constexpr NvAFX_Status NVAFX_ERR_INVALID_PARAM = 3;
 
 using NvAFX_Handle = void *;
 using NvAFX_ParameterSelector = const char *;

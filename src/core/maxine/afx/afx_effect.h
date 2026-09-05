@@ -120,15 +120,25 @@ public:
   void Destroy();
 
 private:
+  // `unsupported_out`, when given, tells whether every candidate failed with
+  // the "invalid parameter" status, which is how the SDK says that the effect
+  // does not take the parameter. Any other status is a real failure.
   bool SetU32Any(NvAFX_Handle handle, const char *what,
                  std::initializer_list<const char *> candidates,
-                 std::uint32_t v, std::string *error_out);
+                 std::uint32_t v, std::string *error_out,
+                 bool *unsupported_out = nullptr);
   bool SetFloatAny(NvAFX_Handle handle, const char *what,
                    std::initializer_list<const char *> candidates, float v,
-                   std::string *error_out);
+                   std::string *error_out, bool *unsupported_out = nullptr);
   bool SetStringAny(NvAFX_Handle handle, const char *what,
                     std::initializer_list<const char *> candidates,
                     const std::string &v, std::string *error_out);
+  // Records a warning about an optional parameter the effect refused. A
+  // parameter the effect does not take is normal; any other failure keeps the
+  // message of the SDK call, which the "takes no ..." wording would hide.
+  void NoteOptionalParam(const char *what, bool unsupported,
+                         const std::string &set_err);
+
   // Reads the first parameter of `candidates` that the effect reports.
   bool GetU32Any(NvAFX_Handle handle,
                  std::initializer_list<const char *> candidates,

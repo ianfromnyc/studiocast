@@ -389,7 +389,10 @@ bool AfxEffect::Configure(const AfxEffectConfig &cfg, std::string *error_out) {
 
 bool AfxEffect::SetU32Any(NvAFX_Handle handle, const char *what,
                           std::initializer_list<const char *> candidates,
-                          std::uint32_t v, std::string *error_out) {
+                          std::uint32_t v, std::string *error_out,
+                          bool *unsupported_out) {
+  if (unsupported_out)
+    *unsupported_out = false;
   if (!api_ || !api_->IsInitialized() || !api_->f().NvAFX_SetU32) {
     if (error_out)
       *error_out = "AFX API not initialized (missing NvAFX_SetU32).";
@@ -397,6 +400,8 @@ bool AfxEffect::SetU32Any(NvAFX_Handle handle, const char *what,
   }
   std::ostringstream tried;
   bool first = true;
+  bool any_tried = false;
+  bool all_invalid_param = true;
   for (const auto *sel : candidates) {
     if (!sel || std::strlen(sel) == 0)
       continue;
@@ -408,7 +413,12 @@ bool AfxEffect::SetU32Any(NvAFX_Handle handle, const char *what,
     if (st == NVAFX_SUCCESS) {
       return true;
     }
+    any_tried = true;
+    if (st != NVAFX_ERR_INVALID_PARAM)
+      all_invalid_param = false;
   }
+  if (unsupported_out)
+    *unsupported_out = any_tried && all_invalid_param;
   if (error_out) {
     std::ostringstream oss;
     oss << "NvAFX_SetU32 failed for " << what << " (tried: " << tried.str()
@@ -420,7 +430,10 @@ bool AfxEffect::SetU32Any(NvAFX_Handle handle, const char *what,
 
 bool AfxEffect::SetFloatAny(NvAFX_Handle handle, const char *what,
                             std::initializer_list<const char *> candidates,
-                            float v, std::string *error_out) {
+                            float v, std::string *error_out,
+                            bool *unsupported_out) {
+  if (unsupported_out)
+    *unsupported_out = false;
   if (!api_ || !api_->IsInitialized() || !api_->f().NvAFX_SetFloat) {
     if (error_out)
       *error_out = "AFX API not initialized (missing NvAFX_SetFloat).";
@@ -428,6 +441,8 @@ bool AfxEffect::SetFloatAny(NvAFX_Handle handle, const char *what,
   }
   std::ostringstream tried;
   bool first = true;
+  bool any_tried = false;
+  bool all_invalid_param = true;
   for (const auto *sel : candidates) {
     if (!sel || std::strlen(sel) == 0)
       continue;
@@ -439,7 +454,12 @@ bool AfxEffect::SetFloatAny(NvAFX_Handle handle, const char *what,
     if (st == NVAFX_SUCCESS) {
       return true;
     }
+    any_tried = true;
+    if (st != NVAFX_ERR_INVALID_PARAM)
+      all_invalid_param = false;
   }
+  if (unsupported_out)
+    *unsupported_out = any_tried && all_invalid_param;
   if (error_out) {
     std::ostringstream oss;
     oss << "NvAFX_SetFloat failed for " << what << " (tried: " << tried.str()
@@ -478,6 +498,17 @@ bool AfxEffect::SetStringAny(NvAFX_Handle handle, const char *what,
     *error_out = oss.str();
   }
   return false;
+}
+
+void AfxEffect::NoteOptionalParam(const char *what, bool unsupported,
+                                  const std::string &set_err) {
+  if (unsupported) {
+    warnings_.push_back("Effect `" + cfg_.effect_selector + "` takes no " +
+                        what + ".");
+    return;
+  }
+  warnings_.push_back("Effect `" + cfg_.effect_selector +
+                      "` did not take the " + what + ": " + set_err);
 }
 
 bool AfxEffect::GetU32Any(NvAFX_Handle handle,
@@ -610,22 +641,21 @@ bool AfxEffect::Load(std::string *error_out) {
     warnings_.push_back(oss.str());
   }
 
+  bool unsupported = false;
   if (!SetFloatAny(handle_, "intensity", {"intensity_ratio"}, cfg_.intensity,
-                   &set_err)) {
-    warnings_.push_back("Effect `" + cfg_.effect_selector +
-                        "` takes no intensity.");
+                   &set_err, &unsupported)) {
+    NoteOptionalParam("intensity", unsupported, set_err);
   }
   if (cfg_.effect_version) {
     if (!SetU32Any(handle_, "effect_version", {"effect_version"},
-                   *cfg_.effect_version, &set_err)) {
-      warnings_.push_back("Effect `" + cfg_.effect_selector +
-                          "` takes no effect version.");
+                   *cfg_.effect_version, &set_err, &unsupported)) {
+      NoteOptionalParam("effect version", unsupported, set_err);
     }
   }
   if (cfg_.vad_enabled) {
-    if (!SetU32Any(handle_, "vad_enabled", {"enable_vad"}, 1u, &set_err)) {
-      warnings_.push_back("Effect `" + cfg_.effect_selector +
-                          "` takes no VAD flag.");
+    if (!SetU32Any(handle_, "vad_enabled", {"enable_vad"}, 1u, &set_err,
+                   &unsupported)) {
+      NoteOptionalParam("VAD flag", unsupported, set_err);
     }
   }
 
@@ -659,10 +689,10 @@ bool AfxEffect::UpdateIntensity(float intensity, std::string *error_out) {
 
   // Studio voice takes no intensity. Keep that a note, not a failure.
   std::string set_err;
+  bool unsupported = false;
   if (!SetFloatAny(handle_, "intensity", {"intensity_ratio"}, intensity,
-                   &set_err)) {
-    warnings_.push_back("Effect `" + cfg_.effect_selector +
-                        "` takes no intensity.");
+                   &set_err, &unsupported)) {
+    NoteOptionalParam("intensity", unsupported, set_err);
     return true;
   }
 

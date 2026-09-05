@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -293,6 +294,9 @@ constexpr int kInvalidParam = 3; // NVAFX_STATUS_INVALID_PARAM
 
 std::vector<std::string> g_set_order;
 std::vector<std::string> g_rejected;
+// Parameters the fake answers with a status of its own, for the errors that
+// are not "the effect does not take this parameter".
+std::map<std::string, int> g_set_status;
 std::uint32_t g_channels_readback = 1;
 bool g_have_get_u32 = true;
 bool g_loaded = false;
@@ -300,6 +304,7 @@ bool g_loaded = false;
 void Reset() {
   g_set_order.clear();
   g_rejected.clear();
+  g_set_status.clear();
   g_channels_readback = 1;
   g_have_get_u32 = true;
   g_loaded = false;
@@ -315,6 +320,9 @@ bool Rejected(const char *param) {
 
 int Record(const char *param) {
   g_set_order.push_back(param);
+  const auto it = g_set_status.find(param);
+  if (it != g_set_status.end())
+    return it->second;
   return Rejected(param) ? kInvalidParam : 0;
 }
 
@@ -712,6 +720,65 @@ bool TestExecPathForRestart() {
   return ok;
 }
 
+// A status of 3 means the effect does not take the parameter. Any other
+// status is a real error, and the warning must carry it instead of the
+// "takes no ..." wording, which would hide it.
+bool TestAnUnexpectedSetErrorKeepsItsMessage() {
+  const fs::path root = TempRoot("seterr");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  fake_afx::Reset();
+  studiocast::maxine::afx::AfxApi api;
+  fake_afx::Install(&api);
+  // 7 is not the "invalid parameter" status, so it is a real failure.
+  fake_afx::g_set_status["intensity_ratio"] = 7;
+  fake_afx::g_set_status["enable_vad"] = 7;
+
+  studiocast::maxine::afx::AfxEffect fx(&api);
+  auto cfg = MakeConfig(features, "denoiser", "denoiser");
+  cfg.vad_enabled = true;
+
+  std::string err;
+  const bool configured = fx.Configure(cfg, &err);
+  bool ok = Require(configured, "expected the denoiser to configure: " + err);
+  if (!ok) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  ok &= Require(fx.Load(&err), "expected the denoiser to load: " + err);
+
+  bool says_takes_no = false;
+  bool carries_float_error = false;
+  bool carries_u32_error = false;
+  for (const auto &w : fx.warnings()) {
+    if (w.find("takes no intensity") != std::string::npos ||
+        w.find("takes no VAD flag") != std::string::npos)
+      says_takes_no = true;
+    if (w.find("NvAFX_SetFloat failed for intensity") != std::string::npos)
+      carries_float_error = true;
+    if (w.find("NvAFX_SetU32 failed for vad_enabled") != std::string::npos)
+      carries_u32_error = true;
+  }
+  ok &= Require(!says_takes_no,
+                "a real SDK error must not read as an unsupported parameter");
+  ok &= Require(carries_float_error,
+                "expected the NvAFX_SetFloat error in the warning");
+  ok &= Require(carries_u32_error,
+                "expected the NvAFX_SetU32 error in the warning");
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -728,6 +795,7 @@ int main() {
   ok = TestLoaderPathValue() && ok;
   ok = TestRunPassesChannelPointers() && ok;
   ok = TestExecPathForRestart() && ok;
+  ok = TestAnUnexpectedSetErrorKeepsItsMessage() && ok;
 
   if (!ok)
     return 1;
