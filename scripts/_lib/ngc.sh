@@ -31,7 +31,12 @@
 #   SC_NGC_TEAM           NGC team. Default: maxine.
 #   SC_NGC_DRY_RUN        1 prints the download commands instead of running them.
 #   SC_NGC_MAX_PAGES      Most pages of a file list to ask for. Default: 200.
-#   SC_NGC_RETRIES        Times curl retries one request. Default: 3.
+#   SC_NGC_RETRIES        Times curl retries one request. Default: 3. A whole
+#                         number of 0 or more. The download loop of this file
+#                         makes three attempts of its own, and each attempt is
+#                         a new curl that retries this many times. Thus one
+#                         file can make 3 x (1 + SC_NGC_RETRIES) requests, or
+#                         12 at the default.
 #   SC_NGC_ALT_RESOURCES  Resource names printed when NGC answers 402.
 #   sc_ngc_log            Log function. The default prints "[ngc] <message>".
 #
@@ -54,6 +59,11 @@ SC_NGC_CATALOG_HOST="${SC_NGC_CATALOG_HOST:-https://catalog.ngc.nvidia.com}"
 SC_NGC_ORG="${SC_NGC_ORG:-nvidia}"
 SC_NGC_TEAM="${SC_NGC_TEAM:-maxine}"
 SC_NGC_DRY_RUN="${SC_NGC_DRY_RUN:-0}"
+
+# The times curl retries one request. This goes to "--retry", which takes a
+# whole number of 0 or more. A different value makes curl print its usage text
+# for each attempt, which names neither the setting nor the file, so
+# sc_ngc_ensure_token refuses it before the first request.
 SC_NGC_RETRIES="${SC_NGC_RETRIES:-3}"
 
 # The most pages of a file list to ask for. The page count comes from the
@@ -251,6 +261,15 @@ PY
   return 0
 }
 
+# Refuse a retry count curl cannot use. Every request goes through
+# sc_ngc_ensure_token, so this runs before the first one.
+_sc_ngc_check_retries() {
+  if ! [[ "${SC_NGC_RETRIES}" =~ ^[0-9]+$ ]]; then
+    sc_ngc_err "SC_NGC_RETRIES must be a whole number of 0 or more, not '${SC_NGC_RETRIES}'."
+    return 2
+  fi
+}
+
 # Put a bearer token for the current API key in _SC_NGC_TOKEN.
 #
 # A modern "nvapi-" key is a bearer token itself, so it is used as it stands.
@@ -258,10 +277,15 @@ PY
 # Every path that talks to NGC calls this first, which is why a download works
 # as the first call of a run.
 #
-# Returns 2 when there is no key. A failed exchange is not fatal: the raw key
+# Returns 2 when SC_NGC_RETRIES is not a count, and when there is no key. A
+# failed exchange is not fatal: the raw key
 # stays in place, and the caller reports the status NGC answers with.
 sc_ngc_ensure_token() {
   local key
+
+  if ! _sc_ngc_check_retries; then
+    return 2
+  fi
 
   if ! key="$(sc_ngc_api_key)"; then
     sc_ngc_err "no NGC API key. Export NGC_API_KEY (or NGC_CLI_API_KEY) first."

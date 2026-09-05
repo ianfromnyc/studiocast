@@ -1060,6 +1060,92 @@ CHILD
   fi
 }
 
+# A retry count that is not a number goes to curl as it stands. curl then
+# prints its usage text for each attempt and stops, which names nothing the
+# user can correct. The setting must be refused before the first request.
+test_a_retry_count_that_is_not_a_number_is_refused() {
+  local listing="${SANDBOX}/badretry.json"
+  cat > "${listing}" <<'JSON'
+{
+  "modelFiles": [{"path": "only.trtpkg", "sizeInBytes": 1}],
+  "paginationInfo": {"totalPages": 1}
+}
+JSON
+
+  local child="${SANDBOX}/badretry-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+unset NGC_API_KEY NGC_CLI_API_KEY
+# shellcheck source=/dev/null
+source "$1"
+export SC_NGC_API_KEY="$2"
+export SC_NGC_AUTHN_HOST="https://authn.invalid"
+export SC_NGC_HOST="https://api.invalid"
+export SC_NGC_RETRIES=abc
+sc_ngc_list_model_files test-model 1.0 >/dev/null
+echo "RC=$?"
+CHILD
+
+  local log="${SANDBOX}/badretry.log"
+  : > "${log}"
+
+  local out
+  out="$(timeout 30 env NGC_CURL_LOG="${log}" \
+    NGC_STUB_LISTING="${listing}" \
+    bash "${child}" "${NGC_LIB}" "${MODERN_KEY}" 2>&1)"
+
+  if [[ "${out}" != *"RC=2"* ]]; then
+    t_fail "a retry count that is not a number should end the call: ${out}"
+  else
+    t_pass "a retry count that is not a number ends the call"
+  fi
+
+  if [[ "${out}" != *"SC_NGC_RETRIES must be"* ]]; then
+    t_fail "the refusal did not say what is wrong with the setting: ${out}"
+  else
+    t_pass "the refusal says what SC_NGC_RETRIES needs"
+  fi
+
+  if [[ -s "${log}" ]]; then
+    t_fail "a bad retry count still made a request: $(cat "${log}")"
+  else
+    t_pass "a bad retry count makes no request"
+  fi
+}
+
+# A retry count below zero is not a count curl can use either.
+test_a_negative_retry_count_is_refused() {
+  local child="${SANDBOX}/negretry-child.sh"
+  cat > "${child}" <<'CHILD'
+set -uo pipefail
+unset NGC_API_KEY NGC_CLI_API_KEY
+# shellcheck source=/dev/null
+source "$1"
+export SC_NGC_API_KEY="$2"
+export SC_NGC_AUTHN_HOST="https://authn.invalid"
+export SC_NGC_HOST="https://api.invalid"
+export SC_NGC_RETRIES=-1
+sc_ngc_list_model_versions test-model >/dev/null
+echo "RC=$?"
+CHILD
+
+  local out
+  out="$(timeout 30 env NGC_CURL_LOG="${SANDBOX}/negretry.log" \
+    bash "${child}" "${NGC_LIB}" "${MODERN_KEY}" 2>&1)"
+
+  if [[ "${out}" != *"RC=2"* ]]; then
+    t_fail "a retry count below zero should end the call: ${out}"
+  else
+    t_pass "a retry count below zero ends the call"
+  fi
+
+  if [[ "${out}" != *"SC_NGC_RETRIES must be"* ]]; then
+    t_fail "the refusal did not name SC_NGC_RETRIES: ${out}"
+  else
+    t_pass "the refusal names SC_NGC_RETRIES"
+  fi
+}
+
 # A page count no answer can justify must end the call with a message, not
 # with a loop that runs until the user stops it.
 test_an_absurd_page_count_is_refused() {
@@ -1192,6 +1278,8 @@ test_a_page_that_adds_nothing_stops_the_listing
 test_an_absurd_page_count_is_refused
 test_an_empty_middle_page_does_not_end_the_listing
 test_a_page_limit_that_is_not_a_number_is_refused
+test_a_retry_count_that_is_not_a_number_is_refused
+test_a_negative_retry_count_is_refused
 
 if [[ "${FAILURES}" -ne 0 ]]; then
   echo "${FAILURES} check(s) failed." >&2
