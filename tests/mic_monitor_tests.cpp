@@ -1484,6 +1484,77 @@ bool TestServiceBacksOffRepeatedMonitorStopFailures() {
   return ok;
 }
 
+// The stop backoff spaces out a stop that keeps failing, but it must not also
+// delay the next stop the user asks for. A monitor the user wants again starts
+// its stop wait over, so unticking the box again stops the microphone playing
+// in the headphones at once and not after the leftover wait.
+bool TestServiceStartsTheStopWaitOverWhenTheMonitorIsWantedAgain() {
+  MonitorRecorder rec;
+  rec.fail_stop.store(true, std::memory_order_relaxed);
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  VirtualAudioService service(std::move(hooks));
+  auto cfg = MonitorServiceConfig(); // 250 ms floor between retries
+  // The monitor is off, so the start-up cleanup runs and its failures build
+  // the stop backoff up.
+  cfg.monitor.enabled = false;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  // Five failed stops put the next stop retry 1250 ms away.
+  if (!WaitUntil([&] { return rec.stops.load(std::memory_order_relaxed) >= 5; },
+                 6000ms)) {
+    std::cerr << "the service did not retry the failed stop\n";
+    service.Stop();
+    return false;
+  }
+
+  // The user turns the monitor on again, which is where the stop wait starts
+  // over, and the sound server answers again.
+  cfg.monitor.enabled = true;
+  service.UpdateConfig(cfg);
+  rec.fail_stop.store(false, std::memory_order_relaxed);
+  if (!WaitUntil([&] { return service.Status().monitor_active; }, 2000ms)) {
+    std::cerr << "the monitor did not start when it was wanted again\n";
+    service.Stop();
+    return false;
+  }
+
+  // The user unticks the box.
+  const int stops_before = rec.stops.load(std::memory_order_relaxed);
+  const auto asked = std::chrono::steady_clock::now();
+  cfg.monitor.enabled = false;
+  service.UpdateConfig(cfg);
+  const bool stopped = WaitUntil(
+      [&] {
+        return rec.stops.load(std::memory_order_relaxed) > stops_before;
+      },
+      3000ms);
+  const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - asked);
+  service.Stop();
+
+  if (!stopped) {
+    std::cerr << "the monitor was never stopped\n";
+    return false;
+  }
+  // The floor between two stop retries is 250 ms, so anything past that is a
+  // deadline the earlier failures left behind.
+  if (waited > 500ms) {
+    std::cerr << "the stop waited " << waited.count()
+              << " ms for a deadline the earlier failures left behind\n";
+    return false;
+  }
+  return true;
+}
+
 // The volume retry runs `pactl list sink-inputs` on every try, so a volume
 // that can never be set must space its retries out the same way.
 bool TestServiceBacksOffRepeatedMonitorVolumeFailures() {
@@ -1771,6 +1842,8 @@ int main() {
        &TestServiceBacksOffRepeatedMonitorStartFailures},
       {"service backs off repeated monitor stop failures",
        &TestServiceBacksOffRepeatedMonitorStopFailures},
+      {"service starts the stop wait over when the monitor is wanted again",
+       &TestServiceStartsTheStopWaitOverWhenTheMonitorIsWantedAgain},
       {"service backs off repeated monitor volume failures",
        &TestServiceBacksOffRepeatedMonitorVolumeFailures},
       {"service waits for the virtual microphone before monitoring",

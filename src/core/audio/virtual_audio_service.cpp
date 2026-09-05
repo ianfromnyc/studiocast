@@ -1340,8 +1340,11 @@ void VirtualAudioService::ThreadMain() {
         }
         setMonitorNote(std::move(monitorNote));
       } else {
-        // A monitor the user wants again starts its stop wait over.
+        // A monitor the user wants again starts its stop wait over. The
+        // deadline goes with the counter: keeping it would make the next stop
+        // the user asks for wait out the backoff of the failures before it.
         monitorStopFailures = 0;
+        nextMonitorStopRetry = steady_clock::time_point{};
         // A lost output keeps its note until something restarts the monitor.
         if (!monitor_output_lost_)
           setMonitorNote(std::string());
