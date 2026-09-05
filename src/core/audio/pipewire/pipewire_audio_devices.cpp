@@ -406,12 +406,21 @@ bool NativeAudioDevices::CreateVirtualSpeaker(std::string *error) {
 bool NativeAudioDevices::DestroyVirtualSpeaker(std::string *error) {
   if (error)
     error->clear();
-  std::string ignored;
-  (void)StopSpeakerLoopback(&ignored);
   // Destroyed after the locks are free, as DestroyVirtualMic does.
+  //
+  // The route stop is the prepare step, so it runs under the create lock. A
+  // stop above that lock finds no route when a route start is in flight: the
+  // start installs its pump after the server answers, and that pump holds the
+  // virtual speakers, so the destroy would answer true and leave the device in
+  // the graph.
   std::shared_ptr<PipeWireAudioNode> old;
-  internal::DestroyDeviceOutsideLock(state_->create_mu, state_->mu,
-                                     [&] { old = std::move(state_->speaker); });
+  internal::DestroyDeviceOutsideLock(
+      state_->create_mu, state_->mu,
+      [&] {
+        std::string ignored;
+        (void)StopSpeakerLoopback(&ignored);
+      },
+      [&] { old = std::move(state_->speaker); });
   old.reset();
   return true;
 }
@@ -428,12 +437,14 @@ bool NativeAudioDevices::StartSpeakerLoopback(
     return false;
   }
 
+  // One route start at a time, and it keeps the virtual speakers in place
+  // while it runs, because a create and a destroy take this lock too. The
+  // stop of the route this one replaces belongs inside the lock for the same
+  // reason the destroy's does.
+  std::lock_guard<std::mutex> creating(state_->create_mu);
+
   std::string ignored;
   (void)StopSpeakerLoopback(&ignored);
-
-  // One route start at a time, and it keeps the virtual speakers in place
-  // while it runs, because a create takes this lock too.
-  std::lock_guard<std::mutex> creating(state_->create_mu);
 
   AudioNodeConfig cfg;
   std::shared_ptr<PipeWireAudioNode> from;

@@ -125,15 +125,29 @@ bool CreateDeviceOutsideLock(std::mutex &create_mu, std::mutex &device_mu,
 // create, which installs the node the caller was told had gone. So a destroy
 // takes `create_mu` as well, in the same order the create takes it.
 //
+// `prepare` runs under `create_mu` alone, before `device_mu` is taken. It is
+// where the work that undoes what a create built belongs: a route that holds
+// the device by value has to end before the device goes, and a stop that ran
+// above `create_mu` would find no route at all when a create in flight is
+// about to install one.
+//
 // `take` runs under `device_mu` and moves the device out. The caller destroys
 // what it took after both locks are free, because taking a node down talks to
 // the server too.
+template <class Prepare, class Take>
+void DestroyDeviceOutsideLock(std::mutex &create_mu, std::mutex &device_mu,
+                              const Prepare &prepare, const Take &take) {
+  std::lock_guard<std::mutex> creating(create_mu);
+  prepare();
+  std::lock_guard<std::mutex> lock(device_mu);
+  take();
+}
+
+// A destroy with nothing to undo but the device itself.
 template <class Take>
 void DestroyDeviceOutsideLock(std::mutex &create_mu, std::mutex &device_mu,
                               const Take &take) {
-  std::lock_guard<std::mutex> creating(create_mu);
-  std::lock_guard<std::mutex> lock(device_mu);
-  take();
+  DestroyDeviceOutsideLock(create_mu, device_mu, [] {}, take);
 }
 
 } // namespace internal
@@ -177,6 +191,9 @@ public:
   // Pass-through route: virtual speakers -> a real sink, with no effects.
   bool StartSpeakerLoopback(const std::string &target_sink_name,
                             std::string *error);
+  // The stop takes the device lock only. A create, a destroy and a start all
+  // stop the route while they hold the create lock, which is a plain mutex, so
+  // this must never take that lock itself.
   bool StopSpeakerLoopback(std::string *error);
 
   // What the last clean-up removed, one line for each module.

@@ -754,6 +754,65 @@ bool TestDeviceDestroyWaitsForACreateInFlight() {
          Expect(!device, "the destroy must leave the device gone");
 }
 
+// What a create built is more than the device pointer: a speaker route holds
+// the device by value. A destroy that undid that above the create lock would
+// find nothing to undo while a create is in flight, and the route the create
+// installs afterwards would keep the device the caller was told had gone.
+bool TestDeviceDestroyUndoesTheRouteInsideTheCreateLock() {
+  using studiocast::audio::pw_backend::internal::CreateDeviceOutsideLock;
+  using studiocast::audio::pw_backend::internal::DestroyDeviceOutsideLock;
+
+  std::mutex create_mu;
+  std::mutex device_mu;
+  std::mutex order_mu;
+  std::string order;
+  const auto note = [&](const char *what) {
+    std::lock_guard<std::mutex> lock(order_mu);
+    order += what;
+  };
+
+  bool device = false;
+  std::atomic<bool> entered{false};
+  std::thread destroyer;
+
+  const bool made = CreateDeviceOutsideLock(
+      create_mu, device_mu, [&] { return device; },
+      [&] {
+        // Stands for the server round trip of a node start. The route the
+        // create installs below is what the destroy has to undo.
+        destroyer = std::thread([&] {
+          entered.store(true, std::memory_order_release);
+          DestroyDeviceOutsideLock(
+              create_mu, device_mu, [&] { note("stop "); },
+              [&] {
+                device = false;
+                note("destroy ");
+              });
+        });
+        while (!entered.load(std::memory_order_acquire))
+          std::this_thread::yield();
+        // The window the destroy needs to get in. It gives the other thread
+        // time; it is not a bound on how long any step may take.
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        note("build ");
+        return true;
+      },
+      [&] {
+        device = true;
+        note("publish ");
+        note("route ");
+      });
+
+  destroyer.join();
+
+  return Expect(made, "a create that builds a device should answer true") &&
+         Expect(order == "build publish route stop destroy ",
+                "a destroy must undo the route of a create it interleaves "
+                "with; the order was: " +
+                    order) &&
+         Expect(!device, "the destroy must leave the device gone");
+}
+
 bool TestPipeWireIoRefusesToOpenWithoutTheVirtualMic() {
   auto io = studiocast::audio::pw_backend::CreatePipeWireAudioIo();
   if (!Expect(io != nullptr, "the PipeWire I/O factory returned nothing"))
@@ -1013,6 +1072,67 @@ bool TestLiveSpeakerLoopbackCycleLeavesTheSpeakersUsable() {
          Expect(cpuMs < 100,
                 "the pump used " + std::to_string(cpuMs) +
                     " ms of processor time in 400 ms; it is spinning");
+}
+
+// A route start holds the create lock across a full round trip to the server
+// and only then installs the pump, which holds the virtual speakers by value.
+// A destroy that stopped the route above that lock would find no pump, answer
+// true, and leave the node it was told to take down in the graph with a route
+// still carrying samples into it.
+//
+// The proof is a weak reference to the node: after a destroy that answered
+// true, nothing may hold the node any more.
+bool TestLiveSpeakerDestroyEndsARouteThatStartedBesideIt() {
+  if (!LiveServerAvailable("live speaker destroy ends a route that started "
+                           "beside it"))
+    return true;
+
+  ScopedTestDeviceOptions options;
+  auto &devices = studiocast::audio::pw_backend::NativeAudioDevices::Instance();
+  std::string error;
+
+  constexpr int kAttempts = 20;
+  int made = 0;
+  int leaked = 0;
+  for (int i = 0; i < kAttempts; ++i) {
+    if (!devices.CreateVirtualSpeaker(&error))
+      break;
+    ++made;
+    const std::weak_ptr<studiocast::pw::PipeWireAudioNode> watch =
+        devices.SpeakerNode();
+
+    // The destroy is aimed at the window the start spends in the server. The
+    // thread waits for the start to begin and then sweeps the window over the
+    // attempts; neither wait is a bound on how long any step may take.
+    std::atomic<bool> starting{false};
+    std::thread destroyer([&devices, &starting, i] {
+      while (!starting.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      std::this_thread::sleep_for(std::chrono::microseconds(200 * (i % 10)));
+      std::string err;
+      (void)devices.DestroyVirtualSpeaker(&err);
+    });
+    std::string start_error;
+    starting.store(true, std::memory_order_release);
+    (void)devices.StartSpeakerLoopback("", &start_error);
+    destroyer.join();
+
+    if (!watch.expired())
+      ++leaked;
+
+    // Whatever the race did, the next attempt starts from nothing.
+    (void)devices.StopSpeakerLoopback(&error);
+    (void)devices.DestroyVirtualSpeaker(&error);
+  }
+
+  return Expect(made == kAttempts,
+                "creating the native virtual speakers failed after " +
+                    std::to_string(made) + " attempts: " + error) &&
+         Expect(leaked == 0,
+                "a destroy that answered true left the virtual speakers in "
+                "the graph; " +
+                    std::to_string(leaked) + " of " +
+                    std::to_string(kAttempts) + " did");
 }
 
 bool TestServiceTransportFollowsTheConfiguredPreference() {
@@ -2249,6 +2369,8 @@ int main() {
        &TestDeviceCreateLeavesTheDeviceLockFreeWhileItBuilds},
       {"device destroy waits for a create in flight",
        &TestDeviceDestroyWaitsForACreateInFlight},
+      {"device destroy undoes the route inside the create lock",
+       &TestDeviceDestroyUndoesTheRouteInsideTheCreateLock},
       {"pipewire io refuses to open without the virtual mic",
        &TestPipeWireIoRefusesToOpenWithoutTheVirtualMic},
       {"node restart delay backs off", &TestNodeRestartDelayBacksOff},
@@ -2258,6 +2380,8 @@ int main() {
        &TestLiveNativeVirtualMicRoundTrip},
       {"live speaker loopback cycle leaves the speakers usable",
        &TestLiveSpeakerLoopbackCycleLeavesTheSpeakersUsable},
+      {"live speaker destroy ends a route that started beside it",
+       &TestLiveSpeakerDestroyEndsARouteThatStartedBesideIt},
       {"service transport follows the configured preference",
        &TestServiceTransportFollowsTheConfiguredPreference},
       {"service transport defaults to pulse",
