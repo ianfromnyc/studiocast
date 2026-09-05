@@ -3,15 +3,22 @@
 // so these tests build such a directory with the names that the SDK really
 // installs.
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <unistd.h>
 #include <vector>
 
+#include "core/maxine/afx/afx_effect.h"
 #include "core/maxine/availability.h"
 #include "core/maxine/maxine_manager.h"
+
+#ifndef STUDIOCAST_SOURCE_DIR
+#define STUDIOCAST_SOURCE_DIR "."
+#endif
 
 namespace {
 namespace fs = std::filesystem;
@@ -200,6 +207,80 @@ bool TestBackendIsAlwaysBuilt() {
   return ok;
 }
 
+// The value of one shell variable in a script, without its quotes. Returns an
+// empty string when the script does not set it.
+std::string ShellVariableValue(const fs::path &script,
+                               const std::string &name) {
+  std::ifstream in(script);
+  std::string line;
+  const std::string prefix = name + "=";
+  while (std::getline(in, line)) {
+    if (line.compare(0, prefix.size(), prefix) != 0)
+      continue;
+    std::string value = line.substr(prefix.size());
+    if (value.size() >= 2 && (value.front() == '"' || value.front() == '\'') &&
+        value.back() == value.front()) {
+      value = value.substr(1, value.size() - 2);
+    }
+    return value;
+  }
+  return {};
+}
+
+// The feature names in an `--afx-effects` list. Each entry is
+// `<feature>-<rate>`, so the name is everything before the last '-'. This is
+// the split that scripts/setup/maxine.sh does.
+std::vector<std::string> AfxEffectFeatureNames(const std::string &csv) {
+  std::vector<std::string> out;
+  std::string entry;
+  std::istringstream in(csv);
+  while (std::getline(in, entry, ',')) {
+    const auto dash = entry.rfind('-');
+    if (dash == std::string::npos || dash == 0)
+      continue;
+    out.push_back(entry.substr(0, dash));
+  }
+  return out;
+}
+
+// The default `--afx-effects` list of the installer must hold every feature
+// that StudioCast's own microphone effects select. A user who follows
+// docs/SETUP.md takes that default, and would otherwise find every broadcast
+// microphone effect missing.
+bool TestTheInstallerDefaultCoversTheMicrophoneEffects() {
+  const fs::path script =
+      fs::path(STUDIOCAST_SOURCE_DIR) / "scripts" / "setup" / "maxine.sh";
+  const std::string csv = ShellVariableValue(script, "AFX_EFFECTS_DEFAULT");
+  if (!Require(!csv.empty(),
+               "expected AFX_EFFECTS_DEFAULT in " + script.string())) {
+    return false;
+  }
+
+  const auto have = AfxEffectFeatureNames(csv);
+  auto lists = [&have](const std::string &feature) {
+    return std::find(have.begin(), have.end(), feature) != have.end();
+  };
+
+  // Ask the planner itself, so the list cannot drift away from the code.
+  using studiocast::maxine::afx::PlanBroadcastMicrophoneEffect;
+  const std::vector<studiocast::maxine::afx::PlannedAfxMicrophoneEffect> plans =
+      {
+          PlanBroadcastMicrophoneEffect(true, false, false, 50),
+          PlanBroadcastMicrophoneEffect(false, true, true, 50),
+          PlanBroadcastMicrophoneEffect(false, true, false, 50),
+          PlanBroadcastMicrophoneEffect(false, false, true, 50),
+      };
+
+  bool ok = true;
+  for (const auto &plan : plans) {
+    ok &= Require(plan.enabled, "expected the planner to select an effect");
+    ok &= Require(lists(plan.feature_id),
+                  "expected AFX_EFFECTS_DEFAULT to hold the '" +
+                      plan.feature_id + "' feature, got: " + csv);
+  }
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -208,6 +289,7 @@ int main() {
   ok = TestBareFeaturesDirResolvesNothing() && ok;
   ok = TestNeighbourNamesDoNotCount() && ok;
   ok = TestBackendIsAlwaysBuilt() && ok;
+  ok = TestTheInstallerDefaultCoversTheMicrophoneEffects() && ok;
 
   if (!ok)
     return 1;

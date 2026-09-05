@@ -137,7 +137,9 @@ Options:
   --install-features    Install the VFX/AR feature packs (needs NGC_API_KEY). Same as
                         --download-features vfx,ar, but both SDK roots must exist.
   --install-afx-features  Download AFX features needed for the MVP (needs NGC_API_KEY)
-  --afx-effects CSV     AFX effect list (default: MVP AEC + Superres)
+  --afx-effects CSV     AFX effect list (default: the four the microphone effects use,
+                        denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k).
+                        AEC and Superres are optional; name them here to add them.
   --afx-gpu NAME        GPU name for download_features.sh -g (for example a40, t4, l4).
                         Without it the AFX script detects the GPU itself.
   --vfx-features CSV    VFX features to install, or "all" (default: the Linux features
@@ -229,8 +231,16 @@ NGC_ORG="nvidia"
 NGC_TEAM="maxine"
 DRY_RUN=0
 
-# MVP minimal AFX list: AEC + Superres.
-AFX_EFFECTS_DEFAULT="superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
+# The AFX features that the StudioCast microphone effects select, at the rate
+# the audio pipeline runs. PlanBroadcastMicrophoneEffect in
+# src/core/maxine/afx/afx_effect.cpp picks one of these four, and `doctor`
+# reports the same four. A default that installed anything else would leave
+# every broadcast microphone effect missing.
+#
+# AEC and Superres are not in this list, because nothing in StudioCast selects
+# them yet. Add them with --afx-effects when you want them:
+#   --afx-effects "denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k,aec-48k,superres-16k_to_48k"
+AFX_EFFECTS_DEFAULT="denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k"
 
 # Check one component short name.
 require_component() {

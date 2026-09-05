@@ -192,17 +192,20 @@ Nothing is written outside your own directories, and no step needs root.
 
 ### Audio effects
 
-The default effect list is the minimal set for the StudioCast MVP: acoustic echo cancellation and super resolution.
+The default effect list is the four features that the StudioCast microphone effects select:
+`denoiser`, `dereverb`, `dereverb_denoiser` and `studio_voice`, at 48 kHz. `studiocast-maxine
+doctor` reports these same four.
 
 ```bash
 ./scripts/setup/maxine.sh --install-afx-features
 ```
 
-Choose another set:
+Acoustic echo cancellation and super resolution are optional; nothing in StudioCast selects
+them yet. Name the whole list to add them:
 
 ```bash
 ./scripts/setup/maxine.sh --install-afx-features \
-  --afx-effects "denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k"
+  --afx-effects "denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k,aec-48k,superres-16k_to_48k"
 ```
 
 The AFX script reads the compute capability of GPU 0 by itself. Name the GPU with `--afx-gpu` (for example `a40`, `t4`, `l4`) when you install on a machine whose GPU is not the target, and set `CUDA_VISIBLE_DEVICES` when the machine has more than one GPU.

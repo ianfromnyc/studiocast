@@ -401,10 +401,15 @@ version (never the Triton Inference Server build beside it), and works around th
 `/usr/local/VideoFX` path inside the SDK's own `install_feature.sh` by running a patched
 copy of it. Nothing is written outside your own directories.
 
-By default, `--install-afx-features` downloads the MVP AFX feature set (AEC + Superres). To customize:
+By default, `--install-afx-features` downloads the four AFX features that the StudioCast
+microphone effects use: `denoiser`, `dereverb`, `dereverb_denoiser` and `studio_voice`, all
+at 48 kHz. Those are the four that `studiocast-maxine doctor` reports. Acoustic echo
+cancellation and super resolution are optional, because nothing in StudioCast selects them
+yet; add them by naming the whole list:
 
 ```bash
-./scripts/setup/maxine.sh --install-afx-features --afx-effects "superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
+./scripts/setup/maxine.sh --install-afx-features \
+  --afx-effects "denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k,aec-48k,superres-16k_to_48k"
 ```
 
 Full instructions, including the entitlement table and the offline path, are in

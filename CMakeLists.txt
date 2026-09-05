@@ -921,6 +921,12 @@ if (BUILD_TESTING)
             "${STUDIOCAST_GENERATED_DIR}"
     )
 
+    # One test reads scripts/setup/maxine.sh, to keep the default feature list
+    # of the installer and the features the mic effects select in step.
+    target_compile_definitions(studiocast-maxine-features-tests PRIVATE
+            STUDIOCAST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+
     studiocast_set_project_warnings(studiocast-maxine-features-tests)
     studiocast_enable_sanitizers(studiocast-maxine-features-tests)
 
