@@ -528,6 +528,21 @@ Safety reuses the speaker target rules and adds one more: the monitor refuses a
 sink whose monitor source is the selected microphone input, because that is a
 feedback loop.
 
+A sink of `"auto"` is resolved once, at the start, and the resolved name is
+pinned. Only an explicit restart resolves it again: a change to the sink or the
+delay, or the monitor going from off to on. A restart the user did not ask for,
+such as the one after a failed route check, uses the pinned name. This is
+because Pulse moves its default output on an unplug, usually to the built-in
+loudspeakers, so a monitor that resolved `"auto"` again would build a feedback
+loop on its own. When the output disappears the monitor stops and writes what
+happened to `monitor.note`, not to `monitor.last_error`, because the GUI prints
+the note as written and turns any error into a request to open Support.
+
+The daemon never writes the monitor setting back. A safety check that finds no
+usable output gives a warning and leaves `monitor.enabled` as the user wrote
+it, because the same check fails when the sound server is only unreadable for a
+moment and the config it checks is the one that is saved to disk.
+
 The monitor talks to Pulse directly: `StartMicMonitor` and `StopMicMonitor`
 call `pactl` and know `module-loopback` and the name `studiocast_mic`.
 `VirtualAudioServiceHooks` gives a seam for the tests, but there is no

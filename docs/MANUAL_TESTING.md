@@ -447,12 +447,26 @@ Expected:
 Expected:
 
 - Status reports that the monitor output disappeared and that the monitor
-  stopped.
+  stopped. The sentence is shown as written, with no request to open Support.
 - StudioCast does not move the monitor to another output by itself. The default
   output after an unplug is usually the loudspeakers, which would feed the
   microphone back into itself.
 - Plugging the headphones back in does not start the monitor again. Turn the
   monitor off and on again, or select the output, to hear it there.
+- Turning microphone processing off and on again also counts as a restart, so
+  it too puts a monitor set to "auto" on the output that is the default at that
+  moment.
+
+- [ ] With the monitor on, change an unrelated audio setting (the effects
+  intensity, for example) while no output sink is usable.
+
+Expected:
+
+- The reply carries a warning that says the monitor cannot start.
+- `audio.monitor.enabled` in the daemon config file is still `true`. The daemon
+  never writes the monitor setting back, and the check box in the GUI does not
+  un-tick itself.
+- The monitor starts on its own when a usable output comes back.
 
 - [ ] Turn microphone processing off while the monitor is on, then stop the
   daemon.
