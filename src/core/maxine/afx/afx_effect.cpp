@@ -611,11 +611,19 @@ bool AfxEffect::Load(std::string *error_out) {
     return false;
   }
 
-  // The channel count is part of the effect. Read the count that the effect
-  // reports when it does not take one, and stop only when that count is not
-  // the one the caller needs.
+  // The channel count is part of the effect. An effect that does not take one
+  // says so with an invalid parameter status; then read the count it reports
+  // and stop only when that count is not the one the caller needs. Any other
+  // status is a real SDK error, so stop at once and keep its message.
+  bool channels_unsupported = false;
   if (!SetU32Any(handle_, "channels", {"num_input_channels", "num_channels"},
-                 cfg_.channels, &set_err)) {
+                 cfg_.channels, &set_err, &channels_unsupported)) {
+    if (!channels_unsupported) {
+      if (error_out)
+        *error_out = set_err;
+      Destroy();
+      return false;
+    }
     std::uint32_t actual = 0;
     const bool known =
         GetU32Any(handle_, {"num_input_channels", "num_channels"}, &actual);

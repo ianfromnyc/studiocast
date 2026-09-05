@@ -532,6 +532,61 @@ bool TestChannelCountMismatchFails() {
   return ok;
 }
 
+// A status that is not "invalid parameter" on the channel count is a real SDK
+// error, not "this effect takes no channel count". It must stop the load and
+// carry the message of the SDK, even when the effect reports the count that
+// StudioCast asked for.
+bool TestAChannelCountErrorFailsTheLoad() {
+  const fs::path root = TempRoot("channel-error");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  fake_afx::Reset();
+  // 7 is not the "invalid parameter" status, so it is a real failure.
+  fake_afx::g_set_status["num_input_channels"] = 7;
+  fake_afx::g_set_status["num_channels"] = 7;
+  // The read back count is the one the caller asked for, so only the status
+  // tells the two cases apart.
+  fake_afx::g_channels_readback = 1;
+  studiocast::maxine::afx::AfxApi api;
+  fake_afx::Install(&api);
+
+  studiocast::maxine::afx::AfxEffect fx(&api);
+  const auto cfg = MakeConfig(features, "denoiser", "denoiser");
+
+  std::string err;
+  const bool configured = fx.Configure(cfg, &err);
+  bool ok = Require(configured, "expected the denoiser to configure: " + err);
+  if (!ok) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  const bool loaded = fx.Load(&err);
+  ok &= Require(!loaded, "expected a real channel count error to fail");
+  ok &=
+      Require(err.find("NvAFX_SetU32 failed for channels") != std::string::npos,
+              "expected the SDK message in the error, got: " + err);
+
+  bool says_takes_no = false;
+  for (const auto &w : fx.warnings()) {
+    if (w.find("takes no channel count") != std::string::npos)
+      says_takes_no = true;
+  }
+  ok &= Require(!says_takes_no,
+                "a real SDK error must not read as an unsupported parameter");
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 // A parameter that every effect needs must still stop the load.
 bool TestMissingRequiredParameterFails() {
   const fs::path root = TempRoot("required");
@@ -790,6 +845,7 @@ int main() {
   ok = TestLoadsStudioVoiceWithoutTheOptionalParameters() && ok;
   ok = TestNonMonoChannelCountIsRefused() && ok;
   ok = TestChannelCountMismatchFails() && ok;
+  ok = TestAChannelCountErrorFailsTheLoad() && ok;
   ok = TestMissingRequiredParameterFails() && ok;
   ok = TestFeatureLibDirsAreListed() && ok;
   ok = TestLoaderPathValue() && ok;
