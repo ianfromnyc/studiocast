@@ -1408,6 +1408,14 @@ void AudioPage::ApplyMonitorSinkListForTesting(
   ApplyMonitorSinkRefreshResult(result);
 }
 
+void AudioPage::ApplyMonitorSinkFailureForTesting(
+    const std::string &pactlDetails) {
+  SpeakerTargetRefreshResult result;
+  result.pactlOk = false;
+  result.pactlDetails = pactlDetails;
+  ApplyMonitorSinkRefreshResult(result);
+}
+
 void AudioPage::ApplyMonitorSinkRefreshResult(
     const SpeakerTargetRefreshResult &result) {
   if (!monitorSinkCombo_)
@@ -1422,6 +1430,13 @@ void AudioPage::ApplyMonitorSinkRefreshResult(
     monitorSinkCombo_->blockSignals(false);
     updatingMonitorUi_ = false;
     monitorSinksUsable_ = false;
+    // Say why the list is empty, as the source and speaker listings do.
+    if (statusText_) {
+      SetPlainTextPreservingScroll(
+          statusText_,
+          QStringLiteral("Microphone monitor output control error:\n%1")
+              .arg(QString::fromStdString(result.pactlDetails)));
+    }
     UpdateMonitorControlsEnabled();
     return;
   }

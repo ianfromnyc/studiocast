@@ -1634,6 +1634,40 @@ bool TestAudioPageReportsAMonitorSinkListError() {
   return ok;
 }
 
+// pactl can be missing altogether. The monitor sink list then holds the
+// "unavailable" line alone, so the status text must carry the reason, the way
+// the microphone input and speaker target listings report it.
+bool TestAudioPageReportsAnUnavailablePactlForTheMonitorSinks() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-pactl");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  // No event loop runs here, for the reason given above.
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *statusText =
+      page.findChild<QPlainTextEdit *>(QStringLiteral("audioStatusText"));
+  auto *sinkCombo =
+      page.findChild<QComboBox *>(QStringLiteral("monitorSinkCombo"));
+  if (!Expect(statusText != nullptr && sinkCombo != nullptr,
+              "the status text and the monitor sink combo should be findable"))
+    return false;
+
+  const std::string details = "pactl was not found on PATH";
+  page.ApplyMonitorSinkFailureForTesting(details);
+
+  const QString text = statusText->toPlainText();
+  bool ok = Expect(text.contains(QString::fromStdString(details)),
+                   "the status text should carry the pactl failure");
+  if (!ok)
+    std::cerr << "status text was: " << text.toStdString() << "\n";
+
+  ok = Expect(sinkCombo->count() == 1,
+              "an unavailable pactl should leave one line in the sink list") &&
+       ok;
+  return ok;
+}
+
 bool TestVideoPageKeepsUserSelectedInputWhenRoutineStatusStillAuto() {
   studiocast::gui::VideoPage page;
   auto *inputCombo =
@@ -1923,5 +1957,6 @@ int main(int argc, char **argv) {
   // its result.
   ok = TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() && ok;
   ok = TestAudioPageReportsAMonitorSinkListError() && ok;
+  ok = TestAudioPageReportsAnUnavailablePactlForTheMonitorSinks() && ok;
   return ok ? 0 : 1;
 }

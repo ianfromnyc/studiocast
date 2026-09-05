@@ -47,6 +47,10 @@ public:
       const std::vector<studiocast::audio::pulse::PactlSink> &sinks,
       const std::string &listError);
 
+  // Test seam. Apply the outcome of a monitor sink listing that never ran
+  // because pactl is unavailable.
+  void ApplyMonitorSinkFailureForTesting(const std::string &pactlDetails);
+
 signals:
   void StatusRefreshRequested();
 
