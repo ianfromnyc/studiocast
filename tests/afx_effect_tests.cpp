@@ -1074,6 +1074,41 @@ bool TestARealIntensityErrorFailsTheUpdate() {
   return ok;
 }
 
+// Compute capability 8.7 is Jetson Orin, and the SDK ships no sm_87 model
+// pack. The nearest architecture it does ship is sm_86, so that is what an
+// 8.7 GPU gets. This pins the fallback, so a later SDK that adds sm_87 shows
+// up here as a failing check.
+bool TestJetsonComputeCapabilityFallsBackToSm86() {
+  const fs::path root = TempRoot("sm87");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  studiocast::maxine::afx::AfxEffect fx(nullptr);
+  auto cfg = MakeConfig(features, "denoiser", "denoiser");
+  cfg.compute_capability = std::make_pair(8, 7);
+
+  std::string err;
+  bool ok = Require(fx.Configure(cfg, &err),
+                    "expected an 8.7 GPU to configure: " + err);
+  if (ok) {
+    ok &= Require(fx.resolved_model_path() ==
+                      features / "denoiser" / "models" / "sm_86" /
+                          "denoiser_48k.trtpkg",
+                  "expected the sm_86 model for compute capability 8.7, got " +
+                      fx.resolved_model_path().string());
+  }
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 // The SDK answers NVAFX_STATUS_IMMUTABLE_PARAM for a parameter that cannot
 // change after Load. That is not a failure of the update; the effect simply
 // keeps the value it was loaded with, so the update is a no-op.
@@ -1142,6 +1177,7 @@ int main() {
   ok = TestAnUnsupportedIntensityIsNotedOnce() && ok;
   ok = TestARealIntensityErrorFailsTheUpdate() && ok;
   ok = TestAnImmutableIntensityIsANoOp() && ok;
+  ok = TestJetsonComputeCapabilityFallsBackToSm86() && ok;
 
   if (!ok)
     return 1;

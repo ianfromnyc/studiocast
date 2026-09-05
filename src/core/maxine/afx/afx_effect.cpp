@@ -37,8 +37,9 @@ SmFolderFromComputeCap(const std::optional<std::pair<int, int>> &cap,
   const int major = cap->first;
   const int minor = cap->second;
 
-  // Supported folders (per issue requirements):
-  // sm_75, sm_80, sm_86, sm_89, sm_90, sm_100, sm_120.
+  // The SDK ships model packs for these folders only: sm_75, sm_80, sm_86,
+  // sm_89, sm_90, sm_100, sm_120. The AFX `features/download_features.sh` maps
+  // every GPU it knows onto that same set.
   if (major == 7) {
     if (minor >= 5)
       return std::string("sm_75");
@@ -46,6 +47,9 @@ SmFolderFromComputeCap(const std::optional<std::pair<int, int>> &cap,
   if (major == 8) {
     if (minor >= 9)
       return std::string("sm_89");
+    // 8.7 is Jetson Orin. NVIDIA ships no sm_87 pack, so it takes the sm_86
+    // engines, which is the nearest architecture the SDK has. Add an sm_87
+    // line here if a later SDK starts to ship one.
     if (minor >= 6)
       return std::string("sm_86");
     if (minor >= 0)
