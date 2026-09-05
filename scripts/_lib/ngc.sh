@@ -30,6 +30,8 @@
 #   SC_NGC_ORG            NGC org. Default: nvidia.
 #   SC_NGC_TEAM           NGC team. Default: maxine.
 #   SC_NGC_DRY_RUN        1 prints the download commands instead of running them.
+#   SC_NGC_MAX_PAGES      Most pages of a file list to ask for. Default: 200.
+#   SC_NGC_RETRIES        Times curl retries one request. Default: 3.
 #   SC_NGC_ALT_RESOURCES  Resource names printed when NGC answers 402.
 #   sc_ngc_log            Log function. The default prints "[ngc] <message>".
 #
@@ -530,7 +532,9 @@ PY
     # A page that holds no file at all is a different thing: the pages after it
     # can still hold files, so go on and do not lose them.
     if [[ -n "${entries}" && "${merged}" == "${listing}" ]]; then
-      sc_ngc_err "page ${page} of the file list for '${resource}' version ${version} repeats what the pages before it gave. Stopping after ${page} of ${pages} pages."
+      # A note, not an error: the listing is whole and the function returns 0.
+      # It goes to stderr, because stdout carries the listing itself.
+      sc_ngc_log "page ${page} of the file list for '${resource}' version ${version} repeats what the pages before it gave. Stopping after ${page} of ${pages} pages." >&2
       break
     fi
     listing="${merged}"

@@ -905,8 +905,6 @@ JSON
   cat > "${child}" <<'CHILD'
 set -uo pipefail
 unset NGC_API_KEY NGC_CLI_API_KEY
-sc_ngc_log() { :; }
-sc_ngc_err() { :; }
 # shellcheck source=/dev/null
 source "$1"
 export SC_NGC_API_KEY="$2"
@@ -917,10 +915,11 @@ sc_ngc_list_model_files test-model 1.0
 CHILD
 
   local log="${SANDBOX}/repeat.log"
+  local errfile="${SANDBOX}/repeat.err"
   : > "${log}"
   local out
   out="$(timeout 30 env NGC_CURL_LOG="${log}" NGC_STUB_LISTING="${listing}" \
-    bash "${child}" "${NGC_LIB}" "${MODERN_KEY}" 2>/dev/null)"
+    bash "${child}" "${NGC_LIB}" "${MODERN_KEY}" 2>"${errfile}")"
 
   local requests
   requests="$(grep -c '^argv:' "${log}")"
@@ -934,6 +933,29 @@ CHILD
     t_fail "the listing lost the only file: ${out}"
   else
     t_pass "the listing keeps what the pages did hold"
+  fi
+
+  local err
+  err="$(cat "${errfile}")"
+  if [[ "${err}" != *"repeats"* ]]; then
+    t_fail "the stop did not say why it stopped: ${err}"
+  else
+    t_pass "the stop says why it stopped"
+  fi
+
+  # Nothing failed here: the loop stopped where it must and the listing is
+  # whole. A note that says ERROR sends the user to look for a fault.
+  if [[ "${err}" == *ERROR* ]]; then
+    t_fail "a listing that worked printed an error: ${err}"
+  else
+    t_pass "a listing that worked prints no error"
+  fi
+
+  # stdout carries the listing, so the note must not go there.
+  if [[ "${out}" == *"[ngc]"* ]]; then
+    t_fail "a log line went into the listing: ${out}"
+  else
+    t_pass "the note stays out of the listing"
   fi
 }
 
