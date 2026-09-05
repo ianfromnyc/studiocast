@@ -453,6 +453,7 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
     monitor_latency_ms_ = 0;
     monitor_volume_ = 0;
     monitor_output_lost_ = false;
+    monitor_route_may_exist_ = false;
     consumer_detector_.reset();
   }
 
@@ -536,6 +537,7 @@ void VirtualAudioService::Stop() {
     monitor_latency_ms_ = 0;
     monitor_volume_ = 0;
     monitor_output_lost_ = false;
+    monitor_route_may_exist_ = false;
     consumer_detector_.reset();
   }
 }
@@ -691,6 +693,7 @@ void VirtualAudioService::ThreadMain() {
   steady_clock::time_point nextSpeakerLoopbackStopRetry{};
   steady_clock::time_point nextSpeakerDestroyRetry{};
   steady_clock::time_point nextMonitorStartRetry{};
+  steady_clock::time_point nextMonitorStopRetry{};
   steady_clock::time_point nextMonitorVerify{};
   std::string speakerLoopbackStopRetryError;
   std::string speakerDestroyRetryError;
@@ -778,6 +781,21 @@ void VirtualAudioService::ThreadMain() {
     st_.speakers_pipeline_resync_events = 0;
   };
 #endif
+
+  // A daemon that is killed while the monitor plays leaves its tagged loopback
+  // loaded, and nothing else removes it. Clear it once per service start, off
+  // the caller's thread, whatever the monitor setting says.
+  {
+    std::string staleErr;
+    if (StopMicMonitorRoute(&staleErr)) {
+      monitor_route_may_exist_ = false;
+    } else {
+      monitor_route_may_exist_ = true;
+      std::lock_guard<std::mutex> lock(mu_);
+      st_.monitor_last_error =
+          "Failed to remove a leftover microphone monitor: " + staleErr;
+    }
+  }
 
   while (!stop_.load(std::memory_order_acquire)) {
     VirtualAudioServiceConfig cfg;
@@ -1238,13 +1256,20 @@ void VirtualAudioService::ThreadMain() {
           forgetMonitorRequest();
           setMonitorError(std::string());
         }
-        if (monitor_running_) {
+        if ((monitor_running_ || monitor_route_may_exist_) &&
+            monitorNow >= nextMonitorStopRetry) {
           std::string err;
           if (StopMicMonitorRoute(&err)) {
+            monitor_route_may_exist_ = false;
+            nextMonitorStopRetry = steady_clock::time_point{};
             clearMonitorRouteState();
             forgetMonitorRequest();
             setMonitorError(std::string());
           } else {
+            // The loopback may still play, so keep coming back to it instead
+            // of forgetting it.
+            monitor_route_may_exist_ = true;
+            nextMonitorStopRetry = monitorNow + StartFailureRetryDelay(cfg);
             setMonitorError("Failed to stop the microphone monitor: " + err);
           }
         }
@@ -1272,8 +1297,12 @@ void VirtualAudioService::ThreadMain() {
           nextMonitorVerify = monitorNow + seconds(2);
           if (!detectErr.empty()) {
             // A failed check says nothing about the loopback, so the status
-            // must not go on claiming an active monitor. Report the failure
-            // and let the restart path below try again.
+            // must not go on claiming an active monitor. Stop the route the
+            // service can no longer see, and keep the knowledge that it may
+            // still play when the stop fails too.
+            std::string stopErr;
+            if (StopMicMonitorRoute(&stopErr))
+              monitor_route_may_exist_ = false;
             clearMonitorRouteState();
             setMonitorError("Failed to check the microphone monitor: " +
                             detectErr);
@@ -1286,6 +1315,7 @@ void VirtualAudioService::ThreadMain() {
                                          ? monitorCfg.sink
                                          : monitor_sink_resolved_;
             clearMonitorRouteState();
+            monitor_route_may_exist_ = false;
             monitor_output_lost_ = true;
             setMonitorError("The monitor output '" + lost +
                             "' disappeared, so the monitor stopped. Choose "
@@ -1304,6 +1334,7 @@ void VirtualAudioService::ThreadMain() {
           if (StartMicMonitorRoute(monitorCfg, micSourceStatus.selected_source,
                                    &state, &err)) {
             monitor_running_ = true;
+            monitor_route_may_exist_ = true;
             monitor_sink_requested_ = monitorCfg.sink;
             monitor_sink_resolved_ = state.sink;
             monitor_latency_ms_ = monitorCfg.latency_ms;
@@ -2737,10 +2768,13 @@ void VirtualAudioService::ThreadMain() {
   }
 
   // The monitor is a listening aid, not a route other apps depend on. Stop it
-  // with the service so no loopback outlives the daemon session.
-  if (monitor_running_) {
+  // with the service so no loopback outlives the daemon session. A failed
+  // check earlier can have cleared `monitor_running_` while the module was
+  // still loaded, so the stop follows what may exist as well.
+  if (monitor_running_ || monitor_route_may_exist_) {
     std::string err;
     if (StopMicMonitorRoute(&err)) {
+      monitor_route_may_exist_ = false;
       monitor_running_ = false;
       monitor_sink_requested_.clear();
       monitor_sink_resolved_.clear();

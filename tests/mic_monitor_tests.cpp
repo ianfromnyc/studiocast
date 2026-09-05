@@ -365,6 +365,7 @@ struct MonitorRecorder {
   std::atomic<int> stops{0};
   std::atomic<bool> running{false};
   std::atomic<bool> fail_start{false};
+  std::atomic<bool> fail_stop{false};
   std::atomic<bool> fail_detect{false};
   std::mutex mu;
   std::string last_sink;
@@ -404,6 +405,12 @@ void HookMonitor(VirtualAudioServiceHooks *hooks, MonitorRecorder *rec) {
   };
   hooks->stop_mic_monitor = [rec](std::string *error) {
     rec->stops.fetch_add(1, std::memory_order_relaxed);
+    if (rec->fail_stop.load(std::memory_order_relaxed)) {
+      // A failed stop says nothing about the loopback, so it may still play.
+      if (error)
+        *error = "synthetic monitor stop failure";
+      return false;
+    }
     rec->running.store(false, std::memory_order_relaxed);
     if (error)
       error->clear();
@@ -869,6 +876,90 @@ bool TestServiceStopsTheMonitorWhenTheResolvedOutputDisappears() {
   return ok;
 }
 
+// A daemon that is killed while the monitor plays leaves the tagged loopback
+// loaded in Pulse. Nothing else removes it, so every service start clears it,
+// even one that starts with the monitor turned off.
+bool TestServiceClearsAStaleMonitorAtStart() {
+  MonitorRecorder rec;
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  VirtualAudioService service(std::move(hooks));
+  auto cfg = MonitorServiceConfig();
+  cfg.monitor.enabled = false;
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  const bool cleared = WaitUntil(
+      [&] { return rec.stops.load(std::memory_order_relaxed) >= 1; }, 1000ms);
+  service.Stop();
+  if (!cleared) {
+    std::cerr << "a service start with the monitor off never cleared a stale "
+                 "loopback\n";
+    return false;
+  }
+  return true;
+}
+
+// A failed check, and a failed stop after it, say nothing about the loopback.
+// The service must keep the knowledge that a route may still play and stop it
+// when the service stops.
+bool TestServiceStopsAMonitorItCanNoLongerSee() {
+  MonitorRecorder rec;
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  VirtualAudioService service(std::move(hooks));
+  const auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+  if (!WaitUntil([&] { return service.Status().monitor_active; }, 1000ms)) {
+    std::cerr << "the monitor did not start\n";
+    service.Stop();
+    return false;
+  }
+
+  // pactl breaks: the check, the start and the stop all fail.
+  rec.fail_detect.store(true, std::memory_order_relaxed);
+  rec.fail_start.store(true, std::memory_order_relaxed);
+  rec.fail_stop.store(true, std::memory_order_relaxed);
+
+  // The service checks the route every two seconds.
+  if (!WaitUntil([&] { return !service.Status().monitor_active; }, 5000ms)) {
+    std::cerr << "a failed check left the monitor state alone\n";
+    service.Stop();
+    return false;
+  }
+
+  // pactl works again, but the service no longer believes a route is running.
+  rec.fail_stop.store(false, std::memory_order_relaxed);
+  const int stops_before = rec.stops.load(std::memory_order_relaxed);
+
+  service.Stop();
+
+  const int stops_after = rec.stops.load(std::memory_order_relaxed);
+  if (stops_after <= stops_before) {
+    std::cerr << "the service stopped without unloading the loopback it could "
+                 "no longer see\n";
+    return false;
+  }
+  if (rec.running.load(std::memory_order_relaxed)) {
+    std::cerr << "a monitor loopback outlived the service\n";
+    return false;
+  }
+  return true;
+}
+
 bool TestMonitorConsumerIsCountedApartFromApps() {
   MonitorRecorder rec;
   std::atomic<int> consumer_count{0};
@@ -1093,6 +1184,10 @@ int main() {
        &TestServiceTreatsAFailedMonitorCheckAsStopped},
       {"service stops the monitor when the resolved output disappears",
        &TestServiceStopsTheMonitorWhenTheResolvedOutputDisappears},
+      {"service clears a stale monitor at start",
+       &TestServiceClearsAStaleMonitorAtStart},
+      {"service stops a monitor it can no longer see",
+       &TestServiceStopsAMonitorItCanNoLongerSee},
       {"monitor consumer is counted apart from apps",
        &TestMonitorConsumerIsCountedApartFromApps},
       {"service drives the real helper through pactl",

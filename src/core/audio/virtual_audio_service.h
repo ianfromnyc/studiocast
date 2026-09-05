@@ -290,6 +290,10 @@ private:
   // Set when the resolved output disappeared. The monitor then stays off until
   // the user changes the setting or turns the monitor off and on again.
   bool monitor_output_lost_ = false;
+  // Set while a tagged loopback may still be loaded in Pulse. A failed check
+  // or a failed stop leaves it set, so the stop is tried again rather than
+  // forgotten. Only a successful stop clears it.
+  bool monitor_route_may_exist_ = false;
 
   VirtualAudioServiceHooks hooks_{};
   VirtualAudioServiceConfig cfg_{};

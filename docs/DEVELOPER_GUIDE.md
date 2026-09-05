@@ -515,7 +515,9 @@ can hear the effects while adjusting them. It is a Pulse `module-loopback` from
 `media.name=StudioCast_Microphone_Monitor`. The name has no spaces because the
 Pulse module argument parser keeps only the text before the first space of a
 property value. StudioCast finds and unloads its own monitor loopback by that
-tag, so a daemon restart never leaves a second monitor behind.
+tag. The service does this once at every start, whatever the monitor setting
+says, so a loopback that a killed daemon left behind is removed and a daemon
+restart never leaves a second monitor behind.
 
 Config lives in the audio config JSON under an additive `monitor` object
 (`enabled`, `sink`, `latency_ms`, `volume`) and in the daemon config under
