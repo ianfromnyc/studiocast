@@ -251,32 +251,55 @@ bool StopMicMonitor(std::string *error) {
   return true;
 }
 
-// Best-effort volume control. The loopback sink input is found by the owner
-// module id that `pactl load-module` reported.
-void ApplyMonitorVolume(int module_id, int volume, std::string *warning) {
+// The loopback sink input is found by the owner module id that
+// `pactl load-module` reported.
+bool SetMicMonitorVolume(int module_id, int volume, std::string *error) {
+  if (error)
+    error->clear();
+
   std::string listErr;
   const auto inputs = pulse::ListSinkInputsDetailed(&listErr);
   if (!listErr.empty()) {
-    if (warning)
-      *warning = "Monitor volume was not applied: " + listErr;
-    return;
+    if (error)
+      *error = "Monitor volume was not applied: " + listErr;
+    return false;
   }
 
+  // The owner module is the one `pactl load-module` reported, so it names the
+  // stream exactly. The stream name is only a fallback, because a foreign
+  // stream can carry it: pipewire-pulse keeps it in the stream-restore
+  // database under `sink-input-by-media-name`.
+  const pulse::PactlSinkInputInfo *chosen = nullptr;
   for (const auto &input : inputs) {
-    const bool ours = input.owner_module == module_id ||
-                      input.media_name == kMonitorStreamName;
-    if (!ours)
-      continue;
-    std::string err;
-    if (!pulse::SetSinkInputVolumePercent(input.id, volume, &err) && warning) {
-      *warning = "Monitor volume was not applied: " + err;
+    if (input.owner_module == module_id) {
+      chosen = &input;
+      break;
     }
-    return;
+  }
+  if (!chosen) {
+    for (const auto &input : inputs) {
+      if (input.media_name == kMonitorStreamName) {
+        chosen = &input;
+        break;
+      }
+    }
   }
 
-  if (warning)
-    *warning = "Monitor volume was not applied: the monitor stream was not "
+  if (!chosen) {
+    if (error) {
+      *error = "Monitor volume was not applied: the monitor stream was not "
                "found.";
+    }
+    return false;
+  }
+
+  std::string err;
+  if (!pulse::SetSinkInputVolumePercent(chosen->id, volume, &err)) {
+    if (error)
+      *error = "Monitor volume was not applied: " + err;
+    return false;
+  }
+  return true;
 }
 
 bool StartMicMonitor(const MicMonitorConfig &raw_cfg,
@@ -329,8 +352,10 @@ bool StartMicMonitor(const MicMonitorConfig &raw_cfg,
     return false;
   }
 
+  // A volume that does not apply leaves the monitor playing, so it is a
+  // warning rather than a failed start.
   std::string volumeWarning;
-  ApplyMonitorVolume(*id, cfg.volume, &volumeWarning);
+  SetMicMonitorVolume(*id, cfg.volume, &volumeWarning);
 
   if (out) {
     out->active = true;

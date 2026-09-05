@@ -77,6 +77,10 @@ MicMonitorState DetectMicMonitor(std::string *error);
 // Unloads every monitor loopback. Succeeds when there is nothing to unload.
 bool StopMicMonitor(std::string *error);
 
+// Sets the playback volume of the running monitor stream, 0..100 percent. The
+// volume belongs to the loopback sink input, so the module need not reload.
+bool SetMicMonitorVolume(int module_id, int volume, std::string *error);
+
 // Starts the monitor: studiocast_mic -> the configured (or default) sink.
 // Any monitor loopback that is already loaded is unloaded first.
 bool StartMicMonitor(const MicMonitorConfig &cfg,

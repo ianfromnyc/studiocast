@@ -210,6 +210,7 @@ struct VirtualAudioServiceHooks {
                      MicMonitorState *, std::string *)>
       start_mic_monitor;
   std::function<bool(std::string *)> stop_mic_monitor;
+  std::function<bool(int, int, std::string *)> set_mic_monitor_volume;
   std::function<MicMonitorState(std::string *)> detect_mic_monitor;
   std::function<AudioBackendAvailability(const VirtualAudioServiceConfig &)>
       probe_microphone_backend_availability;
@@ -262,6 +263,8 @@ private:
                             const std::string &mic_source_name,
                             MicMonitorState *out, std::string *error) const;
   bool StopMicMonitorRoute(std::string *error) const;
+  bool SetMicMonitorRouteVolume(int module_id, int volume,
+                                std::string *error) const;
   MicMonitorState DetectMicMonitorRoute(std::string *error) const;
   AudioBackendAvailability ProbeMicrophoneBackendAvailability(
       const VirtualAudioServiceConfig &cfg) const;
@@ -289,6 +292,7 @@ private:
   // "auto" is resolved once, here, so a later restart cannot move the monitor
   // onto whatever the Pulse default has become.
   std::string monitor_sink_resolved_;
+  int monitor_module_id_ = -1;
   int monitor_latency_ms_ = 0;
   int monitor_volume_ = 0;
   // Set when the resolved output disappeared. The monitor then stays off until

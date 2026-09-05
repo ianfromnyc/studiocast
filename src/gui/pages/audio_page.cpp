@@ -920,6 +920,14 @@ AudioPage::AudioPage(AudioPageMode mode, QWidget *parent)
   connect(audioWriteDebounceTimer_, &QTimer::timeout, this,
           [this] { PushDaemonAudioConfig(); });
 
+  monitorWriteDebounceTimer_ = new QTimer(this);
+  monitorWriteDebounceTimer_->setObjectName(
+      QStringLiteral("monitorWriteDebounceTimer"));
+  monitorWriteDebounceTimer_->setSingleShot(true);
+  monitorWriteDebounceTimer_->setInterval(250);
+  connect(monitorWriteDebounceTimer_, &QTimer::timeout, this,
+          [this] { PushDaemonMonitorConfig(); });
+
   SetAdvancedVisible(false);
 
   // The daemon owns the monitor, so every monitor control stays dead until a
@@ -1552,6 +1560,8 @@ void AudioPage::UpdateMonitorControlsEnabled() {
 }
 
 void AudioPage::PushDaemonMonitorConfig() {
+  if (monitorWriteDebounceTimer_ && monitorWriteDebounceTimer_->isActive())
+    monitorWriteDebounceTimer_->stop();
   if (!daemonAiSupported_ || !monitorEnableCheck_) {
     audioWriteGuard_.MarkWriteRejected();
     return;
@@ -1598,25 +1608,25 @@ void AudioPage::PushDaemonMonitorConfig() {
 void AudioPage::OnMonitorEnabledToggled(bool /*checked*/) {
   if (updatingMonitorUi_)
     return;
-  PushDaemonMonitorConfig();
+  ScheduleDaemonMonitorConfigWrite();
 }
 
 void AudioPage::OnMonitorSinkChanged(int /*index*/) {
   if (updatingMonitorUi_)
     return;
-  PushDaemonMonitorConfig();
+  ScheduleDaemonMonitorConfigWrite();
 }
 
 void AudioPage::OnMonitorLatencyChanged(int /*value*/) {
   if (updatingMonitorUi_)
     return;
-  PushDaemonMonitorConfig();
+  ScheduleDaemonMonitorConfigWrite();
 }
 
 void AudioPage::OnMonitorVolumeChanged(int /*value*/) {
   if (updatingMonitorUi_)
     return;
-  PushDaemonMonitorConfig();
+  ScheduleDaemonMonitorConfigWrite();
 }
 
 void AudioPage::OnSourceChanged(int /*index*/) {
@@ -1903,6 +1913,15 @@ void AudioPage::UpdateReleaseControlsFromCachedStatus() {
   if (destroySpeakersBtn_)
     destroySpeakersBtn_->setEnabled(daemonOk &&
                                     daemonSpeakersVirtualDevicePresent_);
+}
+
+// The volume control sends one change per step, and each daemon write costs
+// the daemon two more pactl runs, so the steps are coalesced into one write.
+void AudioPage::ScheduleDaemonMonitorConfigWrite() {
+  if (!monitorWriteDebounceTimer_)
+    return;
+  audioWriteGuard_.MarkPending();
+  monitorWriteDebounceTimer_->start();
 }
 
 void AudioPage::ScheduleDaemonAudioConfigWrite() {

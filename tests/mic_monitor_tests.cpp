@@ -363,6 +363,7 @@ bool WaitUntil(const std::function<bool()> &pred,
 struct MonitorRecorder {
   std::atomic<int> starts{0};
   std::atomic<int> stops{0};
+  std::atomic<int> volume_calls{0};
   std::atomic<bool> running{false};
   std::atomic<bool> fail_start{false};
   std::atomic<bool> fail_stop{false};
@@ -412,6 +413,16 @@ void HookMonitor(VirtualAudioServiceHooks *hooks, MonitorRecorder *rec) {
       return false;
     }
     rec->running.store(false, std::memory_order_relaxed);
+    if (error)
+      error->clear();
+    return true;
+  };
+  hooks->set_mic_monitor_volume = [rec](int, int volume, std::string *error) {
+    rec->volume_calls.fetch_add(1, std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lock(rec->mu);
+      rec->last_volume = volume;
+    }
     if (error)
       error->clear();
     return true;
@@ -1011,6 +1022,62 @@ bool TestServiceReportsAnIdleMonitorAsANote() {
   return ok;
 }
 
+// The volume belongs to the loopback sink input, not to the module, so a
+// volume change applies in place. Reloading the module would break the sound
+// once per step of the spin box.
+bool TestServiceAppliesAVolumeChangeWithoutReloading() {
+  MonitorRecorder rec;
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  VirtualAudioService service(std::move(hooks));
+  auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+  if (!WaitUntil([&] { return service.Status().monitor_active; }, 1000ms)) {
+    std::cerr << "the monitor did not start\n";
+    service.Stop();
+    return false;
+  }
+
+  const int starts_before = rec.starts.load(std::memory_order_relaxed);
+
+  // Ten steps of the volume spin box.
+  for (int volume = 90; volume > 80; --volume) {
+    cfg.monitor.volume = volume;
+    service.UpdateConfig(cfg);
+    if (!WaitUntil(
+            [&] { return service.Status().monitor_volume_active == volume; },
+            1000ms)) {
+      std::cerr << "the monitor volume did not follow " << volume << "\n";
+      service.Stop();
+      return false;
+    }
+  }
+
+  const int reloads = rec.starts.load(std::memory_order_relaxed) - starts_before;
+  const int applied = rec.volume_calls.load(std::memory_order_relaxed);
+  service.Stop();
+
+  bool ok = true;
+  if (reloads != 0) {
+    std::cerr << "volume-only changes reloaded the loopback " << reloads
+              << " times\n";
+    ok = false;
+  }
+  if (applied < 10) {
+    std::cerr << "the volume was applied in place only " << applied
+              << " times\n";
+    ok = false;
+  }
+  return ok;
+}
+
 bool TestMonitorConsumerIsCountedApartFromApps() {
   MonitorRecorder rec;
   std::atomic<int> consumer_count{0};
@@ -1235,6 +1302,8 @@ int main() {
        &TestServiceTreatsAFailedMonitorCheckAsStopped},
       {"service stops the monitor when the resolved output disappears",
        &TestServiceStopsTheMonitorWhenTheResolvedOutputDisappears},
+      {"service applies a volume change without reloading",
+       &TestServiceAppliesAVolumeChangeWithoutReloading},
       {"service reports an idle monitor as a note",
        &TestServiceReportsAnIdleMonitorAsANote},
       {"service clears a stale monitor at start",

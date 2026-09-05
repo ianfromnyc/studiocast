@@ -131,6 +131,7 @@ private:
   void RefreshStatusFromCachedDaemon(bool forceControlResync);
   void ApplyCachedDaemonAudioStatus(bool forceControlResync = false);
   void ScheduleDaemonAudioConfigWrite();
+  void ScheduleDaemonMonitorConfigWrite();
   void UpdateReleaseControlsFromCachedStatus();
   void PushDaemonAudioConfig();
   void PushDaemonSourceSelection();
@@ -292,6 +293,9 @@ private:
   QStringList openAudioInstallHints_;
 
   QTimer *audioWriteDebounceTimer_ = nullptr;
+  // The monitor writes have their own timer: they carry a different patch
+  // from the effects write, and the volume control sends a burst of steps.
+  QTimer *monitorWriteDebounceTimer_ = nullptr;
   PendingDaemonWriteGuard audioWriteGuard_;
   QThread *sourceRefreshThread_ = nullptr;
   QThread *speakerTargetRefreshThread_ = nullptr;

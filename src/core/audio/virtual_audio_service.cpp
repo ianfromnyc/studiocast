@@ -450,6 +450,7 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
     monitor_running_ = false;
     monitor_sink_requested_.clear();
     monitor_sink_resolved_.clear();
+    monitor_module_id_ = -1;
     monitor_latency_ms_ = 0;
     monitor_volume_ = 0;
     monitor_output_lost_ = false;
@@ -535,6 +536,7 @@ void VirtualAudioService::Stop() {
     monitor_running_ = false;
     monitor_sink_requested_.clear();
     monitor_sink_resolved_.clear();
+    monitor_module_id_ = -1;
     monitor_latency_ms_ = 0;
     monitor_volume_ = 0;
     monitor_output_lost_ = false;
@@ -634,6 +636,14 @@ bool VirtualAudioService::StopMicMonitorRoute(std::string *error) const {
   return studiocast::audio::StopMicMonitor(error);
 }
 
+bool VirtualAudioService::SetMicMonitorRouteVolume(int module_id, int volume,
+                                                   std::string *error) const {
+  if (hooks_.set_mic_monitor_volume) {
+    return hooks_.set_mic_monitor_volume(module_id, volume, error);
+  }
+  return studiocast::audio::SetMicMonitorVolume(module_id, volume, error);
+}
+
 MicMonitorState
 VirtualAudioService::DetectMicMonitorRoute(std::string *error) const {
   if (hooks_.detect_mic_monitor) {
@@ -695,6 +705,7 @@ void VirtualAudioService::ThreadMain() {
   steady_clock::time_point nextSpeakerDestroyRetry{};
   steady_clock::time_point nextMonitorStartRetry{};
   steady_clock::time_point nextMonitorStopRetry{};
+  steady_clock::time_point nextMonitorVolumeRetry{};
   steady_clock::time_point nextMonitorVerify{};
   std::string speakerLoopbackStopRetryError;
   std::string speakerDestroyRetryError;
@@ -1250,6 +1261,7 @@ void VirtualAudioService::ThreadMain() {
       auto forgetMonitorRequest = [&]() {
         monitor_sink_requested_.clear();
         monitor_sink_resolved_.clear();
+        monitor_module_id_ = -1;
         monitor_latency_ms_ = 0;
         monitor_volume_ = 0;
       };
@@ -1333,9 +1345,28 @@ void VirtualAudioService::ThreadMain() {
           }
         }
 
-        const bool needRestart = !monitor_output_lost_ &&
-                                 (!monitor_running_ || monitorSettingsChanged ||
-                                  monitor_volume_ != monitorCfg.volume);
+        // The volume belongs to the loopback sink input, so it applies in
+        // place. Reloading the module for it would break the sound once per
+        // step of the volume control.
+        if (monitor_running_ && monitor_volume_ != monitorCfg.volume &&
+            monitorNow >= nextMonitorVolumeRetry) {
+          std::string volumeErr;
+          if (SetMicMonitorRouteVolume(monitor_module_id_, monitorCfg.volume,
+                                       &volumeErr)) {
+            monitor_volume_ = monitorCfg.volume;
+            nextMonitorVolumeRetry = steady_clock::time_point{};
+            std::lock_guard<std::mutex> lock(mu_);
+            st_.monitor_volume_active = monitorCfg.volume;
+          } else {
+            nextMonitorVolumeRetry = monitorNow + StartFailureRetryDelay(cfg);
+            setMonitorError("Failed to set the microphone monitor volume: " +
+                            volumeErr);
+          }
+        }
+
+        const bool needRestart =
+            !monitor_output_lost_ &&
+            (!monitor_running_ || monitorSettingsChanged);
 
         if (needRestart && monitorNow >= nextMonitorStartRetry) {
           MicMonitorState state;
@@ -1346,9 +1377,11 @@ void VirtualAudioService::ThreadMain() {
             monitor_route_may_exist_ = true;
             monitor_sink_requested_ = monitorCfg.sink;
             monitor_sink_resolved_ = state.sink;
+            monitor_module_id_ = state.module_id;
             monitor_latency_ms_ = monitorCfg.latency_ms;
             monitor_volume_ = monitorCfg.volume;
             nextMonitorStartRetry = steady_clock::time_point{};
+            nextMonitorVolumeRetry = steady_clock::time_point{};
             nextMonitorVerify = monitorNow + seconds(2);
             {
               std::lock_guard<std::mutex> lock(mu_);
@@ -2787,6 +2820,7 @@ void VirtualAudioService::ThreadMain() {
       monitor_running_ = false;
       monitor_sink_requested_.clear();
       monitor_sink_resolved_.clear();
+      monitor_module_id_ = -1;
       monitor_latency_ms_ = 0;
       monitor_volume_ = 0;
       monitor_output_lost_ = false;

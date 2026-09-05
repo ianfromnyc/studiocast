@@ -1813,6 +1813,46 @@ bool TestAudioPageShowsTheMonitorNoteWithoutSendingUserToSupport() {
   return ok;
 }
 
+// Every step of the monitor volume used to be its own blocking daemon write,
+// and each write costs the daemon two more pactl runs. The steps must coalesce
+// into one debounced write, the way the rest of this page writes.
+bool TestAudioPageDebouncesTheMonitorWrites() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-debounce");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *volumeSpin =
+      page.findChild<QSpinBox *>(QStringLiteral("monitorVolumeSpin"));
+  auto *timer =
+      page.findChild<QTimer *>(QStringLiteral("monitorWriteDebounceTimer"));
+  if (!Expect(volumeSpin != nullptr && timer != nullptr,
+              "the monitor volume and its write timer should be findable"))
+    return false;
+
+  bool ok = Expect(!timer->isActive(), "no monitor write is pending yet");
+  ok = Expect(timer->isSingleShot(),
+              "the debounced write should run once per burst") &&
+       ok;
+  ok =
+      Expect(timer->interval() >= 100,
+             "the debounce should be long enough to coalesce spin box steps") &&
+      ok;
+
+  volumeSpin->setValue(volumeSpin->value() - 1);
+  ok = Expect(timer->isActive(),
+              "a volume step should schedule a debounced write") &&
+       ok;
+
+  volumeSpin->setValue(volumeSpin->value() - 1);
+  ok = Expect(timer->isActive(),
+              "a second step should still leave one pending write") &&
+       ok;
+  return ok;
+}
+
 bool TestVideoPageKeepsUserSelectedInputWhenRoutineStatusStillAuto() {
   studiocast::gui::VideoPage page;
   auto *inputCombo =
@@ -2099,6 +2139,7 @@ int main(int argc, char **argv) {
 
   ok = TestAudioPageWaitsForItsDeviceListings() && ok;
   ok = TestAudioPageShowsTheMonitorNoteWithoutSendingUserToSupport() && ok;
+  ok = TestAudioPageDebouncesTheMonitorWrites() && ok;
   ok = TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() && ok;
   ok = TestAudioPageReportsAMonitorSinkListError() && ok;
   ok = TestAudioPageReportsAnUnavailablePactlForTheMonitorSinks() && ok;
