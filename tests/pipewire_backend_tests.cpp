@@ -154,7 +154,9 @@ PipeWireProbeEnv FakeEnv(std::map<std::string, std::string> vars,
     return path == existing;
   };
   env.socket_answers = [existing = std::move(existing_path)](
-                           const std::string &path) { return path == existing; };
+                           const std::string &path) {
+    return path == existing;
+  };
   return env;
 }
 
@@ -660,7 +662,9 @@ std::uint32_t WaitForNodeId(const studiocast::pw::PipeWireAudioNode &node) {
 // away is not asked again on every supervisor poll.
 bool TestNodeRestartDelayBacksOff() {
   using studiocast::pw::NodeRestartDelay;
-  const auto ms = [](int attempts) { return NodeRestartDelay(attempts).count(); };
+  const auto ms = [](int attempts) {
+    return NodeRestartDelay(attempts).count();
+  };
 
   return Expect(ms(0) == 0, "the first attempt must not wait") &&
          Expect(ms(1) == 500, "the second attempt waits half a second") &&
@@ -715,7 +719,8 @@ bool TestLiveDeviceComesBackAfterTheServerDropsIt() {
          Expect(noticed, "the owner never noticed the node had gone") &&
          Expect(recreated, "creating the device again failed: " + error) &&
          Expect(second != 0, "the new node never reached the graph") &&
-         Expect(second != first, "the owner kept the node the server dropped") &&
+         Expect(second != first,
+                "the owner kept the node the server dropped") &&
          Expect(healthyAgain, "the new node reads as down");
 }
 
@@ -995,7 +1000,8 @@ bool TestFrameBufferHandsTheNewestFrameOver() {
   (void)buffer.Publish(second.data(), second.size());
   const std::uint8_t after_second = *buffer.Acquire();
 
-  return Expect(nothingBefore, "a buffer with no frame must hand out nothing") &&
+  return Expect(nothingBefore,
+                "a buffer with no frame must hand out nothing") &&
          Expect(after_first == 0x11, "the first frame did not come back") &&
          Expect(after_second == 0x22, "the second frame did not come back");
 }
@@ -1081,7 +1087,8 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
 
   producer.join();
 
-  return Expect(!torn, "the consumer read a frame that two writes tore apart") &&
+  return Expect(!torn,
+                "the consumer read a frame that two writes tore apart") &&
          Expect(taken > 0, "the consumer should have read something");
 }
 
@@ -1581,7 +1588,8 @@ bool TestRingDiscardsOnlyWhatItWasAskedFor() {
                 "a discard must leave what arrived after the flush") &&
          Expect(popped && out == newer,
                 "the bytes left must be the ones written after the flush") &&
-         Expect(emptied == 0, "a discard of more than the ring holds empties it");
+         Expect(emptied == 0,
+                "a discard of more than the ring holds empties it");
 }
 
 bool TestRingRefusesWorkBeforeItIsSized() {

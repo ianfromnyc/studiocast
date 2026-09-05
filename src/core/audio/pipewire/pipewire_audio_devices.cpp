@@ -419,7 +419,8 @@ bool NativeAudioDevices::StartSpeakerLoopback(
 
   AudioNodeConfig cfg;
   cfg.role = AudioNodeRole::kPlayback;
-  cfg.node_name = "studiocast_speakers_route" + state_->options.node_name_suffix;
+  cfg.node_name =
+      "studiocast_speakers_route" + state_->options.node_name_suffix;
   cfg.node_description =
       "StudioCast Speakers Route" + state_->options.node_name_suffix;
   cfg.target_object = target_sink_name;
