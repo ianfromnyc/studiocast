@@ -340,8 +340,13 @@ jobs:
         # script that uses it. Every script under packaging/ is covered, so a
         # new one joins the job on its own. scripts/install/dlib.sh is here as
         # well, because the RPM build downloads the pinned dlib source with it.
+        #
+        # mapfile reports its own status, not the status of find, so an empty
+        # list has to fail on its own. Without that, a packaging/ that is
+        # renamed leaves the job linting one file and reporting success.
         run: |
           mapfile -t files < <(find packaging -name '*.sh' | sort)
+          (( ${#files[@]} > 0 )) || { echo "no packaging scripts found"; exit 1; }
           shellcheck -x "${files[@]}" scripts/install/dlib.sh
 
   # The RPM build is also the only Fedora build in push CI, so it checks the
