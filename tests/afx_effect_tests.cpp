@@ -834,6 +834,98 @@ bool TestAnUnexpectedSetErrorKeepsItsMessage() {
   return ok;
 }
 
+// An effect that takes no intensity, studio voice for one, must accept every
+// intensity update as a no-op. The note about it belongs in the warnings once,
+// however many updates the GUI sends.
+bool TestAnUnsupportedIntensityIsNotedOnce() {
+  const fs::path root = TempRoot("intensity-unsupported");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  fake_afx::Reset();
+  fake_afx::g_rejected = {"intensity_ratio"};
+  studiocast::maxine::afx::AfxApi api;
+  fake_afx::Install(&api);
+
+  studiocast::maxine::afx::AfxEffect fx(&api);
+  const auto cfg = MakeConfig(features, "denoiser", "denoiser");
+
+  std::string err;
+  const bool configured = fx.Configure(cfg, &err);
+  bool ok = Require(configured, "expected the denoiser to configure: " + err);
+  if (!ok) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  ok &= Require(fx.Load(&err), "expected the denoiser to load: " + err);
+
+  bool every_call_ok = true;
+  for (int i = 0; i < 100; ++i) {
+    if (!fx.UpdateIntensity(0.25f, &err))
+      every_call_ok = false;
+  }
+  ok &= Require(every_call_ok,
+                "an effect that takes no intensity must accept the update");
+  ok &= Require(fx.warnings().size() == 1,
+                "the warnings must not grow with every update, got " +
+                    std::to_string(fx.warnings().size()));
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
+// A status that is not "invalid parameter" is a real SDK error. An intensity
+// update must report it instead of reading as a success.
+bool TestARealIntensityErrorFailsTheUpdate() {
+  const fs::path root = TempRoot("intensity-error");
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  const fs::path features = root / "Audio_Effects_SDK" / "features";
+  if (!MakeFeaturesDir(features)) {
+    std::cerr << "failed to build the AFX features directory\n";
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  fake_afx::Reset();
+  // 7 is not the "invalid parameter" status, so it is a real failure.
+  fake_afx::g_set_status["intensity_ratio"] = 7;
+  studiocast::maxine::afx::AfxApi api;
+  fake_afx::Install(&api);
+
+  studiocast::maxine::afx::AfxEffect fx(&api);
+  const auto cfg = MakeConfig(features, "denoiser", "denoiser");
+
+  std::string err;
+  const bool configured = fx.Configure(cfg, &err);
+  bool ok = Require(configured, "expected the denoiser to configure: " + err);
+  if (!ok) {
+    fs::remove_all(root, ec);
+    return false;
+  }
+
+  ok &= Require(fx.Load(&err), "expected the denoiser to load: " + err);
+
+  err.clear();
+  const bool updated = fx.UpdateIntensity(0.25f, &err);
+  ok &= Require(!updated, "expected a real SDK error to fail the update");
+  ok &= Require(err.find("NvAFX_SetFloat failed for intensity") !=
+                    std::string::npos,
+                "expected the SDK message in the error, got: " + err);
+
+  fs::remove_all(root, ec);
+  return ok;
+}
+
 } // namespace
 
 int main() {
@@ -852,6 +944,8 @@ int main() {
   ok = TestRunPassesChannelPointers() && ok;
   ok = TestExecPathForRestart() && ok;
   ok = TestAnUnexpectedSetErrorKeepsItsMessage() && ok;
+  ok = TestAnUnsupportedIntensityIsNotedOnce() && ok;
+  ok = TestARealIntensityErrorFailsTheUpdate() && ok;
 
   if (!ok)
     return 1;

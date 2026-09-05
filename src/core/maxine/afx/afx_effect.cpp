@@ -500,15 +500,21 @@ bool AfxEffect::SetStringAny(NvAFX_Handle handle, const char *what,
   return false;
 }
 
+// The same parameter can come up again, because the GUI can update the
+// intensity as often as it likes. Keep one note for each message, so that the
+// warnings stay a short list and not a log.
 void AfxEffect::NoteOptionalParam(const char *what, bool unsupported,
                                   const std::string &set_err) {
+  std::string note;
   if (unsupported) {
-    warnings_.push_back("Effect `" + cfg_.effect_selector + "` takes no " +
-                        what + ".");
-    return;
+    note = "Effect `" + cfg_.effect_selector + "` takes no " + what + ".";
+  } else {
+    note = "Effect `" + cfg_.effect_selector + "` did not take the " + what +
+           ": " + set_err;
   }
-  warnings_.push_back("Effect `" + cfg_.effect_selector +
-                      "` did not take the " + what + ": " + set_err);
+  if (std::find(warnings_.begin(), warnings_.end(), note) != warnings_.end())
+    return;
+  warnings_.push_back(std::move(note));
 }
 
 bool AfxEffect::GetU32Any(NvAFX_Handle handle,
@@ -695,12 +701,18 @@ bool AfxEffect::UpdateIntensity(float intensity, std::string *error_out) {
     return false;
   }
 
-  // Studio voice takes no intensity. Keep that a note, not a failure.
+  // Studio voice takes no intensity. Keep that a note and a no-op, and report
+  // every other status as the failure it is.
   std::string set_err;
   bool unsupported = false;
   if (!SetFloatAny(handle_, "intensity", {"intensity_ratio"}, intensity,
                    &set_err, &unsupported)) {
-    NoteOptionalParam("intensity", unsupported, set_err);
+    if (!unsupported) {
+      if (error_out)
+        *error_out = set_err;
+      return false;
+    }
+    NoteOptionalParam("intensity", true, set_err);
     return true;
   }
 
