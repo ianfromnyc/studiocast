@@ -1017,6 +1017,24 @@ struct RingFrame {
 // The ring drops the data the producer holds when it is full, and never the
 // data it already took. Only the consumer may move the read end, so a full
 // ring has no other way to make room.
+// A ring that nobody sized yet holds nothing, so both ends must say no
+// instead of dividing by its zero size.
+bool TestRingRefusesWorkBeforeItIsSized() {
+  studiocast::pw::SpscByteRing ring;
+  std::array<std::uint8_t, 4> data{1, 2, 3, 4};
+
+  const bool pushedNothing = ring.Push(data.data(), 0);
+  const bool pushedSomething = ring.Push(data.data(), data.size());
+  const bool poppedNothing = ring.Pop(data.data(), 0);
+  const bool poppedSomething = ring.Pop(data.data(), data.size());
+
+  return Expect(!pushedNothing, "an unsized ring must refuse an empty push") &&
+         Expect(!pushedSomething, "an unsized ring must refuse a push") &&
+         Expect(!poppedNothing, "an unsized ring must refuse an empty pop") &&
+         Expect(!poppedSomething, "an unsized ring must refuse a pop") &&
+         Expect(ring.Capacity() == 0, "an unsized ring holds nothing");
+}
+
 bool TestRingDropsTheNewestWhenItIsFull() {
   studiocast::pw::SpscByteRing ring;
   ring.Reset(8);
@@ -1180,6 +1198,8 @@ int main() {
        &TestSocketProbeReportsAMissingRuntimeDirectory},
       {"stream state rule reports a down node",
        &TestStreamStateRuleReportsADownNode},
+      {"ring refuses work before it is sized",
+       &TestRingRefusesWorkBeforeItIsSized},
       {"ring drops the newest bytes when it is full",
        &TestRingDropsTheNewestWhenItIsFull},
       {"ring wraps without losing the byte order",

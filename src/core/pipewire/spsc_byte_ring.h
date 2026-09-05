@@ -50,7 +50,9 @@ public:
   // which is the drop-newest policy above: the caller drops the data it holds
   // and counts the drop.
   bool Push(const void *src, std::size_t bytes) {
-    if (bytes > Writable())
+    // A ring that Reset never sized holds nothing and has no size to divide
+    // the write position by.
+    if (buf_.empty() || bytes > Writable())
       return false;
     const auto *in = static_cast<const std::uint8_t *>(src);
     std::size_t h = head_.load(std::memory_order_relaxed);
@@ -66,7 +68,8 @@ public:
   // Consumer end. Returns false and reads nothing when the ring holds too
   // little.
   bool Pop(void *dst, std::size_t bytes) {
-    if (bytes > Readable())
+    // See Push: an unsized ring has nothing to give and no size to divide by.
+    if (buf_.empty() || bytes > Readable())
       return false;
     auto *out = static_cast<std::uint8_t *>(dst);
     std::size_t t = tail_.load(std::memory_order_relaxed);
