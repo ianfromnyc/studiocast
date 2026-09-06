@@ -131,6 +131,11 @@ bool CreateDeviceOutsideLock(std::mutex &create_mu, std::mutex &device_mu,
 // above `create_mu` would find no route at all when a create in flight is
 // about to install one.
 //
+// A create, a destroy and a route start all wait on `create_mu`, so `prepare`
+// must stay bounded. The speaker destroy joins the route pump there, which is
+// bounded because the stop wakes both nodes before it waits. Nothing a user
+// watches waits on it: the status polls take `device_mu` alone.
+//
 // `take` runs under `device_mu` and moves the device out. The caller destroys
 // what it took after both locks are free, because taking a node down talks to
 // the server too.
