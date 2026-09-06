@@ -174,10 +174,12 @@ bool WaitUntil(const std::function<bool()> &pred,
 class SupervisorLoopCounter final {
 public:
   // Installs the sleep hook that counts the loops. Call this after the test
-  // sets the other hooks, because it replaces `sleep_for`.
+  // sets the other hooks, because it replaces `sleep_for`. `WaitUntil` finds
+  // an assignment that comes later and fails the test.
   void HookSleep(VirtualAudioServiceHooks *hooks) {
     auto inner = std::move(hooks->sleep_for);
-    hooks->sleep_for = [this, inner](std::chrono::milliseconds delay) {
+    hooks->sleep_for = [this, inner,
+                        token = token_](std::chrono::milliseconds delay) {
       {
         std::lock_guard<std::mutex> lock(mu_);
         ++count_;
@@ -206,6 +208,12 @@ public:
       const std::function<bool()> &pred, int max_loops,
       const std::source_location loc = std::source_location::current()) const {
     const auto start = std::chrono::steady_clock::now();
+    if (!HookIsInstalled()) {
+      Report("the counting sleep hook is gone; call HookSleep after the test "
+             "sets the other hooks, and never assign sleep_for later",
+             loc, LoopCount(), max_loops, start);
+      return false;
+    }
     for (int i = 0; i < max_loops; ++i) {
       long long seen = 0;
       {
@@ -228,6 +236,16 @@ public:
   }
 
 private:
+  // True while a copy of the counting hook is alive. An assignment to
+  // `hooks.sleep_for` after `HookSleep` destroys the last copy, thus the
+  // token shows that the counter no longer sees the loops.
+  bool HookIsInstalled() const { return token_.use_count() > 1; }
+
+  long long LoopCount() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return count_;
+  }
+
   // Prints why a wait stopped early. The source location tells which of the
   // many waits it was.
   void Report(const std::string &reason, const std::source_location &loc,
@@ -247,6 +265,9 @@ private:
   // Safety net for a supervisor that stopped or is stuck. Only a failed test
   // waits this long.
   std::chrono::milliseconds stall_timeout_{std::chrono::seconds(10)};
+
+  // Held by the counter and by every live copy of the counting hook.
+  std::shared_ptr<const int> token_ = std::make_shared<const int>(0);
 
   mutable std::mutex mu_;
   mutable std::condition_variable cv_;
@@ -305,6 +326,42 @@ bool TestSupervisorLoopCounterReportsStall() {
     return ReportMissing(log, "3 loops");
   if (log.find("elapsed") == std::string::npos)
     return ReportMissing(log, "elapsed");
+  return true;
+}
+
+// An assignment to `sleep_for` after `HookSleep` detaches the counter. The
+// wait must find it at once, and not pass because the predicate is already
+// true.
+bool TestSupervisorLoopCounterDetectsReplacedSleepHook() {
+  SupervisorLoopCounter loops;
+  loops.SetTimeoutsForTesting(5s);
+
+  VirtualAudioServiceHooks hooks;
+  loops.HookSleep(&hooks);
+  hooks.sleep_for = [](std::chrono::milliseconds) {};
+
+  std::string log;
+  bool reached = true;
+  const auto start = std::chrono::steady_clock::now();
+  {
+    ScopedCerrCapture capture;
+    reached = loops.WaitUntil([] { return true; }, 5);
+    log = capture.text();
+  }
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+
+  if (reached) {
+    std::cerr << "the wait passed although the counter is detached\n";
+    return false;
+  }
+  if (elapsed > 1s) {
+    std::cerr << "the wait took " << elapsed.count()
+              << " ms; it must not wait for the stall timeout\n";
+    return false;
+  }
+  if (log.find("HookSleep") == std::string::npos)
+    return ReportMissing(log, "HookSleep");
   return true;
 }
 
@@ -4773,6 +4830,8 @@ int main() {
   } tests[] = {
       {"supervisor loop counter reports a stall",
        &TestSupervisorLoopCounterReportsStall},
+      {"supervisor loop counter detects a replaced sleep hook",
+       &TestSupervisorLoopCounterDetectsReplacedSleepHook},
       {"pactl load-module quotes vector arguments",
        &TestPactlLoadModuleQuotesVectorArguments},
       {"pactl load-module string compatibility splitter",
