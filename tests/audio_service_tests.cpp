@@ -4868,7 +4868,11 @@ bool TestConcurrentServiceStopJoinsSupervisorOnce() {
       [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     return std::make_unique<StartFailPipeline>();
   };
-  hooks.sleep_for = [fx](std::chrono::milliseconds) { fx->ParkSupervisor(); };
+  // Capture a raw pointer: the hooks go into the service, the fixture owns
+  // the service, and a shared_ptr here would make a cycle that never frees
+  // either of them. The fixture outlives the service by construction.
+  auto *raw = fx.get();
+  hooks.sleep_for = [raw](std::chrono::milliseconds) { raw->ParkSupervisor(); };
 
   fx->service = std::make_unique<VirtualAudioService>(std::move(hooks));
 
