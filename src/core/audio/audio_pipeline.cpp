@@ -719,10 +719,14 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
     // that won made them. It writes last_error_, which the next GetStats()
     // reports; that is the whole of what it changes.
     if (starting_ || running_.load(std::memory_order_acquire)) {
-      SetLastError(starting_ ? "Audio pipeline is already starting."
-                             : "Audio pipeline is already running.");
+      // Report the message itself, not the last error that it writes. The
+      // caller that won clears the last error a few instructions later, thus
+      // a read back of it can give an empty string.
+      const char *const msg = starting_ ? "Audio pipeline is already starting."
+                                        : "Audio pipeline is already running.";
+      SetLastError(msg);
       if (error)
-        *error = GetStats().last_error;
+        *error = msg;
       return false;
     }
     starting_ = true;
@@ -826,9 +830,10 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
     }
   }
   if (!io_made) {
-    SetLastError("Audio pipeline I/O backend creation failed.");
+    const char *const msg = "Audio pipeline I/O backend creation failed.";
+    SetLastError(msg);
     if (error)
-      *error = GetStats().last_error;
+      *error = msg;
     return false;
   }
 
