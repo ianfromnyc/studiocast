@@ -128,6 +128,35 @@ struct CapturedFrameView {
   bool timestamp_monotonic = false;
 };
 
+// A buffer VIDIOC_DQBUF just returned, in the fields both buffer types have.
+// The multi-planar arm reads `bytesused` and `data_offset` from its one plane,
+// and the single-plane arm has no `data_offset` and passes 0.
+struct CaptureDequeuedBuffer {
+  const void *mapped_start = nullptr;
+  std::size_t mapped_length = 0;
+  std::size_t bytesused = 0;
+  std::size_t data_offset = 0;
+
+  int index = -1;
+  std::uint64_t sequence = 0;
+  std::uint64_t timestamp_ns = 0;
+  bool timestamp_monotonic = false;
+};
+
+// Fills `out` from a dequeued buffer and says whether the frame can be used.
+//
+// The buffer index goes into `out` before the two refusals this makes, so a
+// refused frame carries the buffer the driver dequeued. That is a contract,
+// not an accident: a refusal here leaves the buffer out of the driver queue,
+// and `ReleaseFrame()` finds it by `CapturedFrameView::index` alone. An index
+// written below the refusals leaves the view at -1, and the driver loses one
+// buffer on every refused frame.
+//
+// Exposed for tests; `V4l2Capture::AcquireFrame()` is the only other caller.
+bool CaptureAcceptDequeuedBuffer(const CaptureDequeuedBuffer &buf,
+                                 const CaptureFormat &fmt,
+                                 CapturedFrameView *out, std::string *outErr);
+
 class V4l2Capture final {
 public:
   V4l2Capture() = default;
@@ -150,7 +179,14 @@ public:
   const CaptureFormat &Actual() const { return actual_; }
 
   // Acquire a frame (DQBUF). Caller MUST call ReleaseFrame() with the returned
-  // view.
+  // view, on failure as well as on success.
+  //
+  // A failure after VIDIOC_DQBUF is a frame this refused with the buffer
+  // already out of the driver queue, and the view carries a valid `index` on
+  // every such refusal, so ReleaseFrame() gives the buffer back. A failure
+  // before VIDIOC_DQBUF - a poll error, a timeout - dequeues nothing and
+  // leaves `index` at -1, which ReleaseFrame() returns early on. The call is
+  // therefore correct after any failure.
   bool AcquireFrame(CapturedFrameView *out, int timeout_ms, std::string *error);
 
   // Release a frame back to driver (QBUF).

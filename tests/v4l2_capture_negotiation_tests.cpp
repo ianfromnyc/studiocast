@@ -591,6 +591,92 @@ bool TestCaptureDrainFailureStopsCaptureOnARefusal() {
                 "a raw walk refusal must stop the capture loop");
 }
 
+// The drain loop gives a refused frame back with `ReleaseFrame()`, which finds
+// the buffer by `CapturedFrameView::index`. `CaptureAcceptDequeuedBuffer()`
+// writes that index above the two refusals, so a refused frame carries the
+// buffer the driver dequeued. This is the drain loop as a fake: an index
+// written below the refusals leaves the view at -1, the driver loses one
+// buffer on every refused frame, and every other test stays green.
+bool TestCaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop() {
+  using studiocast::video::CaptureAcceptDequeuedBuffer;
+  using studiocast::video::CaptureDequeuedBuffer;
+  using studiocast::video::CapturedFrameView;
+  using studiocast::video::CaptureDrainFailureStopsCapture;
+  using studiocast::video::CaptureFormat;
+
+  // 640x480 YUYV in a mapping that holds the frame to the byte, so any plane
+  // offset puts the end of the raw walk past the end of the mapping.
+  CaptureFormat fmt;
+  fmt.width = 640;
+  fmt.height = 480;
+  fmt.format = CapturePixelFormat::yuyv;
+  fmt.bytes_per_line = 1280;
+  fmt.size_image = 614400;
+
+  std::vector<std::uint8_t> mapping(614400u, 0u);
+
+  // The driver queue, as buffer indices. This is `V4l2Capture::ReleaseFrame()`
+  // with the ioctl removed: a view with no buffer releases nothing.
+  std::vector<int> requeued;
+  auto Release = [&requeued](const CapturedFrameView &f) {
+    if (f.index < 0)
+      return;
+    requeued.push_back(f.index);
+  };
+
+  CaptureDequeuedBuffer buf;
+  buf.mapped_start = mapping.data();
+  buf.mapped_length = mapping.size();
+  buf.bytesused = mapping.size();
+  buf.data_offset = 0;
+  buf.index = 3;
+  buf.sequence = 7;
+
+  // A frame the capture accepts.
+  CapturedFrameView view{};
+  if (!Expect(CaptureAcceptDequeuedBuffer(buf, fmt, &view, nullptr),
+              "a frame at the start of the mapping must be accepted"))
+    return false;
+
+  if (!Expect(view.index == 3 && view.sequence == 7u,
+              "an accepted frame must carry the buffer the driver dequeued"))
+    return false;
+
+  // The same buffer with an offset the mapping cannot absorb. The capture
+  // refuses it after the driver dequeued it, so the buffer is out of the
+  // queue and only the caller can put it back.
+  buf.data_offset = 64;
+
+  CapturedFrameView refused{};
+  std::string err;
+  if (!Expect(!CaptureAcceptDequeuedBuffer(buf, fmt, &refused, &err),
+              "an offset the mapping cannot absorb must refuse the frame"))
+    return false;
+
+  if (!Expect(CaptureDrainFailureStopsCapture(err),
+              "a refusal must stop the drain loop"))
+    return false;
+
+  if (!Expect(refused.index == 3,
+              "a refused frame must keep the index of the buffer the driver "
+              "dequeued"))
+    return false;
+
+  Release(refused);
+  if (!Expect(requeued.size() == 1u && requeued.front() == 3,
+              "the drain loop must give the refused buffer back"))
+    return false;
+
+  // A failure before `VIDIOC_DQBUF` - a poll error, a timeout - dequeues no
+  // buffer. The view it leaves has no index, and the drain loop must release
+  // nothing rather than re-queue buffer 0.
+  requeued.clear();
+  const CapturedFrameView never_dequeued{};
+  Release(never_dequeued);
+  return Expect(requeued.empty(),
+                "a failure before the dequeue must release no buffer");
+}
+
 } // namespace
 
 bool TestV4l2CaptureFramePayloadStaysInsideTheMapping() {
@@ -603,6 +689,10 @@ bool TestV4l2CaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset() {
 
 bool TestV4l2CaptureDrainFailureStopsCaptureOnARefusal() {
   return TestCaptureDrainFailureStopsCaptureOnARefusal();
+}
+
+bool TestV4l2CaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop() {
+  return TestCaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop();
 }
 
 bool TestV4l2CapturePreferenceTreats720pAsMjpegWorthy() {

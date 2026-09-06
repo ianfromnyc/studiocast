@@ -47,6 +47,7 @@ bool TestV4l2CaptureBufferMustHoldTheNegotiatedFrame();
 bool TestV4l2CaptureFramePayloadStaysInsideTheMapping();
 bool TestV4l2CaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset();
 bool TestV4l2CaptureDrainFailureStopsCaptureOnARefusal();
+bool TestV4l2CaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop();
 bool TestYuyvToRgb24MatchesBt601AndPreservesPadding();
 bool TestYuyvToRgb24TailStaysInsideAPackedOddWidthRow();
 bool TestYuyvToRgb24BackendsMatchScalarReference();
@@ -1149,6 +1150,9 @@ int main() {
            TestV4l2CaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset},
       {"V4L2 capture drain failure stops capture on a refusal",
        &studiocast::tests::TestV4l2CaptureDrainFailureStopsCaptureOnARefusal},
+      {"V4L2 capture refused frame keeps the buffer index for the drain loop",
+       &studiocast::tests::
+           TestV4l2CaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop},
       {"YUYV->RGB tail stays inside a packed odd width row",
        &studiocast::tests::TestYuyvToRgb24TailStaysInsideAPackedOddWidthRow},
   };

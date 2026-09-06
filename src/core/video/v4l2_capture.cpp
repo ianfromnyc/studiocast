@@ -739,6 +739,42 @@ bool CaptureRawWalkFitsMapping(std::size_t mapped_length,
   return false;
 }
 
+bool CaptureAcceptDequeuedBuffer(const CaptureDequeuedBuffer &buf,
+                                 const CaptureFormat &fmt,
+                                 CapturedFrameView *out, std::string *outErr) {
+  if (!out)
+    return false;
+
+  // The buffer index goes in first, and it must stay above the two refusals
+  // below it. Both of them refuse a frame the driver has already dequeued, so
+  // the buffer leaves the driver queue either way and only the caller can put
+  // it back. `ReleaseFrame()` finds that buffer by this index alone, and the
+  // drain loop in the camera pipeline calls it on a refused view for exactly
+  // that reason. Move this assignment below the refusals and each refused
+  // frame costs the driver one buffer, with nothing in the log.
+  out->index = buf.index;
+  out->sequence = buf.sequence;
+  out->timestamp_ns = buf.timestamp_ns;
+  out->timestamp_monotonic = buf.timestamp_monotonic;
+
+  std::size_t off = 0;
+  std::size_t bytes = 0;
+  if (!CaptureFramePayload(buf.mapped_length, buf.bytesused, buf.data_offset,
+                           &off, &bytes, outErr))
+    return false;
+
+  // The raw readers walk the negotiated frame from `out->data`, not
+  // `out->bytes`, so the mapping has to hold that walk from where the image
+  // starts. A `data_offset` moves the walk later in the mapping without
+  // making it shorter. Refuse the frame rather than walk off the end.
+  if (!CaptureRawWalkFitsMapping(buf.mapped_length, off, fmt, outErr))
+    return false;
+
+  out->bytes = bytes;
+  out->data = static_cast<const std::uint8_t *>(buf.mapped_start) + off;
+  return true;
+}
+
 bool ShouldPreferMjpegForResolution(int width, int height) {
   // Heuristic: uncompressed YUYV at 720p+ tends to be unsupported, unstable,
   // or bandwidth-limited on many UVC webcams, while MJPEG often supports HD+.
@@ -1414,32 +1450,21 @@ bool V4l2Capture::AcquireFrame(CapturedFrameView *out, int timeout_ms,
       return false;
     }
 
-    out->index = static_cast<int>(b.index);
-    out->sequence = b.sequence;
-    out->timestamp_ns =
-        (static_cast<std::uint64_t>(b.timestamp.tv_sec) * 1000000000ULL) +
-        (static_cast<std::uint64_t>(b.timestamp.tv_usec) * 1000ULL);
-    out->timestamp_monotonic =
-        (b.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0;
-
     // A single-plane buffer has no `data_offset`, so the image starts at the
     // beginning of the mapping.
-    std::size_t off = 0;
-    std::size_t bytes = 0;
-    if (!CaptureFramePayload(buffers_[idx].length,
-                             static_cast<std::size_t>(b.bytesused),
-                             /*data_offset=*/0u, &off, &bytes, error))
-      return false;
+    CaptureDequeuedBuffer dq;
+    dq.mapped_start = buffers_[idx].start;
+    dq.mapped_length = buffers_[idx].length;
+    dq.bytesused = static_cast<std::size_t>(b.bytesused);
+    dq.data_offset = 0;
+    dq.index = static_cast<int>(b.index);
+    dq.sequence = b.sequence;
+    dq.timestamp_ns =
+        (static_cast<std::uint64_t>(b.timestamp.tv_sec) * 1000000000ULL) +
+        (static_cast<std::uint64_t>(b.timestamp.tv_usec) * 1000ULL);
+    dq.timestamp_monotonic = (b.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0;
 
-    // The raw readers walk the negotiated frame from `out->data`, not
-    // `out->bytes`, so the mapping has to hold that walk from where the image
-    // starts. An offset of 0 always does, and this arm has no other offset.
-    if (!CaptureRawWalkFitsMapping(buffers_[idx].length, off, actual_, error))
-      return false;
-
-    out->bytes = bytes;
-    out->data = static_cast<const std::uint8_t *>(buffers_[idx].start) + off;
-    return true;
+    return CaptureAcceptDequeuedBuffer(dq, actual_, out, error);
   }
 
 #ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
@@ -1464,31 +1489,21 @@ bool V4l2Capture::AcquireFrame(CapturedFrameView *out, int timeout_ms,
     return false;
   }
 
-  out->index = static_cast<int>(b.index);
-  out->sequence = b.sequence;
-  out->timestamp_ns =
-      (static_cast<std::uint64_t>(b.timestamp.tv_sec) * 1000000000ULL) +
-      (static_cast<std::uint64_t>(b.timestamp.tv_usec) * 1000ULL);
-  out->timestamp_monotonic = (b.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0;
-
   // On a multi-planar buffer the image starts `data_offset` bytes into the
   // plane, and `bytesused` counts those bytes as well.
-  std::size_t off = 0;
-  std::size_t bytes = 0;
-  if (!CaptureFramePayload(
-          buffers_[idx].length, static_cast<std::size_t>(planes[0].bytesused),
-          static_cast<std::size_t>(planes[0].data_offset), &off, &bytes, error))
-    return false;
+  CaptureDequeuedBuffer dq;
+  dq.mapped_start = buffers_[idx].start;
+  dq.mapped_length = buffers_[idx].length;
+  dq.bytesused = static_cast<std::size_t>(planes[0].bytesused);
+  dq.data_offset = static_cast<std::size_t>(planes[0].data_offset);
+  dq.index = static_cast<int>(b.index);
+  dq.sequence = b.sequence;
+  dq.timestamp_ns =
+      (static_cast<std::uint64_t>(b.timestamp.tv_sec) * 1000000000ULL) +
+      (static_cast<std::uint64_t>(b.timestamp.tv_usec) * 1000ULL);
+  dq.timestamp_monotonic = (b.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0;
 
-  // The raw readers walk the negotiated frame from `out->data`, not
-  // `out->bytes`, so a `data_offset` moves the walk later in the mapping
-  // without making it shorter. Refuse the frame rather than walk off the end.
-  if (!CaptureRawWalkFitsMapping(buffers_[idx].length, off, actual_, error))
-    return false;
-
-  out->bytes = bytes;
-  out->data = static_cast<const std::uint8_t *>(buffers_[idx].start) + off;
-  return true;
+  return CaptureAcceptDequeuedBuffer(dq, actual_, out, error);
 #else
   if (error)
     *error = "mplane capture not supported by headers";
