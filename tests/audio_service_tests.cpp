@@ -223,11 +223,16 @@ public:
       const std::function<bool()> &pred, int max_loops,
       const std::source_location loc = std::source_location::current()) const {
     const auto start = std::chrono::steady_clock::now();
+    // The counter counts the loops of the whole test. Only the loops after
+    // this point are of this wait, thus each report subtracts the loops that
+    // came before. A report of the total would compare a number of many
+    // waits with the budget of one.
+    const long long loops_at_start = LoopCount();
     const auto deadline = start + wall_clock_cap_;
     if (!HookIsInstalled()) {
       Report("the counting sleep hook is gone; call HookSleep after the test "
              "sets the other hooks, and never assign sleep_for later",
-             loc, LoopCount(), max_loops, start);
+             loc, LoopCount() - loops_at_start, max_loops, start);
       return false;
     }
     for (int i = 0; i < max_loops; ++i) {
@@ -251,19 +256,19 @@ public:
       if (std::chrono::steady_clock::now() >= deadline)
         Report("the wait reached the wall-clock cap of " +
                    std::to_string(wall_clock_cap_.count()) + " ms",
-               loc, done, max_loops, start);
+               loc, done - loops_at_start, max_loops, start);
       else
         Report("no supervisor loop in " +
                    std::to_string(stall_timeout_.count()) + " ms",
-               loc, done, max_loops, start);
+               loc, done - loops_at_start, max_loops, start);
       return pred();
     }
     // The budget is the third way to stop short. The supervisor is healthy,
     // thus the loop count tells whether the budget was the bound.
     if (pred())
       return true;
-    Report("the budget of supervisor loops ran out", loc, LoopCount(),
-           max_loops, start);
+    Report("the budget of supervisor loops ran out", loc,
+           LoopCount() - loops_at_start, max_loops, start);
     return false;
   }
 
@@ -279,7 +284,7 @@ private:
   }
 
   // Prints why a wait stopped early. The source location tells which of the
-  // many waits it was.
+  // many waits it was, and `loops` is the number of loops of that wait.
   void Report(const std::string &reason, const std::source_location &loc,
               long long loops, int max_loops,
               std::chrono::steady_clock::time_point start) const {
@@ -333,8 +338,26 @@ bool ReportMissing(const std::string &log, const std::string &needle) {
   return false;
 }
 
+// Gives a wait a supervisor that does `loops` more loops and then stops. The
+// predicate is never true, thus each test of it that is inside the budget
+// gives the wait one loop. The count is exact, which no free-running thread
+// can promise.
+std::function<bool()>
+SupervisorThatStopsAfter(int loops, VirtualAudioServiceHooks *hooks) {
+  auto done = std::make_shared<int>(0);
+  return [done, loops, hooks] {
+    if (*done < loops) {
+      ++*done;
+      hooks->sleep_for(25ms);
+    }
+    return false;
+  };
+}
+
 // A supervisor that stops to loop must give a report that shows where the
 // test waited, how many loops the service did, and how long the wait was.
+// The loops are the loops of this wait: the counter also holds the loops of
+// the test before the wait, and that larger number has no meaning here.
 bool TestSupervisorLoopCounterReportsStall() {
   SupervisorLoopCounter loops;
   loops.SetTimeoutsForTesting(100ms, 60s);
@@ -348,7 +371,7 @@ bool TestSupervisorLoopCounterReportsStall() {
   bool reached = true;
   {
     ScopedCerrCapture capture;
-    reached = loops.WaitUntil([] { return false; }, 5);
+    reached = loops.WaitUntil(SupervisorThatStopsAfter(3, &hooks), 5);
     log = capture.text();
   }
 
@@ -358,8 +381,8 @@ bool TestSupervisorLoopCounterReportsStall() {
   }
   if (log.find("audio_service_tests.cpp:") == std::string::npos)
     return ReportMissing(log, "audio_service_tests.cpp:");
-  if (log.find("3 loops") == std::string::npos)
-    return ReportMissing(log, "3 loops");
+  if (log.find("3 loops done of a budget of 5") == std::string::npos)
+    return ReportMissing(log, "3 loops done of a budget of 5");
   if (log.find("elapsed") == std::string::npos)
     return ReportMissing(log, "elapsed");
   return true;
@@ -445,28 +468,32 @@ bool TestSupervisorLoopCounterCapsTheWallClock() {
 
 // A healthy supervisor that loops the whole budget is the likely failure.
 // The report must show that the budget was the bound, and not leave the
-// reader to guess why the wait stopped.
+// reader to guess why the wait stopped. The report must also count only the
+// loops of this wait: the counter lives as long as the test, thus a report
+// of its total gives a number that the budget cannot explain.
 bool TestSupervisorLoopCounterReportsAnExhaustedBudget() {
   SupervisorLoopCounter loops;
   loops.SetTimeoutsForTesting(30s, 60s);
 
   VirtualAudioServiceHooks hooks;
   loops.HookSleep(&hooks);
-  std::atomic<bool> stop{false};
-  std::thread supervisor([&] {
-    while (!stop.load(std::memory_order_relaxed))
-      hooks.sleep_for(25ms);
-  });
+  constexpr int kBudget = 5;
+
+  // A first wait uses its whole budget and thus puts 5 loops in the counter.
+  // The wait that follows must still report 5 loops, and not the total of 10.
+  {
+    ScopedCerrCapture capture;
+    loops.WaitUntil(SupervisorThatStopsAfter(kBudget, &hooks), kBudget);
+  }
 
   std::string log;
   bool reached = true;
   {
     ScopedCerrCapture capture;
-    reached = loops.WaitUntil([] { return false; }, 5);
+    reached =
+        loops.WaitUntil(SupervisorThatStopsAfter(kBudget, &hooks), kBudget);
     log = capture.text();
   }
-  stop.store(true, std::memory_order_relaxed);
-  supervisor.join();
 
   if (reached) {
     std::cerr << "the wait passed although the predicate is never true\n";
@@ -476,8 +503,8 @@ bool TestSupervisorLoopCounterReportsAnExhaustedBudget() {
     return ReportMissing(log, "audio_service_tests.cpp:");
   if (log.find("ran out") == std::string::npos)
     return ReportMissing(log, "ran out");
-  if (log.find("of a budget of 5") == std::string::npos)
-    return ReportMissing(log, "of a budget of 5");
+  if (log.find("5 loops done of a budget of 5") == std::string::npos)
+    return ReportMissing(log, "5 loops done of a budget of 5");
   if (log.find("elapsed") == std::string::npos)
     return ReportMissing(log, "elapsed");
   return true;
