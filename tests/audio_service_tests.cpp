@@ -5808,7 +5808,23 @@ bool TestConcurrentServiceStartFailsAndKeepsTheProcess() {
     return false;
   }
 
+  // Readers of the status keep the object mutex busy, as the IPC threads of
+  // the daemon do. Start() takes that mutex twice between the handle lock of
+  // its Stop() and the publish, thus a busy mutex holds the first caller
+  // there and lets the other callers leave their own Stop() first. Without
+  // this the first caller takes the handle lock again before the others wake,
+  // and the callers never meet at the publish.
+  std::atomic<bool> readers_stop{false};
+  std::vector<std::thread> readers;
+  for (int i = 0; i < 8; ++i) {
+    readers.emplace_back([raw, &readers_stop] {
+      while (!readers_stop.load(std::memory_order_acquire))
+        (void)raw->service->Status();
+    });
+  }
+
   constexpr int kAttempts = 64;
+  constexpr int kCallers = 4;
   for (int attempt = 0; attempt < kAttempts; ++attempt) {
     fx->ArmGate();
     fx->starts_entered.store(0, std::memory_order_release);
@@ -5836,30 +5852,38 @@ bool TestConcurrentServiceStartFailsAndKeepsTheProcess() {
         },
         5000ms);
 
-    std::thread first(starter);
-    std::thread second(starter);
+    std::vector<std::thread> starters;
+    for (int i = 0; i < kCallers; ++i)
+      starters.emplace_back(starter);
     WaitUntil(
         [&] {
-          return raw->starts_entered.load(std::memory_order_acquire) == 2;
+          return raw->starts_entered.load(std::memory_order_acquire) ==
+                 kCallers;
         },
         5000ms);
     go.store(true, std::memory_order_release);
     std::this_thread::sleep_for(5ms);
     fx->OpenGate();
 
-    first.join();
-    second.join();
+    for (auto &t : starters)
+      t.join();
 
     if (fx->unexpected.load(std::memory_order_relaxed) != 0) {
       std::cerr << "service.Start gave an unexpected result on attempt "
                 << attempt << ": " << fx->UnexpectedText() << "\n";
       fx->OpenGate();
+      readers_stop.store(true, std::memory_order_release);
+      for (auto &t : readers)
+        t.join();
       fx->service->Stop();
       return false;
     }
   }
 
   fx->OpenGate();
+  readers_stop.store(true, std::memory_order_release);
+  for (auto &t : readers)
+    t.join();
   fx->service->Stop();
 
   if (fx->already_starting.load(std::memory_order_relaxed) == 0) {
