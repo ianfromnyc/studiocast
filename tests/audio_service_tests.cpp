@@ -163,6 +163,63 @@ bool WaitUntil(const std::function<bool()> &pred,
   return pred();
 }
 
+// Counts the supervisor loops of a `VirtualAudioService`.
+//
+// The service calls the `sleep_for` hook one time at the end of each loop,
+// thus a new count shows that the loop published its status. Tests that
+// measure the progress of the service in loops, and not in wall-clock time,
+// keep the same number of chances on a busy machine as on an idle one.
+class SupervisorLoopCounter final {
+public:
+  // Installs the sleep hook that counts the loops. Call this after the test
+  // sets the other hooks, because it replaces `sleep_for`.
+  void HookSleep(VirtualAudioServiceHooks *hooks) {
+    auto inner = std::move(hooks->sleep_for);
+    hooks->sleep_for = [this, inner](std::chrono::milliseconds delay) {
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        ++count_;
+      }
+      cv_.notify_all();
+      if (inner) {
+        inner(delay);
+        return;
+      }
+      // Tests use a poll interval of 1 ms, thus a short sleep keeps the
+      // supervisor responsive without a busy loop.
+      std::this_thread::sleep_for(1ms);
+    };
+  }
+
+  // Waits until `pred` is true. Gives the supervisor up to `max_loops` more
+  // loops in place of a wall-clock deadline: CPU load changes how long a loop
+  // takes, but not how many chances the service gets.
+  bool WaitUntil(const std::function<bool()> &pred, int max_loops) const {
+    for (int i = 0; i < max_loops; ++i) {
+      long long seen = 0;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        seen = count_;
+      }
+      if (pred())
+        return true;
+      std::unique_lock<std::mutex> lock(mu_);
+      if (!cv_.wait_for(lock, kStallTimeout, [&] { return count_ > seen; }))
+        break;
+    }
+    return pred();
+  }
+
+private:
+  // Safety net for a supervisor that stopped or is stuck. Only a failed test
+  // waits this long.
+  static constexpr std::chrono::seconds kStallTimeout{10};
+
+  mutable std::mutex mu_;
+  mutable std::condition_variable cv_;
+  long long count_ = 0;
+};
+
 AudioConsumerSnapshot ConsumerSnapshot(bool present, int count = 1) {
   AudioConsumerSnapshot out;
   out.present = present;
@@ -3689,10 +3746,9 @@ bool TestSpeakerLoopbackRealHelperStopFailureKeepsOldRouteActive() {
     return ExecResult(99, "unexpected command: " + command);
   });
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3709,7 +3765,7 @@ bool TestSpeakerLoopbackRealHelperStopFailureKeepsOldRouteActive() {
     return false;
   }
 
-  const bool old_route_preserved = WaitUntil(
+  const bool old_route_preserved = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return unload_calls.load(std::memory_order_relaxed) >= 1 &&
@@ -3720,7 +3776,7 @@ bool TestSpeakerLoopbackRealHelperStopFailureKeepsOldRouteActive() {
                    "synthetic old loopback unload failure") !=
                    std::string::npos;
       },
-      250ms);
+      250);
   const int unloads_after_failure =
       unload_calls.load(std::memory_order_relaxed);
   std::this_thread::sleep_for(50ms);
