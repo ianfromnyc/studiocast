@@ -12,7 +12,10 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <source_location>
+#include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -161,6 +164,351 @@ bool WaitUntil(const std::function<bool()> &pred,
     std::this_thread::sleep_for(1ms);
   }
   return pred();
+}
+
+// Counts the supervisor loops of a `VirtualAudioService`.
+//
+// The service calls the `sleep_for` hook one time at the end of each loop,
+// thus a new count shows that the loop published its status. Tests that
+// measure the progress of the service in loops, and not in wall-clock time,
+// keep the same number of chances on a busy machine as on an idle one.
+//
+// A test that follows a wait with a fixed "settle" window keeps its meaning.
+// The wait ends at the service event that makes the predicate true, and the
+// service sets each retry deadline to `now + delay` at that same event, and
+// never at `Start()`. A wait that needs more loops thus moves the event and
+// the window that follows it together, and each settle window stays shorter
+// than the backoff that it must not cross.
+//
+// The check for a detached hook has one known limit: it asks if a copy of
+// the counting hook is alive, thus a test that keeps an unused copy and then
+// replaces `sleep_for` detaches the counter without a report.
+class SupervisorLoopCounter final {
+public:
+  // Installs the sleep hook that counts the loops. Call this after the test
+  // sets the other hooks, because it replaces `sleep_for`. `WaitUntil` finds
+  // an assignment that comes later and fails the test.
+  void HookSleep(VirtualAudioServiceHooks *hooks) {
+    auto inner = std::move(hooks->sleep_for);
+    hooks->sleep_for = [this, inner,
+                        token = token_](std::chrono::milliseconds delay) {
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        ++count_;
+      }
+      cv_.notify_all();
+      if (inner) {
+        inner(delay);
+        return;
+      }
+      // The service clamps `poll_ms` to a minimum of 25 ms, thus `delay` is
+      // always 25 ms. Ignore it, as the replaced hooks did: a short sleep
+      // keeps the supervisor fast without a busy loop.
+      std::this_thread::sleep_for(1ms);
+    };
+  }
+
+  // Shortens the safety timeouts. Only the self-tests of this class use it.
+  void SetTimeoutsForTesting(std::chrono::milliseconds stall,
+                             std::chrono::milliseconds cap) {
+    stall_timeout_ = stall;
+    wall_clock_cap_ = cap;
+  }
+
+  // Waits until `pred` is true. Gives the supervisor up to `max_loops` more
+  // loops in place of a wall-clock deadline: CPU load changes how long a loop
+  // takes, but not how many chances the service gets. The wall-clock cap is
+  // the second bound, and it stops a hung predicate. A wait that stops
+  // before the predicate is true prints why, and where the wait was.
+  bool WaitUntil(
+      const std::function<bool()> &pred, int max_loops,
+      const std::source_location loc = std::source_location::current()) const {
+    const auto start = std::chrono::steady_clock::now();
+    // The counter counts the loops of the whole test. Only the loops after
+    // this point are of this wait, thus each report subtracts the loops that
+    // came before. A report of the total would compare a number of many
+    // waits with the budget of one.
+    const long long loops_at_start = LoopCount();
+    const auto deadline = start + wall_clock_cap_;
+    if (!HookIsInstalled()) {
+      Report("the counting sleep hook is gone; call HookSleep after the test "
+             "sets the other hooks, and never assign sleep_for later",
+             loc, LoopCount() - loops_at_start, max_loops, start);
+      return false;
+    }
+    for (int i = 0; i < max_loops; ++i) {
+      long long seen = 0;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        seen = count_;
+      }
+      if (pred())
+        return true;
+      std::unique_lock<std::mutex> lock(mu_);
+      const std::chrono::nanoseconds left =
+          deadline - std::chrono::steady_clock::now();
+      if (left > std::chrono::nanoseconds::zero() &&
+          cv_.wait_for(lock,
+                       std::min<std::chrono::nanoseconds>(stall_timeout_, left),
+                       [&] { return count_ > seen; }))
+        continue;
+      const long long done = count_;
+      lock.unlock();
+      if (std::chrono::steady_clock::now() >= deadline)
+        Report("the wait reached the wall-clock cap of " +
+                   std::to_string(wall_clock_cap_.count()) + " ms",
+               loc, done - loops_at_start, max_loops, start);
+      else
+        Report("no supervisor loop in " +
+                   std::to_string(stall_timeout_.count()) + " ms",
+               loc, done - loops_at_start, max_loops, start);
+      return pred();
+    }
+    // The budget is the third way to stop short. The supervisor is healthy,
+    // thus the loop count tells whether the budget was the bound.
+    if (pred())
+      return true;
+    Report("the budget of supervisor loops ran out", loc,
+           LoopCount() - loops_at_start, max_loops, start);
+    return false;
+  }
+
+private:
+  // True while a copy of the counting hook is alive. An assignment to
+  // `hooks.sleep_for` after `HookSleep` destroys the last copy, thus the
+  // token shows that the counter no longer sees the loops.
+  bool HookIsInstalled() const { return token_.use_count() > 1; }
+
+  long long LoopCount() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return count_;
+  }
+
+  // Prints why a wait stopped early. The source location tells which of the
+  // many waits it was, and `loops` is the number of loops of that wait.
+  void Report(const std::string &reason, const std::source_location &loc,
+              long long loops, int max_loops,
+              std::chrono::steady_clock::time_point start) const {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+    std::string file(loc.file_name());
+    const auto slash = file.find_last_of('/');
+    if (slash != std::string::npos)
+      file = file.substr(slash + 1);
+    std::cerr << "supervisor loop counter: " << reason << " at " << file << ":"
+              << loc.line() << "; " << loops << " loops done of a budget of "
+              << max_loops << ", elapsed " << elapsed.count() << " ms\n";
+  }
+
+  // Safety net for a supervisor that stopped or is stuck. Only a failed test
+  // waits this long.
+  std::chrono::milliseconds stall_timeout_{std::chrono::seconds(10)};
+
+  // Second bound of a wait. A predicate that hangs cannot keep CI for the
+  // budget of loops multiplied by the stall timeout.
+  std::chrono::milliseconds wall_clock_cap_{std::chrono::seconds(60)};
+
+  // Held by the counter and by every live copy of the counting hook.
+  std::shared_ptr<const int> token_ = std::make_shared<const int>(0);
+
+  mutable std::mutex mu_;
+  mutable std::condition_variable cv_;
+  long long count_ = 0;
+};
+
+// Collects what the code under test writes to `std::cerr`.
+class ScopedCerrCapture final {
+public:
+  ScopedCerrCapture() : old_(std::cerr.rdbuf(buffer_.rdbuf())) {}
+
+  ~ScopedCerrCapture() { std::cerr.rdbuf(old_); }
+
+  ScopedCerrCapture(const ScopedCerrCapture &) = delete;
+  ScopedCerrCapture &operator=(const ScopedCerrCapture &) = delete;
+
+  std::string text() const { return buffer_.str(); }
+
+private:
+  std::ostringstream buffer_;
+  std::streambuf *old_;
+};
+
+bool ReportMissing(const std::string &log, const std::string &needle) {
+  std::cerr << "the stall report has no '" << needle << "'; report was '" << log
+            << "'\n";
+  return false;
+}
+
+// Gives a wait a supervisor that does `loops` more loops and then stops. The
+// predicate is never true, thus each test of it that is inside the budget
+// gives the wait one loop. The count is exact, which no free-running thread
+// can promise.
+std::function<bool()>
+SupervisorThatStopsAfter(int loops, VirtualAudioServiceHooks *hooks) {
+  auto done = std::make_shared<int>(0);
+  return [done, loops, hooks] {
+    if (*done < loops) {
+      ++*done;
+      hooks->sleep_for(25ms);
+    }
+    return false;
+  };
+}
+
+// A supervisor that stops to loop must give a report that shows where the
+// test waited, how many loops the service did, and how long the wait was.
+// The loops are the loops of this wait: the counter also holds the loops of
+// the test before the wait, and that larger number has no meaning here.
+bool TestSupervisorLoopCounterReportsStall() {
+  SupervisorLoopCounter loops;
+  loops.SetTimeoutsForTesting(100ms, 60s);
+
+  VirtualAudioServiceHooks hooks;
+  loops.HookSleep(&hooks);
+  for (int i = 0; i < 3; ++i)
+    hooks.sleep_for(25ms);
+
+  std::string log;
+  bool reached = true;
+  {
+    ScopedCerrCapture capture;
+    reached = loops.WaitUntil(SupervisorThatStopsAfter(3, &hooks), 5);
+    log = capture.text();
+  }
+
+  if (reached) {
+    std::cerr << "the wait passed although the predicate is never true\n";
+    return false;
+  }
+  if (log.find("audio_service_tests.cpp:") == std::string::npos)
+    return ReportMissing(log, "audio_service_tests.cpp:");
+  if (log.find("3 loops done of a budget of 5") == std::string::npos)
+    return ReportMissing(log, "3 loops done of a budget of 5");
+  if (log.find("elapsed") == std::string::npos)
+    return ReportMissing(log, "elapsed");
+  return true;
+}
+
+// An assignment to `sleep_for` after `HookSleep` detaches the counter. The
+// wait must find it at once, and not pass because the predicate is already
+// true.
+bool TestSupervisorLoopCounterDetectsReplacedSleepHook() {
+  SupervisorLoopCounter loops;
+  loops.SetTimeoutsForTesting(5s, 60s);
+
+  VirtualAudioServiceHooks hooks;
+  loops.HookSleep(&hooks);
+  hooks.sleep_for = [](std::chrono::milliseconds) {};
+
+  std::string log;
+  bool reached = true;
+  const auto start = std::chrono::steady_clock::now();
+  {
+    ScopedCerrCapture capture;
+    reached = loops.WaitUntil([] { return true; }, 5);
+    log = capture.text();
+  }
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+
+  if (reached) {
+    std::cerr << "the wait passed although the counter is detached\n";
+    return false;
+  }
+  if (elapsed > 1s) {
+    std::cerr << "the wait took " << elapsed.count()
+              << " ms; it must not wait for the stall timeout\n";
+    return false;
+  }
+  if (log.find("HookSleep") == std::string::npos)
+    return ReportMissing(log, "HookSleep");
+  return true;
+}
+
+// A loop budget alone lets a wait run for `max_loops` stall timeouts. A
+// second bound in wall-clock time keeps a broken build inside a normal CI
+// step.
+bool TestSupervisorLoopCounterCapsTheWallClock() {
+  SupervisorLoopCounter loops;
+  loops.SetTimeoutsForTesting(30s, 200ms);
+
+  VirtualAudioServiceHooks hooks;
+  loops.HookSleep(&hooks);
+  std::atomic<bool> stop{false};
+  std::thread supervisor([&] {
+    while (!stop.load(std::memory_order_relaxed))
+      hooks.sleep_for(25ms);
+  });
+
+  std::string log;
+  bool reached = true;
+  const auto start = std::chrono::steady_clock::now();
+  {
+    ScopedCerrCapture capture;
+    reached = loops.WaitUntil([] { return false; }, 3000);
+    log = capture.text();
+  }
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+  stop.store(true, std::memory_order_relaxed);
+  supervisor.join();
+
+  if (reached) {
+    std::cerr << "the wait passed although the predicate is never true\n";
+    return false;
+  }
+  if (elapsed > 2s) {
+    std::cerr << "the wait took " << elapsed.count()
+              << " ms; the wall-clock cap did not stop it\n";
+    return false;
+  }
+  if (log.find("wall-clock") == std::string::npos)
+    return ReportMissing(log, "wall-clock");
+  return true;
+}
+
+// A healthy supervisor that loops the whole budget is the likely failure.
+// The report must show that the budget was the bound, and not leave the
+// reader to guess why the wait stopped. The report must also count only the
+// loops of this wait: the counter lives as long as the test, thus a report
+// of its total gives a number that the budget cannot explain.
+bool TestSupervisorLoopCounterReportsAnExhaustedBudget() {
+  SupervisorLoopCounter loops;
+  loops.SetTimeoutsForTesting(30s, 60s);
+
+  VirtualAudioServiceHooks hooks;
+  loops.HookSleep(&hooks);
+  constexpr int kBudget = 5;
+
+  // A first wait uses its whole budget and thus puts 5 loops in the counter.
+  // The wait that follows must still report 5 loops, and not the total of 10.
+  {
+    ScopedCerrCapture capture;
+    loops.WaitUntil(SupervisorThatStopsAfter(kBudget, &hooks), kBudget);
+  }
+
+  std::string log;
+  bool reached = true;
+  {
+    ScopedCerrCapture capture;
+    reached =
+        loops.WaitUntil(SupervisorThatStopsAfter(kBudget, &hooks), kBudget);
+    log = capture.text();
+  }
+
+  if (reached) {
+    std::cerr << "the wait passed although the predicate is never true\n";
+    return false;
+  }
+  if (log.find("audio_service_tests.cpp:") == std::string::npos)
+    return ReportMissing(log, "audio_service_tests.cpp:");
+  if (log.find("ran out") == std::string::npos)
+    return ReportMissing(log, "ran out");
+  if (log.find("5 loops done of a budget of 5") == std::string::npos)
+    return ReportMissing(log, "5 loops done of a budget of 5");
+  if (log.find("elapsed") == std::string::npos)
+    return ReportMissing(log, "elapsed");
+  return true;
 }
 
 AudioConsumerSnapshot ConsumerSnapshot(bool present, int count = 1) {
@@ -382,6 +730,53 @@ private:
   std::shared_ptr<BlockingIoState> state_;
   BlockMode mode_;
   std::chrono::milliseconds block_timeout_;
+};
+
+struct ParkedReadIoState {
+  std::mutex mu;
+  std::condition_variable cv;
+  bool read_entered = false;
+  bool released = false;
+};
+
+// Capture I/O that parks the pipeline worker inside Read() until the test
+// releases it. RequestStop() does not release the worker, so a Stop() caller
+// stays inside join() long enough for a second Stop() caller to reach the
+// same join.
+class ParkedReadIo final : public AudioPipelineIo {
+public:
+  explicit ParkedReadIo(std::shared_ptr<ParkedReadIoState> state)
+      : state_(std::move(state)) {}
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool Read(void *, std::size_t, std::string *error) override {
+    std::unique_lock<std::mutex> lock(state_->mu);
+    state_->read_entered = true;
+    state_->cv.notify_all();
+    state_->cv.wait(lock, [&] { return state_->released; });
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+  void RequestStop() override {}
+
+private:
+  std::shared_ptr<ParkedReadIoState> state_;
 };
 
 struct ResettingOpenIoState {
@@ -1302,6 +1697,7 @@ bool TestVirtualAudioServiceReportsResolvedAutoSourceAndWarnings() {
   std::atomic<int> pipeline_creates{0};
   std::string pipeline_source;
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -1332,9 +1728,7 @@ bool TestVirtualAudioServiceReportsResolvedAutoSourceAndWarnings() {
     };
     return std::make_unique<CapturingPipeline>(&pipeline_source);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -1350,7 +1744,7 @@ bool TestVirtualAudioServiceReportsResolvedAutoSourceAndWarnings() {
     return false;
   }
 
-  const bool resolved = WaitUntil(
+  const bool resolved = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_creates.load(std::memory_order_relaxed) == 1 &&
@@ -1358,7 +1752,7 @@ bool TestVirtualAudioServiceReportsResolvedAutoSourceAndWarnings() {
                status.selected_source == "alsa_input.usb_service_mic" &&
                status.source_error.empty() && !status.source_warnings.empty();
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -1410,10 +1804,9 @@ bool TestVirtualAudioServicePreservesUnavailableConfiguredSource() {
     return ExecResult(99, "unexpected command: " + command);
   });
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -1428,7 +1821,7 @@ bool TestVirtualAudioServicePreservesUnavailableConfiguredSource() {
     return false;
   }
 
-  const bool reported = WaitUntil(
+  const bool reported = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return status.selected_source == "alsa_input.disconnected_mic" &&
@@ -1436,7 +1829,7 @@ bool TestVirtualAudioServicePreservesUnavailableConfiguredSource() {
                status.source_error.find("not currently available") !=
                    std::string::npos;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   const auto preservedConfig = service.Config();
   service.Stop();
@@ -2095,6 +2488,7 @@ bool TestMicrophonePipelineDoesNotStartWithoutConsumer() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<bool> mic_consumer_present{false};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -2102,9 +2496,7 @@ bool TestMicrophonePipelineDoesNotStartWithoutConsumer() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2120,14 +2512,14 @@ bool TestMicrophonePipelineDoesNotStartWithoutConsumer() {
     return false;
   }
 
-  const bool saw_idle = WaitUntil(
+  const bool saw_idle = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return status.pipeline_state == "idle_no_consumer" &&
                !status.pipeline_active_needed && !status.pipeline_running &&
                !status.mic_consumer_present;
       },
-      250ms);
+      250);
   std::this_thread::sleep_for(30ms);
   const int creates = pipeline_creates.load(std::memory_order_relaxed);
   const auto status = service.Status();
@@ -2148,6 +2540,7 @@ bool TestMicrophonePipelineStartsWhenConsumerAppears() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<bool> mic_consumer_present{false};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -2155,9 +2548,7 @@ bool TestMicrophonePipelineStartsWhenConsumerAppears() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2173,16 +2564,16 @@ bool TestMicrophonePipelineStartsWhenConsumerAppears() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] { return service.Status().pipeline_state == "idle_no_consumer"; },
-          250ms)) {
+          250)) {
     std::cerr << "microphone pipeline did not reach no-consumer idle state\n";
     service.Stop();
     return false;
   }
 
   mic_consumer_present.store(true, std::memory_order_relaxed);
-  const bool started = WaitUntil(
+  const bool started = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_creates.load(std::memory_order_relaxed) >= 1 &&
@@ -2190,7 +2581,7 @@ bool TestMicrophonePipelineStartsWhenConsumerAppears() {
                status.pipeline_state == "running" &&
                status.mic_consumer_present;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -2210,6 +2601,7 @@ bool TestMicrophonePipelineStopsWhenConsumerDisappears() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -2217,9 +2609,7 @@ bool TestMicrophonePipelineStopsWhenConsumerDisappears() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2235,19 +2625,19 @@ bool TestMicrophonePipelineStopsWhenConsumerDisappears() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             return pipeline_creates.load(std::memory_order_relaxed) >= 1 &&
                    service.Status().pipeline_running;
           },
-          250ms)) {
+          250)) {
     std::cerr << "microphone pipeline did not start before consumer vanished\n";
     service.Stop();
     return false;
   }
 
   mic_consumer_present.store(false, std::memory_order_relaxed);
-  const bool stopped = WaitUntil(
+  const bool stopped = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_stops.load(std::memory_order_relaxed) >= 1 &&
@@ -2255,7 +2645,7 @@ bool TestMicrophonePipelineStopsWhenConsumerDisappears() {
                status.pipeline_state == "idle_no_consumer" &&
                !status.pipeline_active_needed;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -2275,6 +2665,7 @@ bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -2282,9 +2673,7 @@ bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2300,14 +2689,14 @@ bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return pipeline_creates.load(std::memory_order_relaxed) == 1 &&
                    status.pipeline_running &&
                    status.pipeline_state == "running";
           },
-          250ms)) {
+          250)) {
     std::cerr << "microphone pipeline did not start before flapping test\n";
     service.Stop();
     return false;
@@ -2331,12 +2720,12 @@ bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
     }
 
     mic_consumer_present.store(true, std::memory_order_relaxed);
-    if (!WaitUntil(
+    if (!loops.WaitUntil(
             [&] {
               const auto status = service.Status();
               return status.pipeline_running && status.mic_consumer_present;
             },
-            100ms)) {
+            100)) {
       std::cerr << "microphone consumer did not recover during flap cycle\n";
       service.Stop();
       return false;
@@ -2353,14 +2742,14 @@ bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
   }
 
   mic_consumer_present.store(false, std::memory_order_relaxed);
-  const bool stopped = WaitUntil(
+  const bool stopped = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_stops.load(std::memory_order_relaxed) == 1 &&
                !status.pipeline_running && !status.pipeline_active_needed &&
                status.pipeline_state == "idle_no_consumer";
       },
-      700ms);
+      700);
   const auto status = service.Status();
   service.Stop();
 
@@ -2381,6 +2770,7 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<int> detection_stage{0};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   hooks.detect_microphone_consumers = [&] {
     AudioConsumerSnapshot out;
@@ -2399,9 +2789,7 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2417,7 +2805,7 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return status.pipeline_state == "idle_no_consumer" &&
@@ -2425,7 +2813,7 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
                        std::string::npos &&
                    pipeline_creates.load(std::memory_order_relaxed) == 0;
           },
-          250ms)) {
+          250)) {
     const auto status = service.Status();
     std::cerr << "microphone detection error was not surfaced; state='"
               << status.pipeline_state << "' error='"
@@ -2436,7 +2824,7 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
   }
 
   detection_stage.store(1, std::memory_order_relaxed);
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return status.pipeline_state == "idle_no_consumer" &&
@@ -2444,7 +2832,7 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
                        std::string::npos &&
                    pipeline_creates.load(std::memory_order_relaxed) == 0;
           },
-          250ms)) {
+          250)) {
     const auto status = service.Status();
     std::cerr << "missing virtual mic source was not surfaced; state='"
               << status.pipeline_state << "' error='"
@@ -2455,14 +2843,14 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
   }
 
   detection_stage.store(2, std::memory_order_relaxed);
-  const bool recovered = WaitUntil(
+  const bool recovered = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_creates.load(std::memory_order_relaxed) == 1 &&
                status.pipeline_running && status.pipeline_state == "running" &&
                status.mic_consumer_present && status.mic_consumer_error.empty();
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -2484,6 +2872,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> speaker_consumer_present{false};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -2503,9 +2892,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2524,7 +2911,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
     return false;
   }
 
-  const bool saw_idle = WaitUntil(
+  const bool saw_idle = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return status.speakers_pipeline_state == "idle_no_consumer" &&
@@ -2532,7 +2919,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
                !status.speakers_pipeline_running &&
                !status.speakers_consumer_present;
       },
-      250ms);
+      250);
   std::this_thread::sleep_for(30ms);
   if (!saw_idle || pipeline_creates.load(std::memory_order_relaxed) != 0) {
     const auto status = service.Status();
@@ -2545,7 +2932,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
   }
 
   speaker_consumer_present.store(true, std::memory_order_relaxed);
-  const bool started = WaitUntil(
+  const bool started = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_creates.load(std::memory_order_relaxed) >= 1 &&
@@ -2553,7 +2940,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
                status.speakers_pipeline_active_needed &&
                status.speakers_pipeline_state == "running";
       },
-      250ms);
+      250);
   if (!started) {
     const auto status = service.Status();
     std::cerr << "speaker pipeline did not start after consumer appeared; "
@@ -2565,7 +2952,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
   }
 
   speaker_consumer_present.store(false, std::memory_order_relaxed);
-  const bool stopped = WaitUntil(
+  const bool stopped = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_stops.load(std::memory_order_relaxed) >= 1 &&
@@ -2573,7 +2960,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
                status.speakers_pipeline_state == "idle_no_consumer" &&
                !status.speakers_pipeline_active_needed;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -2593,6 +2980,7 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> speaker_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -2612,9 +3000,7 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2633,14 +3019,14 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return pipeline_creates.load(std::memory_order_relaxed) == 1 &&
                    status.speakers_pipeline_running &&
                    status.speakers_pipeline_state == "running";
           },
-          250ms)) {
+          250)) {
     std::cerr << "speaker pipeline did not start before flapping test\n";
     service.Stop();
     return false;
@@ -2664,13 +3050,13 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
     }
 
     speaker_consumer_present.store(true, std::memory_order_relaxed);
-    if (!WaitUntil(
+    if (!loops.WaitUntil(
             [&] {
               const auto status = service.Status();
               return status.speakers_pipeline_running &&
                      status.speakers_consumer_present;
             },
-            100ms)) {
+            100)) {
       std::cerr << "speaker consumer did not recover during flap cycle\n";
       service.Stop();
       return false;
@@ -2687,7 +3073,7 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
   }
 
   speaker_consumer_present.store(false, std::memory_order_relaxed);
-  const bool stopped = WaitUntil(
+  const bool stopped = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_stops.load(std::memory_order_relaxed) == 1 &&
@@ -2695,7 +3081,7 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
                !status.speakers_pipeline_active_needed &&
                status.speakers_pipeline_state == "idle_no_consumer";
       },
-      700ms);
+      700);
   const auto status = service.Status();
   service.Stop();
 
@@ -2716,6 +3102,7 @@ bool TestSpeakerLoopbackPassThroughStatusIsNotConsumerGated() {
   std::atomic<int> loopback_start_calls{0};
   std::atomic<int> speaker_detection_calls{0};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   hooks.create_virtual_speaker = [](std::string *error) {
     if (error)
@@ -2733,9 +3120,7 @@ bool TestSpeakerLoopbackPassThroughStatusIsNotConsumerGated() {
     speaker_detection_calls.fetch_add(1, std::memory_order_relaxed);
     return ConsumerSnapshot(false, 0);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2753,7 +3138,7 @@ bool TestSpeakerLoopbackPassThroughStatusIsNotConsumerGated() {
     return false;
   }
 
-  const bool active = WaitUntil(
+  const bool active = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return loopback_start_calls.load(std::memory_order_relaxed) >= 1 &&
@@ -2763,7 +3148,7 @@ bool TestSpeakerLoopbackPassThroughStatusIsNotConsumerGated() {
                status.speakers_pipeline_idle_reason ==
                    "Speaker processing is not requested.";
       },
-      250ms);
+      250);
   std::this_thread::sleep_for(30ms);
   const auto status = service.Status();
   const int detections =
@@ -2795,6 +3180,7 @@ bool TestMicrophonePipelineRestartsWhenWorkerDies() {
   std::atomic<int> sleep_calls{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -2806,6 +3192,7 @@ bool TestMicrophonePipelineRestartsWhenWorkerDies() {
     sleep_calls.fetch_add(1, std::memory_order_relaxed);
     std::this_thread::sleep_for(1ms);
   };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2822,7 +3209,7 @@ bool TestMicrophonePipelineRestartsWhenWorkerDies() {
   }
 
   const bool restarted =
-      WaitUntil([&] { return pipeline_creates.load() >= 2; }, 250ms);
+      loops.WaitUntil([&] { return pipeline_creates.load() >= 2; }, 250);
   service.Stop();
 
   if (!restarted) {
@@ -2846,6 +3233,7 @@ bool TestMicrophonePipelinePreservesWorkerDeathError() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -2858,9 +3246,7 @@ bool TestMicrophonePipelinePreservesWorkerDeathError() {
     }
     return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
   };
-  hooks.sleep_for = [&](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2877,7 +3263,7 @@ bool TestMicrophonePipelinePreservesWorkerDeathError() {
   }
 
   const bool restarted =
-      WaitUntil([&] { return pipeline_creates.load() >= 2; }, 250ms);
+      loops.WaitUntil([&] { return pipeline_creates.load() >= 2; }, 250);
   const auto status = service.Status();
   service.Stop();
 
@@ -2971,15 +3357,14 @@ bool TestStatusDoesNotBlockDuringRetrySleep() {
 
 bool TestMicrophoneNullPipelineFactoryFailsWithoutCrash() {
   std::atomic<bool> mic_consumer_present{true};
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
       [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     return nullptr;
   };
-  hooks.sleep_for = [&](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2995,14 +3380,14 @@ bool TestMicrophoneNullPipelineFactoryFailsWithoutCrash() {
     return false;
   }
 
-  const bool saw_error = WaitUntil(
+  const bool saw_error = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return !status.pipeline_running &&
                status.last_error.find("pipeline factory returned null") !=
                    std::string::npos;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -3021,6 +3406,7 @@ bool TestSpeakerPipelineStartFailureClearsRouteState() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<bool> speaker_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -3040,9 +3426,7 @@ bool TestSpeakerPipelineStartFailureClearsRouteState() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<StartFailPipeline>();
   };
-  hooks.sleep_for = [&](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3061,13 +3445,13 @@ bool TestSpeakerPipelineStartFailureClearsRouteState() {
     return false;
   }
 
-  const bool saw_failure = WaitUntil(
+  const bool saw_failure = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return status.speakers_pipeline_last_error.find(
                    "synthetic start failure") != std::string::npos;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -3093,6 +3477,7 @@ bool TestOpenAudioFailureCooldownAvoidsRestartChurn() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.probe_microphone_backend_availability =
@@ -3106,9 +3491,7 @@ bool TestOpenAudioFailureCooldownAvoidsRestartChurn() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [&](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3130,7 +3513,7 @@ bool TestOpenAudioFailureCooldownAvoidsRestartChurn() {
   }
 
   const bool started_fallback =
-      WaitUntil([&] { return pipeline_creates.load() >= 1; }, 250ms);
+      loops.WaitUntil([&] { return pipeline_creates.load() >= 1; }, 250);
   std::this_thread::sleep_for(75ms);
   const int creates_after_cooldown_window = pipeline_creates.load();
   const auto status = service.Status();
@@ -3165,6 +3548,7 @@ bool TestForcedMaxineMicrophoneFailureFallsBackToPassthrough() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.probe_microphone_backend_availability =
@@ -3180,9 +3564,7 @@ bool TestForcedMaxineMicrophoneFailureFallsBackToPassthrough() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3201,7 +3583,7 @@ bool TestForcedMaxineMicrophoneFailureFallsBackToPassthrough() {
     return false;
   }
 
-  const bool started_fallback = WaitUntil(
+  const bool started_fallback = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_creates.load(std::memory_order_relaxed) >= 1 &&
@@ -3210,7 +3592,7 @@ bool TestForcedMaxineMicrophoneFailureFallsBackToPassthrough() {
                status.effects_note.find("using pass-through") !=
                    std::string::npos;
       },
-      300ms);
+      300);
   std::this_thread::sleep_for(75ms);
   const int creates_after_settle =
       pipeline_creates.load(std::memory_order_relaxed);
@@ -3240,6 +3622,7 @@ bool TestMicrophoneAvailabilityCacheIgnoresSpeakerOnlyChanges() {
   std::atomic<int> mic_probes{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.probe_microphone_backend_availability =
@@ -3254,9 +3637,7 @@ bool TestMicrophoneAvailabilityCacheIgnoresSpeakerOnlyChanges() {
       [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3272,7 +3653,7 @@ bool TestMicrophoneAvailabilityCacheIgnoresSpeakerOnlyChanges() {
     return false;
   }
 
-  if (!WaitUntil([&] { return mic_probes.load() >= 1; }, 250ms)) {
+  if (!loops.WaitUntil([&] { return mic_probes.load() >= 1; }, 250)) {
     std::cerr << "microphone availability was not probed\n";
     service.Stop();
     return false;
@@ -3300,6 +3681,7 @@ bool TestSpeakerAvailabilityCacheIgnoresMicrophoneOnlyChanges() {
   std::atomic<int> speaker_probes{0};
   std::atomic<bool> speaker_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -3319,9 +3701,7 @@ bool TestSpeakerAvailabilityCacheIgnoresMicrophoneOnlyChanges() {
       [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3339,7 +3719,7 @@ bool TestSpeakerAvailabilityCacheIgnoresMicrophoneOnlyChanges() {
     return false;
   }
 
-  if (!WaitUntil([&] { return speaker_probes.load() >= 1; }, 250ms)) {
+  if (!loops.WaitUntil([&] { return speaker_probes.load() >= 1; }, 250)) {
     std::cerr << "speaker availability was not probed\n";
     service.Stop();
     return false;
@@ -3368,6 +3748,7 @@ bool TestMicrophoneDeadWorkerBacksOffBeforeRestart() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -3375,9 +3756,7 @@ bool TestMicrophoneDeadWorkerBacksOffBeforeRestart() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<DeadPipeline>(&pipeline_stops);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3393,7 +3772,7 @@ bool TestMicrophoneDeadWorkerBacksOffBeforeRestart() {
     return false;
   }
 
-  if (!WaitUntil([&] { return pipeline_creates.load() >= 1; }, 250ms)) {
+  if (!loops.WaitUntil([&] { return pipeline_creates.load() >= 1; }, 250)) {
     std::cerr << "microphone pipeline was not started\n";
     service.Stop();
     return false;
@@ -3402,7 +3781,7 @@ bool TestMicrophoneDeadWorkerBacksOffBeforeRestart() {
   std::this_thread::sleep_for(40ms);
   const int creates_during_backoff = pipeline_creates.load();
   const bool restarted =
-      WaitUntil([&] { return pipeline_creates.load() >= 2; }, 300ms);
+      loops.WaitUntil([&] { return pipeline_creates.load() >= 2; }, 300);
   service.Stop();
 
   if (creates_during_backoff != 1) {
@@ -3425,6 +3804,7 @@ bool TestSpeakerDeadWorkerBacksOffAndClearsRoute() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> speaker_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -3444,9 +3824,7 @@ bool TestSpeakerDeadWorkerBacksOffAndClearsRoute() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<DeadPipeline>(&pipeline_stops);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3465,13 +3843,13 @@ bool TestSpeakerDeadWorkerBacksOffAndClearsRoute() {
     return false;
   }
 
-  if (!WaitUntil([&] { return pipeline_creates.load() >= 1; }, 250ms)) {
+  if (!loops.WaitUntil([&] { return pipeline_creates.load() >= 1; }, 250)) {
     std::cerr << "speaker pipeline was not started\n";
     service.Stop();
     return false;
   }
 
-  const bool saw_inactive = WaitUntil(
+  const bool saw_inactive = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return !status.speakers_routing_active &&
@@ -3479,11 +3857,11 @@ bool TestSpeakerDeadWorkerBacksOffAndClearsRoute() {
                status.speakers_pipeline_last_error.find(
                    "Speaker audio pipeline stopped") != std::string::npos;
       },
-      250ms);
+      250);
   std::this_thread::sleep_for(40ms);
   const int creates_during_backoff = pipeline_creates.load();
   const bool restarted =
-      WaitUntil([&] { return pipeline_creates.load() >= 2; }, 300ms);
+      loops.WaitUntil([&] { return pipeline_creates.load() >= 2; }, 300);
   service.Stop();
 
   if (!saw_inactive) {
@@ -3520,6 +3898,7 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
   synthetic_stats.pulse_latency_us_max = 3000;
   synthetic_stats.resync_events = 4;
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -3539,9 +3918,7 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
           AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     return std::make_unique<FixedStatsPipeline>(synthetic_stats);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3559,13 +3936,13 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
     return false;
   }
 
-  const bool saw_stats = WaitUntil(
+  const bool saw_stats = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return status.speakers_pipeline_frames_processed == 123 &&
                status.speakers_pipeline_pulse_latency_us_max == 3000;
       },
-      250ms);
+      250);
   if (!saw_stats) {
     const auto status = service.Status();
     std::cerr << "speaker pipeline stats were not published; frames="
@@ -3577,7 +3954,7 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
 
   cfg.speakers_enabled = false;
   service.UpdateConfig(cfg);
-  const bool cleared = WaitUntil(
+  const bool cleared = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return status.speakers_route_mode == "off" &&
@@ -3589,7 +3966,7 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
                status.speakers_pipeline_pulse_latency_us_max == 0 &&
                status.speakers_pipeline_resync_events == 0;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -3609,6 +3986,7 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
 bool TestSpeakerLoopbackRestartFailureClearsRouteState() {
   std::atomic<int> loopback_start_calls{0};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   hooks.create_virtual_speaker = [](std::string *error) {
     if (error)
@@ -3628,9 +4006,7 @@ bool TestSpeakerLoopbackRestartFailureClearsRouteState() {
       *error = "synthetic loopback load failure";
     return false;
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3648,14 +4024,14 @@ bool TestSpeakerLoopbackRestartFailureClearsRouteState() {
     return false;
   }
 
-  const bool first_route_active = WaitUntil(
+  const bool first_route_active = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return loopback_start_calls.load(std::memory_order_relaxed) >= 1 &&
                status.speakers_routing_active &&
                status.speakers_route_mode == "loopback";
       },
-      250ms);
+      250);
   if (!first_route_active) {
     const auto status = service.Status();
     std::cerr << "speaker loopback route did not become active; starts="
@@ -3670,7 +4046,7 @@ bool TestSpeakerLoopbackRestartFailureClearsRouteState() {
   cfg.speaker_target_sink = "other_physical_test_sink";
   service.UpdateConfig(cfg);
 
-  const bool cleared_after_failure = WaitUntil(
+  const bool cleared_after_failure = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return loopback_start_calls.load(std::memory_order_relaxed) >= 2 &&
@@ -3679,7 +4055,7 @@ bool TestSpeakerLoopbackRestartFailureClearsRouteState() {
                status.speakers_last_error.find(
                    "synthetic loopback load failure") != std::string::npos;
       },
-      250ms);
+      250);
   const int starts_after_failure =
       loopback_start_calls.load(std::memory_order_relaxed);
   std::this_thread::sleep_for(50ms);
@@ -3740,10 +4116,9 @@ bool TestSpeakerLoopbackRealHelperStopFailureKeepsOldRouteActive() {
     return ExecResult(99, "unexpected command: " + command);
   });
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3760,7 +4135,7 @@ bool TestSpeakerLoopbackRealHelperStopFailureKeepsOldRouteActive() {
     return false;
   }
 
-  const bool old_route_preserved = WaitUntil(
+  const bool old_route_preserved = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return unload_calls.load(std::memory_order_relaxed) >= 1 &&
@@ -3771,7 +4146,7 @@ bool TestSpeakerLoopbackRealHelperStopFailureKeepsOldRouteActive() {
                    "synthetic old loopback unload failure") !=
                    std::string::npos;
       },
-      250ms);
+      250);
   const int unloads_after_failure =
       unload_calls.load(std::memory_order_relaxed);
   std::this_thread::sleep_for(50ms);
@@ -3813,6 +4188,7 @@ bool TestVirtualSpeakerDestroyFailureBacksOffAndKeepsPresent() {
   std::atomic<int> create_calls{0};
   std::atomic<int> destroy_calls{0};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   hooks.create_virtual_speaker = [&](std::string *error) {
     create_calls.fetch_add(1, std::memory_order_relaxed);
@@ -3826,9 +4202,7 @@ bool TestVirtualSpeakerDestroyFailureBacksOffAndKeepsPresent() {
       *error = "synthetic virtual speaker destroy failure";
     return false;
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3845,13 +4219,13 @@ bool TestVirtualSpeakerDestroyFailureBacksOffAndKeepsPresent() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return create_calls.load(std::memory_order_relaxed) >= 1 &&
                    status.speakers_present;
           },
-          250ms)) {
+          250)) {
     std::cerr << "virtual speakers did not become present before destroy\n";
     service.Stop();
     return false;
@@ -3860,7 +4234,7 @@ bool TestVirtualSpeakerDestroyFailureBacksOffAndKeepsPresent() {
   cfg.create_virtual_speakers = false;
   service.UpdateConfig(cfg);
 
-  const bool destroy_failed = WaitUntil(
+  const bool destroy_failed = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return destroy_calls.load(std::memory_order_relaxed) >= 1 &&
@@ -3869,7 +4243,7 @@ bool TestVirtualSpeakerDestroyFailureBacksOffAndKeepsPresent() {
                    "synthetic virtual speaker destroy failure") !=
                    std::string::npos;
       },
-      250ms);
+      250);
   const int destroys_after_failure =
       destroy_calls.load(std::memory_order_relaxed);
   std::this_thread::sleep_for(50ms);
@@ -3902,6 +4276,7 @@ bool TestSpeakerLoopbackStopFailureBlocksPipelineStart() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<bool> speaker_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -3934,9 +4309,7 @@ bool TestSpeakerLoopbackStopFailureBlocksPipelineStart() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3953,14 +4326,14 @@ bool TestSpeakerLoopbackStopFailureBlocksPipelineStart() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return loopback_start_calls.load(std::memory_order_relaxed) >= 1 &&
                    status.speakers_route_mode == "loopback" &&
                    status.speakers_routing_active;
           },
-          250ms)) {
+          250)) {
     const auto status = service.Status();
     std::cerr << "speaker loopback did not become active before processing "
                  "transition; starts="
@@ -3974,7 +4347,7 @@ bool TestSpeakerLoopbackStopFailureBlocksPipelineStart() {
   cfg.effects.speaker.noise_removal_enabled = true;
   service.UpdateConfig(cfg);
 
-  const bool stop_failed = WaitUntil(
+  const bool stop_failed = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return loopback_stop_calls.load(std::memory_order_relaxed) >= 1 &&
@@ -3985,7 +4358,7 @@ bool TestSpeakerLoopbackStopFailureBlocksPipelineStart() {
                status.speakers_last_error.find("synthetic loopback stop "
                                                "failure") != std::string::npos;
       },
-      250ms);
+      250);
   const int stops_after_failure =
       loopback_stop_calls.load(std::memory_order_relaxed);
   std::this_thread::sleep_for(30ms);
@@ -4028,6 +4401,7 @@ bool TestSpeakerLoopbackStopFailurePreventsDestroyAndKeepsRoute() {
   std::atomic<int> loopback_stop_calls{0};
   std::atomic<int> destroy_calls{0};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   hooks.create_virtual_speaker = [](std::string *error) {
     if (error)
@@ -4053,9 +4427,7 @@ bool TestSpeakerLoopbackStopFailurePreventsDestroyAndKeepsRoute() {
       error->clear();
     return true;
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -4072,14 +4444,14 @@ bool TestSpeakerLoopbackStopFailurePreventsDestroyAndKeepsRoute() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return loopback_start_calls.load(std::memory_order_relaxed) >= 1 &&
                    status.speakers_route_mode == "loopback" &&
                    status.speakers_routing_active;
           },
-          250ms)) {
+          250)) {
     std::cerr << "speaker loopback did not become active before disable\n";
     service.Stop();
     return false;
@@ -4089,7 +4461,7 @@ bool TestSpeakerLoopbackStopFailurePreventsDestroyAndKeepsRoute() {
   cfg.create_virtual_speakers = false;
   service.UpdateConfig(cfg);
 
-  const bool stop_failed = WaitUntil(
+  const bool stop_failed = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return loopback_stop_calls.load(std::memory_order_relaxed) >= 1 &&
@@ -4098,7 +4470,7 @@ bool TestSpeakerLoopbackStopFailurePreventsDestroyAndKeepsRoute() {
                status.speakers_last_error.find("synthetic loopback stop "
                                                "failure") != std::string::npos;
       },
-      250ms);
+      250);
   const int stops_after_failure =
       loopback_stop_calls.load(std::memory_order_relaxed);
   std::this_thread::sleep_for(30ms);
@@ -4692,6 +5064,2102 @@ bool TestStopInterruptsBlockedPlaybackWrite() {
   return true;
 }
 
+struct ConcurrentStopFixture {
+  std::atomic<int> stops_entered{0};
+  std::atomic<int> stops_done{0};
+  std::atomic<int> join_errors{0};
+  std::mutex text_mu;
+  std::string join_error_text;
+
+  void RecordJoinError(const std::system_error &e) {
+    join_errors.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(text_mu);
+    if (join_error_text.empty())
+      join_error_text = e.what();
+  }
+
+  std::string JoinErrorText() {
+    std::lock_guard<std::mutex> lock(text_mu);
+    return join_error_text;
+  }
+};
+
+struct ConcurrentPipelineStopFixture : ConcurrentStopFixture {
+  std::shared_ptr<ParkedReadIoState> io_state =
+      std::make_shared<ParkedReadIoState>();
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+
+  void ReleaseWorker() {
+    {
+      std::lock_guard<std::mutex> lock(io_state->mu);
+      io_state->released = true;
+    }
+    io_state->cv.notify_all();
+  }
+};
+
+bool TestConcurrentPipelineStopJoinsWorkerOnce() {
+  auto fx = std::make_shared<ConcurrentPipelineStopFixture>();
+
+  AudioPipelineHooks hooks;
+  auto io_state = fx->io_state;
+  hooks.create_io = [io_state] {
+    return std::make_unique<ParkedReadIo>(io_state);
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  AudioPipelineConfig cfg;
+  std::string err;
+  if (!fx->pipeline->Start(cfg, &err)) {
+    std::cerr << "pipeline.Start failed: " << err << "\n";
+    return false;
+  }
+
+  // Wait longer than the 250 ms that most tests in this file use. This wait
+  // is only for progress, and a run with more copies than CPUs can need more
+  // than 250 ms to give the worker its first slice.
+  if (!WaitUntil(
+          [&] {
+            std::lock_guard<std::mutex> lock(fx->io_state->mu);
+            return fx->io_state->read_entered;
+          },
+          5000ms)) {
+    std::cerr << "pipeline worker did not enter the parked capture read\n";
+    fx->ReleaseWorker();
+    fx->pipeline->Stop();
+    return false;
+  }
+
+  // Two callers stop the same pipeline at once. The worker must be joined
+  // exactly once: a second join on the same worker either throws
+  // "Invalid argument" or waits for a thread that no longer exists.
+  auto stopper = [fx] {
+    fx->stops_entered.fetch_add(1, std::memory_order_release);
+    try {
+      fx->pipeline->Stop();
+    } catch (const std::system_error &e) {
+      fx->RecordJoinError(e);
+    }
+    fx->stops_done.fetch_add(1, std::memory_order_release);
+  };
+
+  std::thread first_stop(stopper);
+  std::thread second_stop(stopper);
+
+  // Hold the worker until both callers are inside Stop(). A fixed sleep can
+  // pass on a loaded runner without ever making the race, thus wait for the
+  // two callers and then give them a short moment to reach the join.
+  //
+  // The 20 ms settle below is the last step that depends on timing: the count
+  // proves that both callers entered Stop(), not that either reached the
+  // join. A count taken immediately before the handle lock would close it,
+  // but that needs a seam in the production code.
+  if (!WaitUntil(
+          [&] {
+            return fx->stops_entered.load(std::memory_order_acquire) == 2;
+          },
+          2000ms)) {
+    std::cerr << "both Stop() callers never entered Stop()\n";
+    fx->ReleaseWorker();
+    first_stop.join();
+    second_stop.join();
+    return false;
+  }
+  std::this_thread::sleep_for(20ms);
+  fx->ReleaseWorker();
+
+  const bool both_returned = WaitUntil(
+      [&] { return fx->stops_done.load(std::memory_order_acquire) == 2; },
+      5000ms);
+
+  if (!both_returned) {
+    // A Stop() is wedged inside join() on a worker that the other Stop()
+    // already joined. The wedged thread cannot be recovered and its stale
+    // thread id can be reused by a later test, so end the run here with a
+    // failure instead of corrupting the tests that follow.
+    first_stop.detach();
+    second_stop.detach();
+    std::cout.flush();
+    std::cerr << "[FAIL] concurrent pipeline Stop() never returned; a join() "
+                 "is stuck on a worker that another Stop() already joined"
+              << std::endl;
+    std::_Exit(1);
+  }
+
+  first_stop.join();
+  second_stop.join();
+
+  if (fx->join_errors.load(std::memory_order_relaxed) != 0) {
+    std::cerr << "concurrent pipeline Stop() threw from join(): "
+              << fx->JoinErrorText() << "\n";
+    return false;
+  }
+
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after concurrent Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
+struct ConcurrentServiceStopFixture : ConcurrentStopFixture {
+  std::mutex park_mu;
+  std::condition_variable park_cv;
+  bool parked = false;
+  bool released = false;
+  std::atomic<bool> mic_consumer_present{true};
+  std::unique_ptr<VirtualAudioService> service;
+
+  // Parks the supervisor thread in the sleep hook until the test releases it.
+  void ParkSupervisor() {
+    std::unique_lock<std::mutex> lock(park_mu);
+    parked = true;
+    park_cv.notify_all();
+    park_cv.wait(lock, [this] { return released; });
+  }
+
+  void ReleaseSupervisor() {
+    {
+      std::lock_guard<std::mutex> lock(park_mu);
+      released = true;
+    }
+    park_cv.notify_all();
+  }
+
+  // See the wait in TestConcurrentPipelineStopJoinsWorkerOnce: a wait for
+  // progress must not fail only because the runner is loaded.
+  bool WaitForParkedSupervisor() {
+    std::unique_lock<std::mutex> lock(park_mu);
+    return park_cv.wait_for(lock, 5000ms, [this] { return parked; });
+  }
+};
+
+bool TestConcurrentServiceStopJoinsSupervisorOnce() {
+  auto fx = std::make_shared<ConcurrentServiceStopFixture>();
+
+  VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &fx->mic_consumer_present);
+  hooks.probe_microphone_backend_availability =
+      [](const VirtualAudioServiceConfig &) {
+        AudioBackendAvailability avail;
+        avail.open_source_ok = true;
+        return avail;
+      };
+  hooks.create_pipeline =
+      [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    return std::make_unique<StartFailPipeline>();
+  };
+  // Capture a raw pointer: the hooks go into the service, the fixture owns
+  // the service, and a shared_ptr here would make a cycle that never frees
+  // either of them. The fixture outlives the service by construction.
+  auto *raw = fx.get();
+  hooks.sleep_for = [raw](std::chrono::milliseconds) { raw->ParkSupervisor(); };
+
+  fx->service = std::make_unique<VirtualAudioService>(std::move(hooks));
+
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.poll_ms = 1;
+  cfg.start_retry_ms = 1;
+
+  std::string err;
+  if (!fx->service->Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!fx->WaitForParkedSupervisor()) {
+    std::cerr << "service supervisor did not enter the parked sleep\n";
+    fx->ReleaseSupervisor();
+    fx->service->Stop();
+    return false;
+  }
+
+  // Two callers stop the same service at once. The supervisor must be joined
+  // exactly once.
+  auto stopper = [fx] {
+    fx->stops_entered.fetch_add(1, std::memory_order_release);
+    try {
+      fx->service->Stop();
+    } catch (const std::system_error &e) {
+      fx->RecordJoinError(e);
+    }
+    fx->stops_done.fetch_add(1, std::memory_order_release);
+  };
+
+  std::thread first_stop(stopper);
+  std::thread second_stop(stopper);
+
+  // Hold the supervisor until both callers are inside Stop(). A fixed sleep
+  // can pass on a loaded runner without ever making the race, thus wait for
+  // the two callers and then give them a short moment to reach the join.
+  //
+  // The 20 ms settle below is the last step that depends on timing: the count
+  // proves that both callers entered Stop(), not that either reached the
+  // join. A count taken immediately before the handle lock would close it,
+  // but that needs a seam in the production code.
+  if (!WaitUntil(
+          [&] {
+            return fx->stops_entered.load(std::memory_order_acquire) == 2;
+          },
+          2000ms)) {
+    std::cerr << "both Stop() callers never entered Stop()\n";
+    fx->ReleaseSupervisor();
+    first_stop.join();
+    second_stop.join();
+    return false;
+  }
+  std::this_thread::sleep_for(20ms);
+  fx->ReleaseSupervisor();
+
+  const bool both_returned = WaitUntil(
+      [&] { return fx->stops_done.load(std::memory_order_acquire) == 2; },
+      5000ms);
+
+  if (!both_returned) {
+    // See TestConcurrentPipelineStopJoinsWorkerOnce: a wedged join cannot be
+    // recovered, thus the run ends here.
+    first_stop.detach();
+    second_stop.detach();
+    std::cout.flush();
+    std::cerr << "[FAIL] concurrent service Stop() never returned; a join() "
+                 "is stuck on a supervisor that another Stop() already joined"
+              << std::endl;
+    std::_Exit(1);
+  }
+
+  first_stop.join();
+  second_stop.join();
+
+  if (fx->join_errors.load(std::memory_order_relaxed) != 0) {
+    std::cerr << "concurrent service Stop() threw from join(): "
+              << fx->JoinErrorText() << "\n";
+    return false;
+  }
+
+  if (fx->service->Status().service_running) {
+    std::cerr << "service still reports running after concurrent Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
+constexpr const char *kOverlapOpenError = "overlap io refuses to open";
+constexpr const char *kOverlapNoIoError =
+    "Audio pipeline I/O backend is not available.";
+constexpr const char *kPipelineAlreadyRunningError =
+    "Audio pipeline is already running.";
+
+// I/O for the Start()/Stop() overlap test. Open() fails at once, thus the
+// worker exits by itself and stays in the handle: the next Start() must join
+// it, and so must a Stop() that runs at the same time. A Stop() that reaches
+// the handle first now finds no backend of this worker to release, because
+// Start() sets io_ and publishes the worker in one hold of thread_mu_. The
+// window that is left is a worker that Start() took out of the handle and
+// joins outside every lock: a Stop() can release io_ while that worker is
+// still inside Open(), and the worker keeps the backend through the shared
+// reference that GetActiveIo() gives it, thus the call stays defined.
+class OverlapIo final : public AudioPipelineIo {
+public:
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (error)
+      *error = kOverlapOpenError;
+    return false;
+  }
+
+  bool Read(void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+  void RequestStop() override {}
+};
+
+struct StartStopOverlapFixture : ConcurrentStopFixture {
+  std::atomic<int> ios_created{0};
+  std::atomic<int> overlaps{0};
+  std::atomic<int> starts_done{0};
+  std::atomic<int> start_failures{0};
+  std::atomic<bool> start_returned{false};
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+};
+
+// Start() and Stop() on one pipeline at the same time. This is the overlap
+// that TestStopInterruptsOpenAfterEarlyStopReset already makes by accident.
+// Every attempt begins from a worker that exited by itself and is still in
+// the handle, thus the join that Start() makes first and the join that Stop()
+// makes both reach the same worker: they must not both join it. Start() has
+// no seam after the guard, thus the stopper sweeps its delay across the
+// attempts to cover the window up to the publish of the new handle.
+bool TestConcurrentStartStopKeepsWorkerHandleUsable() {
+  auto fx = std::make_shared<StartStopOverlapFixture>();
+  auto *raw = fx.get();
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw]() -> std::unique_ptr<AudioPipelineIo> {
+    raw->ios_created.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<OverlapIo>();
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  const AudioPipelineConfig cfg;
+  std::string prime_error;
+  if (fx->pipeline->Start(cfg, &prime_error)) {
+    std::cerr << "pipeline.Start reported success though the I/O refuses to "
+                 "open\n";
+    return false;
+  }
+
+  constexpr int kAttempts = 64;
+  for (int attempt = 0; attempt < kAttempts; ++attempt) {
+    if (!WaitUntil([&] { return !raw->pipeline->GetStats().running; },
+                   2000ms)) {
+      std::cerr << "the worker of attempt " << attempt
+                << " did not exit by itself\n";
+      return false;
+    }
+
+    std::atomic<bool> gate{false};
+    std::atomic<int> burn{0};
+    fx->start_returned.store(false, std::memory_order_release);
+
+    std::thread starter([&] {
+      while (!gate.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      std::string start_error;
+      try {
+        raw->pipeline->Start(cfg, &start_error);
+      } catch (const std::system_error &e) {
+        raw->RecordJoinError(e);
+      }
+      if (start_error != kOverlapOpenError &&
+          start_error != kOverlapNoIoError) {
+        std::cerr << "pipeline.Start gave an unexpected error on attempt "
+                  << attempt << ": " << start_error << "\n";
+        raw->start_failures.fetch_add(1, std::memory_order_relaxed);
+      }
+      raw->start_returned.store(true, std::memory_order_release);
+      raw->starts_done.fetch_add(1, std::memory_order_release);
+    });
+
+    std::thread stopper([&] {
+      while (!gate.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      // Sweep the delay so the stopper lands at a different point of Start()
+      // on every attempt.
+      for (int spin = 0; spin < attempt * 32; ++spin)
+        burn.fetch_add(1, std::memory_order_relaxed);
+      // Record that Start() had not yet returned, thus a green run cannot be
+      // one where the two calls never met.
+      if (!raw->start_returned.load(std::memory_order_acquire))
+        raw->overlaps.fetch_add(1, std::memory_order_relaxed);
+      try {
+        raw->pipeline->Stop();
+      } catch (const std::system_error &e) {
+        raw->RecordJoinError(e);
+      }
+      raw->stops_done.fetch_add(1, std::memory_order_release);
+    });
+
+    gate.store(true, std::memory_order_release);
+
+    const bool both_returned = WaitUntil(
+        [&] {
+          return raw->starts_done.load(std::memory_order_acquire) ==
+                     attempt + 1 &&
+                 raw->stops_done.load(std::memory_order_acquire) == attempt + 1;
+        },
+        5000ms);
+
+    if (!both_returned) {
+      // A caller is wedged inside join() on a worker that the other caller
+      // already joined. A wedged thread cannot be recovered and its stale
+      // thread id can go to a later test, thus the run ends here.
+      starter.detach();
+      stopper.detach();
+      std::cout.flush();
+      std::cerr << "[FAIL] pipeline Start()/Stop() overlap never returned on "
+                   "attempt "
+                << attempt
+                << "; a join() is stuck on a worker that another caller "
+                   "already joined"
+                << std::endl;
+      std::_Exit(1);
+    }
+
+    starter.join();
+    stopper.join();
+
+    if (fx->start_failures.load(std::memory_order_relaxed) != 0)
+      return false;
+
+    if (fx->join_errors.load(std::memory_order_relaxed) != 0) {
+      std::cerr << "Start()/Stop() overlap threw from join(): "
+                << fx->JoinErrorText() << "\n";
+      return false;
+    }
+  }
+
+  if (fx->overlaps.load(std::memory_order_relaxed) == 0) {
+    std::cerr << "no attempt ever put Stop() inside Start(), thus the sweep "
+                 "never made an overlap\n";
+    return false;
+  }
+
+  // Every Start() must have reached a new worker: a lost handle stops the
+  // pipeline from making the next one.
+  const int expected_ios = kAttempts + 1;
+  if (fx->ios_created.load(std::memory_order_relaxed) != expected_ios) {
+    std::cerr << "pipeline made "
+              << fx->ios_created.load(std::memory_order_relaxed)
+              << " I/O backends, expected " << expected_ios << "\n";
+    return false;
+  }
+
+  fx->pipeline->Stop();
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
+// State that the stop-flag ordering test shares with its I/O backends.
+struct StopOrderIoState {
+  std::mutex mu;
+  std::condition_variable cv;
+  // The pipeline stop flag, which SetStopRequestedFlag() gives to every
+  // backend. The test reads the flag through this pointer.
+  const std::atomic<bool> *stop_flag = nullptr;
+  // Open() parks while this is set, thus a worker that nobody tells to stop
+  // stays in the backend and a join of that worker never returns. This is
+  // what a real capture read does and what the shipped OverlapIo cannot do,
+  // because its Open() fails at once.
+  bool park_open = false;
+  // The gate that holds the first backend inside RequestStop(). It gives the
+  // test a seam inside Stop(), after the raise of the stop flag and before
+  // the join.
+  bool request_stop_entered = false;
+  bool request_stop_released = false;
+  // The value of the stop flag at the moment the gate opened.
+  bool stop_flag_recorded = false;
+  bool stop_flag_on_release = false;
+};
+
+// I/O for the stop-flag ordering test. Open() fails, as OverlapIo does, but
+// it first parks until the pipeline asks it to stop, either with the stop
+// flag or with RequestStop().
+class StopOrderIo final : public AudioPipelineIo {
+public:
+  StopOrderIo(std::shared_ptr<StopOrderIoState> state, bool gate_request_stop)
+      : state_(std::move(state)), gate_request_stop_(gate_request_stop) {}
+
+  void SetStopRequestedFlag(const std::atomic<bool> *stop_requested) override {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    stop_requested_ = stop_requested;
+    state_->stop_flag = stop_requested;
+  }
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    {
+      std::unique_lock<std::mutex> lock(state_->mu);
+      state_->cv.wait(lock,
+                      [this] { return !state_->park_open || StopAsked(); });
+    }
+    if (error)
+      *error = kOverlapOpenError;
+    return false;
+  }
+
+  bool Read(void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+
+  void RequestStop() override {
+    std::unique_lock<std::mutex> lock(state_->mu);
+    stop_asked_ = true;
+    state_->cv.notify_all();
+    if (!gate_request_stop_)
+      return;
+    // Hold Stop() here. It has raised the flag and it has not yet joined.
+    state_->request_stop_entered = true;
+    state_->cv.notify_all();
+    state_->cv.wait(lock, [this] { return state_->request_stop_released; });
+    state_->stop_flag_on_release =
+        stop_requested_ != nullptr &&
+        stop_requested_->load(std::memory_order_acquire);
+    state_->stop_flag_recorded = true;
+  }
+
+private:
+  // Call with state_->mu held.
+  bool StopAsked() const {
+    return stop_asked_ || (stop_requested_ != nullptr &&
+                           stop_requested_->load(std::memory_order_acquire));
+  }
+
+  std::shared_ptr<StopOrderIoState> state_;
+  bool gate_request_stop_ = false;
+  bool stop_asked_ = false;
+  const std::atomic<bool> *stop_requested_ = nullptr;
+};
+
+struct StopOrderFixture {
+  std::shared_ptr<StopOrderIoState> io_state =
+      std::make_shared<StopOrderIoState>();
+  std::atomic<int> ios_created{0};
+  // Set as the first statement of each thread. Both verdicts below are a
+  // wait that must run out, thus a thread that the scheduler never ran would
+  // give the same result as the call that behaves. These marks say that the
+  // thread ran; the test waits for the mark before it starts the wait.
+  std::atomic<bool> stopper_entered{false};
+  std::atomic<bool> starter_entered{false};
+  std::atomic<bool> stopper_done{false};
+  std::atomic<bool> starter_done{false};
+  std::atomic<bool> cleaner_done{false};
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+};
+
+// Stop() must keep the stop flag up for the worker that it joins.
+//
+// Stop() raises the flag, asks the backend to stop and then joins. A Start()
+// that runs between the raise and the join clears the flag, makes a new
+// backend and publishes a new worker; Stop() then joins a worker that nobody
+// told to stop and whose backend never got RequestStop(). A worker parked in
+// a real capture read leaves only on one of those two, thus that join never
+// returns. VirtualAudioService::Stop() had the same fault.
+//
+// The test holds Stop() inside RequestStop() and then lets a Start() run. The
+// flag must still be up when Stop() leaves RequestStop(), which is true only
+// while Stop() holds the worker lock across the raise. A sweep under load
+// cannot show this, because the window between the raise and the join is a
+// few instructions wide; the gate makes the order instead of racing for it.
+bool TestStopKeepsTheStopFlagUpForTheWorkerItJoins() {
+  auto fx = std::make_shared<StopOrderFixture>();
+  auto *raw = fx.get();
+  auto io_state = fx->io_state;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw, io_state]() -> std::unique_ptr<AudioPipelineIo> {
+    // Only the first backend holds Stop() inside RequestStop().
+    const int index = raw->ios_created.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<StopOrderIo>(io_state, index == 0);
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  // Prime the pipeline: the first backend stays installed and its worker
+  // exits by itself, thus Stop() finds a backend to ask and a worker to join.
+  const AudioPipelineConfig cfg;
+  std::string prime_error;
+  if (fx->pipeline->Start(cfg, &prime_error)) {
+    std::cerr << "pipeline.Start reported success though the I/O refuses to "
+                 "open\n";
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(io_state->mu);
+    io_state->park_open = true;
+  }
+
+  std::thread stopper([raw] {
+    raw->pipeline->Stop();
+    raw->stopper_done.store(true, std::memory_order_release);
+  });
+
+  if (!WaitUntil(
+          [&] {
+            std::lock_guard<std::mutex> lock(io_state->mu);
+            return io_state->request_stop_entered;
+          },
+          5000ms)) {
+    std::cerr << "Stop() never reached RequestStop()\n";
+    {
+      std::lock_guard<std::mutex> lock(io_state->mu);
+      io_state->park_open = false;
+      io_state->request_stop_released = true;
+    }
+    io_state->cv.notify_all();
+    stopper.join();
+    return false;
+  }
+
+  std::thread starter([raw, cfg] {
+    raw->starter_entered.store(true, std::memory_order_release);
+    std::string start_error;
+    raw->pipeline->Start(cfg, &start_error);
+    raw->starter_done.store(true, std::memory_order_release);
+  });
+
+  // The verdict below is a wait that must run out, thus wait for the starter
+  // to run first: a starter that the scheduler never gave a turn would pass
+  // the test for the wrong reason.
+  if (!WaitUntil(
+          [&] { return raw->starter_entered.load(std::memory_order_acquire); },
+          5000ms)) {
+    std::cerr << "the starter thread never ran\n";
+    {
+      std::lock_guard<std::mutex> lock(io_state->mu);
+      io_state->park_open = false;
+      io_state->request_stop_released = true;
+    }
+    io_state->cv.notify_all();
+    starter.join();
+    stopper.join();
+    return false;
+  }
+
+  // Wait for the flag to fall. Start() clears it as soon as it is past the
+  // handle lock at the top of its body, thus this ends in milliseconds when
+  // Stop() raised the flag outside that lock. When Stop() holds the lock,
+  // Start() waits for it and this wait runs out, which is the pass. Half a
+  // second is a hundred times the margin the failing shape needs, and the
+  // passing shape cannot end this wait at any budget.
+  const bool flag_cleared = WaitUntil(
+      [&] {
+        std::lock_guard<std::mutex> lock(io_state->mu);
+        return io_state->stop_flag != nullptr &&
+               !io_state->stop_flag->load(std::memory_order_acquire);
+      },
+      500ms);
+
+  {
+    std::lock_guard<std::mutex> lock(io_state->mu);
+    io_state->request_stop_released = true;
+  }
+  io_state->cv.notify_all();
+
+  bool flag_up_on_release = false;
+  WaitUntil(
+      [&] {
+        std::lock_guard<std::mutex> lock(io_state->mu);
+        return io_state->stop_flag_recorded;
+      },
+      5000ms);
+  {
+    std::lock_guard<std::mutex> lock(io_state->mu);
+    flag_up_on_release = io_state->stop_flag_on_release;
+  }
+
+  // Start() publishes a worker that parks in the backend. One more Stop()
+  // raises the flag for it and joins it. That worker leaves on the flag
+  // alone, thus this works also when Stop() already released the backend.
+  // Wait for the new backend first: Start() clears the flag before it makes
+  // one, thus a Stop() before that point loses its raise to Start().
+  //
+  // A third thread makes this last Stop(), because a Stop() that is wedged in
+  // a join holds the worker lock and would take the test thread with it.
+  WaitUntil(
+      [&] { return raw->ios_created.load(std::memory_order_relaxed) > 1; },
+      5000ms);
+  std::thread cleaner([raw] {
+    raw->pipeline->Stop();
+    raw->cleaner_done.store(true, std::memory_order_release);
+  });
+
+  const bool all_returned = WaitUntil(
+      [&] {
+        return raw->stopper_done.load(std::memory_order_acquire) &&
+               raw->starter_done.load(std::memory_order_acquire) &&
+               raw->cleaner_done.load(std::memory_order_acquire);
+      },
+      5000ms);
+
+  if (!all_returned) {
+    // A caller is wedged inside a join on a worker that nobody told to stop.
+    // The three threads are already detached here, thus the run can go on:
+    // the other tests do not get a stale thread id from them. Say which
+    // caller is still in flight, because that names the path that wedged.
+    stopper.detach();
+    starter.detach();
+    cleaner.detach();
+    std::cout.flush();
+    std::cerr << "[FAIL] Start()/Stop() with a parked worker never returned; "
+                 "a join() is stuck on a worker that was never told to stop"
+              << " (stopper_done="
+              << raw->stopper_done.load(std::memory_order_acquire)
+              << " starter_done="
+              << raw->starter_done.load(std::memory_order_acquire)
+              << " cleaner_done="
+              << raw->cleaner_done.load(std::memory_order_acquire)
+              << " ios_created="
+              << raw->ios_created.load(std::memory_order_relaxed) << ")"
+              << std::endl;
+    // The three detached threads still read the fixture, and the destructor
+    // of the pipeline in it calls Stop(), which is the call that is wedged.
+    // Leak one more reference on purpose, thus the fixture stays alive and
+    // the run can go on with the other tests.
+    (void)new std::shared_ptr<StopOrderFixture>(fx);
+    return false;
+  }
+
+  stopper.join();
+  starter.join();
+  cleaner.join();
+
+  if (flag_cleared || !flag_up_on_release) {
+    std::cerr << "Start() cleared the stop flag while Stop() was between the "
+                 "raise and the join, thus Stop() can join a worker that "
+                 "nobody told to stop\n";
+    return false;
+  }
+
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
+struct StopRaiseFixture : StopOrderFixture {
+  std::mutex gate_mu;
+  std::condition_variable gate_cv;
+  // Holds the second backend inside the factory, thus Start() parks inside
+  // the worker lock, after it cleared the stop flag.
+  bool create_io_entered = false;
+  bool create_io_released = false;
+
+  void WaitInFactory() {
+    std::unique_lock<std::mutex> lock(gate_mu);
+    create_io_entered = true;
+    gate_cv.notify_all();
+    gate_cv.wait(lock, [this] { return create_io_released; });
+  }
+
+  void ReleaseFactory() {
+    {
+      std::lock_guard<std::mutex> lock(gate_mu);
+      create_io_released = true;
+    }
+    gate_cv.notify_all();
+  }
+};
+
+// Stop() must raise the stop flag under the worker lock, not before it.
+//
+// TestStopKeepsTheStopFlagUpForTheWorkerItJoins pins where RequestStop()
+// sits, not where the raise sits: its gate is inside RequestStop(), thus a
+// Stop() with the raise outside the lock still parks with the flag up. This
+// test pins the raise itself. Start() clears the flag under the same lock,
+// thus while a Start() holds that lock the flag must not move. A Stop() that
+// raises the flag before it takes the lock breaks that: it raises the flag
+// between the clear of a Start() and the publish of its worker, and it then
+// joins a worker whose flag is down.
+//
+// The seam is the backend factory, which Start() calls under the worker
+// lock: it holds Start() there, past the clear, while a Stop() runs.
+bool TestStopRaisesTheStopFlagUnderTheWorkerLock() {
+  auto fx = std::make_shared<StopRaiseFixture>();
+  auto *raw = fx.get();
+  auto io_state = fx->io_state;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw, io_state]() -> std::unique_ptr<AudioPipelineIo> {
+    const int index = raw->ios_created.fetch_add(1, std::memory_order_relaxed);
+    // Only the second backend holds Start() inside the worker lock.
+    if (index == 1)
+      raw->WaitInFactory();
+    return std::make_unique<StopOrderIo>(io_state, false);
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  // Prime the pipeline: the worker of the first backend exits by itself and
+  // the backend keeps the pointer to the stop flag, thus the test can read
+  // the flag for the whole run.
+  const AudioPipelineConfig cfg;
+  std::string prime_error;
+  if (fx->pipeline->Start(cfg, &prime_error)) {
+    std::cerr << "pipeline.Start reported success though the I/O refuses to "
+                 "open\n";
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(io_state->mu);
+    io_state->park_open = true;
+  }
+
+  // The flag is down after a Start(). A raise from here on can only come
+  // from the Stop() below.
+  {
+    std::lock_guard<std::mutex> lock(io_state->mu);
+    if (io_state->stop_flag == nullptr ||
+        io_state->stop_flag->load(std::memory_order_acquire)) {
+      std::cerr << "the stop flag is not down after the priming Start()\n";
+      return false;
+    }
+  }
+
+  std::thread starter([raw, cfg] {
+    std::string start_error;
+    raw->pipeline->Start(cfg, &start_error);
+    raw->starter_done.store(true, std::memory_order_release);
+  });
+
+  if (!WaitUntil(
+          [&] {
+            std::lock_guard<std::mutex> lock(raw->gate_mu);
+            return raw->create_io_entered;
+          },
+          5000ms)) {
+    std::cerr << "Start() never reached the backend factory\n";
+    fx->ReleaseFactory();
+    starter.join();
+    fx->pipeline->Stop();
+    return false;
+  }
+
+  std::thread stopper([raw] {
+    raw->stopper_entered.store(true, std::memory_order_release);
+    raw->pipeline->Stop();
+    raw->stopper_done.store(true, std::memory_order_release);
+  });
+
+  // The verdict below is a wait that must run out, thus wait for the stopper
+  // to run first: a stopper that the scheduler never gave a turn would pass
+  // the test for the wrong reason.
+  if (!WaitUntil(
+          [&] { return raw->stopper_entered.load(std::memory_order_acquire); },
+          5000ms)) {
+    std::cerr << "the stopper thread never ran\n";
+    fx->ReleaseFactory();
+    starter.join();
+    stopper.join();
+    return false;
+  }
+
+  // Wait for the flag to go up. Start() holds the worker lock in the factory,
+  // thus a Stop() that raises the flag under that lock waits and this wait
+  // runs out, which is the pass. A Stop() that raises the flag before the
+  // lock ends this wait in milliseconds.
+  const bool flag_raised = WaitUntil(
+      [&] {
+        std::lock_guard<std::mutex> lock(io_state->mu);
+        return io_state->stop_flag != nullptr &&
+               io_state->stop_flag->load(std::memory_order_acquire);
+      },
+      500ms);
+
+  fx->ReleaseFactory();
+
+  const bool both_returned = WaitUntil(
+      [&] {
+        return raw->starter_done.load(std::memory_order_acquire) &&
+               raw->stopper_done.load(std::memory_order_acquire);
+      },
+      5000ms);
+
+  if (!both_returned) {
+    // Both threads are detached below, thus the run can go on. See the wedge
+    // handler of TestStopKeepsTheStopFlagUpForTheWorkerItJoins.
+    starter.detach();
+    stopper.detach();
+    std::cout.flush();
+    std::cerr << "[FAIL] Start()/Stop() around the backend factory never "
+                 "returned (starter_done="
+              << raw->starter_done.load(std::memory_order_acquire)
+              << " stopper_done="
+              << raw->stopper_done.load(std::memory_order_acquire) << ")"
+              << std::endl;
+    (void)new std::shared_ptr<StopRaiseFixture>(fx);
+    return false;
+  }
+
+  starter.join();
+  stopper.join();
+
+  if (flag_raised) {
+    std::cerr << "Stop() raised the stop flag while a Start() held the worker "
+                 "lock, thus the raise and the clear of the flag can cross\n";
+    return false;
+  }
+
+  fx->pipeline->Stop();
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
+struct ServiceStartStopOverlapFixture : ConcurrentStopFixture {
+  std::atomic<bool> mic_consumer_present{true};
+  std::atomic<int> supervisor_loops{0};
+  std::atomic<int> overlaps{0};
+  std::atomic<int> starts_done{0};
+  std::atomic<int> start_failures{0};
+  std::atomic<bool> start_returned{false};
+  std::unique_ptr<VirtualAudioService> service;
+};
+
+// Start() and Stop() on one service at the same time. Every attempt begins
+// from a live supervisor, thus the stopper and the Stop() that Start() makes
+// first both reach the same supervisor handle: they must not both join it.
+// VirtualAudioService has no seam inside Start(), thus the stopper sweeps its
+// delay across the attempts to cover the window from the join of the old
+// supervisor to the publish of the new one.
+bool TestConcurrentServiceStartStopKeepsSupervisorHandleUsable() {
+  auto fx = std::make_shared<ServiceStartStopOverlapFixture>();
+  auto *raw = fx.get();
+
+  VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &fx->mic_consumer_present);
+  hooks.probe_microphone_backend_availability =
+      [](const VirtualAudioServiceConfig &) {
+        AudioBackendAvailability avail;
+        avail.open_source_ok = true;
+        return avail;
+      };
+  hooks.create_pipeline =
+      [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    return std::make_unique<StartFailPipeline>();
+  };
+  // Keep the supervisor short: an attempt must cost a thread, not a sleep.
+  hooks.sleep_for = [raw](std::chrono::milliseconds) {
+    raw->supervisor_loops.fetch_add(1, std::memory_order_relaxed);
+    std::this_thread::yield();
+  };
+
+  fx->service = std::make_unique<VirtualAudioService>(std::move(hooks));
+
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.poll_ms = 1;
+  cfg.start_retry_ms = 1;
+
+  std::string err;
+  if (!fx->service->Start(cfg, &err)) {
+    std::cerr << "service.Start failed before the overlap sweep: " << err
+              << "\n";
+    return false;
+  }
+
+  constexpr int kAttempts = 64;
+  for (int attempt = 0; attempt < kAttempts; ++attempt) {
+    std::atomic<bool> gate{false};
+    std::atomic<int> burn{0};
+    fx->start_returned.store(false, std::memory_order_release);
+
+    std::thread starter([&] {
+      while (!gate.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      std::string start_error;
+      if (!raw->service->Start(cfg, &start_error)) {
+        std::cerr << "service.Start failed on attempt " << attempt << ": "
+                  << start_error << "\n";
+        raw->start_failures.fetch_add(1, std::memory_order_relaxed);
+      }
+      raw->start_returned.store(true, std::memory_order_release);
+      raw->starts_done.fetch_add(1, std::memory_order_release);
+    });
+
+    std::thread stopper([&] {
+      while (!gate.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      // Sweep the delay so the stopper lands at a different point of Start()
+      // on every attempt.
+      for (int spin = 0; spin < attempt * 32; ++spin)
+        burn.fetch_add(1, std::memory_order_relaxed);
+      // Record that Start() had not yet returned, thus a green run cannot be
+      // one where the two calls never met.
+      if (!raw->start_returned.load(std::memory_order_acquire))
+        raw->overlaps.fetch_add(1, std::memory_order_relaxed);
+      try {
+        raw->service->Stop();
+      } catch (const std::system_error &e) {
+        raw->RecordJoinError(e);
+      }
+      raw->stops_done.fetch_add(1, std::memory_order_release);
+    });
+
+    gate.store(true, std::memory_order_release);
+
+    const bool both_returned = WaitUntil(
+        [&] {
+          return raw->starts_done.load(std::memory_order_acquire) ==
+                     attempt + 1 &&
+                 raw->stops_done.load(std::memory_order_acquire) == attempt + 1;
+        },
+        5000ms);
+
+    if (!both_returned) {
+      // A caller is wedged inside join() on a supervisor that the other
+      // caller already joined. A wedged thread cannot be recovered and its
+      // stale thread id can go to a later test, thus the run ends here.
+      starter.detach();
+      stopper.detach();
+      std::cout.flush();
+      std::cerr << "[FAIL] service Start()/Stop() overlap never returned on "
+                   "attempt "
+                << attempt
+                << "; a join() is stuck on a supervisor that "
+                   "another caller already joined"
+                << std::endl;
+      std::_Exit(1);
+    }
+
+    starter.join();
+    stopper.join();
+
+    if (fx->start_failures.load(std::memory_order_relaxed) != 0)
+      return false;
+
+    if (fx->join_errors.load(std::memory_order_relaxed) != 0) {
+      std::cerr << "Start()/Stop() overlap threw from join(): "
+                << fx->JoinErrorText() << "\n";
+      return false;
+    }
+
+    // Give the next attempt a live supervisor again. A stopper that landed
+    // after Start() leaves the service stopped, which is a correct result.
+    if (!fx->service->Status().service_running &&
+        !fx->service->Start(cfg, &err)) {
+      std::cerr << "service.Start failed after attempt " << attempt << ": "
+                << err << "\n";
+      return false;
+    }
+  }
+
+  if (fx->overlaps.load(std::memory_order_relaxed) == 0) {
+    std::cerr << "no attempt ever put Stop() inside Start(), thus the sweep "
+                 "never made an overlap\n";
+    return false;
+  }
+
+  // The supervisor handle must still work after all that overlap.
+  fx->service->Stop();
+  if (!fx->service->Start(cfg, &err)) {
+    std::cerr << "service.Start failed after the overlap sweep: " << err
+              << "\n";
+    return false;
+  }
+
+  if (!fx->service->Status().service_running) {
+    std::cerr << "service does not report running after the overlap sweep\n";
+    fx->service->Stop();
+    return false;
+  }
+
+  const bool supervisor_ran = WaitUntil(
+      [&] { return fx->supervisor_loops.load(std::memory_order_relaxed) > 0; },
+      2000ms);
+
+  fx->service->Stop();
+
+  if (!supervisor_ran) {
+    std::cerr << "no supervisor ever ran during the overlap sweep\n";
+    return false;
+  }
+
+  if (fx->service->Status().service_running) {
+    std::cerr << "service still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
+constexpr const char *kPipelineAlreadyStartingError =
+    "Audio pipeline is already starting.";
+constexpr const char *kServiceAlreadyStartingError =
+    "Virtual audio service is already starting.";
+
+// State that the backend release test shares with its backends.
+struct ReleaseGateState {
+  std::mutex mu;
+  std::condition_variable cv;
+  // The gate inside the destructor of the first backend. It holds Stop()
+  // where that call releases the backend, which is the step this test is
+  // about.
+  bool release_entered = false;
+  bool release_released = false;
+};
+
+// I/O for the backend release test. Open() fails at once, as OverlapIo does,
+// but the destructor of the first backend parks. Stop() destroys the backend
+// that it takes out of the handle, thus the gate holds Stop() at the
+// release.
+class ReleaseGateIo final : public AudioPipelineIo {
+public:
+  ReleaseGateIo(std::shared_ptr<ReleaseGateState> state, bool gate_destructor)
+      : state_(std::move(state)), gate_destructor_(gate_destructor) {}
+
+  ~ReleaseGateIo() override {
+    if (!gate_destructor_)
+      return;
+    std::unique_lock<std::mutex> lock(state_->mu);
+    state_->release_entered = true;
+    state_->cv.notify_all();
+    state_->cv.wait(lock, [this] { return state_->release_released; });
+  }
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (error)
+      *error = kOverlapOpenError;
+    return false;
+  }
+
+  bool Read(void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+  void RequestStop() override {}
+
+private:
+  std::shared_ptr<ReleaseGateState> state_;
+  bool gate_destructor_ = false;
+};
+
+struct ReleaseGateFixture {
+  std::shared_ptr<ReleaseGateState> gate = std::make_shared<ReleaseGateState>();
+  std::atomic<int> ios_created{0};
+  std::atomic<bool> stopper_entered{false};
+  std::atomic<bool> stopper_done{false};
+  std::atomic<bool> starter_entered{false};
+  std::atomic<bool> starter_done{false};
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+
+  void ReleaseBackend() {
+    {
+      std::lock_guard<std::mutex> lock(gate->mu);
+      gate->release_released = true;
+    }
+    gate->cv.notify_all();
+  }
+};
+
+// Stop() must release the backend under the worker lock.
+//
+// With the release outside that lock, a Stop() that already left the lock
+// can drop the backend of a worker that a Start() published a moment later.
+// That worker then parks in a backend that no later Stop() can ask to stop,
+// and the join of it never returns. The window is a few instructions wide,
+// thus a sweep under load does not find it; the gate makes the order
+// instead of racing for it.
+//
+// The seam is the destructor of the backend, which Stop() runs where it
+// releases it. While the gate holds Stop() there, a Start() must not get as
+// far as a backend of its own: the worker lock is what keeps it out.
+bool TestStopReleasesTheBackendUnderTheWorkerLock() {
+  auto fx = std::make_shared<ReleaseGateFixture>();
+  auto *raw = fx.get();
+  auto gate = fx->gate;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw, gate]() -> std::unique_ptr<AudioPipelineIo> {
+    // Only the first backend holds Stop() inside its destructor.
+    const int index = raw->ios_created.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<ReleaseGateIo>(gate, index == 0);
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  // Prime the pipeline: the first backend stays installed and its worker
+  // exits by itself, thus Stop() finds a worker to join and a backend to
+  // release.
+  const AudioPipelineConfig cfg;
+  std::string prime_error;
+  if (fx->pipeline->Start(cfg, &prime_error)) {
+    std::cerr << "pipeline.Start reported success though the I/O refuses to "
+                 "open\n";
+    return false;
+  }
+
+  std::thread stopper([raw] {
+    raw->stopper_entered.store(true, std::memory_order_release);
+    raw->pipeline->Stop();
+    raw->stopper_done.store(true, std::memory_order_release);
+  });
+
+  if (!WaitUntil(
+          [&] {
+            std::lock_guard<std::mutex> lock(gate->mu);
+            return gate->release_entered;
+          },
+          5000ms)) {
+    std::cerr << "Stop() never released the backend\n";
+    fx->ReleaseBackend();
+    stopper.join();
+    return false;
+  }
+
+  std::thread starter([raw, cfg] {
+    raw->starter_entered.store(true, std::memory_order_release);
+    std::string start_error;
+    raw->pipeline->Start(cfg, &start_error);
+    raw->starter_done.store(true, std::memory_order_release);
+  });
+
+  // The verdict below is a wait that must run out, thus wait for the starter
+  // to run first.
+  if (!WaitUntil(
+          [&] { return raw->starter_entered.load(std::memory_order_acquire); },
+          5000ms)) {
+    std::cerr << "the starter thread never ran\n";
+    fx->ReleaseBackend();
+    starter.join();
+    stopper.join();
+    return false;
+  }
+
+  // Wait for a second backend. Stop() holds the worker lock across the
+  // release, thus Start() waits at its first statement and this wait runs
+  // out, which is the pass. With the release outside that lock, Start() runs
+  // on and makes a backend in milliseconds.
+  const bool second_io = WaitUntil(
+      [&] { return raw->ios_created.load(std::memory_order_relaxed) > 1; },
+      500ms);
+
+  fx->ReleaseBackend();
+
+  const bool both_returned = WaitUntil(
+      [&] {
+        return raw->stopper_done.load(std::memory_order_acquire) &&
+               raw->starter_done.load(std::memory_order_acquire);
+      },
+      5000ms);
+
+  if (!both_returned) {
+    // Both threads are detached below, thus the run can go on. See the wedge
+    // handler of TestStopKeepsTheStopFlagUpForTheWorkerItJoins.
+    stopper.detach();
+    starter.detach();
+    std::cout.flush();
+    std::cerr << "[FAIL] Start()/Stop() around the backend release never "
+                 "returned (stopper_done="
+              << raw->stopper_done.load(std::memory_order_acquire)
+              << " starter_done="
+              << raw->starter_done.load(std::memory_order_acquire) << ")"
+              << std::endl;
+    (void)new std::shared_ptr<ReleaseGateFixture>(fx);
+    return false;
+  }
+
+  stopper.join();
+  starter.join();
+
+  if (second_io) {
+    std::cerr << "Start() made a backend while Stop() was releasing one, thus "
+                 "the release is outside the worker lock\n";
+    return false;
+  }
+
+  // The lock held the starter back; it was not absent. The backend that it
+  // could not make while the gate was closed must be there now.
+  if (fx->ios_created.load(std::memory_order_relaxed) != 2) {
+    std::cerr << "pipeline made "
+              << fx->ios_created.load(std::memory_order_relaxed)
+              << " I/O backends, expected 2\n";
+    return false;
+  }
+
+  fx->pipeline->Stop();
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
+// State that the previous-worker join test shares with its backends.
+struct JoinGateState {
+  std::mutex mu;
+  std::condition_variable cv;
+  // The gate inside the thread-local mark of the first worker. It holds that
+  // worker on its way out.
+  bool worker_exiting = false;
+  bool worker_released = false;
+};
+
+// Parks a worker thread after ThreadMain() returned. A thread-local object
+// is destroyed at the end of the thread, thus after the guard in
+// ThreadMain() cleared running_ and after Start() got its answer from the
+// startup handshake: the worker is still joinable while the pipeline reports
+// itself stopped. That is the state in which a Start() passes both of its
+// guards and still finds a live worker in the handle to join, and that join
+// is what this test is about.
+struct WorkerExitGate {
+  std::shared_ptr<JoinGateState> state;
+
+  ~WorkerExitGate() {
+    if (!state)
+      return;
+    std::unique_lock<std::mutex> lock(state->mu);
+    state->worker_exiting = true;
+    state->cv.notify_all();
+    state->cv.wait(lock, [this] { return state->worker_released; });
+  }
+};
+
+// I/O for the previous-worker join test. Open() fails at once, as OverlapIo
+// does; the first backend also arms the mark that holds its worker on the
+// way out.
+class JoinGateIo final : public AudioPipelineIo {
+public:
+  JoinGateIo(std::shared_ptr<JoinGateState> state, bool arm_exit_gate)
+      : state_(std::move(state)), arm_exit_gate_(arm_exit_gate) {}
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (arm_exit_gate_) {
+      // Open() runs on the worker thread, thus the mark belongs to that
+      // thread and parks it, not the caller of Start().
+      thread_local WorkerExitGate gate;
+      gate.state = state_;
+    }
+    if (error)
+      *error = kOverlapOpenError;
+    return false;
+  }
+
+  bool Read(void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+  void RequestStop() override {}
+
+private:
+  std::shared_ptr<JoinGateState> state_;
+  bool arm_exit_gate_ = false;
+};
+
+struct JoinGateFixture {
+  std::shared_ptr<JoinGateState> gate = std::make_shared<JoinGateState>();
+  std::atomic<int> ios_created{0};
+  std::atomic<int> starts_entered{0};
+  std::atomic<int> starts_done{0};
+  std::atomic<int> refusals{0};
+  std::atomic<int> unexpected{0};
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+
+  void ReleaseWorker() {
+    {
+      std::lock_guard<std::mutex> lock(gate->mu);
+      gate->worker_released = true;
+    }
+    gate->cv.notify_all();
+  }
+};
+
+// Start() must join the worker of the last run outside the worker lock.
+//
+// A worker parked in the backend leaves only on RequestStop(), and Stop()
+// needs the worker lock to make that call. A join under that lock would thus
+// hold the lock for as long as the park, and the pair would never unwind.
+//
+// The seam is a thread-local mark that the first backend arms: it parks its
+// worker at the end of the thread, after ThreadMain() cleared running_.
+// Start() thus finds a live worker in the handle and stays in the join for
+// as long as the test wants. A second Start() must be refused while the
+// first one is there, and that refusal takes the worker lock: it can only
+// happen while the join is outside it.
+bool TestStartJoinsThePreviousWorkerOutsideTheWorkerLock() {
+  auto fx = std::make_shared<JoinGateFixture>();
+  auto *raw = fx.get();
+  auto gate = fx->gate;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw, gate]() -> std::unique_ptr<AudioPipelineIo> {
+    // Only the worker of the first backend parks on its way out.
+    const int index = raw->ios_created.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<JoinGateIo>(gate, index == 0);
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  // Prime the pipeline: the worker fails to open, reports the failure to
+  // Start() and then parks on its way out. It stays in the handle, and the
+  // pipeline reports itself stopped.
+  const AudioPipelineConfig cfg;
+  std::string prime_error;
+  if (fx->pipeline->Start(cfg, &prime_error)) {
+    std::cerr << "pipeline.Start reported success though the I/O refuses to "
+                 "open\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            std::lock_guard<std::mutex> lock(gate->mu);
+            return gate->worker_exiting;
+          },
+          5000ms)) {
+    std::cerr << "the worker of the priming Start() never reached its mark\n";
+    fx->ReleaseWorker();
+    return false;
+  }
+
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "the pipeline reports itself running while its worker is on "
+                 "the way out\n";
+    fx->ReleaseWorker();
+    return false;
+  }
+
+  // Two callers of Start(). One takes the handle and joins the parked
+  // worker; the other must be refused, and cannot be refused before it has
+  // the worker lock.
+  const auto start_once = [raw, cfg] {
+    raw->starts_entered.fetch_add(1, std::memory_order_release);
+    std::string start_error;
+    if (!raw->pipeline->Start(cfg, &start_error)) {
+      if (start_error == kPipelineAlreadyStartingError) {
+        raw->refusals.fetch_add(1, std::memory_order_release);
+      } else if (start_error != kOverlapOpenError &&
+                 start_error != kOverlapNoIoError) {
+        raw->unexpected.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    raw->starts_done.fetch_add(1, std::memory_order_release);
+  };
+
+  std::thread first(start_once);
+  std::thread second(start_once);
+
+  if (!WaitUntil(
+          [&] {
+            return raw->starts_entered.load(std::memory_order_acquire) == 2;
+          },
+          5000ms)) {
+    std::cerr << "the two Start() threads never ran\n";
+    fx->ReleaseWorker();
+    first.join();
+    second.join();
+    return false;
+  }
+
+  // The caller that loses gets its answer from the worker lock. With the
+  // join outside that lock this takes milliseconds; with the join under it
+  // the loser waits for the parked worker, which only this test can release.
+  const bool refused = WaitUntil(
+      [&] { return raw->refusals.load(std::memory_order_acquire) == 1; },
+      2000ms);
+
+  fx->ReleaseWorker();
+
+  const bool both_returned = WaitUntil(
+      [&] { return raw->starts_done.load(std::memory_order_acquire) == 2; },
+      5000ms);
+
+  if (!both_returned) {
+    // Both threads are detached below, thus the run can go on. See the wedge
+    // handler of TestStopKeepsTheStopFlagUpForTheWorkerItJoins.
+    first.detach();
+    second.detach();
+    std::cout.flush();
+    std::cerr << "[FAIL] two Start() callers on a parked worker never "
+                 "returned (starts_done="
+              << raw->starts_done.load(std::memory_order_acquire) << ")"
+              << std::endl;
+    (void)new std::shared_ptr<JoinGateFixture>(fx);
+    return false;
+  }
+
+  first.join();
+  second.join();
+
+  if (!refused) {
+    std::cerr << "no Start() was refused while another one joined the worker "
+                 "of the last run, thus that join holds the worker lock\n";
+    return false;
+  }
+
+  if (fx->unexpected.load(std::memory_order_relaxed) != 0) {
+    std::cerr << "a Start() gave an unexpected error\n";
+    return false;
+  }
+
+  // The caller that won made a backend of its own, thus the handle came
+  // through the join and the refusal.
+  if (fx->ios_created.load(std::memory_order_relaxed) != 2) {
+    std::cerr << "pipeline made "
+              << fx->ios_created.load(std::memory_order_relaxed)
+              << " I/O backends, expected 2\n";
+    return false;
+  }
+
+  fx->pipeline->Stop();
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
+// State that the running-flag test shares with its backends.
+struct RunningFlagState {
+  std::mutex mu;
+  std::condition_variable cv;
+  // The gate inside Open() of the second backend. While a worker parks
+  // there, that worker is live and the pipeline runs.
+  bool worker_in_open = false;
+  bool worker_released = false;
+};
+
+// I/O for the running-flag test. Open() fails at once, as OverlapIo does;
+// the second backend first parks, thus the worker that Start() publishes
+// stays alive for as long as the test wants.
+class RunningFlagIo final : public AudioPipelineIo {
+public:
+  RunningFlagIo(std::shared_ptr<RunningFlagState> state, bool park_open)
+      : state_(std::move(state)), park_open_(park_open) {}
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (park_open_) {
+      std::unique_lock<std::mutex> lock(state_->mu);
+      state_->worker_in_open = true;
+      state_->cv.notify_all();
+      state_->cv.wait(lock, [this] { return state_->worker_released; });
+    }
+    if (error)
+      *error = kOverlapOpenError;
+    return false;
+  }
+
+  bool Read(void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+  void RequestStop() override {}
+
+private:
+  std::shared_ptr<RunningFlagState> state_;
+  bool park_open_ = false;
+};
+
+struct RunningFlagFixture {
+  std::shared_ptr<RunningFlagState> gate = std::make_shared<RunningFlagState>();
+  std::atomic<int> ios_created{0};
+  std::atomic<bool> hook_used{false};
+  std::atomic<bool> hook_entered{false};
+  std::atomic<bool> hook_saw_worker{false};
+  std::atomic<bool> stopper_entered{false};
+  std::atomic<bool> stopper_done{false};
+  std::atomic<bool> starter_entered{false};
+  std::atomic<bool> starter_done{false};
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+
+  void ReleaseWorker() {
+    {
+      std::lock_guard<std::mutex> lock(gate->mu);
+      gate->worker_released = true;
+    }
+    gate->cv.notify_all();
+  }
+};
+
+// Stop() must clear the running flag under the worker lock.
+//
+// The flag is the one that Start() reads before it takes the handle, and it
+// is what the supervisor makes its liveness test. With the store outside the
+// lock, a Stop() that is held between the lock and the store lands that
+// store after a Start() published a worker: the pipeline then reports itself
+// stopped while a worker of it runs. The supervisor tears such a pipeline
+// down, and a later Start() moves the live worker out of the handle and
+// joins it outside every lock.
+//
+// The seam is the test hook that Stop() calls when it released the lock. It
+// holds Stop() there until a Start() published a worker that parks in
+// Open(), thus the two stores meet in the order the fault needs.
+bool TestStopClearsTheRunningFlagUnderTheWorkerLock() {
+  auto fx = std::make_shared<RunningFlagFixture>();
+  auto *raw = fx.get();
+  auto gate = fx->gate;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw, gate]() -> std::unique_ptr<AudioPipelineIo> {
+    // Only the worker of the second backend parks inside Open().
+    const int index = raw->ios_created.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<RunningFlagIo>(gate, index > 0);
+  };
+  hooks.stop_released_worker_lock = [raw, gate] {
+    // Only the first Stop() is held. The last Stop() of the test must run
+    // to the end.
+    if (raw->hook_used.exchange(true, std::memory_order_acq_rel))
+      return;
+    raw->hook_entered.store(true, std::memory_order_release);
+    const bool saw_worker = WaitUntil(
+        [&] {
+          std::lock_guard<std::mutex> lock(gate->mu);
+          return gate->worker_in_open;
+        },
+        5000ms);
+    raw->hook_saw_worker.store(saw_worker, std::memory_order_release);
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  // Prime the pipeline: the worker of the first backend exits by itself,
+  // thus Stop() finds a worker to join and the pipeline is idle.
+  const AudioPipelineConfig cfg;
+  std::string prime_error;
+  if (fx->pipeline->Start(cfg, &prime_error)) {
+    std::cerr << "pipeline.Start reported success though the I/O refuses to "
+                 "open\n";
+    return false;
+  }
+
+  std::thread stopper([raw] {
+    raw->stopper_entered.store(true, std::memory_order_release);
+    raw->pipeline->Stop();
+    raw->stopper_done.store(true, std::memory_order_release);
+  });
+
+  if (!WaitUntil(
+          [&] { return raw->hook_entered.load(std::memory_order_acquire); },
+          5000ms)) {
+    std::cerr << "Stop() never released the worker lock\n";
+    fx->ReleaseWorker();
+    stopper.join();
+    return false;
+  }
+
+  std::thread starter([raw, cfg] {
+    raw->starter_entered.store(true, std::memory_order_release);
+    std::string start_error;
+    raw->pipeline->Start(cfg, &start_error);
+    raw->starter_done.store(true, std::memory_order_release);
+  });
+
+  const bool stop_returned = WaitUntil(
+      [&] { return raw->stopper_done.load(std::memory_order_acquire); },
+      10000ms);
+
+  // The verdict: a worker of this pipeline is live and parked in Open(), and
+  // the Start() that published it has run to the publish, thus the pipeline
+  // must report itself running. A Stop() that clears the flag outside the
+  // lock lands its store here, after that publish.
+  const bool reported_running = fx->pipeline->GetStats().running;
+  const bool hook_saw_worker =
+      fx->hook_saw_worker.load(std::memory_order_acquire);
+
+  fx->ReleaseWorker();
+
+  const bool both_returned = WaitUntil(
+      [&] {
+        return raw->stopper_done.load(std::memory_order_acquire) &&
+               raw->starter_done.load(std::memory_order_acquire);
+      },
+      5000ms);
+
+  if (!both_returned) {
+    // Both threads are detached below, thus the run can go on. See the wedge
+    // handler of TestStopKeepsTheStopFlagUpForTheWorkerItJoins.
+    stopper.detach();
+    starter.detach();
+    std::cout.flush();
+    std::cerr << "[FAIL] Start()/Stop() around the running flag never "
+                 "returned (stopper_done="
+              << raw->stopper_done.load(std::memory_order_acquire)
+              << " starter_done="
+              << raw->starter_done.load(std::memory_order_acquire) << ")"
+              << std::endl;
+    (void)new std::shared_ptr<RunningFlagFixture>(fx);
+    return false;
+  }
+
+  stopper.join();
+  starter.join();
+
+  if (!hook_saw_worker) {
+    std::cerr << "no worker parked in Open() while Stop() held the seam, thus "
+                 "the two calls never met\n";
+    return false;
+  }
+  if (!stop_returned) {
+    std::cerr << "Stop() did not return after the worker was published\n";
+    return false;
+  }
+  if (!reported_running) {
+    std::cerr << "the pipeline reported itself stopped while a worker that "
+                 "Start() published was live, thus Stop() clears the running "
+                 "flag outside the worker lock\n";
+    return false;
+  }
+
+  fx->pipeline->Stop();
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
+struct DoubleStartFixture {
+  // The gate that holds the first caller of an attempt, so that the second
+  // caller reaches the publish of the handle in the same window.
+  std::mutex gate_mu;
+  std::condition_variable gate_cv;
+  bool gate_released = false;
+
+  std::atomic<int> starts_entered{0};
+  std::atomic<int> already_starting{0};
+  std::atomic<int> unexpected{0};
+  std::mutex text_mu;
+  std::string unexpected_text;
+
+  void RecordUnexpected(const std::string &text) {
+    unexpected.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(text_mu);
+    if (unexpected_text.empty())
+      unexpected_text = text;
+  }
+
+  std::string UnexpectedText() {
+    std::lock_guard<std::mutex> lock(text_mu);
+    return unexpected_text;
+  }
+
+  void ArmGate() {
+    std::lock_guard<std::mutex> lock(gate_mu);
+    gate_released = false;
+  }
+
+  void OpenGate() {
+    {
+      std::lock_guard<std::mutex> lock(gate_mu);
+      gate_released = true;
+    }
+    gate_cv.notify_all();
+  }
+};
+
+struct DoublePipelineStartFixture : DoubleStartFixture {
+  int create_io_entered = 0; // guarded by gate_mu
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+};
+
+// Two Start() callers on one pipeline at the same time. The running_ guard is
+// a test and then a store, thus both callers pass it and, without the start
+// mark, both reach the move-assign of the worker handle. A move-assign onto a
+// joinable handle ends the process with std::terminate().
+//
+// The check that stops this must be live in a release build: every automated
+// configure passes -DCMAKE_BUILD_TYPE=Release, thus an assert() is in no
+// binary that CI or a package makes. The second caller must get an error.
+//
+// CreateIo() runs under the worker lock, thus a caller that is held inside it
+// keeps the other caller at the start mark. That is the widest seam Start()
+// gives; the attempts cover the rest of the window.
+bool TestConcurrentPipelineStartFailsAndKeepsTheProcess() {
+  auto fx = std::make_shared<DoublePipelineStartFixture>();
+  auto *raw = fx.get();
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw]() -> std::unique_ptr<AudioPipelineIo> {
+    {
+      std::unique_lock<std::mutex> lock(raw->gate_mu);
+      ++raw->create_io_entered;
+      raw->gate_cv.notify_all();
+      if (raw->create_io_entered == 1)
+        raw->gate_cv.wait(lock, [raw] { return raw->gate_released; });
+    }
+    return std::make_unique<OverlapIo>();
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  const AudioPipelineConfig cfg;
+  constexpr int kAttempts = 64;
+  for (int attempt = 0; attempt < kAttempts; ++attempt) {
+    {
+      std::lock_guard<std::mutex> lock(fx->gate_mu);
+      fx->create_io_entered = 0;
+      fx->gate_released = false;
+    }
+    fx->starts_entered.store(0, std::memory_order_release);
+
+    std::atomic<bool> go{false};
+    auto starter = [raw, cfg, &go] {
+      raw->starts_entered.fetch_add(1, std::memory_order_release);
+      while (!go.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      std::string start_error;
+      if (raw->pipeline->Start(cfg, &start_error)) {
+        raw->RecordUnexpected("Start reported success though the I/O refuses "
+                              "to open");
+      } else if (start_error == kPipelineAlreadyStartingError) {
+        raw->already_starting.fetch_add(1, std::memory_order_relaxed);
+      } else if (start_error != kOverlapOpenError &&
+                 start_error != kOverlapNoIoError &&
+                 start_error != kPipelineAlreadyRunningError) {
+        raw->RecordUnexpected(start_error);
+      }
+    };
+
+    std::thread first(starter);
+    std::thread second(starter);
+    // Both callers are in the lambda before either calls Start(), thus the
+    // one that does not hold the gate always reaches the start mark.
+    WaitUntil(
+        [&] {
+          return raw->starts_entered.load(std::memory_order_acquire) == 2;
+        },
+        5000ms);
+    go.store(true, std::memory_order_release);
+
+    WaitUntil(
+        [&] {
+          std::lock_guard<std::mutex> lock(raw->gate_mu);
+          return raw->create_io_entered >= 1;
+        },
+        5000ms);
+    fx->OpenGate();
+
+    first.join();
+    second.join();
+
+    if (fx->unexpected.load(std::memory_order_relaxed) != 0) {
+      std::cerr << "pipeline.Start gave an unexpected result on attempt "
+                << attempt << ": " << fx->UnexpectedText() << "\n";
+      fx->pipeline->Stop();
+      return false;
+    }
+
+    // Leave the next attempt a stopped pipeline with a free handle.
+    fx->pipeline->Stop();
+  }
+
+  if (fx->already_starting.load(std::memory_order_relaxed) == 0) {
+    std::cerr << "no attempt ever put two Start() callers in Start() at the "
+                 "same time, thus the sweep proves nothing\n";
+    return false;
+  }
+
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
+struct DoubleServiceStartFixture : DoubleStartFixture {
+  std::atomic<bool> mic_consumer_present{true};
+  int sleepers_parked = 0; // guarded by gate_mu
+  std::unique_ptr<VirtualAudioService> service;
+};
+
+// Two Start() callers on one service at the same time. Without the start
+// mark both callers leave the Stop() that Start() makes first before either
+// publishes the supervisor, and the second move-assign lands on a joinable
+// handle. As in the pipeline test, the check must be live in a release
+// build.
+//
+// The seam is the sleep of the supervisor: a parked supervisor holds the
+// Stop() that the first caller makes inside its join, and that Stop() holds
+// the handle lock, thus every other caller waits at the start mark behind
+// it. Each attempt also proves that a caller that fails leaves the service
+// of the caller that won running.
+bool TestConcurrentServiceStartFailsAndKeepsTheProcess() {
+  auto fx = std::make_shared<DoubleServiceStartFixture>();
+  auto *raw = fx.get();
+
+  VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &fx->mic_consumer_present);
+  hooks.probe_microphone_backend_availability =
+      [](const VirtualAudioServiceConfig &) {
+        AudioBackendAvailability avail;
+        avail.open_source_ok = true;
+        return avail;
+      };
+  hooks.create_pipeline =
+      [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    return std::make_unique<StartFailPipeline>();
+  };
+  hooks.sleep_for = [raw](std::chrono::milliseconds) {
+    std::unique_lock<std::mutex> lock(raw->gate_mu);
+    ++raw->sleepers_parked;
+    raw->gate_cv.notify_all();
+    raw->gate_cv.wait(lock, [raw] { return raw->gate_released; });
+    --raw->sleepers_parked;
+  };
+
+  fx->service = std::make_unique<VirtualAudioService>(std::move(hooks));
+
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.poll_ms = 1;
+  cfg.start_retry_ms = 1;
+
+  std::string err;
+  if (!fx->service->Start(cfg, &err)) {
+    std::cerr << "service.Start failed before the sweep: " << err << "\n";
+    return false;
+  }
+
+  // The start mark makes every attempt meet, thus the sweep no longer needs
+  // to cover a window: 32 attempts give about 40 refusals on this host.
+  constexpr int kAttempts = 32;
+  constexpr int kCallers = 4;
+  for (int attempt = 0; attempt < kAttempts; ++attempt) {
+    fx->ArmGate();
+    fx->starts_entered.store(0, std::memory_order_release);
+
+    std::atomic<bool> go{false};
+    auto starter = [raw, cfg, &go] {
+      raw->starts_entered.fetch_add(1, std::memory_order_release);
+      while (!go.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      std::string start_error;
+      if (!raw->service->Start(cfg, &start_error)) {
+        if (start_error == kServiceAlreadyStartingError)
+          raw->already_starting.fetch_add(1, std::memory_order_relaxed);
+        else
+          raw->RecordUnexpected(start_error);
+      }
+    };
+
+    // Park the supervisor before the callers run, thus the Stop() that
+    // Start() makes first waits inside its join.
+    WaitUntil(
+        [&] {
+          std::lock_guard<std::mutex> lock(raw->gate_mu);
+          return raw->sleepers_parked >= 1;
+        },
+        5000ms);
+
+    std::vector<std::thread> starters;
+    for (int i = 0; i < kCallers; ++i)
+      starters.emplace_back(starter);
+    WaitUntil(
+        [&] {
+          return raw->starts_entered.load(std::memory_order_acquire) ==
+                 kCallers;
+        },
+        5000ms);
+    go.store(true, std::memory_order_release);
+    std::this_thread::sleep_for(5ms);
+    fx->OpenGate();
+
+    for (auto &t : starters)
+      t.join();
+
+    if (fx->unexpected.load(std::memory_order_relaxed) != 0) {
+      std::cerr << "service.Start gave an unexpected result on attempt "
+                << attempt << ": " << fx->UnexpectedText() << "\n";
+      fx->OpenGate();
+      fx->service->Stop();
+      return false;
+    }
+
+    // A caller that fails must leave the service of the caller that won
+    // alone. Start() stops the supervisor of the last run and clears the
+    // status before it publishes, thus a caller that fails after all of that
+    // leaves service_running down while the supervisor of the winner is
+    // alive, and it restores none of it.
+    if (!fx->service->Status().service_running) {
+      std::cerr << "the status reported the service down on attempt " << attempt
+                << ", thus a Start() caller that failed left the service of "
+                   "the caller that won stopped\n";
+      fx->OpenGate();
+      fx->service->Stop();
+      return false;
+    }
+  }
+
+  fx->OpenGate();
+  fx->service->Stop();
+
+  if (fx->already_starting.load(std::memory_order_relaxed) == 0) {
+    std::cerr << "no attempt ever put two Start() callers in Start() at the "
+                 "same time, thus the sweep proves nothing\n";
+    return false;
+  }
+
+  if (fx->service->Status().service_running) {
+    std::cerr << "service still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -4700,6 +7168,14 @@ int main() {
     bool (*fn)();
     bool mock_safe_mic_source = false;
   } tests[] = {
+      {"supervisor loop counter reports a stall",
+       &TestSupervisorLoopCounterReportsStall},
+      {"supervisor loop counter detects a replaced sleep hook",
+       &TestSupervisorLoopCounterDetectsReplacedSleepHook},
+      {"supervisor loop counter caps the wall-clock time",
+       &TestSupervisorLoopCounterCapsTheWallClock},
+      {"supervisor loop counter reports an exhausted budget",
+       &TestSupervisorLoopCounterReportsAnExhaustedBudget},
       {"pactl load-module quotes vector arguments",
        &TestPactlLoadModuleQuotesVectorArguments},
       {"pactl load-module string compatibility splitter",
@@ -4813,6 +7289,31 @@ int main() {
        &TestStopInterruptsBlockedCaptureRead},
       {"stop interrupts blocked playback write",
        &TestStopInterruptsBlockedPlaybackWrite},
+      // The tests below can end the run, with std::_Exit(1) on a wedge or
+      // with std::terminate() on a double start, thus they come last: an end
+      // in one of them must not hide the result of another test.
+      {"concurrent pipeline stop joins the worker once",
+       &TestConcurrentPipelineStopJoinsWorkerOnce},
+      {"concurrent service stop joins the supervisor once",
+       &TestConcurrentServiceStopJoinsSupervisorOnce},
+      {"concurrent start/stop keeps the worker handle usable",
+       &TestConcurrentStartStopKeepsWorkerHandleUsable},
+      {"concurrent service start/stop keeps the supervisor handle usable",
+       &TestConcurrentServiceStartStopKeepsSupervisorHandleUsable},
+      {"stop keeps the stop flag up for the worker it joins",
+       &TestStopKeepsTheStopFlagUpForTheWorkerItJoins},
+      {"stop raises the stop flag under the worker lock",
+       &TestStopRaisesTheStopFlagUnderTheWorkerLock},
+      {"stop releases the backend under the worker lock",
+       &TestStopReleasesTheBackendUnderTheWorkerLock},
+      {"start joins the previous worker outside the worker lock",
+       &TestStartJoinsThePreviousWorkerOutsideTheWorkerLock},
+      {"stop clears the running flag under the worker lock",
+       &TestStopClearsTheRunningFlagUnderTheWorkerLock},
+      {"concurrent pipeline start fails and keeps the process",
+       &TestConcurrentPipelineStartFailsAndKeepsTheProcess},
+      {"concurrent service start fails and keeps the process",
+       &TestConcurrentServiceStartFailsAndKeepsTheProcess},
   };
 
   int failed = 0;

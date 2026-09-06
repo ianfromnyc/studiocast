@@ -7,11 +7,24 @@
 #include <cstring>
 #include <optional>
 #include <sstream>
+#include <string>
 
 #include <fcntl.h>
 #include <linux/videodev2.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+
+// One spelling of "these headers know the multi-planar types". The two cap
+// macros have shipped together since Linux 2.6.39, but the mplane helpers
+// below are shared by the output and the capture type lists, thus a guard on
+// one family alone can put a capture-mplane type in a list that no helper can
+// answer.
+#if defined(V4L2_CAP_VIDEO_OUTPUT_MPLANE) ||                                   \
+    defined(V4L2_CAP_VIDEO_CAPTURE_MPLANE)
+#define STUDIOCAST_V4L2_HAS_MPLANE 1
+#else
+#define STUDIOCAST_V4L2_HAS_MPLANE 0
+#endif
 
 namespace studiocast::video {
 namespace {
@@ -66,7 +79,7 @@ std::optional<PixelFormat> PixelFormatFromFourcc(std::uint32_t f) {
 bool IsOutputBufType(__u32 t) {
   if (t == V4L2_BUF_TYPE_VIDEO_OUTPUT)
     return true;
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
   if (t == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
     return true;
 #endif
@@ -79,11 +92,11 @@ const char *BufTypeName(__u32 t) {
     return "VIDEO_OUTPUT";
   case V4L2_BUF_TYPE_VIDEO_CAPTURE:
     return "VIDEO_CAPTURE";
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
   case V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
     return "VIDEO_OUTPUT_MPLANE";
 #endif
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
   case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
     return "VIDEO_CAPTURE_MPLANE";
 #endif
@@ -268,7 +281,7 @@ bool TryGetFmtSinglePlane(int fd, __u32 bufType, v4l2_format *outFmt,
   return false;
 }
 
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#if STUDIOCAST_V4L2_HAS_MPLANE
 bool TrySetFmtMPlane(int fd, __u32 bufType, int width, int height,
                      PixelFormat desired, bool setStrideAndSize,
                      v4l2_format *outFmt, std::string *outErr) {
@@ -333,7 +346,7 @@ bool TrySetFmtAny(int fd, const TypeSpec &t, int width, int height,
     return TrySetFmtSinglePlane(fd, t.type, width, height, desired,
                                 setStrideAndSize, outFmt, outErr);
   }
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#if STUDIOCAST_V4L2_HAS_MPLANE
   return TrySetFmtMPlane(fd, t.type, width, height, desired, setStrideAndSize,
                          outFmt, outErr);
 #else
@@ -348,7 +361,7 @@ bool TryGetFmtAny(int fd, const TypeSpec &t, v4l2_format *outFmt,
   if (!t.mplane) {
     return TryGetFmtSinglePlane(fd, t.type, outFmt, outErr);
   }
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#if STUDIOCAST_V4L2_HAS_MPLANE
   return TryGetFmtMPlane(fd, t.type, outFmt, outErr);
 #else
   if (outErr)
@@ -357,8 +370,104 @@ bool TryGetFmtAny(int fd, const TypeSpec &t, v4l2_format *outFmt,
 #endif
 }
 
-bool ParseChosenFormat(const v4l2_format &f, bool mplane, int fps,
-                       ActualFormat *out, std::string *outErr) {
+// True when a driver report names a frame the writer can fill. Some
+// v4l2loopback configurations transiently report a "blank" format, of width
+// or height 0, while a consumer disconnects or a renegotiation window is
+// open. A frame of no rows takes no bytes, thus `WriteFrame` would push
+// nothing at all and the output would stay silent until something
+// renegotiated. `ParseChosenOutputFmt` asks this of every rung and
+// `SavedOutputFmtIsRestorable` asks it of the format the walk saves, so that
+// the ladder, the refresh and the restore give one answer.
+bool FrameIsUsable(int width, int height) { return width > 0 && height > 0; }
+
+// The largest frame the writer takes from a driver report. An 8K RGB24 frame
+// is 7680 * 4320 * 3 bytes, thus 95 MiB, and every frame this daemon sends is
+// far smaller. The bound is on the frame size the parse gives the caller,
+// because that number sizes buffers as well as writes: the pipeline holds one
+// frame in `std::vector<std::uint8_t> outBuf(outA.size_image)` and the feed
+// does the same. A driver that reports `sizeimage = 0` takes its frame size
+// from the row it reported, so without this bound a row of 4 GB asks for a
+// buffer of 4 TB.
+constexpr std::size_t kMaxFrameBytes = 256u * 1024u * 1024u;
+
+// The sentence `ParseChosenOutputFmt` writes for a blank report, and the
+// sentence `OutputOpenErrorIsTransient` looks for in the failure the pipeline
+// reads. Both take it from here, so that the refusal and the retry cannot
+// drift apart.
+constexpr const char *kBlankFrameRefusal = "Driver reported a blank frame";
+
+// strerror(EINVAL). v4l2loopback answers it to the ioctls of a producer that
+// opened the device a moment too early, and the composed failure carries the
+// text of the ioctl that failed.
+constexpr const char *kInvalidArgument = "Invalid argument";
+
+// The head of the line a composed ladder failure gives to the refusal that
+// stopped the walk. `ComposeLadderFailure` writes it and
+// `OutputOpenErrorIsTransient` reads the rest of that line alone, thus the
+// two must take the head from here.
+constexpr const char *kDecisiveRefusalHead =
+    "First rung the driver answered with a format the writer cannot use: ";
+
+// True when one refusal names a condition that may be gone a moment later.
+bool RefusalIsTransient(const std::string &refusal) {
+  return refusal.find(kInvalidArgument) != std::string::npos ||
+         refusal.find(kBlankFrameRefusal) != std::string::npos;
+}
+
+} // namespace
+
+bool OutputDeviceCanWrite(std::uint32_t caps, std::string *outErr) {
+  if (caps & V4L2_CAP_READWRITE)
+    return true;
+
+  if (outErr) {
+    std::string why = "Device does not support write(): it does not advertise "
+                      "V4L2_CAP_READWRITE";
+    if (caps & V4L2_CAP_STREAMING) {
+      why += ", and it offers STREAMING buffers only, which this writer does "
+             "not use";
+    }
+    *outErr = why + ".";
+  }
+  return false;
+}
+
+bool OutputOpenErrorIsTransient(const std::string &error) {
+  // A composed ladder failure names the refusal that stopped the walk on a
+  // line of its own, and that refusal is the whole answer. The attempt log
+  // below it holds one line for every rung the walk left behind, with the
+  // errno of each, so reading the whole text makes every refusal transient on
+  // a device whose rungs answer EINVAL: an mplane-only device refuses each
+  // single-plane rung with EINVAL and then answers the plane count that no
+  // retry can change.
+  const std::size_t at = error.find(kDecisiveRefusalHead);
+  if (at != std::string::npos) {
+    const std::size_t from = at + std::strlen(kDecisiveRefusalHead);
+    const std::size_t eol = error.find('\n', from);
+    return RefusalIsTransient(error.substr(
+        from, eol == std::string::npos ? std::string::npos : eol - from));
+  }
+
+  // Every other failure the open reports is one refusal, thus the whole text
+  // is the refusal.
+  return RefusalIsTransient(error);
+}
+
+bool SavedOutputFmtIsRestorable(const v4l2_format &f, bool mplane) {
+  if (!mplane) {
+    return FrameIsUsable(static_cast<int>(f.fmt.pix.width),
+                         static_cast<int>(f.fmt.pix.height));
+  }
+#if STUDIOCAST_V4L2_HAS_MPLANE
+  return FrameIsUsable(static_cast<int>(f.fmt.pix_mp.width),
+                       static_cast<int>(f.fmt.pix_mp.height));
+#else
+  return false;
+#endif
+}
+
+bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
+                          ActualFormat *out, std::string *outErr) {
   if (!out)
     return false;
 
@@ -374,14 +483,23 @@ bool ParseChosenFormat(const v4l2_format &f, bool mplane, int fps,
     bpl = static_cast<std::size_t>(f.fmt.pix.bytesperline);
     size = static_cast<std::size_t>(f.fmt.pix.sizeimage);
   } else {
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#if STUDIOCAST_V4L2_HAS_MPLANE
     w = static_cast<int>(f.fmt.pix_mp.width);
     h = static_cast<int>(f.fmt.pix_mp.height);
     fourcc = f.fmt.pix_mp.pixelformat;
-    const __u8 np = f.fmt.pix_mp.num_planes;
-    if (np < 1) {
+    // The writer gives the driver a frame with write(), and the kernel
+    // refuses that I/O method on a buffer of more than one plane:
+    // `__vb2_init_fileio` answers -EBUSY when `vb->num_planes != 1`. A report
+    // of no planes has nothing to read at all, because the arm below reads
+    // `plane_fmt[0]` alone. Name the count here: without this the open
+    // succeeds and every write() fails with "Device or resource busy", which
+    // says nothing about the layout that caused it.
+    if (f.fmt.pix_mp.num_planes != 1) {
       if (outErr)
-        *outErr = "mplane format returned num_planes=0";
+        *outErr =
+            "mplane format returned num_planes=" +
+            std::to_string(static_cast<unsigned>(f.fmt.pix_mp.num_planes)) +
+            ", only one plane is supported";
       return false;
     }
     bpl = static_cast<std::size_t>(f.fmt.pix_mp.plane_fmt[0].bytesperline);
@@ -391,6 +509,16 @@ bool ParseChosenFormat(const v4l2_format &f, bool mplane, int fps,
       *outErr = "mplane not supported";
     return false;
 #endif
+  }
+
+  // A blank report is a rung the writer cannot use, thus the ladder must step
+  // past it to the rung below, where the driver often names the real frame.
+  if (!FrameIsUsable(w, h)) {
+    if (outErr) {
+      *outErr = std::string(kBlankFrameRefusal) + ": " + std::to_string(w) +
+                "x" + std::to_string(h);
+    }
+    return false;
   }
 
   const auto pf = PixelFormatFromFourcc(fourcc);
@@ -412,19 +540,194 @@ bool ParseChosenFormat(const v4l2_format &f, bool mplane, int fps,
   a.pixfmt_fourcc = fourcc;
   a.pixfmt = FourccToString(fourcc);
 
+  const std::size_t rows =
+      a.height > 0 ? static_cast<std::size_t>(a.height) : 0u;
+
+  // Only a row too short to hold the pixels is raised, because the converter
+  // writes the whole packed row and the driver cannot have meant less.
+  const std::size_t driverBpl = bpl;
+  const std::size_t driverSize = size;
   const std::size_t minBpl = MinBytesPerLine(a.width, a.format);
   if (bpl < minBpl)
     bpl = minBpl;
   a.bytes_per_line = bpl;
 
-  const std::size_t minSize = bpl * static_cast<std::size_t>(a.height);
+  // The rows the writer walks must fit the frame the driver sized.
+  // `WriteFrame` sizes every write() from `size_image`, so raising that value
+  // to match a longer row only hides the disagreement, and the writer then
+  // pushes more bytes than the frame the driver sized. On a v4l2loopback
+  // output the surplus runs into the next frame, and the picture is torn from
+  // then on.
+  //
+  // The measure comes after the raise, because the raised row is the row the
+  // writer walks. A stride below the packed row is itself a contradiction in
+  // the report of a packed format, thus the frame that stride implies gets no
+  // more trust than a stride the driver padded.
+  //
+  // A frame size of 0 is not that disagreement: it is no report at all, and
+  // the raise below gives it the value the row implies.
+  const std::size_t minSize = bpl * rows;
+  if (size > 0 && minSize > size) {
+    if (outErr)
+      *outErr = "Driver reported bytesperline=" + std::to_string(driverBpl) +
+                " and sizeimage=" + std::to_string(size) + ", but " +
+                std::to_string(a.height) + " rows of " + std::to_string(bpl) +
+                " bytes do not fit";
+    return false;
+  }
+
   if (size < minSize)
     size = minSize;
+
+  // `size_image` is more than the count of bytes each write() sends: the
+  // pipeline and the feed give their frame buffers that size. A frame size of
+  // 0 takes the row the driver reported instead, thus a nonsense row of
+  // gigabytes asks for a buffer of terabytes. Refuse a frame above the bound,
+  // which no report from a real device comes near.
+  if (size > kMaxFrameBytes) {
+    if (outErr)
+      *outErr = "Driver reported bytesperline=" + std::to_string(driverBpl) +
+                " and sizeimage=" + std::to_string(driverSize) + ", which is " +
+                "a frame of " + std::to_string(size) +
+                " bytes, more than the " + std::to_string(kMaxFrameBytes) +
+                " byte maximum the writer takes";
+    return false;
+  }
+
   a.size_image = size;
 
   *out = a;
   return true;
 }
+
+FormatLadderResult
+ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
+                   const FormatRestore &restore) {
+  FormatLadderResult res;
+  std::ostringstream log;
+
+  // What one buffer type held before the walk asked it to take another
+  // format. A walk that keeps no rung puts this back, because the rungs it
+  // walked past may have left the type holding a format the writer refused.
+  // Only a rung that changes the format can do that, thus the read waits for
+  // the first such rung of the type and a type no such rung names is never
+  // read at all.
+  struct HeldFormat {
+    std::uint32_t buf_type = 0;
+    v4l2_format fmt{};
+
+    // True when the save gave a format worth putting back.
+    bool have = false;
+
+    // True when a rung that changes this type answered.
+    bool changed = false;
+  };
+  std::vector<HeldFormat> held;
+
+  // The first rung the driver answered whose answer the writer cannot use.
+  // The failure message names it; a walk that keeps a rung reports none.
+  bool haveRefusal = false;
+  std::string firstRefusal;
+  std::size_t firstRefusalRung = 0;
+
+  for (std::size_t i = 0; i < rungs.size(); ++i) {
+    const FormatLadderRung &r = rungs[i];
+
+    // Read what this rung's buffer type holds, once per type, before the
+    // first rung that changes it.
+    std::size_t hi = held.size();
+    if (r.mutates) {
+      for (std::size_t k = 0; k < held.size(); ++k) {
+        if (held[k].buf_type == r.buf_type) {
+          hi = k;
+          break;
+        }
+      }
+      if (hi == held.size()) {
+        HeldFormat h;
+        h.buf_type = r.buf_type;
+        h.have = restore.save && restore.save(r, &h.fmt);
+        held.push_back(h);
+      }
+    }
+
+    std::string err;
+    v4l2_format f{};
+    if (!r.ask || !r.ask(&f, &err)) {
+      log << "Tried " << r.name << ": " << (err.empty() ? "(no detail)" : err)
+          << "\n";
+      continue;
+    }
+    if (r.mutates)
+      held[hi].changed = true;
+
+    ActualFormat a;
+    std::string perr;
+    if (ParseChosenOutputFmt(f, r.mplane, fps, &a, &perr)) {
+      res.ok = true;
+      res.actual = a;
+      res.rung = i;
+      res.attempt_log = log.str();
+      return res;
+    }
+
+    // The driver answered, but the writer cannot use the answer. Keep the
+    // first such rung: it is the rung the writer wanted most.
+    if (!haveRefusal) {
+      haveRefusal = true;
+      firstRefusal = perr.empty() ? "(no detail)" : perr;
+      firstRefusalRung = i;
+    }
+
+    log << "Tried " << r.name << ": the driver answered a format the writer "
+        << "cannot use: " << (perr.empty() ? "(no detail)" : perr) << "\n";
+  }
+
+  res.attempt_log = log.str();
+  res.first_refusal = firstRefusal;
+  res.first_refusal_rung = firstRefusalRung;
+
+  // A buffer type that answered no rung which asks it to take a format still
+  // holds the format it held, thus it needs no S_FMT to put one back. A G_FMT
+  // rung answers without changing anything, so a walk of those alone leaves
+  // the device as it found it on its own.
+  //
+  // The saves go back in the reverse of the order the walk read them. A save
+  // runs immediately before the first rung that changes its type, thus a save
+  // below reads the device after the rungs above it ran. On a driver that
+  // keeps one format for several buffer types, that save holds a format a
+  // rung set. Only the first save of the walk is sure to hold the format the
+  // device came in with, so it must be the last S_FMT. On a driver that keeps
+  // a format for each type the order changes nothing.
+  if (restore.restore) {
+    for (auto it = held.rbegin(); it != held.rend(); ++it) {
+      if (it->have && it->changed)
+        restore.restore(it->fmt);
+    }
+  }
+
+  return res;
+}
+
+std::string ComposeLadderFailure(const std::string &header,
+                                 const std::vector<FormatLadderRung> &rungs,
+                                 const FormatLadderResult &ladder) {
+  std::ostringstream oss;
+  oss << header;
+  // Give the refusal that stopped the walk a line of its own, with the rung
+  // that answered it and the message itself. `OutputOpenErrorIsTransient`
+  // reads this line and no other, thus the message goes here even though the
+  // attempt log below carries it too.
+  if (!ladder.first_refusal.empty() &&
+      ladder.first_refusal_rung < rungs.size()) {
+    oss << kDecisiveRefusalHead << rungs[ladder.first_refusal_rung].name << ": "
+        << ladder.first_refusal << "\n";
+  }
+  oss << ladder.attempt_log;
+  return oss.str();
+}
+
+namespace {
 
 struct NegotiationResult {
   bool ok = false;
@@ -448,73 +751,105 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
   if (caps & V4L2_CAP_DEVICE_CAPS)
     caps = cap.device_caps;
 
+  // The frame path is write() alone, thus a device that does not offer that
+  // I/O method takes no frame, whatever format the ladder below negotiates.
+  // Refuse here, where the caps are in hand: without this the open succeeds
+  // and every frame fails on its own with an error that names no cause.
+  std::string ioErr;
+  if (!OutputDeviceCanWrite(caps, &ioErr)) {
+    std::ostringstream oss;
+    oss << "Cannot write frames to " << device << ": " << ioErr << "\n"
+        << "querycap.driver=" << cap.driver << " card=" << cap.card
+        << " bus=" << cap.bus_info << "\n"
+        << "querycap.caps=" << CapsToString(caps) << "\n";
+    res.error = oss.str();
+    return res;
+  }
+
   // Prefer output types first; then capture types. Try mplane variants too.
   const TypeSpec types[] = {
       {V4L2_BUF_TYPE_VIDEO_OUTPUT, false},
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
       {V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, true},
 #endif
       {V4L2_BUF_TYPE_VIDEO_CAPTURE, false},
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
       {V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, true},
 #endif
   };
 
-  // Try S_FMT (stride then no-stride) across types
-  std::ostringstream attemptLog;
-  v4l2_format chosen{};
-  bool chosenMplane = false;
-  bool ok = false;
+  // The ladder: S_FMT (with stride, then no stride) across the types, then
+  // G_FMT across them, in the same order. The walk keeps the first rung the
+  // driver answers with a layout the writer can use.
+  std::vector<FormatLadderRung> rungs;
+  rungs.reserve(std::size(types) * 3);
 
   for (const auto &t : types) {
-    std::string e1, e2;
-    v4l2_format f{};
-    if (TrySetFmtAny(fd, t, width, height, desiredFmt, true, &f, &e1) ||
-        TrySetFmtAny(fd, t, width, height, desiredFmt, false, &f, &e2)) {
-      chosen = f;
-      chosenMplane = t.mplane;
-      res.chosen_buf_type = t.type;
-      res.chosen_mplane = t.mplane;
-      ok = true;
-      break;
-    }
-
-    attemptLog << "Tried " << BufTypeName(t.type)
-               << " S_FMT(with stride): " << (e1.empty() ? "(no detail)" : e1)
-               << "\n";
-    attemptLog << "Tried " << BufTypeName(t.type)
-               << " S_FMT(no stride):   " << (e2.empty() ? "(no detail)" : e2)
-               << "\n";
-  }
-
-  // If set failed everywhere, try G_FMT
-  if (!ok) {
-    for (const auto &t : types) {
-      std::string ge;
-      v4l2_format f{};
-      if (TryGetFmtAny(fd, t, &f, &ge)) {
-        chosen = f;
-        chosenMplane = t.mplane;
-        res.chosen_buf_type = t.type;
-        res.chosen_mplane = t.mplane;
-        ok = true;
-        break;
-      }
-      attemptLog << "Tried " << BufTypeName(t.type)
-                 << " G_FMT: " << (ge.empty() ? "(no detail)" : ge) << "\n";
+    for (const bool withStride : {true, false}) {
+      FormatLadderRung r;
+      r.name = std::string(BufTypeName(t.type)) +
+               (withStride ? " S_FMT(with stride)" : " S_FMT(no stride)");
+      r.buf_type = t.type;
+      r.mplane = t.mplane;
+      // S_FMT asks the device to take the format, thus this rung is one the
+      // walk may have to put a format back after.
+      r.mutates = true;
+      r.ask = [fd, t, width, height, desiredFmt,
+               withStride](v4l2_format *outFmt, std::string *outErr) {
+        return TrySetFmtAny(fd, t, width, height, desiredFmt, withStride,
+                            outFmt, outErr);
+      };
+      rungs.push_back(std::move(r));
     }
   }
 
-  if (!ok) {
+  for (const auto &t : types) {
+    FormatLadderRung r;
+    r.name = std::string(BufTypeName(t.type)) + " G_FMT";
+    r.buf_type = t.type;
+    r.mplane = t.mplane;
+    // G_FMT reads the format the device holds and changes nothing, thus
+    // `mutates` stays false and this rung earns no restore.
+    r.ask = [fd, t](v4l2_format *outFmt, std::string *outErr) {
+      return TryGetFmtAny(fd, t, outFmt, outErr);
+    };
+    rungs.push_back(std::move(r));
+  }
+
+  // A walk that keeps no rung must leave the device as it found it, thus the
+  // walk reads what a buffer type holds before the first rung that changes
+  // it. G_FMT answers under the type it is asked about, and the answer
+  // carries that type back to the S_FMT that puts the format back, thus the
+  // read names the type of the rung that is about to change it and no other.
+  FormatRestore restore;
+  restore.save = [fd](const FormatLadderRung &r, v4l2_format *outFmt) {
+    const TypeSpec t{r.buf_type, r.mplane};
+    std::string err;
+    if (!TryGetFmtAny(fd, t, outFmt, &err))
+      return false;
+    // A blank report names no format the device can be asked to take again,
+    // thus a walk that reads one has nothing to put back and leaves the
+    // buffer type alone.
+    return SavedOutputFmtIsRestorable(*outFmt, t.mplane);
+  };
+  restore.restore = [fd](const v4l2_format &fmt) {
+    v4l2_format put = fmt;
+    (void)IoctlRetry(fd, VIDIOC_S_FMT, &put);
+  };
+
+  const FormatLadderResult ladder = ChooseOutputFormat(rungs, fps, restore);
+  if (ladder.ok) {
+    res.chosen_buf_type = rungs[ladder.rung].buf_type;
+    res.chosen_mplane = rungs[ladder.rung].mplane;
+  } else {
     std::ostringstream oss;
     oss << "Failed to set/query format for " << device
         << " (desired=" << PixelFormatName(desiredFmt) << ", " << width << "x"
         << height << ")\n"
         << "querycap.driver=" << cap.driver << " card=" << cap.card
         << " bus=" << cap.bus_info << "\n"
-        << "querycap.caps=" << CapsToString(caps) << "\n"
-        << attemptLog.str();
-    res.error = oss.str();
+        << "querycap.caps=" << CapsToString(caps) << "\n";
+    res.error = ComposeLadderFailure(oss.str(), rungs, ladder);
     return res;
   }
 
@@ -631,13 +966,10 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
     }
   }
 
-  std::string perr;
-  ActualFormat a;
-  if (!ParseChosenFormat(chosen, chosenMplane, negotiatedFps, &a, &perr)) {
-    res.error = "Format negotiation succeeded but parsing failed: " + perr;
-    return res;
-  }
-
+  // The layout comes from the rung the walk kept. Only the frame rate is
+  // still open at this point, because the walk runs before the S_PARM above.
+  ActualFormat a = ladder.actual;
+  a.fps = negotiatedFps;
   a.fps_num = fpsNum;
   a.fps_den = fpsDen;
 
@@ -783,11 +1115,11 @@ bool V4l2Writer::RefreshActual(std::string *error) {
   // expose both and/or allow querying only one side.
   const TypeSpec types[] = {
       {V4L2_BUF_TYPE_VIDEO_OUTPUT, false},
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
       {V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, true},
 #endif
       {V4L2_BUF_TYPE_VIDEO_CAPTURE, false},
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
       {V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, true},
 #endif
   };
@@ -857,25 +1189,14 @@ bool V4l2Writer::RefreshActual(std::string *error) {
     }
   }
 
+  // The parse refuses a blank format, thus the refresh keeps the cached
+  // format it had and the refusal names the report: a blank one is a
+  // transient of a consumer-disconnect window, not a format to cache.
   ActualFormat a;
   std::string perr;
-  if (!ParseChosenFormat(chosen, chosenMplane, negotiatedFps, &a, &perr)) {
+  if (!ParseChosenOutputFmt(chosen, chosenMplane, negotiatedFps, &a, &perr)) {
     if (error)
       *error = "Queried format parsing failed: " + perr;
-    return false;
-  }
-
-  // Some v4l2loopback configurations transiently report a "blank" format
-  // (e.g. width/height=0) during consumer disconnect / renegotiation windows.
-  // Treat that as a failed refresh so we don't overwrite a previously-valid
-  // cached format and trigger output renegotiation thrash.
-  if (a.width <= 0 || a.height <= 0) {
-    if (error) {
-      std::ostringstream oss;
-      oss << "Queried format invalid: " << a.width << "x" << a.height
-          << " pixfmt=" << a.pixfmt;
-      *error = oss.str();
-    }
     return false;
   }
 

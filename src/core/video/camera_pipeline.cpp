@@ -694,17 +694,15 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
   if (out_opened_or_renegotiated)
     *out_opened_or_renegotiated = true;
 
-  // v4l2loopback can transiently reject format negotiation (EINVAL) right after
-  // the producer FD was closed (or during consumer disconnect windows). Retry
-  // for a short budget with backoff to avoid supervisor thrash (and to make
-  // fast restarts more reliable).
+  // v4l2loopback can transiently reject format negotiation right after the
+  // producer FD was closed (or during consumer disconnect windows): it answers
+  // EINVAL, or it reports a blank frame the writer refuses. Retry for a short
+  // budget with backoff to avoid supervisor thrash (and to make fast restarts
+  // more reliable). `OutputOpenErrorIsTransient` names both faces of that
+  // window, next to the refusals the writer composes.
   constexpr auto kOpenRetryBudget = std::chrono::seconds(5);
   constexpr auto kOpenRetrySleepMin = std::chrono::milliseconds(50);
   constexpr auto kOpenRetrySleepMax = std::chrono::milliseconds(500);
-
-  auto contains_invalid_argument = [](const std::string &s) {
-    return s.find("Invalid argument") != std::string::npos;
-  };
 
   std::string werr;
   bool opened = false;
@@ -739,7 +737,7 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
       writer_.Close();
     }
 
-    const bool maybe_transient = contains_invalid_argument(werr);
+    const bool maybe_transient = OutputOpenErrorIsTransient(werr);
     if (!maybe_transient)
       break;
 
@@ -765,7 +763,7 @@ bool CameraPipeline::OpenOutputLocked(const std::string &outDev, int width,
       *error += werr + "\n\n" + "(open retries: " + std::to_string(attempts) +
                 ", elapsed=" + std::to_string(elapsed) + "ms)";
 
-      if (contains_invalid_argument(werr)) {
+      if (OutputOpenErrorIsTransient(werr)) {
         *error +=
             "\nHint: this can be a transient v4l2loopback restart window; "
             "if it persists, try waiting a few seconds or reloading the "
@@ -7414,6 +7412,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     CapturedFrameView f{};
     std::string ferr;
     if (!cap.AcquireFrame(&f, 1000, &ferr)) {
+      // A frame the capture refused after the driver dequeued the buffer
+      // carries that buffer, and only this call puts it back. A failure
+      // before the dequeue carries none and this releases nothing, so one
+      // call covers all three exits below.
+      std::string rerr;
+      (void)cap.ReleaseFrame(f, &rerr);
+
       // Timeouts and transient interruptions can happen on some
       // devices/drivers. Treat timeouts as recoverable to avoid pipeline
       // flapping (which can manifest as periodic black frames when the loopback

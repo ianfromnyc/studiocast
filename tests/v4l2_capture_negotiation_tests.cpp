@@ -591,6 +591,223 @@ bool TestCaptureDrainFailureStopsCaptureOnARefusal() {
                 "a raw walk refusal must stop the capture loop");
 }
 
+// The drain loop gives a refused frame back with `ReleaseFrame()`, which finds
+// the buffer by `CapturedFrameView::index`. `CaptureAcceptDequeuedBuffer()`
+// writes that index above the two refusals, so a refused frame carries the
+// buffer the driver dequeued. This is the drain loop as a fake: an index
+// written below the refusals leaves the view at -1, the driver loses one
+// buffer on every refused frame, and every other test stays green.
+bool TestCaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop() {
+  using studiocast::video::CaptureAcceptDequeuedBuffer;
+  using studiocast::video::CaptureDequeuedBuffer;
+  using studiocast::video::CapturedFrameView;
+  using studiocast::video::CaptureDrainFailureStopsCapture;
+  using studiocast::video::CaptureFormat;
+
+  // 640x480 YUYV in a mapping that holds the frame to the byte, so any plane
+  // offset puts the end of the raw walk past the end of the mapping.
+  CaptureFormat fmt;
+  fmt.width = 640;
+  fmt.height = 480;
+  fmt.format = CapturePixelFormat::yuyv;
+  fmt.bytes_per_line = 1280;
+  fmt.size_image = 614400;
+
+  std::vector<std::uint8_t> mapping(614400u, 0u);
+
+  // The driver queue, as buffer indices. This is `V4l2Capture::ReleaseFrame()`
+  // with the ioctl removed: a view with no buffer releases nothing.
+  std::vector<int> requeued;
+  auto Release = [&requeued](const CapturedFrameView &f) {
+    if (f.index < 0)
+      return;
+    requeued.push_back(f.index);
+  };
+
+  CaptureDequeuedBuffer buf;
+  buf.mapped_start = mapping.data();
+  buf.mapped_length = mapping.size();
+  buf.bytesused = mapping.size();
+  buf.data_offset = 0;
+  buf.index = 3;
+  buf.sequence = 7;
+
+  // A frame the capture accepts.
+  CapturedFrameView view{};
+  if (!Expect(CaptureAcceptDequeuedBuffer(buf, fmt, &view, nullptr),
+              "a frame at the start of the mapping must be accepted"))
+    return false;
+
+  if (!Expect(view.index == 3 && view.sequence == 7u,
+              "an accepted frame must carry the buffer the driver dequeued"))
+    return false;
+
+  // The first of the two refusals: an offset the payload does not reach. Only
+  // a multi-planar buffer carries an offset, and the driver dequeued this one
+  // as well, so this refusal must keep the index too.
+  buf.bytesused = 32;
+  buf.data_offset = 64;
+
+  CapturedFrameView short_payload{};
+  if (!Expect(!CaptureAcceptDequeuedBuffer(buf, fmt, &short_payload, nullptr),
+              "an offset past the payload must refuse the frame"))
+    return false;
+
+  if (!Expect(short_payload.index == 3,
+              "a payload refusal must keep the buffer index as well"))
+    return false;
+
+  buf.bytesused = mapping.size();
+
+  // The same buffer with an offset the mapping cannot absorb. The capture
+  // refuses it after the driver dequeued it, so the buffer is out of the
+  // queue and only the caller can put it back.
+  buf.data_offset = 64;
+
+  CapturedFrameView refused{};
+  std::string err;
+  if (!Expect(!CaptureAcceptDequeuedBuffer(buf, fmt, &refused, &err),
+              "an offset the mapping cannot absorb must refuse the frame"))
+    return false;
+
+  if (!Expect(CaptureDrainFailureStopsCapture(err),
+              "a refusal must stop the drain loop"))
+    return false;
+
+  if (!Expect(refused.index == 3,
+              "a refused frame must keep the index of the buffer the driver "
+              "dequeued"))
+    return false;
+
+  Release(refused);
+  if (!Expect(requeued.size() == 1u && requeued.front() == 3,
+              "the drain loop must give the refused buffer back"))
+    return false;
+
+  // A failure before `VIDIOC_DQBUF` - a poll error, a timeout - dequeues no
+  // buffer. The view it leaves has no index, and the drain loop must release
+  // nothing rather than re-queue buffer 0.
+  requeued.clear();
+  const CapturedFrameView never_dequeued{};
+  Release(never_dequeued);
+  return Expect(requeued.empty(),
+                "a failure before the dequeue must release no buffer");
+}
+
+// `AcquireFrame()` promises that a failure before `VIDIOC_DQBUF` leaves the
+// view with no buffer, so a release after it gives nothing back. The promise
+// is the function's own, not the caller's: a caller that keeps one view across
+// calls must not read the buffer of an earlier frame out of it after a poll
+// error or a timeout, because that buffer belongs to the driver again. A
+// capture that was never opened is the cheapest failure before the dequeue,
+// and it needs no device.
+bool TestCaptureAcquireClearsTheViewBeforeItCanFail() {
+  using studiocast::video::CapturedFrameView;
+  using studiocast::video::V4l2Capture;
+
+  V4l2Capture cap;
+
+  // The view of a frame the caller already released, given to the next call
+  // again. Every field carries a value an accepted frame could have left, so
+  // the clear must prove itself on each one. `data` points at the view itself
+  // because any non-null address does: the test reads the pointer, never the
+  // bytes behind it.
+  CapturedFrameView reused{};
+  reused.data = reinterpret_cast<const std::uint8_t *>(&reused);
+  reused.bytes = 614400;
+  reused.index = 5;
+  reused.sequence = 11;
+  reused.timestamp_ns = 1234567890u;
+  reused.timestamp_monotonic = true;
+
+  std::string err;
+  if (!Expect(!cap.AcquireFrame(&reused, /*timeout_ms=*/0, &err),
+              "a capture that is not open must refuse to acquire a frame"))
+    return false;
+
+  return Expect(reused.data == nullptr && reused.bytes == 0u &&
+                    reused.index < 0 && reused.sequence == 0u &&
+                    reused.timestamp_ns == 0u && !reused.timestamp_monotonic,
+                "a failure before the dequeue must leave the view with no "
+                "buffer to release");
+}
+
+// One check refuses a frame for either of two causes, and the message must
+// name the one that applies, because it is what the operator acts on. The
+// offset is the cause only when the mapping alone would have held the walk;
+// with a mapping shorter than the walk the offset is beside the point, however
+// large it is.
+bool TestCaptureRawWalkRefusalNamesItsCause() {
+  using studiocast::video::CaptureFormat;
+  using studiocast::video::CaptureRawWalkFitsMapping;
+
+  auto Contains = [](const std::string &haystack, const char *needle) {
+    return haystack.find(needle) != std::string::npos;
+  };
+
+  CaptureFormat fmt;
+  fmt.width = 640;
+  fmt.height = 480;
+  fmt.format = CapturePixelFormat::yuyv;
+  fmt.bytes_per_line = 1280;
+  fmt.size_image = 614400;
+
+  // A mapping that holds the frame, with an offset that moves the end of the
+  // walk past the end of it. The offset is the cause.
+  std::string offset_err;
+  if (!Expect(!CaptureRawWalkFitsMapping(614400u, /*data_offset=*/64u, fmt,
+                                         &offset_err),
+              "an offset the mapping cannot absorb must refuse the frame"))
+    return false;
+
+  if (!Expect(Contains(offset_err, "data_offset of 64 bytes"),
+              "an offset refusal must name the offset"))
+    return false;
+
+  if (!Expect(Contains(offset_err, "614336 bytes of the mapping") &&
+                  Contains(offset_err, "frame of 614400 bytes"),
+              "an offset refusal must give the room it leaves and the walk"))
+    return false;
+
+  // The same check with no offset: the mapping is one byte short of the walk,
+  // and the mapping is the cause. An offset of 0 moves nothing, so a message
+  // that names it points the operator at the wrong number.
+  std::string mapping_err;
+  if (!Expect(!CaptureRawWalkFitsMapping(614399u, /*data_offset=*/0u, fmt,
+                                         &mapping_err),
+              "a mapping shorter than the walk must refuse the frame"))
+    return false;
+
+  if (!Expect(!Contains(mapping_err, "data_offset"),
+              "a refusal with no offset must not blame the offset"))
+    return false;
+
+  if (!Expect(Contains(mapping_err, "capture buffer of 614399 bytes") &&
+                  Contains(mapping_err, "frame of 614400 bytes"),
+              "a mapping refusal must name the mapping and the walk"))
+    return false;
+
+  // A mapping far shorter than the walk, with an offset as well. The offset
+  // takes 64 bytes off a mapping that was already 613400 bytes short, so it is
+  // not what refused the frame and the message must not lead with it.
+  std::string both_err;
+  if (!Expect(!CaptureRawWalkFitsMapping(1000u, /*data_offset=*/64u, fmt,
+                                         &both_err),
+              "a mapping shorter than the walk must refuse the frame with an "
+              "offset as well"))
+    return false;
+
+  if (!Expect(!Contains(both_err, "data_offset"),
+              "a refusal a mapping of any offset would have made must not "
+              "blame the offset"))
+    return false;
+
+  return Expect(Contains(both_err, "capture buffer of 1000 bytes") &&
+                    Contains(both_err, "frame of 614400 bytes"),
+                "a mapping refusal must name the mapping, not the mapping "
+                "less the offset");
+}
+
 } // namespace
 
 bool TestV4l2CaptureFramePayloadStaysInsideTheMapping() {
@@ -603,6 +820,18 @@ bool TestV4l2CaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset() {
 
 bool TestV4l2CaptureDrainFailureStopsCaptureOnARefusal() {
   return TestCaptureDrainFailureStopsCaptureOnARefusal();
+}
+
+bool TestV4l2CaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop() {
+  return TestCaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop();
+}
+
+bool TestV4l2CaptureRawWalkRefusalNamesItsCause() {
+  return TestCaptureRawWalkRefusalNamesItsCause();
+}
+
+bool TestV4l2CaptureAcquireClearsTheViewBeforeItCanFail() {
+  return TestCaptureAcquireClearsTheViewBeforeItCanFail();
 }
 
 bool TestV4l2CapturePreferenceTreats720pAsMjpegWorthy() {

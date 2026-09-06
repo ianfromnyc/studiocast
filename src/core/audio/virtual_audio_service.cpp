@@ -407,6 +407,38 @@ VirtualAudioService::~VirtualAudioService() { Stop(); }
 
 bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
                                 std::string *error) {
+  {
+    // Two Start() callers at the same time both leave the Stop() below
+    // before either publishes the supervisor, and a move-assign onto a
+    // joinable handle ends the process. The second caller must find a start
+    // in progress and fail. The test is live in every build, because a
+    // release build defines NDEBUG and thus drops an assert().
+    //
+    // The mark is tested before the Stop() and before the state below on
+    // purpose. The caller that fails thus stops nothing, keeps the config of
+    // the caller that won and leaves the status as that caller made it. With
+    // the test after the state, the caller that fails left the service with
+    // service_running down while the supervisor of the winner was alive, and
+    // with its own config under that supervisor.
+    std::lock_guard<std::mutex> lock(th_mu_);
+    if (starting_) {
+      SetLastError("Virtual audio service is already starting.");
+      if (error)
+        *error = "Virtual audio service is already starting.";
+      return false;
+    }
+    starting_ = true;
+  }
+
+  // Clears the start mark on every way out of this function.
+  struct StartMark {
+    VirtualAudioService *self;
+    ~StartMark() {
+      std::lock_guard<std::mutex> lock(self->th_mu_);
+      self->starting_ = false;
+    }
+  } start_mark{this};
+
   Stop();
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -470,8 +502,19 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
   if (transport_active_ == studiocast::pw::AudioTransport::kPulse)
     pw_backend::ShutdownNativeAudioDevices();
 
-  stop_.store(false, std::memory_order_release);
   try {
+    // Clear the stop flag and publish the supervisor under one lock. Stop()
+    // sets the flag under the same lock, thus a Stop() that runs at the same
+    // time either joins the supervisor of the last run, or joins this one
+    // after that supervisor saw the flag. Without this, Stop() can join a
+    // supervisor that was never told to stop, and then it never returns.
+    std::lock_guard<std::mutex> lock(th_mu_);
+    // Start() calls Stop() first and the start mark keeps a second caller
+    // out, thus the handle is free here.
+    stop_.store(false, std::memory_order_release);
+    // The supervisor is made under this lock on purpose: it must not run
+    // before the stop flag is clear, thus it cannot be made outside and moved
+    // in. ThreadMain() never takes th_mu_, thus it does not wait on it.
     th_ = std::thread([this]() { ThreadMain(); });
   } catch (const std::exception &e) {
     if (error)
@@ -490,9 +533,16 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
 }
 
 void VirtualAudioService::Stop() {
-  stop_.store(true, std::memory_order_release);
-  if (th_.joinable()) {
-    th_.join();
+  {
+    // A second Stop() caller waits here, and thus never joins a supervisor
+    // that the first caller already joined. The stop flag goes up under the
+    // same lock as the join, thus the supervisor that this caller joins is
+    // always one that sees the flag.
+    std::lock_guard<std::mutex> lock(th_mu_);
+    stop_.store(true, std::memory_order_release);
+    if (th_.joinable()) {
+      th_.join();
+    }
   }
   {
     std::lock_guard<std::mutex> lock(mu_);

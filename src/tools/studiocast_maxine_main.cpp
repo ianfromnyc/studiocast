@@ -525,6 +525,12 @@ int main(int argc, char **argv) {
         studiocast::video::CapturedFrameView fv;
         if (!cap.AcquireFrame(&fv, /*timeout_ms=*/1000, &err)) {
           std::cerr << "Capture AcquireFrame failed: " << err << "\n";
+          // A frame the capture refused after the driver dequeued it carries
+          // the buffer it left out of the driver queue. Give that buffer back
+          // before this loop stops using the camera. A failure before the
+          // dequeue carries no buffer and this releases nothing.
+          std::string rerr;
+          (void)cap.ReleaseFrame(fv, &rerr);
           have_camera = false;
           FillSyntheticBgr(bgr.data(), width, height, rgb_stride);
         } else {
@@ -779,6 +785,12 @@ int main(int argc, char **argv) {
         studiocast::video::CapturedFrameView fv;
         if (!cap.AcquireFrame(&fv, /*timeout_ms=*/1000, &err)) {
           std::cerr << "Capture AcquireFrame failed: " << err << "\n";
+          // A frame the capture refused after the driver dequeued it carries
+          // the buffer it left out of the driver queue. Give that buffer back
+          // before this loop stops using the camera. A failure before the
+          // dequeue carries no buffer and this releases nothing.
+          std::string rerr;
+          (void)cap.ReleaseFrame(fv, &rerr);
           have_camera = false;
           FillSyntheticBgr(bgr.data(), width, height, rgb_stride);
         } else {
