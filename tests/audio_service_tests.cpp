@@ -5829,6 +5829,455 @@ constexpr const char *kPipelineAlreadyStartingError =
 constexpr const char *kServiceAlreadyStartingError =
     "Virtual audio service is already starting.";
 
+// State that the backend release test shares with its backends.
+struct ReleaseGateState {
+  std::mutex mu;
+  std::condition_variable cv;
+  // The gate inside the destructor of the first backend. It holds Stop()
+  // where that call releases the backend, which is the step this test is
+  // about.
+  bool release_entered = false;
+  bool release_released = false;
+};
+
+// I/O for the backend release test. Open() fails at once, as OverlapIo does,
+// but the destructor of the first backend parks. Stop() destroys the backend
+// that it takes out of the handle, thus the gate holds Stop() at the
+// release.
+class ReleaseGateIo final : public AudioPipelineIo {
+public:
+  ReleaseGateIo(std::shared_ptr<ReleaseGateState> state, bool gate_destructor)
+      : state_(std::move(state)), gate_destructor_(gate_destructor) {}
+
+  ~ReleaseGateIo() override {
+    if (!gate_destructor_)
+      return;
+    std::unique_lock<std::mutex> lock(state_->mu);
+    state_->release_entered = true;
+    state_->cv.notify_all();
+    state_->cv.wait(lock, [this] { return state_->release_released; });
+  }
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (error)
+      *error = kOverlapOpenError;
+    return false;
+  }
+
+  bool Read(void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+  void RequestStop() override {}
+
+private:
+  std::shared_ptr<ReleaseGateState> state_;
+  bool gate_destructor_ = false;
+};
+
+struct ReleaseGateFixture {
+  std::shared_ptr<ReleaseGateState> gate = std::make_shared<ReleaseGateState>();
+  std::atomic<int> ios_created{0};
+  std::atomic<bool> stopper_entered{false};
+  std::atomic<bool> stopper_done{false};
+  std::atomic<bool> starter_entered{false};
+  std::atomic<bool> starter_done{false};
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+
+  void ReleaseBackend() {
+    {
+      std::lock_guard<std::mutex> lock(gate->mu);
+      gate->release_released = true;
+    }
+    gate->cv.notify_all();
+  }
+};
+
+// Stop() must release the backend under the worker lock.
+//
+// With the release outside that lock, a Stop() that already left the lock
+// can drop the backend of a worker that a Start() published a moment later.
+// That worker then parks in a backend that no later Stop() can ask to stop,
+// and the join of it never returns. The window is a few instructions wide,
+// thus a sweep under load does not find it; the gate makes the order
+// instead of racing for it.
+//
+// The seam is the destructor of the backend, which Stop() runs where it
+// releases it. While the gate holds Stop() there, a Start() must not get as
+// far as a backend of its own: the worker lock is what keeps it out.
+bool TestStopReleasesTheBackendUnderTheWorkerLock() {
+  auto fx = std::make_shared<ReleaseGateFixture>();
+  auto *raw = fx.get();
+  auto gate = fx->gate;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw, gate]() -> std::unique_ptr<AudioPipelineIo> {
+    // Only the first backend holds Stop() inside its destructor.
+    const int index = raw->ios_created.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<ReleaseGateIo>(gate, index == 0);
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  // Prime the pipeline: the first backend stays installed and its worker
+  // exits by itself, thus Stop() finds a worker to join and a backend to
+  // release.
+  const AudioPipelineConfig cfg;
+  std::string prime_error;
+  if (fx->pipeline->Start(cfg, &prime_error)) {
+    std::cerr << "pipeline.Start reported success though the I/O refuses to "
+                 "open\n";
+    return false;
+  }
+
+  std::thread stopper([raw] {
+    raw->stopper_entered.store(true, std::memory_order_release);
+    raw->pipeline->Stop();
+    raw->stopper_done.store(true, std::memory_order_release);
+  });
+
+  if (!WaitUntil(
+          [&] {
+            std::lock_guard<std::mutex> lock(gate->mu);
+            return gate->release_entered;
+          },
+          5000ms)) {
+    std::cerr << "Stop() never released the backend\n";
+    fx->ReleaseBackend();
+    stopper.join();
+    return false;
+  }
+
+  std::thread starter([raw, cfg] {
+    raw->starter_entered.store(true, std::memory_order_release);
+    std::string start_error;
+    raw->pipeline->Start(cfg, &start_error);
+    raw->starter_done.store(true, std::memory_order_release);
+  });
+
+  // The verdict below is a wait that must run out, thus wait for the starter
+  // to run first.
+  if (!WaitUntil(
+          [&] { return raw->starter_entered.load(std::memory_order_acquire); },
+          5000ms)) {
+    std::cerr << "the starter thread never ran\n";
+    fx->ReleaseBackend();
+    starter.join();
+    stopper.join();
+    return false;
+  }
+
+  // Wait for a second backend. Stop() holds the worker lock across the
+  // release, thus Start() waits at its first statement and this wait runs
+  // out, which is the pass. With the release outside that lock, Start() runs
+  // on and makes a backend in milliseconds.
+  const bool second_io = WaitUntil(
+      [&] { return raw->ios_created.load(std::memory_order_relaxed) > 1; },
+      500ms);
+
+  fx->ReleaseBackend();
+
+  const bool both_returned = WaitUntil(
+      [&] {
+        return raw->stopper_done.load(std::memory_order_acquire) &&
+               raw->starter_done.load(std::memory_order_acquire);
+      },
+      5000ms);
+
+  if (!both_returned) {
+    // Both threads are detached below, thus the run can go on. See the wedge
+    // handler of TestStopKeepsTheStopFlagUpForTheWorkerItJoins.
+    stopper.detach();
+    starter.detach();
+    std::cout.flush();
+    std::cerr << "[FAIL] Start()/Stop() around the backend release never "
+                 "returned (stopper_done="
+              << raw->stopper_done.load(std::memory_order_acquire)
+              << " starter_done="
+              << raw->starter_done.load(std::memory_order_acquire) << ")"
+              << std::endl;
+    (void)new std::shared_ptr<ReleaseGateFixture>(fx);
+    return false;
+  }
+
+  stopper.join();
+  starter.join();
+
+  if (second_io) {
+    std::cerr << "Start() made a backend while Stop() was releasing one, thus "
+                 "the release is outside the worker lock\n";
+    return false;
+  }
+
+  // The lock held the starter back; it was not absent. The backend that it
+  // could not make while the gate was closed must be there now.
+  if (fx->ios_created.load(std::memory_order_relaxed) != 2) {
+    std::cerr << "pipeline made "
+              << fx->ios_created.load(std::memory_order_relaxed)
+              << " I/O backends, expected 2\n";
+    return false;
+  }
+
+  fx->pipeline->Stop();
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
+// State that the previous-worker join test shares with its backends.
+struct JoinGateState {
+  std::mutex mu;
+  std::condition_variable cv;
+  // The gate inside the thread-local mark of the first worker. It holds that
+  // worker on its way out.
+  bool worker_exiting = false;
+  bool worker_released = false;
+};
+
+// Parks a worker thread after ThreadMain() returned. A thread-local object
+// is destroyed at the end of the thread, thus after the guard in
+// ThreadMain() cleared running_ and after Start() got its answer from the
+// startup handshake: the worker is still joinable while the pipeline reports
+// itself stopped. That is the state in which a Start() passes both of its
+// guards and still finds a live worker in the handle to join, and that join
+// is what this test is about.
+struct WorkerExitGate {
+  std::shared_ptr<JoinGateState> state;
+
+  ~WorkerExitGate() {
+    if (!state)
+      return;
+    std::unique_lock<std::mutex> lock(state->mu);
+    state->worker_exiting = true;
+    state->cv.notify_all();
+    state->cv.wait(lock, [this] { return state->worker_released; });
+  }
+};
+
+// I/O for the previous-worker join test. Open() fails at once, as OverlapIo
+// does; the first backend also arms the mark that holds its worker on the
+// way out.
+class JoinGateIo final : public AudioPipelineIo {
+public:
+  JoinGateIo(std::shared_ptr<JoinGateState> state, bool arm_exit_gate)
+      : state_(std::move(state)), arm_exit_gate_(arm_exit_gate) {}
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (arm_exit_gate_) {
+      // Open() runs on the worker thread, thus the mark belongs to that
+      // thread and parks it, not the caller of Start().
+      thread_local WorkerExitGate gate;
+      gate.state = state_;
+    }
+    if (error)
+      *error = kOverlapOpenError;
+    return false;
+  }
+
+  bool Read(void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+  void RequestStop() override {}
+
+private:
+  std::shared_ptr<JoinGateState> state_;
+  bool arm_exit_gate_ = false;
+};
+
+struct JoinGateFixture {
+  std::shared_ptr<JoinGateState> gate = std::make_shared<JoinGateState>();
+  std::atomic<int> ios_created{0};
+  std::atomic<int> starts_entered{0};
+  std::atomic<int> starts_done{0};
+  std::atomic<int> refusals{0};
+  std::atomic<int> unexpected{0};
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+
+  void ReleaseWorker() {
+    {
+      std::lock_guard<std::mutex> lock(gate->mu);
+      gate->worker_released = true;
+    }
+    gate->cv.notify_all();
+  }
+};
+
+// Start() must join the worker of the last run outside the worker lock.
+//
+// A worker parked in the backend leaves only on RequestStop(), and Stop()
+// needs the worker lock to make that call. A join under that lock would thus
+// hold the lock for as long as the park, and the pair would never unwind.
+//
+// The seam is a thread-local mark that the first backend arms: it parks its
+// worker at the end of the thread, after ThreadMain() cleared running_.
+// Start() thus finds a live worker in the handle and stays in the join for
+// as long as the test wants. A second Start() must be refused while the
+// first one is there, and that refusal takes the worker lock: it can only
+// happen while the join is outside it.
+bool TestStartJoinsThePreviousWorkerOutsideTheWorkerLock() {
+  auto fx = std::make_shared<JoinGateFixture>();
+  auto *raw = fx.get();
+  auto gate = fx->gate;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw, gate]() -> std::unique_ptr<AudioPipelineIo> {
+    // Only the worker of the first backend parks on its way out.
+    const int index = raw->ios_created.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<JoinGateIo>(gate, index == 0);
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  // Prime the pipeline: the worker fails to open, reports the failure to
+  // Start() and then parks on its way out. It stays in the handle, and the
+  // pipeline reports itself stopped.
+  const AudioPipelineConfig cfg;
+  std::string prime_error;
+  if (fx->pipeline->Start(cfg, &prime_error)) {
+    std::cerr << "pipeline.Start reported success though the I/O refuses to "
+                 "open\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            std::lock_guard<std::mutex> lock(gate->mu);
+            return gate->worker_exiting;
+          },
+          5000ms)) {
+    std::cerr << "the worker of the priming Start() never reached its mark\n";
+    fx->ReleaseWorker();
+    return false;
+  }
+
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "the pipeline reports itself running while its worker is on "
+                 "the way out\n";
+    fx->ReleaseWorker();
+    return false;
+  }
+
+  // Two callers of Start(). One takes the handle and joins the parked
+  // worker; the other must be refused, and cannot be refused before it has
+  // the worker lock.
+  const auto start_once = [raw, cfg] {
+    raw->starts_entered.fetch_add(1, std::memory_order_release);
+    std::string start_error;
+    if (!raw->pipeline->Start(cfg, &start_error)) {
+      if (start_error == kPipelineAlreadyStartingError) {
+        raw->refusals.fetch_add(1, std::memory_order_release);
+      } else if (start_error != kOverlapOpenError &&
+                 start_error != kOverlapNoIoError) {
+        raw->unexpected.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+    raw->starts_done.fetch_add(1, std::memory_order_release);
+  };
+
+  std::thread first(start_once);
+  std::thread second(start_once);
+
+  if (!WaitUntil(
+          [&] {
+            return raw->starts_entered.load(std::memory_order_acquire) == 2;
+          },
+          5000ms)) {
+    std::cerr << "the two Start() threads never ran\n";
+    fx->ReleaseWorker();
+    first.join();
+    second.join();
+    return false;
+  }
+
+  // The caller that loses gets its answer from the worker lock. With the
+  // join outside that lock this takes milliseconds; with the join under it
+  // the loser waits for the parked worker, which only this test can release.
+  const bool refused = WaitUntil(
+      [&] { return raw->refusals.load(std::memory_order_acquire) == 1; },
+      2000ms);
+
+  fx->ReleaseWorker();
+
+  const bool both_returned = WaitUntil(
+      [&] { return raw->starts_done.load(std::memory_order_acquire) == 2; },
+      5000ms);
+
+  if (!both_returned) {
+    // Both threads are detached below, thus the run can go on. See the wedge
+    // handler of TestStopKeepsTheStopFlagUpForTheWorkerItJoins.
+    first.detach();
+    second.detach();
+    std::cout.flush();
+    std::cerr << "[FAIL] two Start() callers on a parked worker never "
+                 "returned (starts_done="
+              << raw->starts_done.load(std::memory_order_acquire) << ")"
+              << std::endl;
+    (void)new std::shared_ptr<JoinGateFixture>(fx);
+    return false;
+  }
+
+  first.join();
+  second.join();
+
+  if (!refused) {
+    std::cerr << "no Start() was refused while another one joined the worker "
+                 "of the last run, thus that join holds the worker lock\n";
+    return false;
+  }
+
+  if (fx->unexpected.load(std::memory_order_relaxed) != 0) {
+    std::cerr << "a Start() gave an unexpected error\n";
+    return false;
+  }
+
+  // The caller that won made a backend of its own, thus the handle came
+  // through the join and the refusal.
+  if (fx->ios_created.load(std::memory_order_relaxed) != 2) {
+    std::cerr << "pipeline made "
+              << fx->ios_created.load(std::memory_order_relaxed)
+              << " I/O backends, expected 2\n";
+    return false;
+  }
+
+  fx->pipeline->Stop();
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
 struct DoubleStartFixture {
   // The gate that holds the first caller of an attempt, so that the second
   // caller reaches the publish of the handle in the same window.
@@ -6257,6 +6706,10 @@ int main() {
        &TestStopKeepsTheStopFlagUpForTheWorkerItJoins},
       {"stop raises the stop flag under the worker lock",
        &TestStopRaisesTheStopFlagUnderTheWorkerLock},
+      {"stop releases the backend under the worker lock",
+       &TestStopReleasesTheBackendUnderTheWorkerLock},
+      {"start joins the previous worker outside the worker lock",
+       &TestStartJoinsThePreviousWorkerOutsideTheWorkerLock},
       {"concurrent pipeline start fails and keeps the process",
        &TestConcurrentPipelineStartFailsAndKeepsTheProcess},
       {"concurrent service start fails and keeps the process",
