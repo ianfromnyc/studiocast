@@ -104,6 +104,14 @@ bool SavedOutputFmtIsRestorable(const v4l2_format &f, bool mplane);
 // answers a blank frame report. A report the driver stands by, such as a
 // plane count the writer cannot use or a device that takes no write(), says
 // the same thing on every retry.
+//
+// A failure the format ladder composed is read by the refusal that stopped
+// the walk alone, which `ComposeLadderFailure` gives a line of its own. The
+// attempt log below that line holds the errno of every rung the walk left
+// behind, and a rung the walk went past says nothing about the refusal that
+// decided it: on an mplane-only device every single-plane rung answers EINVAL
+// and the walk then stops on a plane count no retry can change. Every other
+// failure the open reports is one refusal, thus the whole text is read.
 bool OutputOpenErrorIsTransient(const std::string &error);
 
 // One rung of the format ladder: a question for the driver, and the union arm
@@ -143,9 +151,10 @@ struct FormatLadderResult {
   // index of that rung in `rungs`. A walk that kept a rung leaves both empty,
   // because the layout it gives back is the whole answer.
   //
-  // The failure message names the rung, thus `NegotiateFormat` reads the
-  // index and reads the message only to ask whether there was a refusal: the
-  // attempt log already carries the text. The tests read the text itself.
+  // This is the refusal that stopped the walk, thus the one that says whether
+  // the failure can be waited out. `ComposeLadderFailure` writes both the
+  // rung name and the message on one line of the failure, and
+  // `OutputOpenErrorIsTransient` reads that line alone.
   std::string first_refusal;
   std::size_t first_refusal_rung = 0;
 };
@@ -190,6 +199,15 @@ struct FormatRestore {
 FormatLadderResult
 ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
                    const FormatRestore &restore = {});
+
+// Composes the failure a walk that kept no rung reports: the header the
+// caller gives, the refusal that stopped the walk, and one line for every
+// rung the walk left behind.
+//
+// Exposed for tests; `V4l2Writer::Open()` is the only other caller.
+std::string ComposeLadderFailure(const std::string &header,
+                                 const std::vector<FormatLadderRung> &rungs,
+                                 const FormatLadderResult &ladder);
 
 class V4l2Writer final {
 public:

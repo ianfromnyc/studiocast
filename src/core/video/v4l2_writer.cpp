@@ -401,6 +401,19 @@ constexpr const char *kBlankFrameRefusal = "Driver reported a blank frame";
 // text of the ioctl that failed.
 constexpr const char *kInvalidArgument = "Invalid argument";
 
+// The head of the line a composed ladder failure gives to the refusal that
+// stopped the walk. `ComposeLadderFailure` writes it and
+// `OutputOpenErrorIsTransient` reads the rest of that line alone, thus the
+// two must take the head from here.
+constexpr const char *kDecisiveRefusalHead =
+    "First rung the driver answered with a format the writer cannot use: ";
+
+// True when one refusal names a condition that may be gone a moment later.
+bool RefusalIsTransient(const std::string &refusal) {
+  return refusal.find(kInvalidArgument) != std::string::npos ||
+         refusal.find(kBlankFrameRefusal) != std::string::npos;
+}
+
 } // namespace
 
 bool OutputDeviceCanWrite(std::uint32_t caps, std::string *outErr) {
@@ -420,8 +433,24 @@ bool OutputDeviceCanWrite(std::uint32_t caps, std::string *outErr) {
 }
 
 bool OutputOpenErrorIsTransient(const std::string &error) {
-  return error.find(kInvalidArgument) != std::string::npos ||
-         error.find(kBlankFrameRefusal) != std::string::npos;
+  // A composed ladder failure names the refusal that stopped the walk on a
+  // line of its own, and that refusal is the whole answer. The attempt log
+  // below it holds one line for every rung the walk left behind, with the
+  // errno of each, so reading the whole text makes every refusal transient on
+  // a device whose rungs answer EINVAL: an mplane-only device refuses each
+  // single-plane rung with EINVAL and then answers the plane count that no
+  // retry can change.
+  const std::size_t at = error.find(kDecisiveRefusalHead);
+  if (at != std::string::npos) {
+    const std::size_t from = at + std::strlen(kDecisiveRefusalHead);
+    const std::size_t eol = error.find('\n', from);
+    return RefusalIsTransient(error.substr(
+        from, eol == std::string::npos ? std::string::npos : eol - from));
+  }
+
+  // Every other failure the open reports is one refusal, thus the whole text
+  // is the refusal.
+  return RefusalIsTransient(error);
 }
 
 bool SavedOutputFmtIsRestorable(const v4l2_format &f, bool mplane) {
@@ -649,6 +678,24 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
   return res;
 }
 
+std::string ComposeLadderFailure(const std::string &header,
+                                 const std::vector<FormatLadderRung> &rungs,
+                                 const FormatLadderResult &ladder) {
+  std::ostringstream oss;
+  oss << header;
+  // Give the refusal that stopped the walk a line of its own, with the rung
+  // that answered it and the message itself. `OutputOpenErrorIsTransient`
+  // reads this line and no other, thus the message goes here even though the
+  // attempt log below carries it too.
+  if (!ladder.first_refusal.empty() &&
+      ladder.first_refusal_rung < rungs.size()) {
+    oss << kDecisiveRefusalHead << rungs[ladder.first_refusal_rung].name << ": "
+        << ladder.first_refusal << "\n";
+  }
+  oss << ladder.attempt_log;
+  return oss.str();
+}
+
 namespace {
 
 struct NegotiationResult {
@@ -774,14 +821,7 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
         << "querycap.driver=" << cap.driver << " card=" << cap.card
         << " bus=" << cap.bus_info << "\n"
         << "querycap.caps=" << CapsToString(caps) << "\n";
-    // Name the rung alone, because the log below carries its message.
-    if (!ladder.first_refusal.empty()) {
-      oss << "First rung the driver answered with a format the writer cannot "
-             "use: "
-          << rungs[ladder.first_refusal_rung].name << "\n";
-    }
-    oss << ladder.attempt_log;
-    res.error = oss.str();
+    res.error = ComposeLadderFailure(oss.str(), rungs, ladder);
     return res;
   }
 

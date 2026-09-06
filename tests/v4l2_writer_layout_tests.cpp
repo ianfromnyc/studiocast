@@ -1118,6 +1118,10 @@ bool TestV4l2WriterRestoresOnlyAFormatItCouldUse() {
 // write(), a plane count the writer cannot use and a report that contradicts
 // itself all say the same thing on every retry.
 bool TestV4l2WriterNamesTheRefusalsARetryCanOutlive() {
+  using video::ChooseOutputFormat;
+  using video::ComposeLadderFailure;
+  using video::FormatLadderResult;
+  using video::FormatLadderRung;
   using video::OutputOpenErrorIsTransient;
   using video::ParseChosenOutputFmt;
 
@@ -1138,16 +1142,115 @@ bool TestV4l2WriterNamesTheRefusalsARetryCanOutlive() {
     return false;
   }
 
-  // The pipeline reads the whole composed failure, not the refusal alone.
-  const std::string composed =
+  // The pipeline reads the whole composed failure, not the refusal alone, so
+  // the cases below compose it the way the writer composes it rather than
+  // write a shape the walk does not produce.
+  const char *const header =
       "Failed to set/query format for /dev/video10 (desired=YUYV, 1280x720)\n"
-      "querycap.driver=v4l2 loopback card=StudioCast bus=platform\n"
-      "Tried VIDEO_OUTPUT S_FMT(with stride): the driver answered a format "
-      "the writer cannot use: " +
-      blankErr + "\n";
-  if (!Expect(OutputOpenErrorIsTransient(composed),
-              "a composed failure must carry the refusal through"))
-    return false;
+      "querycap.driver=v4l2 loopback card=StudioCast bus=platform\n";
+
+  // An S_FMT rung the driver answers EINVAL, which is the answer every
+  // single-plane rung gets on an mplane-only device.
+  auto Refuse = [](const char *name) {
+    FormatLadderRung r;
+    r.name = name;
+    r.mutates = true;
+    r.ask = [](v4l2_format *, std::string *outErr) {
+      if (outErr)
+        *outErr = "VIDIOC_S_FMT(VIDEO_OUTPUT) failed: Invalid argument";
+      return false;
+    };
+    return r;
+  };
+
+  // An S_FMT rung the driver answers with one report.
+  auto Answer = [](const char *name, const LayoutCase &c,
+                   std::uint8_t num_planes = 1) {
+    FormatLadderRung r;
+    r.name = name;
+    r.mplane = c.mplane;
+    r.mutates = true;
+    r.ask = [c, num_planes](v4l2_format *outFmt, std::string *) {
+      FillDriverFormat(outFmt, c, num_planes);
+      return true;
+    };
+    return r;
+  };
+
+  // A walk stopped by the blank report of a disconnect window is one the
+  // budget can heal, and the rung it left behind does not change that.
+  {
+    const std::vector<FormatLadderRung> rungs = {
+        Refuse("VIDEO_OUTPUT S_FMT(with stride)"),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", blank),
+    };
+    const FormatLadderResult ladder = ChooseOutputFormat(rungs, /*fps=*/30);
+    const std::string composed = ComposeLadderFailure(header, rungs, ladder);
+    if (!Expect(OutputOpenErrorIsTransient(composed),
+                "a walk stopped by a blank report must read as transient")) {
+      std::cerr << "  '" << composed << "'\n";
+      return false;
+    }
+  }
+
+  // The refusal that stopped the walk is the one that answers. The attempt
+  // log below it names every rung the driver refused, with the errno of each,
+  // thus a refusal the driver stands by must stay permanent even though a
+  // rung the walk left behind answered EINVAL.
+  {
+    const LayoutCase contradiction = {"rows the frame size cannot hold",
+                                      V4L2_PIX_FMT_YUYV,
+                                      640,
+                                      480,
+                                      1536,
+                                      614400,
+                                      0u,
+                                      0u};
+    const std::vector<FormatLadderRung> rungs = {
+        Refuse("VIDEO_OUTPUT S_FMT(with stride)"),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", contradiction),
+    };
+    const FormatLadderResult ladder = ChooseOutputFormat(rungs, /*fps=*/30);
+    const std::string composed = ComposeLadderFailure(header, rungs, ladder);
+    if (!Expect(!OutputOpenErrorIsTransient(composed),
+                "a report that contradicts itself must not read as transient "
+                "because a rung the walk left behind answered EINVAL")) {
+      std::cerr << "  '" << composed << "'\n";
+      return false;
+    }
+  }
+
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
+  // The device that answers a plane count the writer cannot use is an
+  // mplane-only device, thus its single-plane rungs answer EINVAL and the
+  // composed failure carries both. This is the shape the pipeline reads on
+  // such a device, and the plane count cannot change while the writer waits.
+  {
+    const LayoutCase two_planes = {"an mplane report of two planes",
+                                   V4L2_PIX_FMT_YUYV,
+                                   640,
+                                   480,
+                                   1280,
+                                   614400,
+                                   0u,
+                                   0u,
+                                   true};
+    const std::vector<FormatLadderRung> rungs = {
+        Refuse("VIDEO_OUTPUT S_FMT(with stride)"),
+        Answer("VIDEO_OUTPUT_MPLANE S_FMT(with stride)", two_planes,
+               /*num_planes=*/2),
+    };
+    const FormatLadderResult ladder = ChooseOutputFormat(rungs, /*fps=*/30);
+    const std::string composed = ComposeLadderFailure(header, rungs, ladder);
+    if (!Expect(!OutputOpenErrorIsTransient(composed),
+                "a plane count the writer cannot use must not read as "
+                "transient because a rung the walk left behind answered "
+                "EINVAL")) {
+      std::cerr << "  '" << composed << "'\n";
+      return false;
+    }
+  }
+#endif
 
   struct TransientCase {
     const char *error;
