@@ -1456,8 +1456,12 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
           late = true;
           break;
         }
-        // The producer gives up the core, thus a consumer that has none can
-        // run.
+        // The producer gives up the core. This is not what makes the hand-off
+        // happen: Linux preempts the producer anyway, and 30 runs with the
+        // line removed, on one core with 32 other jobs on it, gave 0 failures
+        // and the same time. The line is kept because it holds on a scheduler
+        // that does not preempt, and because it keeps the wait from filling
+        // the core with writes that the consumer can only drop.
         std::this_thread::yield();
       }
     }
