@@ -5442,6 +5442,165 @@ bool TestStopKeepsTheStopFlagUpForTheWorkerItJoins() {
   return true;
 }
 
+struct StopRaiseFixture : StopOrderFixture {
+  std::mutex gate_mu;
+  std::condition_variable gate_cv;
+  // Holds the second backend inside the factory, thus Start() parks inside
+  // the worker lock, after it cleared the stop flag.
+  bool create_io_entered = false;
+  bool create_io_released = false;
+
+  void WaitInFactory() {
+    std::unique_lock<std::mutex> lock(gate_mu);
+    create_io_entered = true;
+    gate_cv.notify_all();
+    gate_cv.wait(lock, [this] { return create_io_released; });
+  }
+
+  void ReleaseFactory() {
+    {
+      std::lock_guard<std::mutex> lock(gate_mu);
+      create_io_released = true;
+    }
+    gate_cv.notify_all();
+  }
+};
+
+// Stop() must raise the stop flag under the worker lock, not before it.
+//
+// TestStopKeepsTheStopFlagUpForTheWorkerItJoins pins where RequestStop()
+// sits, not where the raise sits: its gate is inside RequestStop(), thus a
+// Stop() with the raise outside the lock still parks with the flag up. This
+// test pins the raise itself. Start() clears the flag under the same lock,
+// thus while a Start() holds that lock the flag must not move. A Stop() that
+// raises the flag before it takes the lock breaks that: it raises the flag
+// between the clear of a Start() and the publish of its worker, and it then
+// joins a worker whose flag is down.
+//
+// The seam is the backend factory, which Start() calls under the worker
+// lock: it holds Start() there, past the clear, while a Stop() runs.
+bool TestStopRaisesTheStopFlagUnderTheWorkerLock() {
+  auto fx = std::make_shared<StopRaiseFixture>();
+  auto *raw = fx.get();
+  auto io_state = fx->io_state;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw, io_state]() -> std::unique_ptr<AudioPipelineIo> {
+    const int index = raw->ios_created.fetch_add(1, std::memory_order_relaxed);
+    // Only the second backend holds Start() inside the worker lock.
+    if (index == 1)
+      raw->WaitInFactory();
+    return std::make_unique<StopOrderIo>(io_state, false);
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  // Prime the pipeline: the worker of the first backend exits by itself and
+  // the backend keeps the pointer to the stop flag, thus the test can read
+  // the flag for the whole run.
+  const AudioPipelineConfig cfg;
+  std::string prime_error;
+  if (fx->pipeline->Start(cfg, &prime_error)) {
+    std::cerr << "pipeline.Start reported success though the I/O refuses to "
+                 "open\n";
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(io_state->mu);
+    io_state->park_open = true;
+  }
+
+  // The flag is down after a Start(). A raise from here on can only come
+  // from the Stop() below.
+  {
+    std::lock_guard<std::mutex> lock(io_state->mu);
+    if (io_state->stop_flag == nullptr ||
+        io_state->stop_flag->load(std::memory_order_acquire)) {
+      std::cerr << "the stop flag is not down after the priming Start()\n";
+      return false;
+    }
+  }
+
+  std::thread starter([raw, cfg] {
+    std::string start_error;
+    raw->pipeline->Start(cfg, &start_error);
+    raw->starter_done.store(true, std::memory_order_release);
+  });
+
+  if (!WaitUntil(
+          [&] {
+            std::lock_guard<std::mutex> lock(raw->gate_mu);
+            return raw->create_io_entered;
+          },
+          5000ms)) {
+    std::cerr << "Start() never reached the backend factory\n";
+    fx->ReleaseFactory();
+    starter.join();
+    fx->pipeline->Stop();
+    return false;
+  }
+
+  std::thread stopper([raw] {
+    raw->pipeline->Stop();
+    raw->stopper_done.store(true, std::memory_order_release);
+  });
+
+  // Wait for the flag to go up. Start() holds the worker lock in the factory,
+  // thus a Stop() that raises the flag under that lock waits and this wait
+  // runs out, which is the pass. A Stop() that raises the flag before the
+  // lock ends this wait in milliseconds.
+  const bool flag_raised = WaitUntil(
+      [&] {
+        std::lock_guard<std::mutex> lock(io_state->mu);
+        return io_state->stop_flag != nullptr &&
+               io_state->stop_flag->load(std::memory_order_acquire);
+      },
+      1000ms);
+
+  fx->ReleaseFactory();
+
+  const bool both_returned = WaitUntil(
+      [&] {
+        return raw->starter_done.load(std::memory_order_acquire) &&
+               raw->stopper_done.load(std::memory_order_acquire);
+      },
+      5000ms);
+
+  if (!both_returned) {
+    // Both threads are detached below, thus the run can go on. See the wedge
+    // handler of TestStopKeepsTheStopFlagUpForTheWorkerItJoins.
+    starter.detach();
+    stopper.detach();
+    std::cout.flush();
+    std::cerr << "[FAIL] Start()/Stop() around the backend factory never "
+                 "returned (starter_done="
+              << raw->starter_done.load(std::memory_order_acquire)
+              << " stopper_done="
+              << raw->stopper_done.load(std::memory_order_acquire) << ")"
+              << std::endl;
+    (void)new std::shared_ptr<StopRaiseFixture>(fx);
+    return false;
+  }
+
+  starter.join();
+  stopper.join();
+
+  if (flag_raised) {
+    std::cerr << "Stop() raised the stop flag while a Start() held the worker "
+                 "lock, thus the raise and the clear of the flag can cross\n";
+    return false;
+  }
+
+  fx->pipeline->Stop();
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
 struct ServiceStartStopOverlapFixture : ConcurrentStopFixture {
   std::atomic<bool> mic_consumer_present{true};
   std::atomic<int> supervisor_loops{0};
@@ -6056,6 +6215,8 @@ int main() {
        &TestConcurrentServiceStartStopKeepsSupervisorHandleUsable},
       {"stop keeps the stop flag up for the worker it joins",
        &TestStopKeepsTheStopFlagUpForTheWorkerItJoins},
+      {"stop raises the stop flag under the worker lock",
+       &TestStopRaisesTheStopFlagUnderTheWorkerLock},
       {"concurrent pipeline start fails and keeps the process",
        &TestConcurrentPipelineStartFailsAndKeepsTheProcess},
       {"concurrent service start fails and keeps the process",
