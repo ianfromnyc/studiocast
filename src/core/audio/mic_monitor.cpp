@@ -376,8 +376,8 @@ bool StartMicMonitor(const MicMonitorConfig &raw_cfg,
       // absent, and a killed pactl prints no details. "pactl not available:"
       // with nothing after it becomes a request to open Support.
       if (pactlTimedOut) {
-        *error = "The sound server did not answer in time, so the microphone "
-                 "monitor did not start.";
+        *error = std::string(kSoundServerNoAnswerMessage) +
+                 " in time, so the microphone monitor did not start.";
         if (!details.empty())
           *error += " Details: " + details;
       } else {

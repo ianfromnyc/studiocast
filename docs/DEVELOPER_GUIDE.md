@@ -536,7 +536,17 @@ because Pulse moves its default output on an unplug, usually to the built-in
 loudspeakers, so a monitor that resolved `"auto"` again would build a feedback
 loop on its own. When the output disappears the monitor stops and writes what
 happened to `monitor.note`, not to `monitor.last_error`, because the GUI prints
-the note as written and turns any error into a request to open Support.
+the note as written and turns an error it does not know into a request to open
+Support.
+
+Two errors are an exception, because they clear themselves and ask nothing of
+the user. The GUI finds them by the text the daemon writes, so the text lives
+in one place: `kNoSafeMicMonitorSinkMessage` opens every message about a
+machine with no usable output, and `kSoundServerNoAnswerMessage` opens every
+message about a sound server that gave no answer. The page prints advice for
+the first and a wait for the second. A new message of either kind must start
+from the constant, or the page sends the user to Support for a state that
+needs nothing from them.
 
 The pin does not outlive the output it names. A start that used the pinned name
 and failed asks the sound server whether that sink is still in its list. While

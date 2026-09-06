@@ -58,6 +58,13 @@ bool IsUnsafeMicMonitorSinkName(const std::string &sink,
 inline constexpr char kNoSafeMicMonitorSinkMessage[] =
     "No safe output sink was found for the microphone monitor.";
 
+// Opening words of every message the daemon writes when the sound server gave
+// no answer at all. That state clears itself and asks nothing of the user, so
+// the GUI matches on this text to say the monitor waits instead of asking the
+// user to open Support. Both sides use this one text and cannot drift apart.
+inline constexpr char kSoundServerNoAnswerMessage[] =
+    "The sound server did not answer";
+
 // Resolves the configured sink ("auto" = Pulse default) to a safe output sink.
 // Returns no value when no safe sink is available; `error` says why.
 std::optional<std::string>

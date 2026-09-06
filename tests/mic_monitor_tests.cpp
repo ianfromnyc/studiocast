@@ -424,7 +424,10 @@ bool TestStartReportsATimedOutPactlAsABusySoundServer() {
     std::cerr << "the start reported success while pactl timed out\n";
     return false;
   }
-  if (error.find("in time") == std::string::npos) {
+  // The GUI reads this text, so the message must carry it exactly. A sentence
+  // that only means the same thing becomes "Open Support" on the page.
+  if (error.find(studiocast::audio::kSoundServerNoAnswerMessage) ==
+      std::string::npos) {
     std::cerr << "the failed start blamed a missing pactl: '" << error << "'\n";
     return false;
   }
@@ -1548,6 +1551,15 @@ bool TestServiceReportsWhyTheSinkQuestionHadNoAnswer() {
   bool ok = true;
   if (!reported) {
     std::cerr << "the unanswered sink question left no trace: '"
+              << service.Status().monitor_last_error << "'\n";
+    ok = false;
+  }
+  // The GUI reads this text, so a sound server that gave no answer must not
+  // become "Open Support" on the page.
+  if (service.Status().monitor_last_error.find(
+          studiocast::audio::kSoundServerNoAnswerMessage) ==
+      std::string::npos) {
+    std::cerr << "the unanswered sink question did not use the shared text: '"
               << service.Status().monitor_last_error << "'\n";
     ok = false;
   }

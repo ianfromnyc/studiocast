@@ -2373,6 +2373,14 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
             monitorLines << QStringLiteral(
                 "No output can be used for the microphone monitor. Choose a "
                 "physical output sink, or plug one in.");
+          } else if (monitorError.contains(QString::fromLatin1(
+                         studiocast::audio::kSoundServerNoAnswerMessage))) {
+            // A sound server that did not answer clears itself in seconds and
+            // asks nothing of the user. The daemon keeps retrying, so the
+            // page says to wait rather than to open a support case.
+            monitorLines << QStringLiteral(
+                "The sound server is busy. The monitor starts on its own when "
+                "the sound server answers.");
           } else {
             monitorLines << QStringLiteral(
                 "The monitor needs attention. Open Support for technical "

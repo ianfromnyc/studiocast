@@ -1567,8 +1567,11 @@ void VirtualAudioService::ThreadMain() {
                 "Failed to start the microphone monitor: " + err;
             if (!monitorSinkQuestionError.empty()) {
               // The pin holds, so say why the sound server could not say
-              // whether the output is still there.
-              message += " The sound server did not say whether the output '" +
+              // whether the output is still there. The message opens with the
+              // shared no-answer text, because the GUI reads that text as a
+              // wait and not as a request to open Support.
+              message += " " + std::string(kSoundServerNoAnswerMessage) +
+                         ", so it is not known whether the output '" +
                          startCfg.sink +
                          "' is still there: " + monitorSinkQuestionError;
             }
