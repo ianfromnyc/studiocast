@@ -547,12 +547,17 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
   FormatLadderResult res;
   std::ostringstream log;
 
-  // The format the device holds before the walk asks it for another one. A
-  // walk that keeps no rung puts this back, because the rungs it walked past
-  // may have left the device holding a format the writer refused.
+  // The format the device holds before the walk asks it to take another one.
+  // A walk that keeps no rung puts this back, because the rungs it walked past
+  // may have left the device holding a format the writer refused. Only a rung
+  // that changes the format can do that, thus the read waits for the first
+  // such rung and a walk that reaches none reads nothing at all.
   v4l2_format held{};
-  const bool haveHeld = restore.save && restore.save(&held);
-  bool answered = false;
+  bool haveHeld = false;
+  bool readHeld = false;
+
+  // True when a rung that changes the format the device holds answered.
+  bool changed = false;
 
   // The first rung the driver answered whose answer the writer cannot use.
   // The failure message names it; a walk that keeps a rung reports none.
@@ -563,6 +568,11 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
   for (std::size_t i = 0; i < rungs.size(); ++i) {
     const FormatLadderRung &r = rungs[i];
 
+    if (r.mutates && !readHeld) {
+      readHeld = true;
+      haveHeld = restore.save && restore.save(&held);
+    }
+
     std::string err;
     v4l2_format f{};
     if (!r.ask || !r.ask(&f, &err)) {
@@ -570,7 +580,8 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
           << "\n";
       continue;
     }
-    answered = true;
+    if (r.mutates)
+      changed = true;
 
     ActualFormat a;
     std::string perr;
@@ -598,9 +609,11 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
   res.first_refusal = firstRefusal;
   res.first_refusal_rung = firstRefusalRung;
 
-  // A device that answered no rung was never asked to take a format, thus it
-  // holds the format it held and needs no S_FMT to put one back.
-  if (answered && haveHeld && restore.restore)
+  // A device that answered no rung which asks it to take a format still holds
+  // the format it held, thus it needs no S_FMT to put one back. A G_FMT rung
+  // answers without changing anything, so a walk of those alone leaves the
+  // device as it found it on its own.
+  if (changed && haveHeld && restore.restore)
     restore.restore(held);
 
   return res;
@@ -670,6 +683,9 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
                (withStride ? " S_FMT(with stride)" : " S_FMT(no stride)");
       r.buf_type = t.type;
       r.mplane = t.mplane;
+      // S_FMT asks the device to take the format, thus this rung is one the
+      // walk may have to put a format back after.
+      r.mutates = true;
       r.ask = [fd, t, width, height, desiredFmt,
                withStride](v4l2_format *outFmt, std::string *outErr) {
         return TrySetFmtAny(fd, t, width, height, desiredFmt, withStride,
@@ -684,6 +700,8 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
     r.name = std::string(BufTypeName(t.type)) + " G_FMT";
     r.buf_type = t.type;
     r.mplane = t.mplane;
+    // G_FMT reads the format the device holds and changes nothing, thus
+    // `mutates` stays false and this rung earns no restore.
     r.ask = [fd, t](v4l2_format *outFmt, std::string *outErr) {
       return TryGetFmtAny(fd, t, outFmt, outErr);
     };

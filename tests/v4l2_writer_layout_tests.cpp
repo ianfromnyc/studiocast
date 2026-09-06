@@ -787,21 +787,25 @@ bool TestV4l2WriterRefusesAFrameLargerThanItCanHold() {
 // format the writer named as one it cannot use. That is not the format the
 // device held before the writer asked, and no other opener asked for it.
 //
-// So the walk reads the format the device holds before the first rung, and
-// puts it back when no rung gives a usable layout. The device the walk
-// changed nothing on gets no S_FMT at all: a driver that answered no rung
-// still holds the format it held.
+// So the walk reads the format the device holds before the first rung that
+// changes it, and puts that format back when no rung gives a usable layout.
+// A rung that asks G_FMT changes nothing, thus a walk in which only such
+// rungs answered gets no S_FMT, and a ladder of them alone is never saved
+// from at all.
 bool TestV4l2WriterFormatLadderPutsTheDeviceFormatBack() {
   using video::ChooseOutputFormat;
   using video::FormatLadderResult;
   using video::FormatLadderRung;
   using video::FormatRestore;
 
-  // Builds a rung that answers with one driver report.
-  auto Answer = [](const char *name, const LayoutCase &c) {
+  // Builds a rung that answers with one driver report. `mutates` tells the
+  // walk whether the question changes the format the device holds: S_FMT
+  // does, G_FMT does not.
+  auto Answer = [](const char *name, const LayoutCase &c, bool mutates) {
     FormatLadderRung r;
     r.name = name;
     r.mplane = c.mplane;
+    r.mutates = mutates;
     r.ask = [c](v4l2_format *outFmt, std::string *) {
       FillDriverFormat(outFmt, c);
       return true;
@@ -809,10 +813,11 @@ bool TestV4l2WriterFormatLadderPutsTheDeviceFormatBack() {
     return r;
   };
 
-  // Builds a rung the driver refuses outright.
+  // Builds an S_FMT rung the driver refuses outright.
   auto Refuse = [](const char *name) {
     FormatLadderRung r;
     r.name = name;
+    r.mutates = true;
     r.ask = [](v4l2_format *, std::string *outErr) {
       if (outErr)
         *outErr = "VIDIOC_S_FMT failed: Invalid argument";
@@ -865,8 +870,8 @@ bool TestV4l2WriterFormatLadderPutsTheDeviceFormatBack() {
     saves = 0;
     restored.clear();
     const std::vector<FormatLadderRung> rungs = {
-        Answer("VIDEO_OUTPUT S_FMT(with stride)", unusable),
-        Answer("VIDEO_OUTPUT S_FMT(no stride)", unusable),
+        Answer("VIDEO_OUTPUT S_FMT(with stride)", unusable, true),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", unusable, true),
     };
 
     const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30, guard);
@@ -888,8 +893,8 @@ bool TestV4l2WriterFormatLadderPutsTheDeviceFormatBack() {
     saves = 0;
     restored.clear();
     const std::vector<FormatLadderRung> rungs = {
-        Answer("VIDEO_OUTPUT S_FMT(with stride)", unusable),
-        Answer("VIDEO_OUTPUT S_FMT(no stride)", sane),
+        Answer("VIDEO_OUTPUT S_FMT(with stride)", unusable, true),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", sane, true),
     };
 
     const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30, guard);
@@ -922,10 +927,62 @@ bool TestV4l2WriterFormatLadderPutsTheDeviceFormatBack() {
     }
   }
 
+  // A G_FMT rung answers a format without asking the device to take one, thus
+  // a walk in which only such rungs answered changed nothing and needs no
+  // S_FMT to put anything back. The walk does not even read the held format,
+  // because it walks past no rung that could change it.
+  {
+    saves = 0;
+    restored.clear();
+    const std::vector<FormatLadderRung> rungs = {
+        Answer("VIDEO_OUTPUT G_FMT", unusable, false),
+        Answer("VIDEO_CAPTURE G_FMT", unusable, false),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30, guard);
+    if (!Expect(!got.ok, "a ladder of unusable G_FMT rungs must fail"))
+      return false;
+    if (!Expect(saves == 0, "a walk that changes nothing must read nothing")) {
+      std::cerr << "  saved " << saves << " times\n";
+      return false;
+    }
+    if (!Expect(restored.empty(),
+                "a rung that changes nothing must earn no S_FMT")) {
+      std::cerr << "  restored " << restored.size() << " formats\n";
+      return false;
+    }
+  }
+
+  // The held format is read before the first rung that changes it, and only
+  // that once: a walk whose first rung asks nothing of the device still puts
+  // back the format the device held before the S_FMT rungs below it.
+  {
+    saves = 0;
+    restored.clear();
+    const std::vector<FormatLadderRung> rungs = {
+        Answer("VIDEO_OUTPUT G_FMT", unusable, false),
+        Answer("VIDEO_OUTPUT S_FMT(with stride)", unusable, true),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", unusable, true),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30, guard);
+    if (!Expect(!got.ok, "a ladder no rung parses must fail"))
+      return false;
+    if (!Expect(saves == 1, "the walk must read the held format once")) {
+      std::cerr << "  saved " << saves << " times\n";
+      return false;
+    }
+    if (!Expect(restored.size() == 1u && restored[0] == 1920,
+                "the failed walk must put the held format back")) {
+      std::cerr << "  restored " << restored.size() << " formats\n";
+      return false;
+    }
+  }
+
   // The walk still runs when the caller gives it no way to save or restore.
   {
     const std::vector<FormatLadderRung> rungs = {
-        Answer("VIDEO_OUTPUT S_FMT(no stride)", sane),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", sane, true),
     };
 
     const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30);

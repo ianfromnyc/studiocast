@@ -92,6 +92,11 @@ struct FormatLadderRung {
   // True when the answer lands in `fmt.pix_mp`.
   bool mplane = false;
 
+  // True when the question changes the format the device holds: S_FMT does,
+  // G_FMT does not. The walk reads the held format before the first rung that
+  // changes it, and puts that format back only when such a rung answered.
+  bool mutates = false;
+
   // Asks the driver. Fills `*outFmt` on success, `*outErr` on failure.
   std::function<bool(v4l2_format *outFmt, std::string *outErr)> ask;
 };
@@ -122,13 +127,15 @@ struct FormatLadderResult {
 // use. Both members are best effort, and a walk given neither changes nothing
 // on failure.
 struct FormatRestore {
-  // Reads the format the device holds before the first rung. True when the
-  // answer is one the walk can put back.
+  // Reads the format the device holds. The walk calls this once, before the
+  // first rung whose `mutates` says it changes that format, thus a walk that
+  // reaches no such rung asks the device nothing. True when the answer is one
+  // the walk can put back.
   std::function<bool(v4l2_format *outFmt)> save;
 
   // Asks the device to take the saved format again. The walk calls this only
-  // when it failed after a rung the driver answered, and it does not read the
-  // outcome: the caller is on its way to reporting the failure.
+  // when it failed after a rung that changes the format answered, and it does
+  // not read the outcome: the caller is on its way to reporting the failure.
   std::function<void(const v4l2_format &fmt)> restore;
 };
 
