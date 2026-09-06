@@ -451,13 +451,15 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
     consumer_detector_.reset();
   }
 
-  stop_.store(false, std::memory_order_release);
   try {
-    // Start the supervisor outside the lock so ThreadMain() never waits on
-    // it, then publish the handle under the lock.
-    std::thread supervisor([this]() { ThreadMain(); });
+    // Clear the stop flag and publish the supervisor under one lock. Stop()
+    // sets the flag under the same lock, thus a Stop() that runs at the same
+    // time either joins the supervisor of the last run, or joins this one
+    // after that supervisor saw the flag. Without this, Stop() can join a
+    // supervisor that was never told to stop, and then it never returns.
     std::lock_guard<std::mutex> lock(th_mu_);
-    th_ = std::move(supervisor);
+    stop_.store(false, std::memory_order_release);
+    th_ = std::thread([this]() { ThreadMain(); });
   } catch (const std::exception &e) {
     if (error)
       *error = std::string("Failed to start VirtualAudioService thread: ") +
@@ -475,11 +477,13 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
 }
 
 void VirtualAudioService::Stop() {
-  stop_.store(true, std::memory_order_release);
   {
     // A second Stop() caller waits here, and thus never joins a supervisor
-    // that the first caller already joined.
+    // that the first caller already joined. The stop flag goes up under the
+    // same lock as the join, thus the supervisor that this caller joins is
+    // always one that sees the flag.
     std::lock_guard<std::mutex> lock(th_mu_);
+    stop_.store(true, std::memory_order_release);
     if (th_.joinable()) {
       th_.join();
     }
