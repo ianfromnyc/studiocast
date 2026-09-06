@@ -189,8 +189,9 @@ public:
         inner(delay);
         return;
       }
-      // Tests use a poll interval of 1 ms, thus a short sleep keeps the
-      // supervisor responsive without a busy loop.
+      // The service clamps `poll_ms` to a minimum of 25 ms, thus `delay` is
+      // always 25 ms. Ignore it, as the replaced hooks did: a short sleep
+      // keeps the supervisor fast without a busy loop.
       std::this_thread::sleep_for(1ms);
     };
   }
