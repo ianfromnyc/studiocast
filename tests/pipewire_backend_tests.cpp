@@ -1383,8 +1383,21 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
   constexpr std::uint64_t kFrames = 20000;
   // Hand-offs the consumer must take. Each one is a frame the consumer read
   // while the producer wrote the next.
-  constexpr int kHandoffs = 32;
-  // A write count no healthy run comes near, because 32 hand-offs need 32
+  //
+  // This count sets what the test costs on a loaded machine. A consumer that
+  // must share its core waits a full scheduler round for each hand-off, thus
+  // the time is linear in this count and in the length of the run queue: on
+  // one core with 32 other jobs on it, the slowest of 15 runs took 0.29 s at 1
+  // hand-off, 1.12 s at 8 and 3.59 s at 32. An idle machine gives the same
+  // time at each count.
+  //
+  // A count of 1 is enough to catch the fault this test was written for, which
+  // is a hand-off that never happens. 8 also says that the two ends keep the
+  // hand-off up: 8 hand-offs need 8 consumer runs, which one producer time
+  // slice cannot give. Raise this count for more interleaving, but know that
+  // the wait on a loaded machine goes up with it.
+  constexpr int kHandoffs = 8;
+  // A write count no healthy run comes near, because 8 hand-offs need 8
   // writes at best and the writes above give thousands on an idle machine.
   constexpr std::uint64_t kWriteCap = kFrames * 500;
   // The third bound, on the clock. The write cap counts writes, thus what it
