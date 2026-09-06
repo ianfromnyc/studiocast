@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -382,6 +383,53 @@ private:
   std::shared_ptr<BlockingIoState> state_;
   BlockMode mode_;
   std::chrono::milliseconds block_timeout_;
+};
+
+struct ParkedReadIoState {
+  std::mutex mu;
+  std::condition_variable cv;
+  bool read_entered = false;
+  bool released = false;
+};
+
+// Capture I/O that parks the pipeline worker inside Read() until the test
+// releases it. RequestStop() does not release the worker, so a Stop() caller
+// stays inside join() long enough for a second Stop() caller to reach the
+// same join.
+class ParkedReadIo final : public AudioPipelineIo {
+public:
+  explicit ParkedReadIo(std::shared_ptr<ParkedReadIoState> state)
+      : state_(std::move(state)) {}
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool Read(void *, std::size_t, std::string *error) override {
+    std::unique_lock<std::mutex> lock(state_->mu);
+    state_->read_entered = true;
+    state_->cv.notify_all();
+    state_->cv.wait(lock, [&] { return state_->released; });
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return true;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+  void RequestStop() override {}
+
+private:
+  std::shared_ptr<ParkedReadIoState> state_;
 };
 
 struct ResettingOpenIoState {
@@ -4641,6 +4689,134 @@ bool TestStopInterruptsBlockedPlaybackWrite() {
   return true;
 }
 
+// Keeps a fixture alive after a stop thread wedged inside join(). A wedged
+// thread cannot be cancelled, so the test leaves it detached and holds its
+// state here instead of letting a dangling reference outlive the test.
+std::vector<std::shared_ptr<void>> &WedgedFixtures() {
+  static std::vector<std::shared_ptr<void>> fixtures;
+  return fixtures;
+}
+
+struct ConcurrentStopFixture {
+  std::atomic<int> stops_done{0};
+  std::atomic<int> join_errors{0};
+  std::mutex text_mu;
+  std::string join_error_text;
+
+  void RecordJoinError(const std::system_error &e) {
+    join_errors.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(text_mu);
+    if (join_error_text.empty())
+      join_error_text = e.what();
+  }
+
+  std::string JoinErrorText() {
+    std::lock_guard<std::mutex> lock(text_mu);
+    return join_error_text;
+  }
+};
+
+struct ConcurrentPipelineStopFixture : ConcurrentStopFixture {
+  std::shared_ptr<ParkedReadIoState> io_state =
+      std::make_shared<ParkedReadIoState>();
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+
+  void ReleaseWorker() {
+    {
+      std::lock_guard<std::mutex> lock(io_state->mu);
+      io_state->released = true;
+    }
+    io_state->cv.notify_all();
+  }
+};
+
+bool TestConcurrentPipelineStopJoinsWorkerOnce() {
+  auto fx = std::make_shared<ConcurrentPipelineStopFixture>();
+
+  AudioPipelineHooks hooks;
+  auto io_state = fx->io_state;
+  hooks.create_io = [io_state] {
+    return std::make_unique<ParkedReadIo>(io_state);
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  AudioPipelineConfig cfg;
+  std::string err;
+  if (!fx->pipeline->Start(cfg, &err)) {
+    std::cerr << "pipeline.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!WaitUntil(
+          [&] {
+            std::lock_guard<std::mutex> lock(fx->io_state->mu);
+            return fx->io_state->read_entered;
+          },
+          250ms)) {
+    std::cerr << "pipeline worker did not enter the parked capture read\n";
+    fx->ReleaseWorker();
+    fx->pipeline->Stop();
+    return false;
+  }
+
+  // Two callers stop the same pipeline at once. The worker must be joined
+  // exactly once: a second join on the same worker either throws
+  // "Invalid argument" or waits for a thread that no longer exists.
+  auto stopper = [fx] {
+    try {
+      fx->pipeline->Stop();
+    } catch (const std::system_error &e) {
+      fx->RecordJoinError(e);
+    }
+    fx->stops_done.fetch_add(1, std::memory_order_release);
+  };
+
+  std::thread first_stop(stopper);
+  std::thread second_stop(stopper);
+
+  // Hold the worker until both callers are inside Stop().
+  std::this_thread::sleep_for(100ms);
+  fx->ReleaseWorker();
+
+  const bool both_returned = WaitUntil(
+      [&] { return fx->stops_done.load(std::memory_order_acquire) == 2; },
+      5000ms);
+
+  if (!both_returned) {
+    // A Stop() is wedged inside join() on a worker that the other Stop()
+    // already joined. The wedged thread cannot be recovered and its stale
+    // thread id can be reused by a later test, so end the run here with a
+    // failure instead of corrupting the tests that follow.
+    first_stop.detach();
+    second_stop.detach();
+    WedgedFixtures().push_back(fx);
+    std::cout.flush();
+    std::cerr << "[FAIL] concurrent pipeline Stop() never returned; a join() "
+                 "is stuck on a worker that another Stop() already joined"
+              << std::endl;
+    std::_Exit(1);
+  }
+
+  first_stop.join();
+  second_stop.join();
+
+  if (fx->join_errors.load(std::memory_order_relaxed) != 0) {
+    std::cerr << "concurrent pipeline Stop() threw from join(): "
+              << fx->JoinErrorText() << "\n";
+    return false;
+  }
+
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after concurrent Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -4746,6 +4922,8 @@ int main() {
       {"stop interrupts open after early stop reset",
        &TestStopInterruptsOpenAfterEarlyStopReset},
       {"stop interrupts blocked flush", &TestStopInterruptsBlockedFlush},
+      {"concurrent pipeline stop joins the worker once",
+       &TestConcurrentPipelineStopJoinsWorkerOnce},
       {"start returns open failure and can retry",
        &TestStartReturnsOpenFailureAndCanRetry},
       {"pipeline surfaces capture disconnect",
