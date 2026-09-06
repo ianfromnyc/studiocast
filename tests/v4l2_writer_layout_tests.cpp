@@ -279,4 +279,89 @@ bool TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite() {
 #endif
 }
 
+// The driver's own report has to hold together: the rows it says the frame
+// has must fit the frame size it says the buffer holds. The writer sizes
+// every write() from `size_image`, so raising that value to match a longer
+// stride only hides the disagreement and then pushes more bytes than the
+// frame the driver sized. On a v4l2loopback output the surplus runs into the
+// next frame, and the picture is torn from then on.
+//
+// A frame size of 0 is not that disagreement: it is no report at all, and the
+// raise gives it the value the stride implies. That case must stay accepted.
+bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold() {
+  using video::ActualFormat;
+  using video::ParseChosenFormat;
+
+  const LayoutCase refused[] = {
+      {"padded YUYV rows overrun the reported frame", V4L2_PIX_FMT_YUYV, 640,
+       480, 1536, 614400, 0u, 0u},
+      {"RGB24 rows overrun the reported frame", V4L2_PIX_FMT_RGB24, 640, 480,
+       2048, 921600, 0u, 0u},
+      {"one byte of stride too many", V4L2_PIX_FMT_YUYV, 640, 480, 1281, 614400,
+       0u, 0u},
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
+      {"padded YUYV rows overrun the reported frame, mplane", V4L2_PIX_FMT_YUYV,
+       640, 480, 1536, 614400, 0u, 0u, true},
+      {"RGB24 rows overrun the reported frame, mplane", V4L2_PIX_FMT_RGB24, 640,
+       480, 2048, 921600, 0u, 0u, true},
+#endif
+  };
+
+  for (const LayoutCase &c : refused) {
+    v4l2_format f{};
+    FillDriverFormat(&f, c);
+
+    ActualFormat got{};
+    std::string err;
+    if (!Expect(!ParseChosenFormat(f, c.mplane, /*fps=*/30, &got, &err),
+                "rows the reported frame size cannot hold must be refused")) {
+      std::cerr << "  " << c.name << ": got size_image " << got.size_image
+                << "\n";
+      return false;
+    }
+
+    if (!Expect(!err.empty(), "the refusal must name the reason")) {
+      std::cerr << "  " << c.name << "\n";
+      return false;
+    }
+  }
+
+  // The two reports that look like the refusal but are not it: a frame size
+  // of 0 is no report at all, and a stride below the packed row is measured
+  // against the frame size before it is raised.
+  const LayoutCase accepted[] = {
+      {"a stride with no frame size at all", V4L2_PIX_FMT_YUYV, 640, 480, 1280,
+       0, 1280u, 614400u},
+      {"a stride below the packed row is raised, not refused",
+       V4L2_PIX_FMT_YUYV, 3, 4, 4, 16, 8u, 32u},
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
+      {"a stride with no frame size at all, mplane", V4L2_PIX_FMT_YUYV, 640,
+       480, 1280, 0, 1280u, 614400u, true},
+#endif
+  };
+
+  for (const LayoutCase &c : accepted) {
+    v4l2_format f{};
+    FillDriverFormat(&f, c);
+
+    ActualFormat got{};
+    std::string err;
+    if (!Expect(ParseChosenFormat(f, c.mplane, /*fps=*/30, &got, &err),
+                "a report that is not self-contradictory must be accepted")) {
+      std::cerr << "  " << c.name << ": " << err << "\n";
+      return false;
+    }
+
+    if (!Expect(got.bytes_per_line == c.want_bytes_per_line &&
+                    got.size_image == c.want_size_image,
+                "the accepted report must take the implied layout")) {
+      std::cerr << "  " << c.name << ": got " << got.bytes_per_line << " and "
+                << got.size_image << "\n";
+      return false;
+    }
+  }
+
+  return true;
+}
+
 } // namespace studiocast::tests

@@ -65,6 +65,7 @@ bool TestBackgroundBlurCpuMatchesReferenceAndPreservesPadding();
 bool TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair();
 bool TestV4l2WriterFormatParseReadsBothUnionArms();
 bool TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite();
+bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold();
 } // namespace studiocast::tests
 
 namespace {
@@ -1139,6 +1140,8 @@ int main() {
       {"V4L2 writer refuses an mplane plane count it cannot write",
        &studiocast::tests::
            TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite},
+      {"V4L2 writer refuses rows the frame size cannot hold",
+       &studiocast::tests::TestV4l2WriterRefusesRowsTheFrameSizeCannotHold},
       {"V4L2 capture negotiation keeps the driver row stride",
        &studiocast::tests::TestV4l2CaptureNegotiationKeepsTheDriverRowStride},
       {"V4L2 capture negotiation refuses rows the frame size cannot hold",
