@@ -67,6 +67,7 @@ bool TestV4l2WriterFormatParseReadsBothUnionArms();
 bool TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite();
 bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold();
 bool TestV4l2WriterFormatLadderStepsPastAParseRefusal();
+bool TestV4l2WriterRefusesADeviceThatCannotTakeWrites();
 } // namespace studiocast::tests
 
 namespace {
@@ -996,7 +997,8 @@ bool TestStandaloneGpuScalerPolicySkipsInactiveBackendTransfers() {
           /*have_deferred_gpu_out=*/true,
           /*allow_cpu_resize=*/false,
           /*same_backend_effects_ran=*/true)) {
-    std::cerr << "standalone GPU scaler should skip when no scaling is needed\n";
+    std::cerr
+        << "standalone GPU scaler should skip when no scaling is needed\n";
     return false;
   }
 
@@ -1074,8 +1076,7 @@ int main() {
        &studiocast::tests::
            TestOpenCudaF32ResizeBorderContractIsReplicateNoGpuSafe},
       {"Open CUDA alpha clamp and solid BGR contract are no-GPU safe",
-       &studiocast::tests::
-           TestOpenCudaAlphaClampAndSolidBgrContractNoGpuSafe},
+       &studiocast::tests::TestOpenCudaAlphaClampAndSolidBgrContractNoGpuSafe},
       {"CUDA u8 resize rounding contract is no-GPU safe",
        &studiocast::tests::TestCudaU8ResizeRoundingContractIsNoGpuSafe},
       {"CUDA resize availability probe is thread-safe",
@@ -1145,6 +1146,8 @@ int main() {
        &studiocast::tests::TestV4l2WriterRefusesRowsTheFrameSizeCannotHold},
       {"V4L2 writer format ladder steps past a parse refusal",
        &studiocast::tests::TestV4l2WriterFormatLadderStepsPastAParseRefusal},
+      {"V4L2 writer refuses a device that cannot take writes",
+       &studiocast::tests::TestV4l2WriterRefusesADeviceThatCannotTakeWrites},
       {"V4L2 capture negotiation keeps the driver row stride",
        &studiocast::tests::TestV4l2CaptureNegotiationKeepsTheDriverRowStride},
       {"V4L2 capture negotiation refuses rows the frame size cannot hold",

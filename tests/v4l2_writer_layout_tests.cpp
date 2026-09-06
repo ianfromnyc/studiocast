@@ -518,4 +518,54 @@ bool TestV4l2WriterFormatLadderStepsPastAParseRefusal() {
   return true;
 }
 
+// The writer gives the driver every frame with write(), which is the file I/O
+// method `V4L2_CAP_READWRITE` advertises. A device without that cap fails
+// every frame, whatever the format says, so negotiation must refuse it while
+// the caps are still in hand. Without the check the open succeeds and each
+// frame fails on its own, and none of those failures names the cause.
+bool TestV4l2WriterRefusesADeviceThatCannotTakeWrites() {
+  using video::OutputDeviceCanWrite;
+
+  std::string err;
+  if (!Expect(OutputDeviceCanWrite(V4L2_CAP_VIDEO_OUTPUT | V4L2_CAP_READWRITE |
+                                       V4L2_CAP_STREAMING,
+                                   &err),
+              "a device that advertises READWRITE must be accepted")) {
+    std::cerr << "  " << err << "\n";
+    return false;
+  }
+
+  // v4l2loopback advertises CAPTURE and READWRITE on the producer side, which
+  // is the device StudioCast writes to.
+  if (!Expect(OutputDeviceCanWrite(V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_READWRITE |
+                                       V4L2_CAP_STREAMING,
+                                   &err),
+              "the v4l2loopback caps must be accepted")) {
+    std::cerr << "  " << err << "\n";
+    return false;
+  }
+
+  const __u32 refused[] = {
+      V4L2_CAP_VIDEO_OUTPUT | V4L2_CAP_STREAMING,
+      V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING,
+      0u,
+  };
+
+  for (const __u32 caps : refused) {
+    err.clear();
+    if (!Expect(!OutputDeviceCanWrite(caps, &err),
+                "a device without READWRITE must be refused")) {
+      std::cerr << "  caps 0x" << std::hex << caps << std::dec << "\n";
+      return false;
+    }
+
+    if (!Expect(!err.empty(), "the refusal must name the reason")) {
+      std::cerr << "  caps 0x" << std::hex << caps << std::dec << "\n";
+      return false;
+    }
+  }
+
+  return true;
+}
+
 } // namespace studiocast::tests

@@ -64,6 +64,14 @@ struct ActualFormat {
 bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
                           ActualFormat *out, std::string *outErr);
 
+// True when the capabilities a device reports from VIDIOC_QUERYCAP hold the
+// read/write I/O method. The writer gives the driver every frame with
+// write(), which is the file I/O the kernel offers under
+// `V4L2_CAP_READWRITE`, thus a device without that cap takes no frame at all.
+//
+// Exposed for tests; `V4l2Writer::Open()` is the only other caller.
+bool OutputDeviceCanWrite(std::uint32_t caps, std::string *outErr);
+
 // One rung of the format ladder: a question for the driver, and the union arm
 // the answer lands in.
 struct FormatLadderRung {

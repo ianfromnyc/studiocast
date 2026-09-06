@@ -372,6 +372,22 @@ bool TryGetFmtAny(int fd, const TypeSpec &t, v4l2_format *outFmt,
 
 } // namespace
 
+bool OutputDeviceCanWrite(std::uint32_t caps, std::string *outErr) {
+  if (caps & V4L2_CAP_READWRITE)
+    return true;
+
+  if (outErr) {
+    std::string why = "Device does not support write(): it does not advertise "
+                      "V4L2_CAP_READWRITE";
+    if (caps & V4L2_CAP_STREAMING) {
+      why += ", and it offers STREAMING buffers only, which this writer does "
+             "not use";
+    }
+    *outErr = why + ".";
+  }
+  return false;
+}
+
 bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
                           ActualFormat *out, std::string *outErr) {
   if (!out)
@@ -541,6 +557,21 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
   __u32 caps = cap.capabilities;
   if (caps & V4L2_CAP_DEVICE_CAPS)
     caps = cap.device_caps;
+
+  // The frame path is write() alone, thus a device that does not offer that
+  // I/O method takes no frame, whatever format the ladder below negotiates.
+  // Refuse here, where the caps are in hand: without this the open succeeds
+  // and every frame fails on its own with an error that names no cause.
+  std::string ioErr;
+  if (!OutputDeviceCanWrite(caps, &ioErr)) {
+    std::ostringstream oss;
+    oss << "Cannot write frames to " << device << ": " << ioErr << "\n"
+        << "querycap.driver=" << cap.driver << " card=" << cap.card
+        << " bus=" << cap.bus_info << "\n"
+        << "querycap.caps=" << CapsToString(caps) << "\n";
+    res.error = oss.str();
+    return res;
+  }
 
   // Prefer output types first; then capture types. Try mplane variants too.
   const TypeSpec types[] = {
