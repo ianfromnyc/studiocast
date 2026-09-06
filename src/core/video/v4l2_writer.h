@@ -85,6 +85,10 @@ struct FormatLadderRung {
   // Names the rung in the attempt log, e.g. "VIDEO_OUTPUT S_FMT(no stride)".
   std::string name;
 
+  // The V4L2 buffer type the question names, and thus the type the caller
+  // must use for every ioctl that follows the walk.
+  std::uint32_t buf_type = 0;
+
   // True when the answer lands in `fmt.pix_mp`.
   bool mplane = false;
 
@@ -103,9 +107,12 @@ struct FormatLadderResult {
   // One line for each rung the walk tried and left, for the failure message.
   std::string attempt_log;
 
-  // The message of the first rung whose answer the parse refused. Empty when
-  // no rung got that far.
+  // The message of the first rung whose answer the parse refused, and the
+  // index of that rung in `rungs`. Both belong to the failure message: a walk
+  // that kept a rung leaves the message empty, because the layout it gives
+  // back is the whole answer.
   std::string first_refusal;
+  std::size_t first_refusal_rung = 0;
 };
 
 // How the walk puts the device format back. A rung that asks S_FMT changes

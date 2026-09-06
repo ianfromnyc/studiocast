@@ -463,6 +463,13 @@ bool TestV4l2WriterFormatLadderStepsPastAParseRefusal() {
     if (!Expect(!got.attempt_log.empty(),
                 "the refused rung must stay in the attempt log"))
       return false;
+    // The refusal belongs to the failure message alone, so a walk that kept a
+    // rung reports none: the layout it gives back is the whole answer.
+    if (!Expect(got.first_refusal.empty(),
+                "a walk that kept a rung must report no refusal")) {
+      std::cerr << "  got '" << got.first_refusal << "'\n";
+      return false;
+    }
   }
 
   // A rung the driver refuses outright is walked past the same way, and the
@@ -511,6 +518,26 @@ bool TestV4l2WriterFormatLadderStepsPastAParseRefusal() {
     if (!Expect(got.attempt_log.find("S_FMT(no stride)") != std::string::npos,
                 "the attempt log must name every rung tried")) {
       std::cerr << "  got '" << got.attempt_log << "'\n";
+      return false;
+    }
+  }
+
+  // The failure names the rung of the first refusal as well as its message,
+  // thus the caller can point at that rung without printing its text twice.
+  {
+    const std::vector<FormatLadderRung> rungs = {
+        Refuse("VIDEO_OUTPUT S_FMT(with stride)", "S_FMT failed: Invalid "
+                                                  "argument"),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", contradictory),
+        Answer("VIDEO_CAPTURE S_FMT(with stride)", contradictory),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30);
+    if (!Expect(!got.ok, "a ladder no rung parses must fail"))
+      return false;
+    if (!Expect(got.first_refusal_rung == 1u,
+                "the failure must name the rung of the first refusal")) {
+      std::cerr << "  named rung " << got.first_refusal_rung << "\n";
       return false;
     }
   }

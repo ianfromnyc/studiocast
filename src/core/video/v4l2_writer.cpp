@@ -554,6 +554,12 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
   const bool haveHeld = restore.save && restore.save(&held);
   bool answered = false;
 
+  // The first rung the driver answered whose answer the writer cannot use.
+  // The failure message names it; a walk that keeps a rung reports none.
+  bool haveRefusal = false;
+  std::string firstRefusal;
+  std::size_t firstRefusalRung = 0;
+
   for (std::size_t i = 0; i < rungs.size(); ++i) {
     const FormatLadderRung &r = rungs[i];
 
@@ -577,15 +583,20 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
     }
 
     // The driver answered, but the writer cannot use the answer. Keep the
-    // first such message: it names the rung the writer wanted most.
-    if (res.first_refusal.empty())
-      res.first_refusal = perr;
+    // first such rung: it is the rung the writer wanted most.
+    if (!haveRefusal) {
+      haveRefusal = true;
+      firstRefusal = perr.empty() ? "(no detail)" : perr;
+      firstRefusalRung = i;
+    }
 
     log << "Tried " << r.name << ": the driver answered a format the writer "
         << "cannot use: " << (perr.empty() ? "(no detail)" : perr) << "\n";
   }
 
   res.attempt_log = log.str();
+  res.first_refusal = firstRefusal;
+  res.first_refusal_rung = firstRefusalRung;
 
   // A device that answered no rung was never asked to take a format, thus it
   // holds the format it held and needs no S_FMT to put one back.
@@ -650,15 +661,14 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
   // G_FMT across them, in the same order. The walk keeps the first rung the
   // driver answers with a layout the writer can use.
   std::vector<FormatLadderRung> rungs;
-  std::vector<__u32> rungTypes;
   rungs.reserve(std::size(types) * 3);
-  rungTypes.reserve(std::size(types) * 3);
 
   for (const auto &t : types) {
     for (const bool withStride : {true, false}) {
       FormatLadderRung r;
       r.name = std::string(BufTypeName(t.type)) +
                (withStride ? " S_FMT(with stride)" : " S_FMT(no stride)");
+      r.buf_type = t.type;
       r.mplane = t.mplane;
       r.ask = [fd, t, width, height, desiredFmt,
                withStride](v4l2_format *outFmt, std::string *outErr) {
@@ -666,19 +676,18 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
                             outFmt, outErr);
       };
       rungs.push_back(std::move(r));
-      rungTypes.push_back(t.type);
     }
   }
 
   for (const auto &t : types) {
     FormatLadderRung r;
     r.name = std::string(BufTypeName(t.type)) + " G_FMT";
+    r.buf_type = t.type;
     r.mplane = t.mplane;
     r.ask = [fd, t](v4l2_format *outFmt, std::string *outErr) {
       return TryGetFmtAny(fd, t, outFmt, outErr);
     };
     rungs.push_back(std::move(r));
-    rungTypes.push_back(t.type);
   }
 
   // A walk that keeps no rung must leave the device as it found it, thus the
@@ -701,11 +710,9 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
 
   const FormatLadderResult ladder = ChooseOutputFormat(rungs, fps, restore);
   if (ladder.ok) {
-    res.chosen_buf_type = rungTypes[ladder.rung];
+    res.chosen_buf_type = rungs[ladder.rung].buf_type;
     res.chosen_mplane = rungs[ladder.rung].mplane;
-  }
-
-  if (!ladder.ok) {
+  } else {
     std::ostringstream oss;
     oss << "Failed to set/query format for " << device
         << " (desired=" << PixelFormatName(desiredFmt) << ", " << width << "x"
@@ -713,9 +720,11 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
         << "querycap.driver=" << cap.driver << " card=" << cap.card
         << " bus=" << cap.bus_info << "\n"
         << "querycap.caps=" << CapsToString(caps) << "\n";
+    // Name the rung alone, because the log below carries its message.
     if (!ladder.first_refusal.empty()) {
-      oss << "First format the driver gave that the writer cannot use: "
-          << ladder.first_refusal << "\n";
+      oss << "First rung the driver answered with a format the writer cannot "
+             "use: "
+          << rungs[ladder.first_refusal_rung].name << "\n";
     }
     oss << ladder.attempt_log;
     res.error = oss.str();
