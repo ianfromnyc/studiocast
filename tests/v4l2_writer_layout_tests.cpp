@@ -1256,6 +1256,65 @@ bool TestV4l2WriterRestoresOnlyTheBufferTypeARungChanged() {
     }
   }
 
+  // A driver that keeps one format for several buffer types answers every
+  // G_FMT with what the last S_FMT wrote, whatever type asked about it. The
+  // save of a type below thus reads a format a rung above already set, and
+  // only the first save of the walk is sure to hold what the device came in
+  // with. So the walk puts the saves back in the reverse of the order it read
+  // them: the earliest save is the last write, and it wins.
+  {
+    v4l2_format device{};
+    FillDriverFormat(&device, held);
+
+    // The one format the device keeps, read under the type that asks for it.
+    FormatRestore shared;
+    shared.save = [&](const FormatLadderRung &r, v4l2_format *outFmt) {
+      *outFmt = device;
+      outFmt->type = r.buf_type;
+      return true;
+    };
+    shared.restore = [&](const v4l2_format &f) { device = f; };
+
+    // An S_FMT rung that writes the one format the device keeps.
+    auto Write = [&device](const char *name, __u32 buf_type,
+                           const LayoutCase &c) {
+      FormatLadderRung r;
+      r.name = name;
+      r.buf_type = buf_type;
+      r.mutates = true;
+      r.ask = [&device, c, buf_type](v4l2_format *outFmt, std::string *) {
+        FillDriverFormat(outFmt, c);
+        outFmt->type = buf_type;
+        device = *outFmt;
+        return true;
+      };
+      return r;
+    };
+
+    const std::vector<FormatLadderRung> rungs = {
+        Write("VIDEO_OUTPUT S_FMT(with stride)", V4L2_BUF_TYPE_VIDEO_OUTPUT,
+              unusable),
+        Write("VIDEO_CAPTURE S_FMT(with stride)", V4L2_BUF_TYPE_VIDEO_CAPTURE,
+              unusable),
+    };
+
+    const FormatLadderResult got =
+        ChooseOutputFormat(rungs, /*fps=*/30, shared);
+    if (!Expect(!got.ok, "a ladder no rung parses must fail"))
+      return false;
+    if (!Expect(device.fmt.pix.pixelformat == held.fourcc &&
+                    device.fmt.pix.width == static_cast<__u32>(held.width) &&
+                    device.fmt.pix.height == static_cast<__u32>(held.height),
+                "the walk must leave a shared format as it found it")) {
+      std::cerr << "  device holds fourcc 0x" << std::hex
+                << device.fmt.pix.pixelformat << std::dec << " "
+                << device.fmt.pix.width << "x" << device.fmt.pix.height
+                << ", wanted 0x" << std::hex << held.fourcc << std::dec << " "
+                << held.width << "x" << held.height << "\n";
+      return false;
+    }
+  }
+
   return true;
 }
 

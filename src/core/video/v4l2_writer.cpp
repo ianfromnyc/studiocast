@@ -691,10 +691,18 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
   // holds the format it held, thus it needs no S_FMT to put one back. A G_FMT
   // rung answers without changing anything, so a walk of those alone leaves
   // the device as it found it on its own.
+  //
+  // The saves go back in the reverse of the order the walk read them. A save
+  // runs immediately before the first rung that changes its type, thus a save
+  // below reads the device after the rungs above it ran. On a driver that
+  // keeps one format for several buffer types, that save holds a format a
+  // rung set. Only the first save of the walk is sure to hold the format the
+  // device came in with, so it must be the last S_FMT. On a driver that keeps
+  // a format for each type the order changes nothing.
   if (restore.restore) {
-    for (const HeldFormat &h : held) {
-      if (h.have && h.changed)
-        restore.restore(h.fmt);
+    for (auto it = held.rbegin(); it != held.rend(); ++it) {
+      if (it->have && it->changed)
+        restore.restore(it->fmt);
     }
   }
 

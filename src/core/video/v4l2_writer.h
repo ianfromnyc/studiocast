@@ -196,7 +196,9 @@ struct FormatRestore {
 // A walk that keeps a rung leaves the device holding that rung's format. A
 // walk that keeps no rung puts back the formats `restore.save` read, so that
 // it leaves the device as it found it. It puts back the format of a buffer
-// type only when a rung of that type changed it.
+// type only when a rung of that type changed it, and it puts the types back
+// in the reverse of the order it read them, so that a driver which keeps one
+// format for several types ends on the format the walk read first.
 //
 // That is a claim about the walk alone, not about the open. Everything after
 // a kept rung is outside it: a caller that opens the device and then closes
