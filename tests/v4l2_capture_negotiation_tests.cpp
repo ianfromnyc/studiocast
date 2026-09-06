@@ -677,6 +677,61 @@ bool TestCaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop() {
                 "a failure before the dequeue must release no buffer");
 }
 
+// One check serves both buffer types, and each type reaches it for its own
+// reason. A plane offset is what moves the walk past the end of the mapping on
+// the multi-planar arm; the single-plane arm has no offset, so only a mapping
+// shorter than the walk can refuse a frame there. The message must name the
+// one that applies, because it is what the operator acts on.
+bool TestCaptureRawWalkRefusalNamesItsCause() {
+  using studiocast::video::CaptureFormat;
+  using studiocast::video::CaptureRawWalkFitsMapping;
+
+  auto Contains = [](const std::string &haystack, const char *needle) {
+    return haystack.find(needle) != std::string::npos;
+  };
+
+  CaptureFormat fmt;
+  fmt.width = 640;
+  fmt.height = 480;
+  fmt.format = CapturePixelFormat::yuyv;
+  fmt.bytes_per_line = 1280;
+  fmt.size_image = 614400;
+
+  // A mapping that holds the frame, with an offset that moves the end of the
+  // walk past the end of it. The offset is the cause.
+  std::string offset_err;
+  if (!Expect(!CaptureRawWalkFitsMapping(614400u, /*data_offset=*/64u, fmt,
+                                         &offset_err),
+              "an offset the mapping cannot absorb must refuse the frame"))
+    return false;
+
+  if (!Expect(Contains(offset_err, "data_offset of 64 bytes"),
+              "an offset refusal must name the offset"))
+    return false;
+
+  if (!Expect(Contains(offset_err, "614336 bytes of the mapping") &&
+                  Contains(offset_err, "frame of 614400 bytes"),
+              "an offset refusal must give the room it leaves and the walk"))
+    return false;
+
+  // The same check with no offset: the mapping is one byte short of the walk,
+  // and the mapping is the cause. An offset of 0 moves nothing, so a message
+  // that names it points the operator at the wrong number.
+  std::string mapping_err;
+  if (!Expect(!CaptureRawWalkFitsMapping(614399u, /*data_offset=*/0u, fmt,
+                                         &mapping_err),
+              "a mapping shorter than the walk must refuse the frame"))
+    return false;
+
+  if (!Expect(!Contains(mapping_err, "data_offset"),
+              "a refusal with no offset must not blame the offset"))
+    return false;
+
+  return Expect(Contains(mapping_err, "capture buffer of 614399 bytes") &&
+                    Contains(mapping_err, "frame of 614400 bytes"),
+                "a mapping refusal must name the mapping and the walk");
+}
+
 } // namespace
 
 bool TestV4l2CaptureFramePayloadStaysInsideTheMapping() {
@@ -693,6 +748,10 @@ bool TestV4l2CaptureDrainFailureStopsCaptureOnARefusal() {
 
 bool TestV4l2CaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop() {
   return TestCaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop();
+}
+
+bool TestV4l2CaptureRawWalkRefusalNamesItsCause() {
+  return TestCaptureRawWalkRefusalNamesItsCause();
 }
 
 bool TestV4l2CapturePreferenceTreats720pAsMjpegWorthy() {
