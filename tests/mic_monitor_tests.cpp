@@ -1507,6 +1507,119 @@ bool TestServiceCleansUpTheLoopbackAfterALostOutput() {
   return ok;
 }
 
+// The lost-output cleanup runs a stop on the audio supervisor thread, and in
+// production a stop is a pactl process with a deadline. The state that drives
+// the cleanup is terminal: only the user ends a lost output. A stop that keeps
+// failing must therefore give up, or one deadline per backoff step blocks the
+// supervisor for the rest of the run, and everything the user asks for waits
+// behind it. Giving up keeps the knowledge that a loopback may still play, so
+// the stop at shutdown still removes it.
+bool TestServiceStopsRetryingTheLostOutputCleanup() {
+  MonitorRecorder rec;
+  std::atomic<bool> sink_gone{false};
+  std::atomic<bool> start_fails{false};
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  auto start_monitor = hooks.start_mic_monitor;
+  hooks.start_mic_monitor = [&](const MicMonitorConfig &cfg,
+                                const std::string &source, MicMonitorState *out,
+                                std::string *error) {
+    if (start_fails.load(std::memory_order_relaxed)) {
+      rec.starts.fetch_add(1, std::memory_order_relaxed);
+      if (error)
+        *error = "synthetic monitor start failure";
+      return false;
+    }
+    return start_monitor(cfg, source, out, error);
+  };
+  hooks.mic_monitor_sink_present = [&](const std::string &,
+                                       std::string *error) {
+    if (error)
+      error->clear();
+    return std::optional<bool>(!sink_gone.load(std::memory_order_relaxed));
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  const auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+  if (!WaitUntil([&] { return service.Status().monitor_active; }, 1000ms)) {
+    std::cerr << "the monitor did not start\n";
+    service.Stop();
+    return false;
+  }
+
+  // The sound server goes wrong and never comes back: the check, the start and
+  // the stop all fail, and the output is gone as well.
+  rec.fail_detect.store(true, std::memory_order_relaxed);
+  start_fails.store(true, std::memory_order_relaxed);
+  rec.fail_stop.store(true, std::memory_order_relaxed);
+  sink_gone.store(true, std::memory_order_relaxed);
+  if (!WaitUntil(
+          [&] {
+            return service.Status().monitor_note.find("disappeared") !=
+                   std::string::npos;
+          },
+          8000ms)) {
+    std::cerr << "the lost monitor output was not reported: note='"
+              << service.Status().monitor_note << "'\n";
+    service.Stop();
+    return false;
+  }
+
+  // The cleanup must go quiet on its own. The backoff caps at eight steps of
+  // the retry delay, so a window longer than one capped step with no new stop
+  // says the retry ended.
+  const int before = rec.stops.load(std::memory_order_relaxed);
+  int seen = before;
+  auto lastChange = std::chrono::steady_clock::now();
+  const auto deadline = lastChange + 14000ms;
+  bool settled = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(20ms);
+    const int now = rec.stops.load(std::memory_order_relaxed);
+    if (now != seen) {
+      seen = now;
+      lastChange = std::chrono::steady_clock::now();
+      continue;
+    }
+    if (std::chrono::steady_clock::now() - lastChange >= 2500ms) {
+      settled = true;
+      break;
+    }
+  }
+
+  bool ok = true;
+  if (!settled) {
+    std::cerr << "the lost-output cleanup kept blocking the supervisor: "
+              << (seen - before) << " stops and still going\n";
+    ok = false;
+  }
+  if (seen - before > 8) {
+    std::cerr << "the lost-output cleanup ran " << (seen - before)
+              << " stops before it gave up\n";
+    ok = false;
+  }
+
+  // Giving up keeps the knowledge, so the service still stops the route it
+  // could not remove.
+  const int before_shutdown = rec.stops.load(std::memory_order_relaxed);
+  service.Stop();
+  if (rec.stops.load(std::memory_order_relaxed) <= before_shutdown) {
+    std::cerr << "the service stopped without trying to remove the loopback "
+                 "the cleanup gave up on\n";
+    ok = false;
+  }
+  return ok;
+}
+
 // The sink question is the one place that knows why the sound server could not
 // answer, and "no answer" is the arm a monitor sits in while the sound server
 // is unwell. A monitor stuck on a pinned start must leave that reason where a
@@ -2453,6 +2566,8 @@ int main() {
        &TestServiceStopsAMonitorItCanNoLongerSee},
       {"service cleans up the loopback after a lost output",
        &TestServiceCleansUpTheLoopbackAfterALostOutput},
+      {"service stops retrying the lost-output cleanup",
+       &TestServiceStopsRetryingTheLostOutputCleanup},
       {"service reports why the sink question had no answer",
        &TestServiceReportsWhyTheSinkQuestionHadNoAnswer},
       {"service keeps the pin when the sound server gives no answer",

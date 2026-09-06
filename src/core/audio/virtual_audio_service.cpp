@@ -730,6 +730,13 @@ void VirtualAudioService::ThreadMain() {
   // The cleanup that runs while the output is lost keeps its own counter and
   // deadline: the monitor is still wanted there, and the wait of the stop the
   // user asks for starts over on every pass of a wanted monitor.
+  //
+  // It also gives up at the top of its backoff, which the other loops never
+  // do. Only the user ends a lost output, so a cleanup that never gave up
+  // would block the audio supervisor for one stop deadline per backoff step
+  // for the rest of the run. A stop that failed this many times with a growing
+  // wait will not work on the next try for a reason the wait can fix.
+  constexpr int kMonitorLostCleanupMaxTries = 8;
   steady_clock::time_point nextMonitorLostCleanup{};
   int monitorLostCleanupFailures = 0;
   // True while the reported error belongs to a failed volume step. A later
@@ -1494,7 +1501,15 @@ void VirtualAudioService::ThreadMain() {
         // waiting for the service to stop. It stays quiet, because the note
         // already tells the user what to do and the shutdown cleanup reports a
         // stop that never works.
+        //
+        // The retry ends at the top of the backoff. Every try blocks the audio
+        // supervisor for one stop deadline, and only the user ends a lost
+        // output, so a retry without an end would block the supervisor for the
+        // rest of the run. The knowledge that a loopback may still play stays
+        // behind, and the stop at shutdown, or the next thing the user asks
+        // for, uses it.
         if (monitor_output_lost_ && monitor_route_may_exist_ &&
+            monitorLostCleanupFailures < kMonitorLostCleanupMaxTries &&
             monitorNow >= nextMonitorLostCleanup) {
           std::string cleanupErr;
           if (StopMicMonitorRoute(&cleanupErr)) {
@@ -1503,8 +1518,8 @@ void VirtualAudioService::ThreadMain() {
             nextMonitorLostCleanup = steady_clock::time_point{};
             clearMonitorRouteState();
           } else {
-            monitorLostCleanupFailures =
-                std::min(monitorLostCleanupFailures + 1, 8);
+            monitorLostCleanupFailures = std::min(
+                monitorLostCleanupFailures + 1, kMonitorLostCleanupMaxTries);
             nextMonitorLostCleanup =
                 monitorNow +
                 StartFailureRetryDelay(cfg) * monitorLostCleanupFailures;

@@ -566,6 +566,13 @@ is lost, and the service stops the route again when it stops. A loopback that
 plays the microphone into the speakers cannot outlive the daemon because the
 output disappeared.
 
+That retry ends at the top of its backoff, which the other retry loops of the
+monitor do not do. Each try blocks the audio supervisor for one `pactl`
+deadline, and only the user ends a lost output, so a retry without an end would
+block the supervisor for the rest of the run. The knowledge that a loopback may
+still play stays behind after the retry gives up, so the stop at shutdown, and
+the next thing the user asks for, still removes it.
+
 The daemon never writes the monitor setting back. A safety check that finds no
 usable output gives a warning and leaves `monitor.enabled` as the user wrote
 it, because the same check fails when the sound server is only unreadable for a
