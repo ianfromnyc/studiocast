@@ -4817,6 +4817,127 @@ bool TestConcurrentPipelineStopJoinsWorkerOnce() {
   return true;
 }
 
+struct ConcurrentServiceStopFixture : ConcurrentStopFixture {
+  std::mutex park_mu;
+  std::condition_variable park_cv;
+  bool parked = false;
+  bool released = false;
+  std::atomic<bool> mic_consumer_present{true};
+  std::unique_ptr<VirtualAudioService> service;
+
+  // Parks the supervisor thread in the sleep hook until the test releases it.
+  void ParkSupervisor() {
+    std::unique_lock<std::mutex> lock(park_mu);
+    parked = true;
+    park_cv.notify_all();
+    park_cv.wait(lock, [this] { return released; });
+  }
+
+  void ReleaseSupervisor() {
+    {
+      std::lock_guard<std::mutex> lock(park_mu);
+      released = true;
+    }
+    park_cv.notify_all();
+  }
+
+  bool WaitForParkedSupervisor() {
+    std::unique_lock<std::mutex> lock(park_mu);
+    return park_cv.wait_for(lock, 250ms, [this] { return parked; });
+  }
+};
+
+bool TestConcurrentServiceStopJoinsSupervisorOnce() {
+  auto fx = std::make_shared<ConcurrentServiceStopFixture>();
+
+  VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &fx->mic_consumer_present);
+  hooks.probe_microphone_backend_availability =
+      [](const VirtualAudioServiceConfig &) {
+        AudioBackendAvailability avail;
+        avail.open_source_ok = true;
+        return avail;
+      };
+  hooks.create_pipeline =
+      [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    return std::make_unique<StartFailPipeline>();
+  };
+  hooks.sleep_for = [fx](std::chrono::milliseconds) { fx->ParkSupervisor(); };
+
+  fx->service = std::make_unique<VirtualAudioService>(std::move(hooks));
+
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.poll_ms = 1;
+  cfg.start_retry_ms = 1;
+
+  std::string err;
+  if (!fx->service->Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+
+  if (!fx->WaitForParkedSupervisor()) {
+    std::cerr << "service supervisor did not enter the parked sleep\n";
+    fx->ReleaseSupervisor();
+    fx->service->Stop();
+    return false;
+  }
+
+  // Two callers stop the same service at once. The supervisor must be joined
+  // exactly once.
+  auto stopper = [fx] {
+    try {
+      fx->service->Stop();
+    } catch (const std::system_error &e) {
+      fx->RecordJoinError(e);
+    }
+    fx->stops_done.fetch_add(1, std::memory_order_release);
+  };
+
+  std::thread first_stop(stopper);
+  std::thread second_stop(stopper);
+
+  // Hold the supervisor until both callers are inside Stop().
+  std::this_thread::sleep_for(100ms);
+  fx->ReleaseSupervisor();
+
+  const bool both_returned = WaitUntil(
+      [&] { return fx->stops_done.load(std::memory_order_acquire) == 2; },
+      5000ms);
+
+  if (!both_returned) {
+    // See TestConcurrentPipelineStopJoinsWorkerOnce: a wedged join cannot be
+    // recovered, thus the run ends here.
+    first_stop.detach();
+    second_stop.detach();
+    WedgedFixtures().push_back(fx);
+    std::cout.flush();
+    std::cerr << "[FAIL] concurrent service Stop() never returned; a join() "
+                 "is stuck on a supervisor that another Stop() already joined"
+              << std::endl;
+    std::_Exit(1);
+  }
+
+  first_stop.join();
+  second_stop.join();
+
+  if (fx->join_errors.load(std::memory_order_relaxed) != 0) {
+    std::cerr << "concurrent service Stop() threw from join(): "
+              << fx->JoinErrorText() << "\n";
+    return false;
+  }
+
+  if (fx->service->Status().service_running) {
+    std::cerr << "service still reports running after concurrent Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -4924,6 +5045,8 @@ int main() {
       {"stop interrupts blocked flush", &TestStopInterruptsBlockedFlush},
       {"concurrent pipeline stop joins the worker once",
        &TestConcurrentPipelineStopJoinsWorkerOnce},
+      {"concurrent service stop joins the supervisor once",
+       &TestConcurrentServiceStopJoinsSupervisorOnce},
       {"start returns open failure and can retry",
        &TestStartReturnsOpenFailureAndCanRetry},
       {"pipeline surfaces capture disconnect",
