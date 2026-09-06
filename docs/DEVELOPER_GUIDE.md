@@ -539,14 +539,33 @@ happened to `monitor.note`, not to `monitor.last_error`, because the GUI prints
 the note as written and turns an error it does not know into a request to open
 Support.
 
-Two errors are an exception, because they clear themselves and ask nothing of
-the user. The GUI finds them by the text the daemon writes, so the text lives
-in one place: `kNoSafeMicMonitorSinkMessage` opens every message about a
-machine with no usable output, and `kSoundServerNoAnswerMessage` opens every
-message about a sound server that gave no answer. The page prints advice for
-the first and a wait for the second. A new message of either kind must start
-from the constant, or the page sends the user to Support for a state that
-needs nothing from them.
+Some errors are an exception, because they clear themselves and ask nothing of
+the user. The GUI finds them by the text the daemon writes, so each text lives
+in one place. Three constants carry the rule, and each one names the messages
+that must use it:
+
+- `kNoSafeMicMonitorSinkMessage` opens the message
+  `ChooseSafeMicMonitorSinkName` writes when it finds no safe output. The page
+  prints advice: choose a physical output sink.
+- `kSoundServerNoAnswerMessage` opens two messages, both about a *start*: the
+  one `StartMicMonitor` writes when `pactl --version` gave no answer, and the
+  sink-question detail the service appends to a failed pinned start. The page
+  prints a wait, and says the monitor starts on its own.
+- `kSoundServerNoAnswerOnStopMessage` is the whole message `StopMicMonitor`
+  writes when `pactl --version` gave no answer to a *stop*. It needs a text of
+  its own because the state is the opposite one: the loopback can still play
+  the microphone into the speakers. The page prints a wait that says so. The
+  text opens with `kSoundServerNoAnswerMessage`, so the page must match on it
+  first.
+
+The failed route check is deliberately not on this list. It writes "Failed to
+check the microphone monitor: …", which can also end in "did not answer in
+time", but the monitor does not retry out of that state the way a failed start
+or stop does, so the page sends it to Support. Do not give it one of the
+constants without giving the daemon a retry the page can promise.
+
+A new message of one of the three kinds must start from its constant, or the
+page sends the user to Support for a state that needs nothing from them.
 
 The pin does not outlive the output it names. A start that used the pinned name
 and failed asks the sound server whether that sink is still in its list. While
