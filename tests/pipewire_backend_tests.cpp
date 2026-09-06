@@ -9,6 +9,7 @@
 #include <iostream>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -924,6 +925,12 @@ bool TestLiveDeviceComesBackAfterTheServerDropsIt() {
               "creating the native virtual microphone failed: " + error))
     return false;
 
+  // The proof that the owner replaced the node is the node object, not its
+  // id: PipeWire global ids come off a free list, so a server with nothing
+  // else to hand out gives the id of the destroyed node back to the node the
+  // owner makes next. The ids are reported, not asserted.
+  const std::weak_ptr<studiocast::pw::PipeWireAudioNode> watch =
+      devices.MicNode();
   const std::uint32_t first = WaitForNodeId(*devices.MicNode());
   const bool healthyAtFirst = !devices.MicWentDown();
 
@@ -939,8 +946,16 @@ bool TestLiveDeviceComesBackAfterTheServerDropsIt() {
   }
 
   const bool recreated = devices.CreateVirtualMic(&error);
-  const std::uint32_t second =
-      recreated && devices.MicNode() ? WaitForNodeId(*devices.MicNode()) : 0;
+  std::uint32_t second = 0;
+  bool replaced = false;
+  {
+    // The reference is given up before the destroy, so the node it holds
+    // never outlives the test that reads it.
+    const std::shared_ptr<studiocast::pw::PipeWireAudioNode> now =
+        recreated ? devices.MicNode() : nullptr;
+    second = now ? WaitForNodeId(*now) : 0;
+    replaced = now != nullptr && now != watch.lock();
+  }
   const bool healthyAgain = recreated && !devices.MicWentDown();
 
   (void)devices.DestroyVirtualMic(&error);
@@ -950,8 +965,10 @@ bool TestLiveDeviceComesBackAfterTheServerDropsIt() {
          Expect(noticed, "the owner never noticed the node had gone") &&
          Expect(recreated, "creating the device again failed: " + error) &&
          Expect(second != 0, "the new node never reached the graph") &&
-         Expect(second != first,
-                "the owner kept the node the server dropped") &&
+         Expect(replaced, "the owner kept the node the server dropped; the "
+                          "node id went from " +
+                              std::to_string(first) + " to " +
+                              std::to_string(second)) &&
          Expect(healthyAgain, "the new node reads as down");
 }
 
