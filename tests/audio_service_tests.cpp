@@ -5266,6 +5266,12 @@ struct StopOrderFixture {
   std::shared_ptr<StopOrderIoState> io_state =
       std::make_shared<StopOrderIoState>();
   std::atomic<int> ios_created{0};
+  // Set as the first statement of each thread. Both verdicts below are a
+  // wait that must run out, thus a thread that the scheduler never ran would
+  // give the same result as the call that behaves. These marks say that the
+  // thread ran; the test waits for the mark before it starts the wait.
+  std::atomic<bool> stopper_entered{false};
+  std::atomic<bool> starter_entered{false};
   std::atomic<bool> stopper_done{false};
   std::atomic<bool> starter_done{false};
   std::atomic<bool> cleaner_done{false};
@@ -5339,10 +5345,29 @@ bool TestStopKeepsTheStopFlagUpForTheWorkerItJoins() {
   }
 
   std::thread starter([raw, cfg] {
+    raw->starter_entered.store(true, std::memory_order_release);
     std::string start_error;
     raw->pipeline->Start(cfg, &start_error);
     raw->starter_done.store(true, std::memory_order_release);
   });
+
+  // The verdict below is a wait that must run out, thus wait for the starter
+  // to run first: a starter that the scheduler never gave a turn would pass
+  // the test for the wrong reason.
+  if (!WaitUntil(
+          [&] { return raw->starter_entered.load(std::memory_order_acquire); },
+          5000ms)) {
+    std::cerr << "the starter thread never ran\n";
+    {
+      std::lock_guard<std::mutex> lock(io_state->mu);
+      io_state->park_open = false;
+      io_state->request_stop_released = true;
+    }
+    io_state->cv.notify_all();
+    starter.join();
+    stopper.join();
+    return false;
+  }
 
   // Wait for the flag to fall. Start() clears it as soon as it is past the
   // handle lock at the top of its body, thus this ends in milliseconds when
@@ -5547,9 +5572,23 @@ bool TestStopRaisesTheStopFlagUnderTheWorkerLock() {
   }
 
   std::thread stopper([raw] {
+    raw->stopper_entered.store(true, std::memory_order_release);
     raw->pipeline->Stop();
     raw->stopper_done.store(true, std::memory_order_release);
   });
+
+  // The verdict below is a wait that must run out, thus wait for the stopper
+  // to run first: a stopper that the scheduler never gave a turn would pass
+  // the test for the wrong reason.
+  if (!WaitUntil(
+          [&] { return raw->stopper_entered.load(std::memory_order_acquire); },
+          5000ms)) {
+    std::cerr << "the stopper thread never ran\n";
+    fx->ReleaseFactory();
+    starter.join();
+    stopper.join();
+    return false;
+  }
 
   // Wait for the flag to go up. Start() holds the worker lock in the factory,
   // thus a Stop() that raises the flag under that lock waits and this wait
