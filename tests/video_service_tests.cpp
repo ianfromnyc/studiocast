@@ -1291,11 +1291,12 @@ bool TestCameraNodeRestartBackoffWaitsATickBeforeItTrustsAStart() {
   return true;
 }
 
-// The supervisor thread applies a camera node plan too, so it can replace the
-// node between the tick that started one and the tick that judges it. That
-// node is not the one the frame thread started, but the graph is healthy: a
-// replacement the supervisor made on purpose must not count against the wait,
-// or a later genuine restart sits out a backoff it did not earn.
+// A node that another node replaced between the tick that started one and the
+// tick that judges it is not the node the frame thread started, but the graph
+// is healthy: a replacement made on purpose must not count against the wait,
+// or a later genuine restart sits out a backoff it did not earn. Nothing in
+// the daemon can do that while a run is up (see the test below), so this is
+// the rule alone.
 bool TestCameraNodeRestartBackoffIgnoresAReplacedNode() {
   using studiocast::video::internal::PipeWireRestartBackoff;
   using studiocast::video::internal::StartOutcome;
@@ -1345,6 +1346,34 @@ bool TestCameraNodeRestartBackoffIgnoresAReplacedNode() {
   }
   if (!backoff.Ready(now + first_wait)) {
     std::cerr << "a replacement must not make the wait grow\n";
+    return false;
+  }
+  return true;
+}
+
+// A start that is under way, and a run that is up, both own the camera
+// output. EnsureOutputOpen and CloseOutput return on this rule, so between two
+// frame thread ticks nothing else writes the PipeWire node, and the replaced
+// outcome above cannot happen while a run is up. A change that lets another
+// thread through the rule has to answer for the restart wait as well: a node
+// replaced on every tick would hold that wait at zero for ever.
+bool TestCameraOutputBelongsToTheRunWhileItRuns() {
+  using studiocast::video::internal::RunOwnsOutput;
+
+  if (RunOwnsOutput(/*running=*/false, /*starting=*/false)) {
+    std::cerr << "an idle pipeline must let a caller open the output\n";
+    return false;
+  }
+  if (!RunOwnsOutput(/*running=*/true, /*starting=*/false)) {
+    std::cerr << "a run that is up owns the output\n";
+    return false;
+  }
+  if (!RunOwnsOutput(/*running=*/false, /*starting=*/true)) {
+    std::cerr << "a start under way owns the output already\n";
+    return false;
+  }
+  if (!RunOwnsOutput(/*running=*/true, /*starting=*/true)) {
+    std::cerr << "a run that is up owns the output whatever the start says\n";
     return false;
   }
   return true;
@@ -1441,6 +1470,8 @@ int main() {
        &TestCameraNodeRestartBackoffWaitsATickBeforeItTrustsAStart},
       {"camera node restart backoff ignores a replaced node",
        &TestCameraNodeRestartBackoffIgnoresAReplacedNode},
+      {"camera output belongs to the run while it runs",
+       &TestCameraOutputBelongsToTheRunWhileItRuns},
       {"PipeWire output state reports a write failure",
        &TestPipeWireOutputStateReportsAWriteFailure},
       {"pipewire output status hides the numbers of a down node",

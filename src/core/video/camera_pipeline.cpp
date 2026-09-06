@@ -1049,7 +1049,7 @@ bool CameraPipeline::EnsureOutputOpen(const CameraPipelineConfig &cfg,
   }
 
   std::unique_lock<std::mutex> lock(mu_);
-  if (running_ || starting_) {
+  if (internal::RunOwnsOutput(running_, starting_)) {
     // Output is already open (or will be shortly) as part of Start().
     return true;
   }
@@ -1188,7 +1188,7 @@ void CameraPipeline::CloseOutput() {
   std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> old;
   {
     std::lock_guard<std::mutex> lock(mu_);
-    if (running_ || starting_)
+    if (internal::RunOwnsOutput(running_, starting_))
       return;
     writer_.Close();
     writer_device_.clear();

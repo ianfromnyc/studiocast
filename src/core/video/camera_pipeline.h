@@ -270,14 +270,30 @@ struct PipeWireNodePlan {
   studiocast::video::pw_backend::CameraNodeConfig node;
 };
 
+// True while the run owns the camera output.
+//
+// EnsureOutputOpen and CloseOutput both return on this, so a caller from
+// another thread changes nothing while a run is up or a start is under way.
+// The frame thread is therefore the only writer of the PipeWire node between
+// two of its own ticks, which is what makes StartOutcome::replaced below
+// unreachable today. A change that lets another thread through here has to
+// answer for the wait in Settle as well.
+inline bool RunOwnsOutput(bool running, bool starting) {
+  return running || starting;
+}
+
 // What became of the node a start installed, as the next tick finds it.
 enum class StartOutcome {
   // The node that start installed is still the node that runs. The start
   // succeeded.
   held,
-  // Another node runs in its place. The supervisor thread applies a plan too,
-  // so it replaces the node on purpose; the start has no verdict, and the
-  // graph is healthy.
+  // Another node runs in its place. The start has no verdict, and the graph is
+  // healthy: whoever replaced the node did it on purpose.
+  //
+  // Nothing in the daemon can do that while a run is up, because RunOwnsOutput
+  // keeps every other thread out of the plan. The outcome is kept because it
+  // is the honest shape of the question, and because the rule the wait needs
+  // has to be written down before the guard is loosened, not after.
   replaced,
   // The node went down, or no node runs at all. A format the server refuses
   // ends here.
@@ -342,10 +358,15 @@ public:
       Reset();
       return;
     case StartOutcome::replaced:
-      // The supervisor put another node in its place, which it does on
-      // purpose and only for a healthy graph. There is no verdict to give, so
-      // the wait stays where it was: a replacement must neither excuse the
-      // failures before it nor add one of its own.
+      // Another node took its place, which happens on purpose and only for a
+      // healthy graph. There is no verdict to give, so the wait stays where it
+      // was: a replacement must neither excuse the failures before it nor add
+      // one of its own.
+      //
+      // RunOwnsOutput keeps this case unreachable while a run is up. A change
+      // that opens it must also stop a replacement that repeats from holding
+      // the wait at zero, or a node that something replaces on every tick
+      // churns once a second for ever.
       return;
     case StartOutcome::gone:
       Failed(now);
