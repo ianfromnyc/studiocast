@@ -7,6 +7,7 @@
 #include <cstring>
 #include <optional>
 #include <sstream>
+#include <string>
 
 #include <fcntl.h>
 #include <linux/videodev2.h>
@@ -380,10 +381,19 @@ bool ParseChosenFormat(const v4l2_format &f, bool mplane, int fps,
     w = static_cast<int>(f.fmt.pix_mp.width);
     h = static_cast<int>(f.fmt.pix_mp.height);
     fourcc = f.fmt.pix_mp.pixelformat;
-    const __u8 np = f.fmt.pix_mp.num_planes;
-    if (np < 1) {
+    // The writer gives the driver a frame with write(), and the kernel
+    // refuses that I/O method on a buffer of more than one plane:
+    // `__vb2_init_fileio` answers -EBUSY when `vb->num_planes != 1`. A report
+    // of no planes has nothing to read at all, because the arm below reads
+    // `plane_fmt[0]` alone. Name the count here: without this the open
+    // succeeds and every write() fails with "Device or resource busy", which
+    // says nothing about the layout that caused it.
+    if (f.fmt.pix_mp.num_planes != 1) {
       if (outErr)
-        *outErr = "mplane format returned num_planes=0";
+        *outErr =
+            "mplane format returned num_planes=" +
+            std::to_string(static_cast<unsigned>(f.fmt.pix_mp.num_planes)) +
+            ", only one plane is supported";
       return false;
     }
     bpl = static_cast<std::size_t>(f.fmt.pix_mp.plane_fmt[0].bytesperline);
