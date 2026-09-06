@@ -94,7 +94,8 @@ bool CaptureBufferHoldsFrame(std::size_t mapped_length,
 // single-plane buffer has no such field and passes 0. An offset the payload
 // does not reach describes no image at all, so the frame is refused.
 //
-// Exposed for tests; `V4l2Capture::AcquireFrame()` is the only other caller.
+// Exposed for tests; `CaptureAcceptDequeuedBuffer()` is the only other
+// caller.
 bool CaptureFramePayload(std::size_t mapped_length, std::size_t bytesused,
                          std::size_t data_offset, std::size_t *out_offset,
                          std::size_t *out_bytes, std::string *outErr);
@@ -110,7 +111,13 @@ bool CaptureFramePayload(std::size_t mapped_length, std::size_t bytesused,
 // length instead, which `CaptureFramePayload` already bounds, so it is always
 // inside.
 //
-// Exposed for tests; `V4l2Capture::AcquireFrame()` is the only other caller.
+// Either the offset or the mapping can refuse a frame here, and `outErr` names
+// the one the operator acts on. A mapping that would have held the walk on its
+// own gives the offset message; a mapping shorter than the walk gives the
+// mapping message, because no offset makes that walk fit.
+//
+// Exposed for tests; `CaptureAcceptDequeuedBuffer()` is the only other
+// caller.
 bool CaptureRawWalkFitsMapping(std::size_t mapped_length,
                                std::size_t data_offset,
                                const CaptureFormat &fmt, std::string *outErr);
