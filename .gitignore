@@ -3,7 +3,6 @@
 /.junie
 /*.zip
 /build/
-/build-debug/
 /dist/
 **/*.onnx
 /scripts/models/build_open_video_eye_contact_models.py
