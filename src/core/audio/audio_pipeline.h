@@ -149,6 +149,11 @@ private:
   bool startup_ok_ = false;
   std::string startup_error_;
 
+  // Guards every use of the worker handle. Start() and Stop() can run at the
+  // same time, so the "is it joinable?" test and the join must be one step:
+  // without the lock two callers both see a joinable handle and both join the
+  // same worker, which is undefined behaviour.
+  std::mutex thread_mu_;
   std::thread thread_;
 };
 

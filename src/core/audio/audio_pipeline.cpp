@@ -702,8 +702,11 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
       *error = "Audio pipeline is already running.";
     return false;
   }
-  if (thread_.joinable()) {
-    thread_.join();
+  {
+    std::lock_guard<std::mutex> lock(thread_mu_);
+    if (thread_.joinable()) {
+      thread_.join();
+    }
   }
 
   // Reset stats.
@@ -762,7 +765,13 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
   }
 
   running_.store(true, std::memory_order_release);
-  thread_ = std::thread([this, cfg] { ThreadMain(cfg); });
+  {
+    // Start the worker outside the lock so ThreadMain() never waits on it,
+    // then publish the handle under the lock.
+    std::thread worker([this, cfg] { ThreadMain(cfg); });
+    std::lock_guard<std::mutex> lock(thread_mu_);
+    thread_ = std::move(worker);
+  }
 
   std::unique_lock<std::mutex> startup_lock(startup_mu_);
   startup_cv_.wait(startup_lock, [this] { return startup_complete_; });
@@ -786,6 +795,10 @@ void AudioPipeline::Stop() {
       io_->RequestStop();
     }
   }
+  // Hold the worker lock across the join and the I/O release. A second Stop()
+  // caller then waits here instead of joining the same worker a second time,
+  // and it cannot release the I/O backend while the worker still uses it.
+  std::lock_guard<std::mutex> thread_lock(thread_mu_);
   if (thread_.joinable()) {
     thread_.join();
   }
