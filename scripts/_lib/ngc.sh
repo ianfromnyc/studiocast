@@ -278,8 +278,8 @@ _sc_ngc_check_retries() {
 # as the first call of a run.
 #
 # Returns 2 when SC_NGC_RETRIES is not a count, and when there is no key. A
-# failed exchange is not fatal: the raw key
-# stays in place, and the caller reports the status NGC answers with.
+# failed exchange is not fatal: the raw key stays in place, and the caller
+# reports the status NGC answers with.
 sc_ngc_ensure_token() {
   local key
 
