@@ -171,6 +171,13 @@ bool WaitUntil(const std::function<bool()> &pred,
 // thus a new count shows that the loop published its status. Tests that
 // measure the progress of the service in loops, and not in wall-clock time,
 // keep the same number of chances on a busy machine as on an idle one.
+//
+// A test that follows a wait with a fixed "settle" window keeps its meaning.
+// The wait ends at the service event that makes the predicate true, and the
+// service sets each retry deadline to `now + delay` at that same event, and
+// never at `Start()`. A wait that needs more loops thus moves the event and
+// the window that follows it together, and each settle window stays shorter
+// than the backoff that it must not cross.
 class SupervisorLoopCounter final {
 public:
   // Installs the sleep hook that counts the loops. Call this after the test
