@@ -357,6 +357,8 @@ bool TryGetFmtAny(int fd, const TypeSpec &t, v4l2_format *outFmt,
 #endif
 }
 
+} // namespace
+
 bool ParseChosenFormat(const v4l2_format &f, bool mplane, int fps,
                        ActualFormat *out, std::string *outErr) {
   if (!out)
@@ -425,6 +427,8 @@ bool ParseChosenFormat(const v4l2_format &f, bool mplane, int fps,
   *out = a;
   return true;
 }
+
+namespace {
 
 struct NegotiationResult {
   bool ok = false;

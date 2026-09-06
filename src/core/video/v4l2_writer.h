@@ -5,6 +5,10 @@
 #include <optional>
 #include <string>
 
+// V4L2 format the driver reports back from VIDIOC_S_FMT. Only a reference to
+// one crosses this header, so it stays free of <linux/videodev2.h>.
+struct v4l2_format;
+
 namespace studiocast::video {
 
 enum class PixelFormat {
@@ -38,6 +42,24 @@ struct ActualFormat {
   std::size_t bytes_per_line = 0;
   std::size_t size_image = 0;
 };
+
+// Reads the format the driver reported after VIDIOC_S_FMT or VIDIOC_G_FMT
+// into an `ActualFormat`. `mplane` says which union arm of `f` holds the
+// answer: `fmt.pix` for a single-planar type, `fmt.pix_mp` for a
+// multi-planar one.
+//
+// The writer gives the driver a frame with write(), and that I/O method
+// takes a buffer of one plane only, so a multi-planar report of any other
+// plane count is refused.
+//
+// A row too short to hold the pixels is raised to the packed row size, and a
+// frame size below the rows it must hold follows the raise. A report whose
+// own rows overrun its own frame size is refused instead, because the writer
+// would then push more bytes than the frame the driver sized.
+//
+// Exposed for tests; the writer itself is the only other caller.
+bool ParseChosenFormat(const v4l2_format &f, bool mplane, int fps,
+                       ActualFormat *out, std::string *outErr);
 
 class V4l2Writer final {
 public:
