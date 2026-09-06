@@ -7168,6 +7168,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     CapturedFrameView f{};
     std::string ferr;
     if (!cap.AcquireFrame(&f, 1000, &ferr)) {
+      // A frame the capture refused after the driver dequeued the buffer
+      // carries that buffer, and only this call puts it back. A failure
+      // before the dequeue carries none and this releases nothing, so one
+      // call covers all three exits below.
+      std::string rerr;
+      (void)cap.ReleaseFrame(f, &rerr);
+
       // Timeouts and transient interruptions can happen on some
       // devices/drivers. Treat timeouts as recoverable to avoid pipeline
       // flapping (which can manifest as periodic black frames when the loopback
