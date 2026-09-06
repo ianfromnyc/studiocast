@@ -6278,6 +6278,219 @@ bool TestStartJoinsThePreviousWorkerOutsideTheWorkerLock() {
   return true;
 }
 
+// State that the running-flag test shares with its backends.
+struct RunningFlagState {
+  std::mutex mu;
+  std::condition_variable cv;
+  // The gate inside Open() of the second backend. While a worker parks
+  // there, that worker is live and the pipeline runs.
+  bool worker_in_open = false;
+  bool worker_released = false;
+};
+
+// I/O for the running-flag test. Open() fails at once, as OverlapIo does;
+// the second backend first parks, thus the worker that Start() publishes
+// stays alive for as long as the test wants.
+class RunningFlagIo final : public AudioPipelineIo {
+public:
+  RunningFlagIo(std::shared_ptr<RunningFlagState> state, bool park_open)
+      : state_(std::move(state)), park_open_(park_open) {}
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (park_open_) {
+      std::unique_lock<std::mutex> lock(state_->mu);
+      state_->worker_in_open = true;
+      state_->cv.notify_all();
+      state_->cv.wait(lock, [this] { return state_->worker_released; });
+    }
+    if (error)
+      *error = kOverlapOpenError;
+    return false;
+  }
+
+  bool Read(void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+  void RequestStop() override {}
+
+private:
+  std::shared_ptr<RunningFlagState> state_;
+  bool park_open_ = false;
+};
+
+struct RunningFlagFixture {
+  std::shared_ptr<RunningFlagState> gate = std::make_shared<RunningFlagState>();
+  std::atomic<int> ios_created{0};
+  std::atomic<bool> hook_used{false};
+  std::atomic<bool> hook_entered{false};
+  std::atomic<bool> hook_saw_worker{false};
+  std::atomic<bool> stopper_entered{false};
+  std::atomic<bool> stopper_done{false};
+  std::atomic<bool> starter_entered{false};
+  std::atomic<bool> starter_done{false};
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+
+  void ReleaseWorker() {
+    {
+      std::lock_guard<std::mutex> lock(gate->mu);
+      gate->worker_released = true;
+    }
+    gate->cv.notify_all();
+  }
+};
+
+// Stop() must clear the running flag under the worker lock.
+//
+// The flag is the one that Start() reads before it takes the handle, and it
+// is what the supervisor makes its liveness test. With the store outside the
+// lock, a Stop() that is held between the lock and the store lands that
+// store after a Start() published a worker: the pipeline then reports itself
+// stopped while a worker of it runs. The supervisor tears such a pipeline
+// down, and a later Start() moves the live worker out of the handle and
+// joins it outside every lock.
+//
+// The seam is the test hook that Stop() calls when it released the lock. It
+// holds Stop() there until a Start() published a worker that parks in
+// Open(), thus the two stores meet in the order the fault needs.
+bool TestStopClearsTheRunningFlagUnderTheWorkerLock() {
+  auto fx = std::make_shared<RunningFlagFixture>();
+  auto *raw = fx.get();
+  auto gate = fx->gate;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw, gate]() -> std::unique_ptr<AudioPipelineIo> {
+    // Only the worker of the second backend parks inside Open().
+    const int index = raw->ios_created.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<RunningFlagIo>(gate, index > 0);
+  };
+  hooks.stop_released_worker_lock = [raw, gate] {
+    // Only the first Stop() is held. The last Stop() of the test must run
+    // to the end.
+    if (raw->hook_used.exchange(true, std::memory_order_acq_rel))
+      return;
+    raw->hook_entered.store(true, std::memory_order_release);
+    const bool saw_worker = WaitUntil(
+        [&] {
+          std::lock_guard<std::mutex> lock(gate->mu);
+          return gate->worker_in_open;
+        },
+        5000ms);
+    raw->hook_saw_worker.store(saw_worker, std::memory_order_release);
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  // Prime the pipeline: the worker of the first backend exits by itself,
+  // thus Stop() finds a worker to join and the pipeline is idle.
+  const AudioPipelineConfig cfg;
+  std::string prime_error;
+  if (fx->pipeline->Start(cfg, &prime_error)) {
+    std::cerr << "pipeline.Start reported success though the I/O refuses to "
+                 "open\n";
+    return false;
+  }
+
+  std::thread stopper([raw] {
+    raw->stopper_entered.store(true, std::memory_order_release);
+    raw->pipeline->Stop();
+    raw->stopper_done.store(true, std::memory_order_release);
+  });
+
+  if (!WaitUntil(
+          [&] { return raw->hook_entered.load(std::memory_order_acquire); },
+          5000ms)) {
+    std::cerr << "Stop() never released the worker lock\n";
+    fx->ReleaseWorker();
+    stopper.join();
+    return false;
+  }
+
+  std::thread starter([raw, cfg] {
+    raw->starter_entered.store(true, std::memory_order_release);
+    std::string start_error;
+    raw->pipeline->Start(cfg, &start_error);
+    raw->starter_done.store(true, std::memory_order_release);
+  });
+
+  const bool stop_returned = WaitUntil(
+      [&] { return raw->stopper_done.load(std::memory_order_acquire); },
+      10000ms);
+
+  // The verdict: a worker of this pipeline is live and parked in Open(), and
+  // the Start() that published it has run to the publish, thus the pipeline
+  // must report itself running. A Stop() that clears the flag outside the
+  // lock lands its store here, after that publish.
+  const bool reported_running = fx->pipeline->GetStats().running;
+  const bool hook_saw_worker =
+      fx->hook_saw_worker.load(std::memory_order_acquire);
+
+  fx->ReleaseWorker();
+
+  const bool both_returned = WaitUntil(
+      [&] {
+        return raw->stopper_done.load(std::memory_order_acquire) &&
+               raw->starter_done.load(std::memory_order_acquire);
+      },
+      5000ms);
+
+  if (!both_returned) {
+    // Both threads are detached below, thus the run can go on. See the wedge
+    // handler of TestStopKeepsTheStopFlagUpForTheWorkerItJoins.
+    stopper.detach();
+    starter.detach();
+    std::cout.flush();
+    std::cerr << "[FAIL] Start()/Stop() around the running flag never "
+                 "returned (stopper_done="
+              << raw->stopper_done.load(std::memory_order_acquire)
+              << " starter_done="
+              << raw->starter_done.load(std::memory_order_acquire) << ")"
+              << std::endl;
+    (void)new std::shared_ptr<RunningFlagFixture>(fx);
+    return false;
+  }
+
+  stopper.join();
+  starter.join();
+
+  if (!hook_saw_worker) {
+    std::cerr << "no worker parked in Open() while Stop() held the seam, thus "
+                 "the two calls never met\n";
+    return false;
+  }
+  if (!stop_returned) {
+    std::cerr << "Stop() did not return after the worker was published\n";
+    return false;
+  }
+  if (!reported_running) {
+    std::cerr << "the pipeline reported itself stopped while a worker that "
+                 "Start() published was live, thus Stop() clears the running "
+                 "flag outside the worker lock\n";
+    return false;
+  }
+
+  fx->pipeline->Stop();
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
 struct DoubleStartFixture {
   // The gate that holds the first caller of an attempt, so that the second
   // caller reaches the publish of the handle in the same window.
@@ -6710,6 +6923,8 @@ int main() {
        &TestStopReleasesTheBackendUnderTheWorkerLock},
       {"start joins the previous worker outside the worker lock",
        &TestStartJoinsThePreviousWorkerOutsideTheWorkerLock},
+      {"stop clears the running flag under the worker lock",
+       &TestStopClearsTheRunningFlagUnderTheWorkerLock},
       {"concurrent pipeline start fails and keeps the process",
        &TestConcurrentPipelineStartFailsAndKeepsTheProcess},
       {"concurrent service start fails and keeps the process",

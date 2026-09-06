@@ -918,6 +918,9 @@ void AudioPipeline::Stop() {
     }
     released.reset();
   }
+  if (hooks_.stop_released_worker_lock) {
+    hooks_.stop_released_worker_lock();
+  }
   running_.store(false, std::memory_order_release);
 }
 

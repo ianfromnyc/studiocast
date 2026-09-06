@@ -44,6 +44,13 @@ public:
 
 struct AudioPipelineHooks {
   std::function<std::unique_ptr<AudioPipelineIo>()> create_io;
+
+  // Test seam. Stop() calls this when it has released the worker handle
+  // lock. A test holds Stop() there and lets a Start() publish a worker in
+  // the meantime, thus it can see whether Stop() has a store left that lands
+  // after that publish. Everything that Stop() changes must be done before
+  // this point.
+  std::function<void()> stop_released_worker_lock;
 };
 
 struct AudioPipelineConfig {
