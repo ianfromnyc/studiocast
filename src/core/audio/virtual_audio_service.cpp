@@ -453,7 +453,11 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
 
   stop_.store(false, std::memory_order_release);
   try {
-    th_ = std::thread([this]() { ThreadMain(); });
+    // Start the supervisor outside the lock so ThreadMain() never waits on
+    // it, then publish the handle under the lock.
+    std::thread supervisor([this]() { ThreadMain(); });
+    std::lock_guard<std::mutex> lock(th_mu_);
+    th_ = std::move(supervisor);
   } catch (const std::exception &e) {
     if (error)
       *error = std::string("Failed to start VirtualAudioService thread: ") +
@@ -472,8 +476,13 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
 
 void VirtualAudioService::Stop() {
   stop_.store(true, std::memory_order_release);
-  if (th_.joinable()) {
-    th_.join();
+  {
+    // A second Stop() caller waits here, and thus never joins a supervisor
+    // that the first caller already joined.
+    std::lock_guard<std::mutex> lock(th_mu_);
+    if (th_.joinable()) {
+      th_.join();
+    }
   }
   {
     std::lock_guard<std::mutex> lock(mu_);

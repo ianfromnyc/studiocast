@@ -240,6 +240,12 @@ private:
   void SetLastError(std::string msg);
 
   mutable std::mutex mu_;
+
+  // Guards every use of the supervisor handle. Start() and Stop() can run at
+  // the same time, so the "is it joinable?" test and the join must be one
+  // step: without the lock two callers both see a joinable handle and both
+  // join the same supervisor, which is undefined behaviour.
+  std::mutex th_mu_;
   std::thread th_;
   std::atomic_bool stop_{false};
 
