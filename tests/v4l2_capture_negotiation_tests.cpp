@@ -708,19 +708,26 @@ bool TestCaptureAcquireClearsTheViewBeforeItCanFail() {
   V4l2Capture cap;
 
   // The view of a frame the caller already released, given to the next call
-  // again.
+  // again. Every field carries a value an accepted frame could have left, so
+  // the clear must prove itself on each one. `data` points at the view itself
+  // because any non-null address does: the test reads the pointer, never the
+  // bytes behind it.
   CapturedFrameView reused{};
+  reused.data = reinterpret_cast<const std::uint8_t *>(&reused);
+  reused.bytes = 614400;
   reused.index = 5;
   reused.sequence = 11;
-  reused.bytes = 614400;
+  reused.timestamp_ns = 1234567890u;
+  reused.timestamp_monotonic = true;
 
   std::string err;
   if (!Expect(!cap.AcquireFrame(&reused, /*timeout_ms=*/0, &err),
               "a capture that is not open must refuse to acquire a frame"))
     return false;
 
-  return Expect(reused.index < 0 && reused.data == nullptr &&
-                    reused.bytes == 0u,
+  return Expect(reused.data == nullptr && reused.bytes == 0u &&
+                    reused.index < 0 && reused.sequence == 0u &&
+                    reused.timestamp_ns == 0u && !reused.timestamp_monotonic,
                 "a failure before the dequeue must leave the view with no "
                 "buffer to release");
 }
