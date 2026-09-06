@@ -5434,10 +5434,6 @@ int main() {
       {"stop interrupts open after early stop reset",
        &TestStopInterruptsOpenAfterEarlyStopReset},
       {"stop interrupts blocked flush", &TestStopInterruptsBlockedFlush},
-      {"concurrent pipeline stop joins the worker once",
-       &TestConcurrentPipelineStopJoinsWorkerOnce},
-      {"concurrent service stop joins the supervisor once",
-       &TestConcurrentServiceStopJoinsSupervisorOnce},
       {"start returns open failure and can retry",
        &TestStartReturnsOpenFailureAndCanRetry},
       {"pipeline surfaces capture disconnect",
@@ -5452,6 +5448,13 @@ int main() {
        &TestStopInterruptsBlockedCaptureRead},
       {"stop interrupts blocked playback write",
        &TestStopInterruptsBlockedPlaybackWrite},
+      // The tests below can end the run with std::_Exit(1), thus they come
+      // last: a wedge in one of them must not hide the result of another
+      // test.
+      {"concurrent pipeline stop joins the worker once",
+       &TestConcurrentPipelineStopJoinsWorkerOnce},
+      {"concurrent service stop joins the supervisor once",
+       &TestConcurrentServiceStopJoinsSupervisorOnce},
       {"concurrent start/stop keeps the worker handle usable",
        &TestConcurrentStartStopKeepsWorkerHandleUsable},
       {"concurrent service start/stop keeps the supervisor handle usable",
