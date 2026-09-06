@@ -4938,6 +4938,374 @@ bool TestConcurrentServiceStopJoinsSupervisorOnce() {
   return true;
 }
 
+constexpr const char *kOverlapOpenError = "overlap io refuses to open";
+constexpr const char *kOverlapNoIoError =
+    "Audio pipeline I/O backend is not available.";
+
+// I/O for the Start()/Stop() overlap test. Open() fails at once, thus the
+// worker exits by itself and stays in the handle: the next Start() must join
+// it, and so must a Stop() that runs at the same time. Open() reads no member
+// of this object on purpose, because a Stop() that reaches the handle before
+// Start() publishes it releases the backend while the worker still holds the
+// raw pointer that GetActiveIo() gave it (see the comment on
+// AudioPipeline::Stop()).
+class OverlapIo final : public AudioPipelineIo {
+public:
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    if (error)
+      *error = kOverlapOpenError;
+    return false;
+  }
+
+  bool Read(void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+  void RequestStop() override {}
+};
+
+struct StartStopOverlapFixture : ConcurrentStopFixture {
+  std::atomic<int> ios_created{0};
+  std::atomic<int> overlaps{0};
+  std::atomic<int> starts_done{0};
+  std::atomic<int> start_failures{0};
+  std::atomic<bool> start_returned{false};
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+};
+
+// Start() and Stop() on one pipeline at the same time. This is the overlap
+// that TestStopInterruptsOpenAfterEarlyStopReset already makes by accident.
+// Every attempt begins from a worker that exited by itself and is still in
+// the handle, thus the join that Start() makes first and the join that Stop()
+// makes both reach the same worker: they must not both join it. Start() has
+// no seam after the guard, thus the stopper sweeps its delay across the
+// attempts to cover the window up to the publish of the new handle.
+bool TestConcurrentStartStopKeepsWorkerHandleUsable() {
+  auto fx = std::make_shared<StartStopOverlapFixture>();
+  auto *raw = fx.get();
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw]() -> std::unique_ptr<AudioPipelineIo> {
+    raw->ios_created.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<OverlapIo>();
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  const AudioPipelineConfig cfg;
+  std::string prime_error;
+  if (fx->pipeline->Start(cfg, &prime_error)) {
+    std::cerr << "pipeline.Start reported success though the I/O refuses to "
+                 "open\n";
+    return false;
+  }
+
+  constexpr int kAttempts = 64;
+  for (int attempt = 0; attempt < kAttempts; ++attempt) {
+    if (!WaitUntil([&] { return !raw->pipeline->GetStats().running; },
+                   2000ms)) {
+      std::cerr << "the worker of attempt " << attempt
+                << " did not exit by itself\n";
+      return false;
+    }
+
+    std::atomic<bool> gate{false};
+    std::atomic<int> burn{0};
+    fx->start_returned.store(false, std::memory_order_release);
+
+    std::thread starter([&] {
+      while (!gate.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      std::string start_error;
+      try {
+        raw->pipeline->Start(cfg, &start_error);
+      } catch (const std::system_error &e) {
+        raw->RecordJoinError(e);
+      }
+      if (start_error != kOverlapOpenError &&
+          start_error != kOverlapNoIoError) {
+        std::cerr << "pipeline.Start gave an unexpected error on attempt "
+                  << attempt << ": " << start_error << "\n";
+        raw->start_failures.fetch_add(1, std::memory_order_relaxed);
+      }
+      raw->start_returned.store(true, std::memory_order_release);
+      raw->starts_done.fetch_add(1, std::memory_order_release);
+    });
+
+    std::thread stopper([&] {
+      while (!gate.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      // Sweep the delay so the stopper lands at a different point of Start()
+      // on every attempt.
+      for (int spin = 0; spin < attempt * 32; ++spin)
+        burn.fetch_add(1, std::memory_order_relaxed);
+      // Record that Start() had not yet returned, thus a green run cannot be
+      // one where the two calls never met.
+      if (!raw->start_returned.load(std::memory_order_acquire))
+        raw->overlaps.fetch_add(1, std::memory_order_relaxed);
+      try {
+        raw->pipeline->Stop();
+      } catch (const std::system_error &e) {
+        raw->RecordJoinError(e);
+      }
+      raw->stops_done.fetch_add(1, std::memory_order_release);
+    });
+
+    gate.store(true, std::memory_order_release);
+
+    const bool both_returned = WaitUntil(
+        [&] {
+          return raw->starts_done.load(std::memory_order_acquire) ==
+                     attempt + 1 &&
+                 raw->stops_done.load(std::memory_order_acquire) == attempt + 1;
+        },
+        5000ms);
+
+    if (!both_returned) {
+      // A caller is wedged inside join() on a worker that the other caller
+      // already joined. A wedged thread cannot be recovered and its stale
+      // thread id can go to a later test, thus the run ends here.
+      starter.detach();
+      stopper.detach();
+      std::cout.flush();
+      std::cerr << "[FAIL] pipeline Start()/Stop() overlap never returned on "
+                   "attempt "
+                << attempt
+                << "; a join() is stuck on a worker that another caller "
+                   "already joined"
+                << std::endl;
+      std::_Exit(1);
+    }
+
+    starter.join();
+    stopper.join();
+
+    if (fx->start_failures.load(std::memory_order_relaxed) != 0)
+      return false;
+
+    if (fx->join_errors.load(std::memory_order_relaxed) != 0) {
+      std::cerr << "Start()/Stop() overlap threw from join(): "
+                << fx->JoinErrorText() << "\n";
+      return false;
+    }
+  }
+
+  if (fx->overlaps.load(std::memory_order_relaxed) == 0) {
+    std::cerr << "no attempt ever put Stop() inside Start(), thus the sweep "
+                 "never made an overlap\n";
+    return false;
+  }
+
+  // Every Start() must have reached a new worker: a lost handle stops the
+  // pipeline from making the next one.
+  const int expected_ios = kAttempts + 1;
+  if (fx->ios_created.load(std::memory_order_relaxed) != expected_ios) {
+    std::cerr << "pipeline made "
+              << fx->ios_created.load(std::memory_order_relaxed)
+              << " I/O backends, expected " << expected_ios << "\n";
+    return false;
+  }
+
+  fx->pipeline->Stop();
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
+struct ServiceStartStopOverlapFixture : ConcurrentStopFixture {
+  std::atomic<bool> mic_consumer_present{true};
+  std::atomic<int> supervisor_loops{0};
+  std::atomic<int> overlaps{0};
+  std::atomic<int> starts_done{0};
+  std::atomic<int> start_failures{0};
+  std::atomic<bool> start_returned{false};
+  std::unique_ptr<VirtualAudioService> service;
+};
+
+// Start() and Stop() on one service at the same time. Every attempt begins
+// from a live supervisor, thus the stopper and the Stop() that Start() makes
+// first both reach the same supervisor handle: they must not both join it.
+// VirtualAudioService has no seam inside Start(), thus the stopper sweeps its
+// delay across the attempts to cover the window from the join of the old
+// supervisor to the publish of the new one.
+bool TestConcurrentServiceStartStopKeepsSupervisorHandleUsable() {
+  auto fx = std::make_shared<ServiceStartStopOverlapFixture>();
+  auto *raw = fx.get();
+
+  VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &fx->mic_consumer_present);
+  hooks.probe_microphone_backend_availability =
+      [](const VirtualAudioServiceConfig &) {
+        AudioBackendAvailability avail;
+        avail.open_source_ok = true;
+        return avail;
+      };
+  hooks.create_pipeline =
+      [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    return std::make_unique<StartFailPipeline>();
+  };
+  // Keep the supervisor short: an attempt must cost a thread, not a sleep.
+  hooks.sleep_for = [raw](std::chrono::milliseconds) {
+    raw->supervisor_loops.fetch_add(1, std::memory_order_relaxed);
+    std::this_thread::yield();
+  };
+
+  fx->service = std::make_unique<VirtualAudioService>(std::move(hooks));
+
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.poll_ms = 1;
+  cfg.start_retry_ms = 1;
+
+  std::string err;
+  if (!fx->service->Start(cfg, &err)) {
+    std::cerr << "service.Start failed before the overlap sweep: " << err
+              << "\n";
+    return false;
+  }
+
+  constexpr int kAttempts = 64;
+  for (int attempt = 0; attempt < kAttempts; ++attempt) {
+    std::atomic<bool> gate{false};
+    std::atomic<int> burn{0};
+    fx->start_returned.store(false, std::memory_order_release);
+
+    std::thread starter([&] {
+      while (!gate.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      std::string start_error;
+      if (!raw->service->Start(cfg, &start_error)) {
+        std::cerr << "service.Start failed on attempt " << attempt << ": "
+                  << start_error << "\n";
+        raw->start_failures.fetch_add(1, std::memory_order_relaxed);
+      }
+      raw->start_returned.store(true, std::memory_order_release);
+      raw->starts_done.fetch_add(1, std::memory_order_release);
+    });
+
+    std::thread stopper([&] {
+      while (!gate.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      // Sweep the delay so the stopper lands at a different point of Start()
+      // on every attempt.
+      for (int spin = 0; spin < attempt * 32; ++spin)
+        burn.fetch_add(1, std::memory_order_relaxed);
+      // Record that Start() had not yet returned, thus a green run cannot be
+      // one where the two calls never met.
+      if (!raw->start_returned.load(std::memory_order_acquire))
+        raw->overlaps.fetch_add(1, std::memory_order_relaxed);
+      try {
+        raw->service->Stop();
+      } catch (const std::system_error &e) {
+        raw->RecordJoinError(e);
+      }
+      raw->stops_done.fetch_add(1, std::memory_order_release);
+    });
+
+    gate.store(true, std::memory_order_release);
+
+    const bool both_returned = WaitUntil(
+        [&] {
+          return raw->starts_done.load(std::memory_order_acquire) ==
+                     attempt + 1 &&
+                 raw->stops_done.load(std::memory_order_acquire) == attempt + 1;
+        },
+        5000ms);
+
+    if (!both_returned) {
+      // A caller is wedged inside join() on a supervisor that the other
+      // caller already joined. A wedged thread cannot be recovered and its
+      // stale thread id can go to a later test, thus the run ends here.
+      starter.detach();
+      stopper.detach();
+      std::cout.flush();
+      std::cerr << "[FAIL] service Start()/Stop() overlap never returned on "
+                   "attempt "
+                << attempt << "; a join() is stuck on a supervisor that "
+                             "another caller already joined"
+                << std::endl;
+      std::_Exit(1);
+    }
+
+    starter.join();
+    stopper.join();
+
+    if (fx->start_failures.load(std::memory_order_relaxed) != 0)
+      return false;
+
+    if (fx->join_errors.load(std::memory_order_relaxed) != 0) {
+      std::cerr << "Start()/Stop() overlap threw from join(): "
+                << fx->JoinErrorText() << "\n";
+      return false;
+    }
+
+    // Give the next attempt a live supervisor again. A stopper that landed
+    // after Start() leaves the service stopped, which is a correct result.
+    if (!fx->service->Status().service_running &&
+        !fx->service->Start(cfg, &err)) {
+      std::cerr << "service.Start failed after attempt " << attempt << ": "
+                << err << "\n";
+      return false;
+    }
+  }
+
+  if (fx->overlaps.load(std::memory_order_relaxed) == 0) {
+    std::cerr << "no attempt ever put Stop() inside Start(), thus the sweep "
+                 "never made an overlap\n";
+    return false;
+  }
+
+  // The supervisor handle must still work after all that overlap.
+  fx->service->Stop();
+  if (!fx->service->Start(cfg, &err)) {
+    std::cerr << "service.Start failed after the overlap sweep: " << err
+              << "\n";
+    return false;
+  }
+
+  if (!fx->service->Status().service_running) {
+    std::cerr << "service does not report running after the overlap sweep\n";
+    fx->service->Stop();
+    return false;
+  }
+
+  const bool supervisor_ran = WaitUntil(
+      [&] { return fx->supervisor_loops.load(std::memory_order_relaxed) > 0; },
+      2000ms);
+
+  fx->service->Stop();
+
+  if (!supervisor_ran) {
+    std::cerr << "no supervisor ever ran during the overlap sweep\n";
+    return false;
+  }
+
+  if (fx->service->Status().service_running) {
+    std::cerr << "service still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -5061,6 +5429,10 @@ int main() {
        &TestStopInterruptsBlockedCaptureRead},
       {"stop interrupts blocked playback write",
        &TestStopInterruptsBlockedPlaybackWrite},
+      {"concurrent start/stop keeps the worker handle usable",
+       &TestConcurrentStartStopKeepsWorkerHandleUsable},
+      {"concurrent service start/stop keeps the supervisor handle usable",
+       &TestConcurrentServiceStartStopKeepsSupervisorHandleUsable},
   };
 
   int failed = 0;
