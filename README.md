@@ -126,8 +126,9 @@ systemctl --user enable --now studiocastd.service
   does not ship. Enable RPM Fusion Free and install `akmod-v4l2loopback` for it.
   `dnf` installs StudioCast without the module, but the virtual camera stays
   unavailable until you add it. The GUI installer wizard is not part of the RPM,
-  because the installer backend is Ubuntu-only, and `./scripts/setup.sh` does
-  not support Fedora either.
+  because the installer backend is Ubuntu-only. `./scripts/setup.sh` works on
+  Fedora: it installs the dependencies and sets up `v4l2loopback` with the same
+  flags as on Ubuntu. See [docs/SETUP.md](docs/SETUP.md).
 
 - Build from source manually: use the commands below when developing,
   installing over SSH, debugging setup, or recovering from a failed install.

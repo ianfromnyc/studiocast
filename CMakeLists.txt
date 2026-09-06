@@ -848,6 +848,32 @@ if (BUILD_TESTING)
         message(STATUS "Skipping studiocast-embedded-ptx-freshness because Python3 was not found.")
     endif()
 
+    find_program(STUDIOCAST_BASH_PROGRAM bash)
+    if (STUDIOCAST_BASH_PROGRAM)
+        add_test(NAME studiocast-onnxruntime-lib-tests
+                COMMAND "${STUDIOCAST_BASH_PROGRAM}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/onnxruntime_lib_tests.sh")
+        set_tests_properties(studiocast-onnxruntime-lib-tests PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+
+        add_test(NAME studiocast-fedora-setup-tests
+                COMMAND "${STUDIOCAST_BASH_PROGRAM}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fedora_setup_tests.sh")
+        set_tests_properties(studiocast-fedora-setup-tests PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+
+        add_test(NAME studiocast-uninstall-pkgconfig-tests
+                COMMAND "${STUDIOCAST_BASH_PROGRAM}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/uninstall_pkgconfig_tests.sh")
+        set_tests_properties(studiocast-uninstall-pkgconfig-tests PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+    else()
+        message(STATUS "Skipping the shell script tests because bash was not found.")
+    endif()
+
     add_executable(studiocast-maxine-paths-tests
             tests/maxine_paths_tests.cpp
     )

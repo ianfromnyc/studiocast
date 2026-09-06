@@ -318,7 +318,7 @@ jobs:
   # linter can read them. This job is that linter, so a regression such as the
   # one an unquoted glob caused cannot come back unnoticed.
   shell-lint:
-    name: shellcheck (packaging scripts)
+    name: shellcheck (shell scripts)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # The same image the packages are built in, so the ShellCheck is the one
@@ -337,19 +337,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Lint the packaging scripts
+      - name: Lint the shell scripts
         # -x follows a sourced file, so a helper library is read with the
-        # script that uses it. Every script under packaging/ is covered, so a
-        # new one joins the job on its own. scripts/install/dlib.sh is here as
-        # well, because the RPM build downloads the pinned dlib source with it.
+        # script that uses it. Every script under packaging/ and scripts/ is
+        # covered, plus the shell test suites, so a new one joins the job on
+        # its own.
         #
-        # mapfile reports its own status, not the status of find, so an empty
-        # list has to fail on its own. Without that, a packaging/ that is
-        # renamed leaves the job linting one file and reporting success.
+        # A directory that is renamed away must fail the job, not leave it
+        # linting the others and reporting success. find complains on stderr
+        # inside a process substitution that nobody reads, so each directory
+        # is asserted on its own first. The dirs array gives the assert and
+        # the find one list, so a new directory cannot go in only one of them.
+        # The empty-list guard is the second net: mapfile reports its own
+        # status, not the status of find.
         run: |
-          mapfile -t files < <(find packaging -name '*.sh' | sort)
-          (( ${#files[@]} > 0 )) || { echo "no packaging scripts found"; exit 1; }
-          shellcheck -x "${files[@]}" scripts/install/dlib.sh
+          dirs=(packaging scripts tests)
+          for dir in "${dirs[@]}"; do
+            [[ -d "${dir}" ]] || { echo "no ${dir} directory"; exit 1; }
+          done
+          mapfile -t files < <(find "${dirs[@]}" -name '*.sh' | sort)
+          (( ${#files[@]} > 0 )) || { echo "no shell scripts found"; exit 1; }
+          shellcheck -x "${files[@]}"
 
   # The RPM build is also the only Fedora build in push CI, so it checks the
   # sources against the Fedora compiler and the Fedora Qt 6 as well.

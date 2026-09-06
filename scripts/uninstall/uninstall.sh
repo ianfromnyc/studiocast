@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
 # StudioCast uninstall helper.
 #
@@ -7,6 +6,9 @@ set -euo pipefail
 #   1) Simple uninstall (default): remove user-installed binaries/service + runtime socket.
 #   2) Greedy uninstall (--greedy): additionally remove most local data/config/state and
 #      attempt to purge common system dependencies installed by repo helper scripts.
+#
+# Everything at the top level is a definition, so sourcing this file only makes
+# the functions available. The shell options and the work belong to main().
 
 usage() {
   cat <<'EOF'
@@ -16,7 +18,8 @@ Usage:
 Modes:
   (default)          Simple uninstall: remove user-level artifacts only.
   --greedy           Also remove most local StudioCast data/config/state and attempt to
-                     remove/purge common system dependencies (requires sudo).
+                     remove/purge common system dependencies (needs root: a root
+                     shell, or sudo).
 
 Options:
   --dry-run          Print actions without executing.
@@ -37,15 +40,33 @@ DRY_RUN=0
 YES=0
 GREEDY=0
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --greedy) GREEDY=1; shift ;;
-    --dry-run) DRY_RUN=1; shift ;;
-    -y|--yes) YES=1; shift ;;
-    -h|--help) usage; exit 0 ;;
-    *) die "Unknown argument: $1 (use --help)" ;;
-  esac
-done
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --greedy) GREEDY=1; shift ;;
+      --dry-run) DRY_RUN=1; shift ;;
+      -y|--yes) YES=1; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "Unknown argument: $1 (use --help)" ;;
+    esac
+  done
+}
+
+# Command prefix for the steps that need root. A root shell gets none: a
+# container or a rescue system often has no sudo, and scripts/setup/fedora.sh
+# writes the same system files without sudo when it runs as root.
+#
+# main() calls resolve_priv. The default covers a caller that sources this file
+# and calls one helper without it.
+PRIV=(sudo)
+
+resolve_priv() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    PRIV=()
+  else
+    PRIV=(sudo)
+  fi
+}
 
 run() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -94,25 +115,29 @@ confirm() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-HOME_DIR="${HOME:-}"
-[[ -n "$HOME_DIR" ]] || die "HOME is not set"
+# Work out the user directories the uninstall touches. This reads the
+# environment and runs a command, so main() calls it instead of the top level.
+resolve_user_paths() {
+  HOME_DIR="${HOME:-}"
+  [[ -n "$HOME_DIR" ]] || die "HOME is not set"
 
-XDG_DATA_HOME_DIR="${XDG_DATA_HOME:-$HOME_DIR/.local/share}"
-XDG_CONFIG_HOME_DIR="${XDG_CONFIG_HOME:-$HOME_DIR/.config}"
-XDG_STATE_HOME_DIR="${XDG_STATE_HOME:-$HOME_DIR/.local/state}"
+  XDG_DATA_HOME_DIR="${XDG_DATA_HOME:-$HOME_DIR/.local/share}"
+  XDG_CONFIG_HOME_DIR="${XDG_CONFIG_HOME:-$HOME_DIR/.config}"
+  XDG_STATE_HOME_DIR="${XDG_STATE_HOME:-$HOME_DIR/.local/state}"
 
-UID_NUM="$(id -u)"
-XDG_RUNTIME_DIR_DIR="${XDG_RUNTIME_DIR:-/tmp/studiocast-runtime-${UID_NUM}}"
+  UID_NUM="$(id -u)"
+  XDG_RUNTIME_DIR_DIR="${XDG_RUNTIME_DIR:-/tmp/studiocast-runtime-${UID_NUM}}"
 
-STUDIOCAST_DATA_DIR="${XDG_DATA_HOME_DIR}/studiocast"
-STUDIOCAST_CONFIG_DIR="${XDG_CONFIG_HOME_DIR}/studiocast"
-STUDIOCAST_STATE_DIR="${XDG_STATE_HOME_DIR}/studiocast"
-STUDIOCAST_RUNTIME_DIR="${XDG_RUNTIME_DIR_DIR}/studiocast"
+  STUDIOCAST_DATA_DIR="${XDG_DATA_HOME_DIR}/studiocast"
+  STUDIOCAST_CONFIG_DIR="${XDG_CONFIG_HOME_DIR}/studiocast"
+  STUDIOCAST_STATE_DIR="${XDG_STATE_HOME_DIR}/studiocast"
+  STUDIOCAST_RUNTIME_DIR="${XDG_RUNTIME_DIR_DIR}/studiocast"
 
-SYSTEMD_USER_DIR="${XDG_CONFIG_HOME_DIR}/systemd/user"
-SYSTEMD_SERVICE_PATH="${SYSTEMD_USER_DIR}/studiocastd.service"
+  SYSTEMD_USER_DIR="${XDG_CONFIG_HOME_DIR}/systemd/user"
+  SYSTEMD_SERVICE_PATH="${SYSTEMD_USER_DIR}/studiocastd.service"
 
-LOCAL_BIN_DIR="${HOME_DIR}/.local/bin"
+  LOCAL_BIN_DIR="${HOME_DIR}/.local/bin"
+}
 
 remove_systemd_user_service() {
   if ! have_cmd systemctl; then
@@ -174,26 +199,90 @@ greedy_remove_user_data() {
   rm_path "$STUDIOCAST_STATE_DIR"
 }
 
+# Directories that can hold the onnxruntime.pc link the setup helper made.
+#
+# scripts/_lib/onnxruntime.sh links the file into the first directory that
+# pkg-config searches, so ask pkg-config for that list. Without pkg-config,
+# fall back to the two directories that list almost always starts with.
+onnxruntime_pc_link_dirs() {
+  local pc_path=""
+
+  if have_cmd pkg-config; then
+    pc_path="$(pkg-config --variable pc_path pkg-config 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$pc_path" ]]; then
+    printf '%s\n' "$pc_path" | tr ':' '\n' | grep -v '^$' || true
+    return 0
+  fi
+
+  printf '%s\n' /usr/lib64/pkgconfig /usr/lib/pkgconfig
+}
+
+# Remove the onnxruntime.pc links that point at our bootstrap file.
+#
+# Arguments: <bootstrap .pc file> <directory>...
+#
+# Only a symlink whose target is that file is removed, so a file owned by a
+# distribution package is never touched.
+remove_onnxruntime_pc_links() {
+  local pc_file="$1"
+  shift
+
+  local dir pc_link
+  for dir in "$@"; do
+    pc_link="${dir}/onnxruntime.pc"
+    if [[ -L "$pc_link" && "$(readlink -- "$pc_link")" == "$pc_file" ]]; then
+      log "Removing: $pc_link"
+      run "${PRIV[@]}" rm -f -- "$pc_link"
+    fi
+  done
+}
+
 greedy_remove_system_onnxruntime_bootstrap() {
-  # Installed by scripts/setup.sh --deps (scripts/setup/ubuntu.sh).
-  local ort_root="/opt/studiocast/onnxruntime"
-  local ld_conf="/etc/ld.so.conf.d/studiocast-onnxruntime.conf"
+  # Installed by scripts/setup.sh --deps (scripts/setup/ubuntu.sh and
+  # scripts/setup/fedora.sh). The cuDNN tree and the CUDA ld.so.conf.d file come
+  # from the Fedora gpu flavor. The NVIDIA rpms are never touched here.
   local pc_file="/usr/local/lib/pkgconfig/onnxruntime.pc"
+  local -a trees=(
+    "/opt/studiocast/onnxruntime"
+    "/opt/studiocast/cudnn"
+  )
+  local -a ld_confs=(
+    "/etc/ld.so.conf.d/studiocast-onnxruntime.conf"
+    "/etc/ld.so.conf.d/studiocast-cudnn.conf"
+    "/etc/ld.so.conf.d/studiocast-cuda.conf"
+  )
 
-  if [[ -d "$ort_root" ]]; then
-    log "Removing ONNX Runtime under: $ort_root"
-    run sudo rm -rf -- "$ort_root"
+  local tree
+  for tree in "${trees[@]}"; do
+    if [[ -d "$tree" ]]; then
+      log "Removing: $tree"
+      run "${PRIV[@]}" rm -rf -- "$tree"
+    fi
+  done
+
+  local removed_ld_conf=0
+  local ld_conf
+  for ld_conf in "${ld_confs[@]}"; do
+    if [[ -f "$ld_conf" ]]; then
+      log "Removing: $ld_conf"
+      run "${PRIV[@]}" rm -f -- "$ld_conf"
+      removed_ld_conf=1
+    fi
+  done
+
+  if [[ "$removed_ld_conf" -eq 1 ]]; then
+    run "${PRIV[@]}" ldconfig || true
   fi
 
-  if [[ -f "$ld_conf" ]]; then
-    log "Removing: $ld_conf"
-    run sudo rm -f -- "$ld_conf"
-    run sudo ldconfig || true
-  fi
+  local -a pc_dirs=()
+  mapfile -t pc_dirs < <(onnxruntime_pc_link_dirs)
+  remove_onnxruntime_pc_links "$pc_file" "${pc_dirs[@]}"
 
   if [[ -f "$pc_file" ]]; then
     log "Removing: $pc_file"
-    run sudo rm -f -- "$pc_file"
+    run "${PRIV[@]}" rm -f -- "$pc_file"
   fi
 }
 
@@ -205,19 +294,19 @@ greedy_remove_v4l2loopback_persistence() {
   log "Greedy mode: removing v4l2loopback persistence (if created for StudioCast)"
 
   if have_cmd modprobe; then
-    run_quiet sudo modprobe -r v4l2loopback || true
+    run_quiet "${PRIV[@]}" modprobe -r v4l2loopback || true
   fi
 
   if [[ -f "$modprobe_conf" ]]; then
     log "Removing: $modprobe_conf"
-    run sudo rm -f -- "$modprobe_conf"
+    run "${PRIV[@]}" rm -f -- "$modprobe_conf"
   fi
 
   if [[ -f "$modules_load_conf" ]]; then
     # Be conservative: only remove if it's a single-line file containing exactly 'v4l2loopback'.
     if [[ "$(wc -l < "$modules_load_conf" | tr -d ' ')" == "1" ]] && grep -qx 'v4l2loopback' "$modules_load_conf"; then
       log "Removing: $modules_load_conf"
-      run sudo rm -f -- "$modules_load_conf"
+      run "${PRIV[@]}" rm -f -- "$modules_load_conf"
     else
       warn "Not removing $modules_load_conf (contents don't match expected single-line 'v4l2loopback')."
     fi
@@ -249,14 +338,20 @@ greedy_purge_apt_dependencies() {
   )
 
   log "Greedy mode: attempting to purge apt dependencies (best-effort)"
-  run sudo apt-get update
+  run "${PRIV[@]}" apt-get update
   # Intentionally allow failures (packages may not be installed).
-  run sudo apt-get remove --purge -y "${pkgs[@]}" || true
-  run sudo apt-get autoremove --purge -y || true
-  run sudo apt-get -f install -y || true
+  run "${PRIV[@]}" apt-get remove --purge -y "${pkgs[@]}" || true
+  run "${PRIV[@]}" apt-get autoremove --purge -y || true
+  run "${PRIV[@]}" apt-get -f install -y || true
 }
 
 main() {
+  set -euo pipefail
+
+  parse_args "$@"
+  resolve_user_paths
+  resolve_priv
+
   log "Mode: $([[ "$GREEDY" -eq 1 ]] && echo greedy || echo simple)"
   log "Dry-run: $([[ "$DRY_RUN" -eq 1 ]] && echo yes || echo no)"
 
@@ -276,7 +371,8 @@ main() {
   if [[ "$GREEDY" -eq 1 ]]; then
     greedy_remove_user_data
 
-    if ! have_cmd sudo; then
+    # A root shell needs no sudo, so only a user shell without it must stop.
+    if [[ "${#PRIV[@]}" -gt 0 ]] && ! have_cmd sudo; then
       warn "sudo not found; skipping system-level cleanup (onnxruntime/v4l2loopback/apt purge)"
     else
       greedy_remove_system_onnxruntime_bootstrap
@@ -288,4 +384,11 @@ main() {
   log "Done."
 }
 
-main
+# Everything above is a definition. Stop here when the file is sourced, so that
+# tests/uninstall_pkgconfig_tests.sh can call single functions without an
+# uninstall, without argument parsing, and without new shell options.
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
+
+main "$@"

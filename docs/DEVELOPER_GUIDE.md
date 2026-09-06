@@ -10,11 +10,11 @@ For user-facing setup and usage, start with [../README.md](../README.md).
 StudioCast currently targets Ubuntu 22.04 and 24.04. The setup helper supports
 Ubuntu-family distributions and installs the common build/runtime dependencies,
 ONNX Runtime, and v4l2loopback support. Fedora 44 is an early-preview target:
-`packaging/rpm/build_rpm.sh` builds an RPM package. The setup helper is
-Ubuntu-only, so a Fedora machine needs its dependencies by hand: the
-`BuildRequires` list in `packaging/rpm/studiocast.spec.in` names them,
-`scripts/install/dlib.sh` builds the pinned dlib, and the `v4l2loopback` module
-comes from RPM Fusion Free.
+`./scripts/setup.sh` runs `scripts/setup/fedora.sh` there, which installs the
+dependencies and sets up v4l2loopback with the same flags, and
+`packaging/rpm/build_rpm.sh` builds an RPM package. Fedora ships no dlib
+package, so `scripts/install/dlib.sh` builds the pinned dlib when a source
+build needs Eye Contact. See [SETUP.md](SETUP.md) for the Fedora notes.
 
 One-shot development setup:
 
