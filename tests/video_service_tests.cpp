@@ -46,6 +46,7 @@ bool TestV4l2CaptureNegotiationRefusesAnMplaneReportWithoutOnePlane();
 bool TestV4l2CaptureBufferMustHoldTheNegotiatedFrame();
 bool TestV4l2CaptureFramePayloadStaysInsideTheMapping();
 bool TestV4l2CaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset();
+bool TestV4l2CaptureDrainFailureStopsCaptureOnARefusal();
 bool TestYuyvToRgb24MatchesBt601AndPreservesPadding();
 bool TestYuyvToRgb24TailStaysInsideAPackedOddWidthRow();
 bool TestYuyvToRgb24BackendsMatchScalarReference();
@@ -1146,6 +1147,8 @@ int main() {
       {"V4L2 capture raw walk stays inside the mapping after a plane offset",
        &studiocast::tests::
            TestV4l2CaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset},
+      {"V4L2 capture drain failure stops capture on a refusal",
+       &studiocast::tests::TestV4l2CaptureDrainFailureStopsCaptureOnARefusal},
       {"YUYV->RGB tail stays inside a packed odd width row",
        &studiocast::tests::TestYuyvToRgb24TailStaysInsideAPackedOddWidthRow},
   };

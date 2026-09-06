@@ -536,6 +536,61 @@ bool TestCaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset() {
                 "a compressed frame must not be refused for an offset");
 }
 
+// The frame-drain loop is the second caller of `AcquireFrame`, and it asks
+// for a frame with no wait. A recoverable failure there only says the queue is
+// empty. Every other failure is a frame the capture refused after it dequeued
+// the buffer, and a loop that reads it as an empty queue runs one buffer short
+// from then on.
+bool TestCaptureDrainFailureStopsCaptureOnARefusal() {
+  using studiocast::video::CaptureDrainFailureStopsCapture;
+  using studiocast::video::CaptureFormat;
+  using studiocast::video::CaptureFramePayload;
+  using studiocast::video::CaptureRawWalkFitsMapping;
+
+  if (!Expect(!CaptureDrainFailureStopsCapture(
+                  "Timed out waiting for camera frame."),
+              "an empty queue must keep the capture loop running"))
+    return false;
+
+  if (!Expect(!CaptureDrainFailureStopsCapture(""),
+              "a failure with no detail must keep the capture loop running"))
+    return false;
+
+  if (!Expect(CaptureDrainFailureStopsCapture(
+                  "VIDIOC_DQBUF (mplane) failed: Input/output error"),
+              "a dequeue failure must stop the capture loop"))
+    return false;
+
+  // The two per-frame refusals, in the words the capture itself writes.
+  std::size_t off = 0;
+  std::size_t bytes = 0;
+  std::string err;
+  if (!Expect(!CaptureFramePayload(4096u, 1024u, /*data_offset=*/1025u, &off,
+                                   &bytes, &err),
+              "an offset past the payload must refuse the frame"))
+    return false;
+
+  if (!Expect(CaptureDrainFailureStopsCapture(err),
+              "a payload refusal must stop the capture loop"))
+    return false;
+
+  CaptureFormat fmt;
+  fmt.width = 640;
+  fmt.height = 480;
+  fmt.format = CapturePixelFormat::yuyv;
+  fmt.bytes_per_line = 1280;
+  fmt.size_image = 614400;
+
+  err.clear();
+  if (!Expect(!CaptureRawWalkFitsMapping(614400u, /*data_offset=*/64u, fmt,
+                                         &err),
+              "an offset the mapping cannot absorb must refuse the frame"))
+    return false;
+
+  return Expect(CaptureDrainFailureStopsCapture(err),
+                "a raw walk refusal must stop the capture loop");
+}
+
 } // namespace
 
 bool TestV4l2CaptureFramePayloadStaysInsideTheMapping() {
@@ -544,6 +599,10 @@ bool TestV4l2CaptureFramePayloadStaysInsideTheMapping() {
 
 bool TestV4l2CaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset() {
   return TestCaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset();
+}
+
+bool TestV4l2CaptureDrainFailureStopsCaptureOnARefusal() {
+  return TestCaptureDrainFailureStopsCaptureOnARefusal();
 }
 
 bool TestV4l2CapturePreferenceTreats720pAsMjpegWorthy() {

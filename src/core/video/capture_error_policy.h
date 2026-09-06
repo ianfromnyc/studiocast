@@ -26,6 +26,20 @@ inline bool IsRecoverableCaptureAcquireFailure(std::string_view err) {
   return false;
 }
 
+// True when a failed acquire inside the frame-drain loop must stop the whole
+// capture loop.
+//
+// The drain loop asks for a frame with no wait, so a recoverable failure there
+// only says the queue is empty: the loop keeps the frame it has and goes on.
+// Every other failure is a frame the driver gave and the capture refused, and
+// the buffer stays dequeued. A loop that reads such a failure as an empty
+// queue runs one buffer short from then on, with nothing in the log. The two
+// callers of `AcquireFrame` must agree on what a fatal acquire means, and this
+// is that agreement.
+inline bool CaptureDrainFailureStopsCapture(std::string_view err) {
+  return !IsRecoverableCaptureAcquireFailure(err);
+}
+
 inline bool ShouldFallbackToRawAfterMjpegDecodeFailure(
     const CaptureFormat &capture, bool fallback_already_attempted) {
   return capture.format == CapturePixelFormat::mjpeg &&
