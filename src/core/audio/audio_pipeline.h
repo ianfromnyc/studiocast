@@ -44,6 +44,13 @@ public:
 
 struct AudioPipelineHooks {
   std::function<std::unique_ptr<AudioPipelineIo>()> create_io;
+
+  // Test seam. Stop() calls this when it has released the worker handle
+  // lock. A test holds Stop() there and lets a Start() publish a worker in
+  // the meantime, thus it can see whether Stop() has a store left that lands
+  // after that publish. Everything that Stop() changes must be done before
+  // this point.
+  std::function<void()> stop_released_worker_lock;
 };
 
 struct AudioPipelineConfig {
@@ -114,7 +121,7 @@ private:
   void SetLastError(std::string msg);
   void CompleteStartup(bool ok, std::string error);
   std::unique_ptr<AudioPipelineIo> CreateIo() const;
-  AudioPipelineIo *GetActiveIo() const;
+  std::shared_ptr<AudioPipelineIo> GetActiveIo() const;
 
   AudioProcessor *processor_ = nullptr; // not owned
   AudioPipelineHooks hooks_;
@@ -123,11 +130,20 @@ private:
   mutable std::mutex mu_;
   std::string last_error_;
 
+  // The backend is shared, not owned alone, because ThreadMain() keeps its
+  // own reference for as long as it makes calls on the backend. Stop() can
+  // release io_ while a worker that Start() took out of the handle is still
+  // inside Open(); with a raw pointer that call reads the vtable pointer of
+  // a freed object. The shared reference makes the last user, not Stop(),
+  // the one that frees the backend. No test in this suite goes red without
+  // it: the window is a few instructions wide and a use-after-free needs a
+  // sanitizer to see.
   mutable std::mutex io_mu_;
-  std::unique_ptr<AudioPipelineIo> io_;
+  std::shared_ptr<AudioPipelineIo> io_;
 
   // Hot-path stats are atomics to avoid lock contention on the real-time
-  // thread.
+  // thread. running_ is more than a stat: Start() and Stop() change it under
+  // thread_mu_. See part 1 of the note on that lock.
   std::atomic<bool> running_{false};
   std::atomic<std::uint64_t> frames_processed_{0};
   std::atomic<std::uint64_t> process_time_us_sum_{0};
@@ -149,7 +165,52 @@ private:
   bool startup_ok_ = false;
   std::string startup_error_;
 
+  // Guards the worker handle in Start() and in Stop(). Start() and Stop() can
+  // run at the same time, so the "is it joinable?" test, the join and the
+  // publish must be one step: without the lock two callers both see a
+  // joinable handle and both join the same worker, which is undefined
+  // behaviour.
+  //
+  // The invariant this lock keeps has three parts:
+  //
+  //  1. The worker handle, the backend io_, the stop flag stop_ and the
+  //     running flag running_ change only under this lock, and always
+  //     together. Thus the backend that io_ holds is always the backend of
+  //     the worker that thread_ holds, and Stop() always reaches the backend
+  //     of the worker it is about to join. A backend released while its
+  //     worker still parks in it can never be asked to stop again, and the
+  //     next join of that worker never returns. running_ is in the list
+  //     because Start() reads it before it takes the handle: a clear that
+  //     lands after a publish makes a running pipeline report itself
+  //     stopped, and the next Start() then joins a live worker.
+  //     ThreadMain() clears running_ as well, but only on its way out,
+  //     after its last call on the backend.
+  //  2. Stop() raises stop_, asks the backend to stop, joins and releases
+  //     the backend, all in one hold of this lock. A Start() thus cannot
+  //     clear the flag or replace the backend in between.
+  //     VirtualAudioService uses th_mu_ for the same jobs.
+  //  3. No caller joins a worker while it holds this lock, unless it first
+  //     raised stop_ and called RequestStop() under the same lock. Start()
+  //     takes the worker of the last run out of the handle under the lock
+  //     and joins it outside every lock, because a worker parked in the
+  //     backend leaves only on RequestStop(), and Stop() needs this lock to
+  //     make that call. A join under the lock before the request would hold
+  //     the lock for as long as the park, and the pair would never unwind.
+  //
+  // Stop() holds this lock across its own join on purpose. src/core/video
+  // does the opposite: VideoFeed::Stop() moves the handle out under the lock
+  // and joins outside it, thus a second Stop() there returns before the
+  // worker is gone. Do not change this side to match, because
+  // ~AudioPipeline() calls Stop() and must not free the object under a live
+  // worker. Part 3 above is what makes that join safe.
+  std::mutex thread_mu_;
   std::thread thread_;
+
+  // True from the moment a Start() takes the handle until that call returns.
+  // Guarded by thread_mu_. A second Start() must fail rather than publish a
+  // worker over the handle of the first, because a move-assign onto a
+  // joinable handle ends the process.
+  bool starting_ = false;
 };
 
 } // namespace studiocast::audio

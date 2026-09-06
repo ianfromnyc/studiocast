@@ -240,9 +240,38 @@ private:
   void SetLastError(std::string msg);
 
   mutable std::mutex mu_;
+
+  // Guards the supervisor handle, the stop_ flag and the start mark in
+  // Start() and in Stop(). Start() and Stop() can run at the same time, so
+  // the "is it joinable?" test of Stop(), the join and the publish of
+  // Start() must be one step: without the lock two callers both see a
+  // joinable handle and both join the same supervisor, which is undefined
+  // behaviour. Start() makes no such test any more; the start mark below is
+  // what keeps a second caller away from the handle.
+  //
+  // Stop() holds this lock across the join on purpose. src/core/video does
+  // the opposite: VirtualCameraService::Stop() moves the handle out under the
+  // lock and joins outside it, thus a second Stop() there returns before the
+  // supervisor is gone. Do not change this side to match, because
+  // ~VirtualAudioService() calls Stop() and must not free the object under a
+  // live supervisor.
+  std::mutex th_mu_;
   std::thread th_;
   std::atomic_bool stop_{false};
 
+  // True from the moment a Start() takes the handle until that call returns.
+  // Guarded by th_mu_. A second Start() must fail before it stops the
+  // supervisor of the first and before it replaces the config and the
+  // status, because a move-assign onto a joinable handle ends the process
+  // and a caller that fails must leave nothing of its own behind.
+  bool starting_ = false;
+
+  // Guarded by mu_, not by th_mu_. AudioPipeline keeps its running flag
+  // under the lock of its worker handle, because Start() there reads the
+  // flag before it takes the handle and a clear that lands after a publish
+  // would make that Start() join a live worker. This flag guards nothing:
+  // Start() refuses a second caller on the start mark above, and Stop()
+  // clears this one after it joined the supervisor.
   bool running_ = false;
   bool mic_created_ = false;
 
