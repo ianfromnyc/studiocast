@@ -4777,6 +4777,11 @@ bool TestConcurrentPipelineStopJoinsWorkerOnce() {
   // Hold the worker until both callers are inside Stop(). A fixed sleep can
   // pass on a loaded runner without ever making the race, thus wait for the
   // two callers and then give them a short moment to reach the join.
+  //
+  // The 20 ms settle below is the last step that depends on timing: the count
+  // proves that both callers entered Stop(), not that either reached the
+  // join. A count taken immediately before the handle lock would close it,
+  // but that needs a seam in the production code.
   if (!WaitUntil(
           [&] {
             return fx->stops_entered.load(std::memory_order_acquire) == 2;
@@ -4919,6 +4924,11 @@ bool TestConcurrentServiceStopJoinsSupervisorOnce() {
   // Hold the supervisor until both callers are inside Stop(). A fixed sleep
   // can pass on a loaded runner without ever making the race, thus wait for
   // the two callers and then give them a short moment to reach the join.
+  //
+  // The 20 ms settle below is the last step that depends on timing: the count
+  // proves that both callers entered Stop(), not that either reached the
+  // join. A count taken immediately before the handle lock would close it,
+  // but that needs a seam in the production code.
   if (!WaitUntil(
           [&] {
             return fx->stops_entered.load(std::memory_order_acquire) == 2;
