@@ -1362,14 +1362,21 @@ bool TestFrameBufferReportsAFrameThatWasNeverTaken() {
 // The hand-off carries whole frames between two threads with no lock. A torn
 // frame would hold the bytes of two writes at once.
 //
-// The producer stops on a count of hand-offs, not on a count of writes. A
-// publish that answers `published` says the consumer took the frame before it,
-// thus the producer sees each hand-off as it happens and keeps writing until it
-// has enough of them. CPU load changes how long the producer must write, but
-// not how many hand-offs the consumer gets: a machine too busy to give the
-// consumer a slice for a long time makes this test slower, not false. The cap
-// on the writes is the second bound, and it stops a buffer that hands nothing
-// over from writing for ever.
+// The producer stops on a count of hand-offs, not on a count of writes, and
+// the consumer counts the hand-offs. A frame whose bytes differ from the frame
+// before it is a frame that crossed, thus the count is the consumer's own
+// record of what it got. The producer keeps writing until that count is high
+// enough. CPU load changes how long the producer must write, but not how many
+// hand-offs the consumer gets: a machine too busy to give the consumer a slice
+// for a long time makes this test slower, not false. The cap on the writes is
+// the second bound, and it stops a buffer that hands nothing over from writing
+// for ever.
+//
+// The producer keeps its own count of the hand-offs, but only to report it: a
+// publish that answers `published` says the consumer took the frame before it.
+// A buffer that never raises the fresh bit makes every publish answer
+// `published` although no frame crosses, thus the producer's count alone is not
+// proof of a hand-off. The two counts together name that break.
 bool TestFrameBufferSurvivesAProducerAndAConsumer() {
   constexpr std::size_t kFrameBytes = 4096;
   // Writes that stress the hand-off before the producer starts to wait.
@@ -1389,12 +1396,17 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
   std::atomic<std::uint64_t> dropped{0};
   std::atomic<int> handoffs{0};
   std::atomic<std::uint64_t> writes{0};
+  // The consumer counts the frames that crossed. The producer reads the count
+  // to know when to stop, and the test asserts on it, thus the stop rule and
+  // the bar are the same number and cannot disagree.
+  std::atomic<int> crossed{0};
   std::thread producer([&] {
     std::vector<std::uint8_t> frame(kFrameBytes, 0);
     std::uint64_t written = 0;
     int seen = 0;
     while (!torn.load(std::memory_order_relaxed) && written < kWriteCap &&
-           (written < kFrames || seen < kHandoffs)) {
+           (written < kFrames ||
+            crossed.load(std::memory_order_relaxed) < kHandoffs)) {
       const auto value = static_cast<std::uint8_t>(written % 251);
       std::fill(frame.begin(), frame.end(), value);
       const bool first = written == 0;
@@ -1409,7 +1421,8 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
       }
       // The writes are done and the producer only waits for hand-offs now. It
       // gives up the core, thus a consumer that has none can run.
-      if (written >= kFrames && seen < kHandoffs)
+      if (written >= kFrames &&
+          crossed.load(std::memory_order_relaxed) < kHandoffs)
         std::this_thread::yield();
     }
     handoffs.store(seen, std::memory_order_relaxed);
@@ -1418,11 +1431,20 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
   });
 
   int taken = 0;
+  int last = -1;
   while (!done.load(std::memory_order_acquire)) {
     const std::uint8_t *frame = buffer.Acquire();
     if (!frame)
       continue;
     ++taken;
+    // A frame that holds a value the frame before it did not hold is a frame
+    // that crossed. A buffer that gives the same frame again does not raise
+    // this count, thus the count says what the consumer got, not what the
+    // producer offered.
+    if (frame[0] != last) {
+      last = frame[0];
+      crossed.fetch_add(1, std::memory_order_relaxed);
+    }
     for (std::size_t i = 1; i < kFrameBytes; ++i) {
       if (frame[i] != frame[0]) {
         // The producer reads this and stops, because a torn frame ends the
@@ -1439,13 +1461,15 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
 
   return Expect(!torn.load(std::memory_order_relaxed),
                 "the consumer read a frame that two writes tore apart") &&
-         Expect(handoffs.load(std::memory_order_relaxed) >= kHandoffs,
-                "the producer handed over " +
-                    std::to_string(handoffs.load(std::memory_order_relaxed)) +
+         Expect(crossed.load(std::memory_order_relaxed) >= kHandoffs,
+                "the consumer took " +
+                    std::to_string(crossed.load(std::memory_order_relaxed)) +
                     " frames of the " + std::to_string(kHandoffs) +
                     " the test needs, in " +
                     std::to_string(writes.load(std::memory_order_relaxed)) +
-                    " writes") &&
+                    " writes, and the producer counted " +
+                    std::to_string(handoffs.load(std::memory_order_relaxed)) +
+                    " hand-offs") &&
          Expect(taken > 0, "the consumer should have read something");
 }
 
