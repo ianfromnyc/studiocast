@@ -1,6 +1,7 @@
 #include "core/audio/virtual_audio_service.h"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -459,6 +460,11 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
     // supervisor that was never told to stop, and then it never returns.
     std::lock_guard<std::mutex> lock(th_mu_);
     stop_.store(false, std::memory_order_release);
+    // Start() calls Stop() first, thus the handle is free here. Two Start()
+    // callers at the same time can still get here one after the other, and
+    // the move-assign onto a joinable handle ends the process. This makes
+    // that fail in a debug build instead.
+    assert(!th_.joinable());
     th_ = std::thread([this]() { ThreadMain(); });
   } catch (const std::exception &e) {
     if (error)

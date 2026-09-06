@@ -1,6 +1,7 @@
 #include "core/audio/audio_pipeline.h"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -770,6 +771,12 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
     // then publish the handle under the lock.
     std::thread worker([this, cfg] { ThreadMain(cfg); });
     std::lock_guard<std::mutex> lock(thread_mu_);
+    // Two Start() callers at the same time both pass the running_ guard
+    // above, because that guard is a test and then a store. Both then get
+    // here, and the move-assign onto a joinable handle ends the process. No
+    // caller starts twice today; this makes a future one fail in a debug
+    // build.
+    assert(!thread_.joinable());
     thread_ = std::move(worker);
   }
 
