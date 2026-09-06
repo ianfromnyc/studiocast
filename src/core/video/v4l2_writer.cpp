@@ -424,12 +424,36 @@ bool ParseChosenFormat(const v4l2_format &f, bool mplane, int fps,
   a.pixfmt_fourcc = fourcc;
   a.pixfmt = FourccToString(fourcc);
 
+  const std::size_t rows =
+      a.height > 0 ? static_cast<std::size_t>(a.height) : 0u;
+
+  // The driver's own report must hold together: the rows it says the frame
+  // has must fit in the frame size it says the buffer holds. `WriteFrame`
+  // sizes every write() from `size_image`, so raising that value to match a
+  // longer stride only hides the disagreement, and the writer then pushes
+  // more bytes than the frame the driver sized. On a v4l2loopback output the
+  // surplus runs into the next frame, and the picture is torn from then on.
+  //
+  // A frame size of 0 is not that disagreement: it is no report at all, and
+  // the raise below gives it the value the stride implies.
+  if (size > 0 && bpl * rows > size) {
+    if (outErr)
+      *outErr = "Driver reported bytesperline=" + std::to_string(bpl) +
+                " for " + std::to_string(a.height) +
+                " rows, which does not fit sizeimage=" + std::to_string(size);
+    return false;
+  }
+
+  // Only a row too short to hold the pixels is raised, because the converter
+  // writes the whole packed row and the driver cannot have meant less.
   const std::size_t minBpl = MinBytesPerLine(a.width, a.format);
   if (bpl < minBpl)
     bpl = minBpl;
   a.bytes_per_line = bpl;
 
-  const std::size_t minSize = bpl * static_cast<std::size_t>(a.height);
+  // A raised stride is the one case where the frame size no longer follows
+  // the driver's own report, so it follows the raise.
+  const std::size_t minSize = bpl * rows;
   if (size < minSize)
     size = minSize;
   a.size_image = size;
