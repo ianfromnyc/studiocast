@@ -4743,12 +4743,15 @@ bool TestConcurrentPipelineStopJoinsWorkerOnce() {
     return false;
   }
 
+  // Wait longer than the 250 ms that most tests in this file use. This wait
+  // is only for progress, and a run with more copies than CPUs can need more
+  // than 250 ms to give the worker its first slice.
   if (!WaitUntil(
           [&] {
             std::lock_guard<std::mutex> lock(fx->io_state->mu);
             return fx->io_state->read_entered;
           },
-          250ms)) {
+          5000ms)) {
     std::cerr << "pipeline worker did not enter the parked capture read\n";
     fx->ReleaseWorker();
     fx->pipeline->Stop();
@@ -4847,9 +4850,11 @@ struct ConcurrentServiceStopFixture : ConcurrentStopFixture {
     park_cv.notify_all();
   }
 
+  // See the wait in TestConcurrentPipelineStopJoinsWorkerOnce: a wait for
+  // progress must not fail only because the runner is loaded.
   bool WaitForParkedSupervisor() {
     std::unique_lock<std::mutex> lock(park_mu);
-    return park_cv.wait_for(lock, 250ms, [this] { return parked; });
+    return park_cv.wait_for(lock, 5000ms, [this] { return parked; });
   }
 };
 
