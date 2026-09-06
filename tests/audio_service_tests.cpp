@@ -5155,6 +5155,267 @@ bool TestConcurrentStartStopKeepsWorkerHandleUsable() {
   return true;
 }
 
+// State that the stop-flag ordering test shares with its I/O backends.
+struct StopOrderIoState {
+  std::mutex mu;
+  std::condition_variable cv;
+  // The pipeline stop flag, which SetStopRequestedFlag() gives to every
+  // backend. The test reads the flag through this pointer.
+  const std::atomic<bool> *stop_flag = nullptr;
+  // Open() parks while this is set, thus a worker that nobody tells to stop
+  // stays in the backend and a join of that worker never returns. This is
+  // what a real capture read does and what the shipped OverlapIo cannot do,
+  // because its Open() fails at once.
+  bool park_open = false;
+  // The gate that holds the first backend inside RequestStop(). It gives the
+  // test a seam inside Stop(), after the raise of the stop flag and before
+  // the join.
+  bool request_stop_entered = false;
+  bool request_stop_released = false;
+  // The value of the stop flag at the moment the gate opened.
+  bool stop_flag_recorded = false;
+  bool stop_flag_on_release = false;
+};
+
+// I/O for the stop-flag ordering test. Open() fails, as OverlapIo does, but
+// it first parks until the pipeline asks it to stop, either with the stop
+// flag or with RequestStop().
+class StopOrderIo final : public AudioPipelineIo {
+public:
+  StopOrderIo(std::shared_ptr<StopOrderIoState> state, bool gate_request_stop)
+      : state_(std::move(state)), gate_request_stop_(gate_request_stop) {}
+
+  void SetStopRequestedFlag(const std::atomic<bool> *stop_requested) override {
+    std::lock_guard<std::mutex> lock(state_->mu);
+    stop_requested_ = stop_requested;
+    state_->stop_flag = stop_requested;
+  }
+
+  bool Open(const AudioPipelineConfig &, std::string *error) override {
+    {
+      std::unique_lock<std::mutex> lock(state_->mu);
+      state_->cv.wait(lock,
+                      [this] { return !state_->park_open || StopAsked(); });
+    }
+    if (error)
+      *error = kOverlapOpenError;
+    return false;
+  }
+
+  bool Read(void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool Write(const void *, std::size_t, std::string *error) override {
+    if (error)
+      error->clear();
+    return false;
+  }
+
+  bool GetCaptureLatencyUs(std::uint64_t *) override { return false; }
+  bool GetPlaybackLatencyUs(std::uint64_t *) override { return false; }
+  void Flush() override {}
+
+  void RequestStop() override {
+    std::unique_lock<std::mutex> lock(state_->mu);
+    stop_asked_ = true;
+    state_->cv.notify_all();
+    if (!gate_request_stop_)
+      return;
+    // Hold Stop() here. It has raised the flag and it has not yet joined.
+    state_->request_stop_entered = true;
+    state_->cv.notify_all();
+    state_->cv.wait(lock, [this] { return state_->request_stop_released; });
+    state_->stop_flag_on_release =
+        stop_requested_ != nullptr &&
+        stop_requested_->load(std::memory_order_acquire);
+    state_->stop_flag_recorded = true;
+  }
+
+private:
+  // Call with state_->mu held.
+  bool StopAsked() const {
+    return stop_asked_ || (stop_requested_ != nullptr &&
+                           stop_requested_->load(std::memory_order_acquire));
+  }
+
+  std::shared_ptr<StopOrderIoState> state_;
+  bool gate_request_stop_ = false;
+  bool stop_asked_ = false;
+  const std::atomic<bool> *stop_requested_ = nullptr;
+};
+
+struct StopOrderFixture {
+  std::shared_ptr<StopOrderIoState> io_state =
+      std::make_shared<StopOrderIoState>();
+  std::atomic<int> ios_created{0};
+  std::atomic<bool> stopper_done{false};
+  std::atomic<bool> starter_done{false};
+  std::atomic<bool> cleaner_done{false};
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+};
+
+// Stop() must keep the stop flag up for the worker that it joins.
+//
+// Stop() raises the flag, asks the backend to stop and then joins. A Start()
+// that runs between the raise and the join clears the flag, makes a new
+// backend and publishes a new worker; Stop() then joins a worker that nobody
+// told to stop and whose backend never got RequestStop(). A worker parked in
+// a real capture read leaves only on one of those two, thus that join never
+// returns. VirtualAudioService::Stop() had the same fault.
+//
+// The test holds Stop() inside RequestStop() and then lets a Start() run. The
+// flag must still be up when Stop() leaves RequestStop(), which is true only
+// while Stop() holds the worker lock across the raise. A sweep under load
+// cannot show this, because the window between the raise and the join is a
+// few instructions wide; the gate makes the order instead of racing for it.
+bool TestStopKeepsTheStopFlagUpForTheWorkerItJoins() {
+  auto fx = std::make_shared<StopOrderFixture>();
+  auto *raw = fx.get();
+  auto io_state = fx->io_state;
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw, io_state]() -> std::unique_ptr<AudioPipelineIo> {
+    // Only the first backend holds Stop() inside RequestStop().
+    const int index = raw->ios_created.fetch_add(1, std::memory_order_relaxed);
+    return std::make_unique<StopOrderIo>(io_state, index == 0);
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  // Prime the pipeline: the first backend stays installed and its worker
+  // exits by itself, thus Stop() finds a backend to ask and a worker to join.
+  const AudioPipelineConfig cfg;
+  std::string prime_error;
+  if (fx->pipeline->Start(cfg, &prime_error)) {
+    std::cerr << "pipeline.Start reported success though the I/O refuses to "
+                 "open\n";
+    return false;
+  }
+  {
+    std::lock_guard<std::mutex> lock(io_state->mu);
+    io_state->park_open = true;
+  }
+
+  std::thread stopper([raw] {
+    raw->pipeline->Stop();
+    raw->stopper_done.store(true, std::memory_order_release);
+  });
+
+  if (!WaitUntil(
+          [&] {
+            std::lock_guard<std::mutex> lock(io_state->mu);
+            return io_state->request_stop_entered;
+          },
+          5000ms)) {
+    std::cerr << "Stop() never reached RequestStop()\n";
+    {
+      std::lock_guard<std::mutex> lock(io_state->mu);
+      io_state->park_open = false;
+      io_state->request_stop_released = true;
+    }
+    io_state->cv.notify_all();
+    stopper.join();
+    return false;
+  }
+
+  std::thread starter([raw, cfg] {
+    std::string start_error;
+    raw->pipeline->Start(cfg, &start_error);
+    raw->starter_done.store(true, std::memory_order_release);
+  });
+
+  // Wait for the flag to fall. Start() clears it as soon as it is past the
+  // join at the top of its body, thus this ends in milliseconds when Stop()
+  // raised the flag outside the worker lock. When Stop() holds that lock,
+  // Start() waits for it and this wait runs out, which is the pass.
+  const bool flag_cleared = WaitUntil(
+      [&] {
+        std::lock_guard<std::mutex> lock(io_state->mu);
+        return io_state->stop_flag != nullptr &&
+               !io_state->stop_flag->load(std::memory_order_acquire);
+      },
+      2000ms);
+
+  {
+    std::lock_guard<std::mutex> lock(io_state->mu);
+    io_state->request_stop_released = true;
+  }
+  io_state->cv.notify_all();
+
+  bool flag_up_on_release = false;
+  WaitUntil(
+      [&] {
+        std::lock_guard<std::mutex> lock(io_state->mu);
+        return io_state->stop_flag_recorded;
+      },
+      5000ms);
+  {
+    std::lock_guard<std::mutex> lock(io_state->mu);
+    flag_up_on_release = io_state->stop_flag_on_release;
+  }
+
+  // Start() publishes a worker that parks in the backend. One more Stop()
+  // raises the flag for it and joins it. That worker leaves on the flag
+  // alone, thus this works also when Stop() already released the backend.
+  // Wait for the new backend first: Start() clears the flag before it makes
+  // one, thus a Stop() before that point loses its raise to Start().
+  //
+  // A third thread makes this last Stop(), because a Stop() that is wedged in
+  // a join holds the worker lock and would take the test thread with it.
+  WaitUntil(
+      [&] { return raw->ios_created.load(std::memory_order_relaxed) > 1; },
+      5000ms);
+  std::thread cleaner([raw] {
+    raw->pipeline->Stop();
+    raw->cleaner_done.store(true, std::memory_order_release);
+  });
+
+  const bool all_returned = WaitUntil(
+      [&] {
+        return raw->stopper_done.load(std::memory_order_acquire) &&
+               raw->starter_done.load(std::memory_order_acquire) &&
+               raw->cleaner_done.load(std::memory_order_acquire);
+      },
+      5000ms);
+
+  if (!all_returned) {
+    // A caller is wedged inside a join on a worker that nobody told to stop.
+    // A wedged thread cannot be recovered and its stale thread id can go to a
+    // later test, thus the run ends here.
+    stopper.detach();
+    starter.detach();
+    cleaner.detach();
+    std::cout.flush();
+    std::cerr << "[FAIL] Start()/Stop() with a parked worker never returned; "
+                 "a join() is stuck on a worker that was never told to stop"
+              << std::endl;
+    std::_Exit(1);
+  }
+
+  stopper.join();
+  starter.join();
+  cleaner.join();
+
+  if (flag_cleared || !flag_up_on_release) {
+    std::cerr << "Start() cleared the stop flag while Stop() was between the "
+                 "raise and the join, thus Stop() can join a worker that "
+                 "nobody told to stop\n";
+    return false;
+  }
+
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
 struct ServiceStartStopOverlapFixture : ConcurrentStopFixture {
   std::atomic<bool> mic_consumer_present{true};
   std::atomic<int> supervisor_loops{0};
@@ -5464,6 +5725,8 @@ int main() {
        &TestConcurrentStartStopKeepsWorkerHandleUsable},
       {"concurrent service start/stop keeps the supervisor handle usable",
        &TestConcurrentServiceStartStopKeepsSupervisorHandleUsable},
+      {"stop keeps the stop flag up for the worker it joins",
+       &TestStopKeepsTheStopFlagUpForTheWorkerItJoins},
   };
 
   int failed = 0;
