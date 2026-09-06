@@ -375,8 +375,9 @@ bool TryGetFmtAny(int fd, const TypeSpec &t, v4l2_format *outFmt,
 // or height 0, while a consumer disconnects or a renegotiation window is
 // open. A frame of no rows takes no bytes, thus `WriteFrame` would push
 // nothing at all and the output would stay silent until something
-// renegotiated. `ParseChosenOutputFmt` and `RefreshActual` both ask this
-// question, so that the ladder and the refresh give the same answer.
+// renegotiated. `ParseChosenOutputFmt` asks this of every rung and
+// `SavedOutputFmtIsRestorable` asks it of the format the walk saves, so that
+// the ladder, the refresh and the restore give one answer.
 bool FrameIsUsable(int width, int height) { return width > 0 && height > 0; }
 
 // The largest frame the writer takes from a driver report. An 8K RGB24 frame
@@ -1104,24 +1105,14 @@ bool V4l2Writer::RefreshActual(std::string *error) {
     }
   }
 
+  // The parse refuses a blank format, thus the refresh keeps the cached
+  // format it had and the refusal names the report: a blank one is a
+  // transient of a consumer-disconnect window, not a format to cache.
   ActualFormat a;
   std::string perr;
   if (!ParseChosenOutputFmt(chosen, chosenMplane, negotiatedFps, &a, &perr)) {
     if (error)
       *error = "Queried format parsing failed: " + perr;
-    return false;
-  }
-
-  // The parse refuses a blank format on its own, thus this is the second
-  // guard on the same rule: it holds the previously-valid cached format, and
-  // it keeps the refresh free of output renegotiation thrash.
-  if (!FrameIsUsable(a.width, a.height)) {
-    if (error) {
-      std::ostringstream oss;
-      oss << "Queried format invalid: " << a.width << "x" << a.height
-          << " pixfmt=" << a.pixfmt;
-      *error = oss.str();
-    }
     return false;
   }
 
