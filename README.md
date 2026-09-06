@@ -60,6 +60,8 @@ Known caveats:
 - A V4L2-compatible physical camera for camera input.
 - `v4l2loopback` for the StudioCast virtual camera.
 - A PulseAudio-compatible audio stack with `pactl` for virtual audio routing.
+- Optional: PipeWire 0.3 for the native audio and virtual camera nodes. Set
+  `audio.backend` and `video.output.backend`. See `docs/PIPEWIRE.md`.
 - CMake, Ninja, Qt, and compiler dependencies for the current source-build flow.
 - Optional: NVIDIA driver/CUDA support for Open Video model backends.
 - Optional: user-installed NVIDIA Maxine SDK assets for Maxine effects.

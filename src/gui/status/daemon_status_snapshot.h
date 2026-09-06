@@ -143,6 +143,15 @@ struct DaemonStatusSnapshot {
   QString videoEffectsActiveBackends;
   QString microphoneActiveBackend;
   QString speakersActiveBackend;
+
+  // Sound server API the daemon runs on: "pulse" or "pipewire", and the
+  // reason for a fallback, if there was one.
+  QString audioTransportBackend;
+  QString audioTransportNote;
+
+  // Native PipeWire virtual camera: "off", "starting", "running", or an error.
+  QString videoPipeWireOutputState;
+  int videoPipeWireConsumerCount = 0;
   QString speakersRouteMode;
   AudioEndpointStatus microphoneEndpoint;
   AudioEndpointStatus speakersEndpoint;

@@ -1,0 +1,632 @@
+#include "core/video/pipewire/pipewire_camera_node.h"
+
+#include "core/pipewire/triple_frame_buffer.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#if STUDIOCAST_HAVE_PIPEWIRE
+#include <cstdlib>
+
+#include <pipewire/pipewire.h>
+#include <spa/param/video/format-utils.h>
+#include <spa/pod/builder.h>
+#include <spa/utils/result.h>
+#endif
+
+// The pw_ and spa_ names below stay unqualified. libpipewire 1.0, which Ubuntu
+// 24.04 and Linux Mint 22 ship, gives some of them as macros, among them
+// pw_registry_add_listener and spa_strerror. A :: in front of a macro name is a
+// compile error, so the plain name is the only spelling that works on both
+// libpipewire 1.0 and the inline functions of libpipewire 1.6. All these names
+// are C symbols in the global namespace, so the plain name finds them.
+
+namespace studiocast::video::pw_backend {
+
+namespace internal {
+
+std::string CameraFormatMismatch(std::uint32_t offered_format, int width,
+                                 int height, std::uint32_t negotiated_format,
+                                 std::uint32_t negotiated_width,
+                                 std::uint32_t negotiated_height) {
+  if (negotiated_format == offered_format &&
+      negotiated_width == static_cast<std::uint32_t>(width) &&
+      negotiated_height == static_cast<std::uint32_t>(height)) {
+    return {};
+  }
+  return "The PipeWire server picked a camera format StudioCast did not "
+         "offer: " +
+         std::to_string(negotiated_width) + "x" +
+         std::to_string(negotiated_height) + " format " +
+         std::to_string(negotiated_format) + ", where the node offers " +
+         std::to_string(width) + "x" + std::to_string(height) + " format " +
+         std::to_string(offered_format) + ".";
+}
+
+FrameWriteAnswer FrameWriteAnswerOf(studiocast::pw::PublishOutcome outcome) {
+  FrameWriteAnswer answer;
+  switch (outcome) {
+  case studiocast::pw::PublishOutcome::published:
+    return answer;
+  case studiocast::pw::PublishOutcome::replaced:
+    answer.dropped = true;
+    return answer;
+  case studiocast::pw::PublishOutcome::refused:
+    break;
+  }
+  answer.ok = false;
+  answer.error = "The PipeWire camera node refused the frame: its row layout "
+                 "does not describe the buffer the pipeline handed over.";
+  return answer;
+}
+
+} // namespace internal
+
+std::size_t CameraStrideBytes(int width, PixelFormat format) {
+  // The loopback writer already holds this rule, and the two must agree: the
+  // pipeline sizes its output buffer with MinBytesPerLine, so an odd YUYV
+  // width has a row two bytes longer than the pixel count alone gives.
+  return studiocast::video::MinBytesPerLine(width, format);
+}
+
+std::size_t CameraFrameBytes(int width, int height, PixelFormat format) {
+  if (width <= 0 || height <= 0)
+    return 0;
+  return CameraStrideBytes(width, format) * static_cast<std::size_t>(height);
+}
+
+namespace {
+
+#if STUDIOCAST_HAVE_PIPEWIRE
+
+void EnsurePipeWireInitialized() {
+  static std::once_flag once;
+  std::call_once(once, [] { pw_init(nullptr, nullptr); });
+}
+
+std::uint32_t SpaFormatFor(PixelFormat format) {
+  switch (format) {
+  case PixelFormat::rgb24:
+    return SPA_VIDEO_FORMAT_RGB;
+  case PixelFormat::yuyv:
+    return SPA_VIDEO_FORMAT_YUY2;
+  }
+  return SPA_VIDEO_FORMAT_RGB;
+}
+
+#endif // STUDIOCAST_HAVE_PIPEWIRE
+
+} // namespace
+
+struct PipeWireCameraNode::Impl {
+  CameraNodeConfig cfg;
+  std::size_t frame_bytes = 0;
+  // Row size the node hands its consumers, and the row size of the frames the
+  // pipeline hands the node. The second is the first or more, and the copy in
+  // WriteFrame drops the difference.
+  std::size_t stride_bytes = 0;
+  std::size_t source_stride_bytes = 0;
+  std::size_t rows = 0;
+
+  // The frame hand-off between the pipeline thread and the real-time callback.
+  //
+  // It takes no lock on either side. The callback runs on the PipeWire data
+  // thread, which the server schedules in real time, and a full frame is
+  // megabytes: a mutex there would let a normal-priority copy hold up the
+  // whole graph. See core/pipewire/triple_frame_buffer.h.
+  //
+  // Drop policy: the newest frame wins, and a frame counts as dropped when a
+  // newer one replaced it before the callback took it.
+  studiocast::pw::TripleFrameBuffer frames;
+
+  std::atomic<bool> running{false};
+  // The camera node hands out frames, so it is the output end of every
+  // consumer link.
+  studiocast::pw::NodeLinkCounter links;
+  std::atomic<std::uint64_t> frames_sent{0};
+  std::atomic<std::uint64_t> frames_dropped{0};
+
+  mutable std::mutex error_mu;
+  std::string last_error;
+
+  void SetError(std::string msg) {
+    std::lock_guard<std::mutex> lock(error_mu);
+    last_error = std::move(msg);
+  }
+
+  std::string Error() const {
+    std::lock_guard<std::mutex> lock(error_mu);
+    return last_error;
+  }
+
+#if STUDIOCAST_HAVE_PIPEWIRE
+  struct pw_thread_loop *loop = nullptr;
+  struct pw_context *context = nullptr;
+  struct pw_core *core = nullptr;
+  struct pw_registry *registry = nullptr;
+  struct pw_stream *stream = nullptr;
+
+  struct spa_hook stream_listener {};
+  struct spa_hook registry_listener {};
+#endif
+};
+
+#if STUDIOCAST_HAVE_PIPEWIRE
+
+namespace {
+
+// The pw_stream state as the shared rule names it.
+studiocast::pw::StreamState ToStreamState(enum pw_stream_state state) {
+  switch (state) {
+  case PW_STREAM_STATE_ERROR:
+    return studiocast::pw::StreamState::kError;
+  case PW_STREAM_STATE_UNCONNECTED:
+    return studiocast::pw::StreamState::kUnconnected;
+  case PW_STREAM_STATE_CONNECTING:
+    return studiocast::pw::StreamState::kConnecting;
+  case PW_STREAM_STATE_PAUSED:
+    return studiocast::pw::StreamState::kPaused;
+  case PW_STREAM_STATE_STREAMING:
+    return studiocast::pw::StreamState::kStreaming;
+  }
+  return studiocast::pw::StreamState::kUnconnected;
+}
+
+void OnStreamStateChanged(void *data, enum pw_stream_state old,
+                          enum pw_stream_state state, const char *error) {
+  auto *impl = static_cast<PipeWireCameraNode::Impl *>(data);
+
+  // A node the server took down never comes back by itself. Say so, so that
+  // IsRunning stops reporting a dead node and the planner replaces it.
+  if (studiocast::pw::StreamWentDown(ToStreamState(old),
+                                     ToStreamState(state))) {
+    // A node that Stop took down is already not running, so it gets no
+    // message about a server that dropped it.
+    const bool was_running =
+        impl->running.exchange(false, std::memory_order_acq_rel);
+    if (state == PW_STREAM_STATE_ERROR) {
+      impl->SetError(error ? std::string(error) : std::string("stream error"));
+    } else if (was_running) {
+      impl->SetError("The PipeWire server took the camera node down.");
+    }
+    // A node that left the graph has no id and no consumers any more.
+    impl->links.Reset(studiocast::pw::LinkEnd::kOutput);
+    return;
+  }
+  if (state == PW_STREAM_STATE_ERROR) {
+    impl->SetError(error ? std::string(error) : std::string("stream error"));
+    return;
+  }
+
+  // The server gives the node an id while the stream is still connecting. Take
+  // it at the first state that has one, so a consumer that links right away is
+  // counted.
+  const std::uint32_t id = pw_stream_get_node_id(impl->stream);
+  if (id != PW_ID_ANY)
+    impl->links.SetNodeId(id);
+}
+
+// The server picked a format. Answer with the buffer layout StudioCast wants,
+// otherwise the stream never gets data ports and a consumer receives nothing.
+void OnParamChanged(void *data, std::uint32_t id, const struct spa_pod *param) {
+  auto *impl = static_cast<PipeWireCameraNode::Impl *>(data);
+  if (param == nullptr || id != SPA_PARAM_Format)
+    return;
+
+  std::uint32_t media_type = 0;
+  std::uint32_t media_subtype = 0;
+  if (spa_format_parse(param, &media_type, &media_subtype) < 0)
+    return;
+  if (media_type != SPA_MEDIA_TYPE_video ||
+      media_subtype != SPA_MEDIA_SUBTYPE_raw)
+    return;
+
+  struct spa_video_info_raw raw {};
+  if (spa_format_video_raw_parse(param, &raw) < 0)
+    return;
+
+  // The node offers exactly one format, so the server can only pick that one.
+  // Check it anyway: the buffer answer below is built from the configured
+  // size, and a negotiated size that differed would make the callback send
+  // truncated frames with nothing to explain them.
+  //
+  // Such a node never gets data ports, so it is down and not merely in error.
+  // Without this the status would say "running" for ever and the planner would
+  // keep a node that hands out nothing.
+  const std::string mismatch = internal::CameraFormatMismatch(
+      SpaFormatFor(impl->cfg.format), impl->cfg.width, impl->cfg.height,
+      static_cast<std::uint32_t>(raw.format), raw.size.width, raw.size.height);
+  if (!mismatch.empty()) {
+    impl->running.store(false, std::memory_order_release);
+    impl->SetError(mismatch);
+    impl->links.Reset(studiocast::pw::LinkEnd::kOutput);
+    return;
+  }
+
+  const auto stride = static_cast<std::int32_t>(impl->stride_bytes);
+  const auto size = static_cast<std::int32_t>(impl->frame_bytes);
+
+  std::uint8_t pod_buffer[1024];
+  struct spa_pod_builder builder =
+      SPA_POD_BUILDER_INIT(pod_buffer, sizeof(pod_buffer));
+  const struct spa_pod *params[1];
+  params[0] = static_cast<const struct spa_pod *>(spa_pod_builder_add_object(
+      &builder, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+      SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 2, 8),
+      SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
+      SPA_POD_Int(size), SPA_PARAM_BUFFERS_stride, SPA_POD_Int(stride),
+      SPA_PARAM_BUFFERS_dataType,
+      SPA_POD_CHOICE_FLAGS_Int(1 << SPA_DATA_MemPtr)));
+
+  pw_stream_update_params(impl->stream, params, 1);
+}
+
+void OnStreamProcess(void *data) {
+  auto *impl = static_cast<PipeWireCameraNode::Impl *>(data);
+  struct pw_buffer *b = pw_stream_dequeue_buffer(impl->stream);
+  if (!b)
+    return;
+
+  struct spa_buffer *buf = b->buffer;
+  if (buf->n_datas == 0 || buf->datas[0].data == nullptr) {
+    pw_stream_queue_buffer(impl->stream, b);
+    return;
+  }
+
+  auto *out = static_cast<std::uint8_t *>(buf->datas[0].data);
+  const std::size_t room =
+      std::min<std::size_t>(buf->datas[0].maxsize, impl->frame_bytes);
+
+  // Take the newest frame, or the last one again when none arrived. Neither
+  // call waits for the pipeline thread.
+  const std::uint8_t *frame = impl->frames.Acquire();
+  if (frame && impl->frames.FrameBytes() >= room) {
+    std::memcpy(out, frame, room);
+    impl->frames_sent.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    // No frame is ready yet. A black frame keeps the consumer's timing
+    // steady instead of stalling it.
+    std::memset(out, 0, room);
+  }
+  const std::size_t written = room;
+
+  buf->datas[0].chunk->offset = 0;
+  buf->datas[0].chunk->stride = static_cast<std::int32_t>(impl->stride_bytes);
+  buf->datas[0].chunk->size = static_cast<std::uint32_t>(written);
+
+  pw_stream_queue_buffer(impl->stream, b);
+}
+
+const struct pw_stream_events &StreamEvents() {
+  static const struct pw_stream_events events = [] {
+    struct pw_stream_events e {};
+    e.version = PW_VERSION_STREAM_EVENTS;
+    e.state_changed = OnStreamStateChanged;
+    e.param_changed = OnParamChanged;
+    e.process = OnStreamProcess;
+    return e;
+  }();
+  return events;
+}
+
+// Reads a numeric node id out of a link property. Returns zero when the
+// property is absent or is not a plain number.
+std::uint32_t LinkEndpointNode(const struct spa_dict *props, const char *key) {
+  const char *v = spa_dict_lookup(props, key);
+  if (!v)
+    return 0;
+  char *end = nullptr;
+  const unsigned long parsed = std::strtoul(v, &end, 10);
+  if (!end || *end != '\0')
+    return 0;
+  return static_cast<std::uint32_t>(parsed);
+}
+
+void OnRegistryGlobal(void *data, std::uint32_t id, std::uint32_t permissions,
+                      const char *type, std::uint32_t version,
+                      const struct spa_dict *props) {
+  (void)permissions;
+  (void)version;
+  auto *impl = static_cast<PipeWireCameraNode::Impl *>(data);
+  if (!type || std::strcmp(type, PW_TYPE_INTERFACE_Link) != 0 || !props)
+    return;
+
+  impl->links.OnLinkAdded(id, LinkEndpointNode(props, PW_KEY_LINK_OUTPUT_NODE),
+                          LinkEndpointNode(props, PW_KEY_LINK_INPUT_NODE));
+}
+
+void OnRegistryGlobalRemove(void *data, std::uint32_t id) {
+  auto *impl = static_cast<PipeWireCameraNode::Impl *>(data);
+  impl->links.OnGlobalRemoved(id);
+}
+
+const struct pw_registry_events &RegistryEvents() {
+  static const struct pw_registry_events events = [] {
+    struct pw_registry_events e {};
+    e.version = PW_VERSION_REGISTRY_EVENTS;
+    e.global = OnRegistryGlobal;
+    e.global_remove = OnRegistryGlobalRemove;
+    return e;
+  }();
+  return events;
+}
+
+} // namespace
+
+#endif // STUDIOCAST_HAVE_PIPEWIRE
+
+PipeWireCameraNode::PipeWireCameraNode() : impl_(std::make_unique<Impl>()) {}
+
+PipeWireCameraNode::~PipeWireCameraNode() { Stop(); }
+
+#if !STUDIOCAST_HAVE_PIPEWIRE
+
+bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
+                               std::string *error) {
+  (void)cfg;
+  const std::string msg = "StudioCast was built without PipeWire support "
+                          "(STUDIOCAST_ENABLE_PIPEWIRE=OFF).";
+  impl_->SetError(msg);
+  if (error)
+    *error = msg;
+  return false;
+}
+
+void PipeWireCameraNode::Stop() {}
+
+#else
+
+bool PipeWireCameraNode::Start(const CameraNodeConfig &cfg,
+                               std::string *error) {
+  if (error)
+    error->clear();
+  Stop();
+
+  const std::size_t bytes = CameraFrameBytes(cfg.width, cfg.height, cfg.format);
+  if (bytes == 0 || cfg.fps <= 0) {
+    const std::string msg = "Unsupported PipeWire camera format.";
+    impl_->SetError(msg);
+    if (error)
+      *error = msg;
+    return false;
+  }
+
+  EnsurePipeWireInitialized();
+
+  impl_->cfg = cfg;
+  impl_->frame_bytes = bytes;
+  impl_->stride_bytes = CameraStrideBytes(cfg.width, cfg.format);
+  impl_->rows = static_cast<std::size_t>(cfg.height);
+  // A source that says nothing about its rows has them packed.
+  impl_->source_stride_bytes =
+      std::max<std::size_t>(cfg.stride_bytes, impl_->stride_bytes);
+  impl_->links.Reset(studiocast::pw::LinkEnd::kOutput);
+  impl_->frames_sent.store(0, std::memory_order_relaxed);
+  impl_->frames_dropped.store(0, std::memory_order_relaxed);
+  impl_->SetError({});
+  impl_->frames.Reset(bytes);
+
+  const std::string name =
+      cfg.node_name.empty()
+          ? std::string(studiocast::pw::kVirtualCameraNodeName)
+          : cfg.node_name;
+  const std::string description =
+      cfg.node_description.empty()
+          ? std::string(studiocast::pw::kVirtualCameraDescription)
+          : cfg.node_description;
+
+  impl_->loop = pw_thread_loop_new(name.c_str(), nullptr);
+  if (!impl_->loop) {
+    const std::string msg = "Could not create the PipeWire thread loop.";
+    impl_->SetError(msg);
+    if (error)
+      *error = msg;
+    return false;
+  }
+
+  impl_->context =
+      pw_context_new(pw_thread_loop_get_loop(impl_->loop), nullptr, 0);
+  if (!impl_->context || pw_thread_loop_start(impl_->loop) < 0) {
+    Stop();
+    const std::string msg = "Could not start the PipeWire thread loop.";
+    impl_->SetError(msg);
+    if (error)
+      *error = msg;
+    return false;
+  }
+
+  pw_thread_loop_lock(impl_->loop);
+
+  impl_->core = pw_context_connect(impl_->context, nullptr, 0);
+  if (!impl_->core) {
+    pw_thread_loop_unlock(impl_->loop);
+    Stop();
+    const std::string msg = "Could not connect to the PipeWire server.";
+    impl_->SetError(msg);
+    if (error)
+      *error = msg;
+    return false;
+  }
+
+  impl_->registry = pw_core_get_registry(impl_->core, PW_VERSION_REGISTRY, 0);
+  if (impl_->registry) {
+    pw_registry_add_listener(impl_->registry, &impl_->registry_listener,
+                               &RegistryEvents(), impl_.get());
+  }
+
+  struct pw_properties *props = pw_properties_new(
+      PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Playback",
+      PW_KEY_MEDIA_ROLE, "Camera", PW_KEY_MEDIA_CLASS, "Video/Source",
+      PW_KEY_NODE_NAME, name.c_str(), PW_KEY_NODE_DESCRIPTION,
+      description.c_str(), PW_KEY_NODE_VIRTUAL, "true", PW_KEY_NODE_DRIVER,
+      "true", PW_KEY_APP_NAME, "StudioCast", nullptr);
+
+  impl_->stream = pw_stream_new(impl_->core, name.c_str(), props);
+  if (!impl_->stream) {
+    pw_thread_loop_unlock(impl_->loop);
+    Stop();
+    const std::string msg = "Could not create the PipeWire stream.";
+    impl_->SetError(msg);
+    if (error)
+      *error = msg;
+    return false;
+  }
+
+  pw_stream_add_listener(impl_->stream, &impl_->stream_listener,
+                           &StreamEvents(), impl_.get());
+
+  std::uint8_t pod_buffer[1024];
+  struct spa_pod_builder builder =
+      SPA_POD_BUILDER_INIT(pod_buffer, sizeof(pod_buffer));
+  struct spa_video_info_raw info {};
+  info.format = static_cast<enum spa_video_format>(SpaFormatFor(cfg.format));
+  info.size = SPA_RECTANGLE(static_cast<std::uint32_t>(cfg.width),
+                            static_cast<std::uint32_t>(cfg.height));
+  info.framerate =
+      SPA_FRACTION(static_cast<std::uint32_t>(cfg.fps), std::uint32_t{1});
+
+  const struct spa_pod *params[1];
+  params[0] =
+      spa_format_video_raw_build(&builder, SPA_PARAM_EnumFormat, &info);
+
+  // A Video/Source node waits for consumers, so it must not connect itself.
+  //
+  // It also drives its part of the graph: a frame arriving from the pipeline
+  // is what starts a cycle. Without this the graph has no clock for the link
+  // and a consumer receives nothing.
+  const auto flags = static_cast<enum pw_stream_flags>(
+      PW_STREAM_FLAG_MAP_BUFFERS | PW_STREAM_FLAG_RT_PROCESS |
+      PW_STREAM_FLAG_DRIVER);
+
+  // The node counts as running before the connect, while the loop lock is
+  // still held. A state change that says the node went down then clears the
+  // flag for good, instead of being overwritten by a store from this thread.
+  impl_->running.store(true, std::memory_order_release);
+
+  const int rc = pw_stream_connect(impl_->stream, SPA_DIRECTION_OUTPUT,
+                                     PW_ID_ANY, flags, params, 1);
+  pw_thread_loop_unlock(impl_->loop);
+
+  if (rc < 0) {
+    const std::string msg =
+        std::string("Could not connect the PipeWire camera node: ") +
+        spa_strerror(rc);
+    Stop();
+    impl_->SetError(msg);
+    if (error)
+      *error = msg;
+    return false;
+  }
+
+  return true;
+}
+
+void PipeWireCameraNode::Stop() {
+  impl_->running.store(false, std::memory_order_release);
+
+  if (impl_->loop)
+    pw_thread_loop_stop(impl_->loop);
+
+  if (impl_->stream) {
+    pw_stream_destroy(impl_->stream);
+    impl_->stream = nullptr;
+  }
+  if (impl_->registry) {
+    pw_proxy_destroy(reinterpret_cast<struct pw_proxy *>(impl_->registry));
+    impl_->registry = nullptr;
+  }
+  if (impl_->core) {
+    pw_core_disconnect(impl_->core);
+    impl_->core = nullptr;
+  }
+  if (impl_->context) {
+    pw_context_destroy(impl_->context);
+    impl_->context = nullptr;
+  }
+  if (impl_->loop) {
+    pw_thread_loop_destroy(impl_->loop);
+    impl_->loop = nullptr;
+  }
+
+  impl_->links.Reset(studiocast::pw::LinkEnd::kOutput);
+  // The data thread has stopped, so both ends of the hand-off are this one.
+  impl_->frames.Clear();
+}
+
+#endif // STUDIOCAST_HAVE_PIPEWIRE
+
+bool PipeWireCameraNode::IsRunning() const {
+  return impl_->running.load(std::memory_order_acquire);
+}
+
+bool PipeWireCameraNode::WriteFrame(const std::uint8_t *data,
+                                    std::size_t bytes, std::string *error) {
+  if (error)
+    error->clear();
+  if (!IsRunning()) {
+    if (error)
+      *error = "The PipeWire camera node is not running.";
+    return false;
+  }
+  // The rows of the source can be further apart than the rows the node hands
+  // out, so the frame is copied row by row. PublishRows refuses a frame that
+  // is too short for the rows it should hold.
+  const std::size_t needed =
+      impl_->rows == 0 ? impl_->frame_bytes
+                       : impl_->source_stride_bytes * (impl_->rows - 1) +
+                             impl_->stride_bytes;
+  if (!data || bytes < needed) {
+    if (error)
+      *error = "The frame is smaller than the negotiated camera format.";
+    return false;
+  }
+
+  // A frame that replaced one the callback never took is a dropped frame. A
+  // frame the hand-off refused is a layout error, and the write fails with the
+  // reason, so the status carries it.
+  const internal::FrameWriteAnswer answer =
+      internal::FrameWriteAnswerOf(impl_->frames.PublishRows(
+          data, bytes, impl_->source_stride_bytes, impl_->stride_bytes,
+          impl_->rows));
+  if (!answer.ok) {
+    impl_->SetError(answer.error);
+    if (error)
+      *error = answer.error;
+    return false;
+  }
+  if (answer.dropped)
+    impl_->frames_dropped.fetch_add(1, std::memory_order_relaxed);
+
+#if STUDIOCAST_HAVE_PIPEWIRE
+  // The node drives the graph once it streams, and a new frame is what starts
+  // a cycle. Before that it is not the driver yet, so ask first: the call is
+  // safe either way, but the check says what this line means.
+  if (impl_->stream && pw_stream_is_driving(impl_->stream))
+    pw_stream_trigger_process(impl_->stream);
+#endif
+  return true;
+}
+
+std::uint32_t PipeWireCameraNode::NodeId() const {
+  return impl_->links.NodeId();
+}
+
+int PipeWireCameraNode::ConsumerCount() const {
+  return impl_->links.ConsumerCount();
+}
+
+std::uint64_t PipeWireCameraNode::FramesSent() const {
+  return impl_->frames_sent.load(std::memory_order_relaxed);
+}
+
+std::uint64_t PipeWireCameraNode::FramesDropped() const {
+  return impl_->frames_dropped.load(std::memory_order_relaxed);
+}
+
+std::string PipeWireCameraNode::LastError() const { return impl_->Error(); }
+
+} // namespace studiocast::video::pw_backend

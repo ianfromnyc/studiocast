@@ -93,6 +93,11 @@ void Usage(const char *argv0) {
          "(default: #000000)\n"
       << "  --background-replace-image PATH    Replace-mode background image "
          "path\n"
+      << "  --audio-backend B        Sound server API: pulse|auto|pipewire "
+         "(default: pulse)\n"
+      << "  --video-output-backend B  Virtual camera output: "
+         "auto|v4l2loopback|pipewire|both (default: auto; pipewire adds the "
+         "node and keeps v4l2loopback)\n"
       << "  --poll-ms N              Consumer poll interval (default: 250)\n"
       << "  --stop-grace-ms N        Stop after N ms without consumers "
          "(default: 1000)\n"
@@ -1165,6 +1170,12 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"next_start_retry_ms\":" << st.next_start_retry_ms;
   oss << "},";
 
+  oss << "\"pipewire_output\":{";
+  oss << "\"state\":\"" << JsonEscape(st.pipeline.pipewire_output_state)
+      << "\",";
+  oss << "\"node_id\":" << st.pipeline.pipewire_node_id << ",";
+  oss << "\"consumer_count\":" << st.pipeline.pipewire_consumer_count;
+  oss << "},";
   oss << "\"input_device\":\"" << JsonEscape(effectiveInputDevice) << "\",";
   oss << "\"output_device\":\"" << JsonEscape(effectiveOutputDevice)
       << "\",";
@@ -1492,6 +1503,10 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
     oss << "\"" << JsonEscape(audioSourceWarnings[i]) << "\"";
   }
   oss << "],";
+  oss << "\"transport_backend\":\"" << JsonEscape(ast.transport_backend_active)
+      << "\",";
+  oss << "\"transport_backend_note\":\"" << JsonEscape(ast.transport_note)
+      << "\",";
   oss << "\"mic_present\":" << BoolJson(ast.mic_present) << ",";
   oss << "\"mic_consumer_present\":" << BoolJson(ast.mic_consumer_present)
       << ",";
@@ -2338,6 +2353,31 @@ int main(int argc, char **argv) {
   if (const auto v = GetArgValue(argc, argv, "--background-replace-image");
       !v.empty()) {
     cfg.pipeline.effects.virtual_background.replace_path = v;
+  }
+
+  if (const auto v = GetArgValue(argc, argv, "--video-output-backend");
+      !v.empty()) {
+    if (const auto pref = studiocast::pw::ParseVideoOutputPreference(v)) {
+      const auto decision = studiocast::pw::ResolveVideoOutputBackends(
+          *pref, studiocast::pw::ProbePipeWire());
+      cfg.pipeline.pipewire_output = decision.backends.pipewire;
+      if (decision.used_fallback && !decision.note.empty())
+        std::cerr << decision.note << "\n";
+    } else {
+      std::cerr << "Unknown --video-output-backend value: " << v
+                << " (use auto, v4l2loopback, pipewire or both)\n";
+      return 2;
+    }
+  }
+
+  if (const auto v = GetArgValue(argc, argv, "--audio-backend"); !v.empty()) {
+    if (const auto pref = studiocast::pw::ParseAudioTransportPreference(v)) {
+      acfg.transport = *pref;
+    } else {
+      std::cerr << "Unknown --audio-backend value: " << v
+                << " (use pulse, auto or pipewire)\n";
+      return 2;
+    }
   }
 
   if (const int v = GetArgInt(argc, argv, "--poll-ms", -1); v > 0)

@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "core/video/effects/broadcast_effects.h"
+#include "core/video/pipewire/pipewire_camera_node.h"
 #include "core/video/v4l2_capture.h"
 #include "core/video/v4l2_writer.h"
 
@@ -63,6 +65,10 @@ struct CameraPipelineConfig {
   // spending tens of milliseconds per frame.
   bool allow_cpu_resize = true;
 
+  // Mirror every processed frame onto a native PipeWire Video/Source node
+  // named "studiocast_camera", beside the v4l2loopback output.
+  bool pipewire_output = false;
+
   studiocast::video::effects::BroadcastCameraEffects effects{};
 };
 
@@ -80,6 +86,13 @@ struct CameraPipelineStatus {
   // "raw_after_mjpeg_decode_failure".
   std::string capture_fallback_state = "none";
   std::string capture_fallback_reason;
+
+  // Native PipeWire camera node: "off", "starting", "running", or the text
+  // of the last failure. A node that runs but cannot take frames reports
+  // that text, not "running".
+  std::string pipewire_output_state = "off";
+  std::uint32_t pipewire_node_id = 0;
+  int pipewire_consumer_count = 0;
 
   // Active output-scaling backend.
   // Common values: "cpu", "gpu:maxine", "gpu:open_cuda" (empty when idle)
@@ -226,6 +239,213 @@ private:
   bool retry_ready_published_ = false;
 };
 
+namespace internal {
+
+// The state of the PipeWire camera node that runs now, as far as the plan
+// below needs it.
+struct PipeWireNodeState {
+  bool running = false;
+  int width = 0;
+  int height = 0;
+  int fps = 0;
+  PixelFormat format = PixelFormat::rgb24;
+  // Row size of the buffer the node was told to read. A renegotiation that
+  // changes the padding alone changes nothing else here, so without this the
+  // node would keep reading the rows at the old distance.
+  std::size_t stride = 0;
+};
+
+// What the camera node needs next.
+struct PipeWireNodePlan {
+  enum class Action {
+    // The node already matches the output, or there is no output format yet.
+    keep,
+    // No node is wanted; take down whatever runs.
+    stop,
+    // Start a node for `node`, in place of whatever runs.
+    restart,
+  };
+
+  Action action = Action::keep;
+  studiocast::video::pw_backend::CameraNodeConfig node;
+};
+
+// True while the run owns the camera output.
+//
+// EnsureOutputOpen and CloseOutput both return on this, so a caller from
+// another thread changes nothing while a run is up or a start is under way.
+// The frame thread is therefore the only writer of the PipeWire node between
+// two of its own ticks, which is what makes StartOutcome::replaced below
+// unreachable today. A change that lets another thread through here has to
+// answer for the wait in Settle as well.
+inline bool RunOwnsOutput(bool running, bool starting) {
+  return running || starting;
+}
+
+// What became of the node a start installed, as the next tick finds it.
+enum class StartOutcome {
+  // The node that start installed is still the node that runs. The start
+  // succeeded.
+  held,
+  // Another node runs in its place. The start has no verdict, and the graph is
+  // healthy: whoever replaced the node did it on purpose.
+  //
+  // Nothing in the daemon can do that while a run is up, because RunOwnsOutput
+  // keeps every other thread out of the plan. The outcome is kept because it
+  // is the honest shape of the question, and because the rule the wait needs
+  // has to be written down before the guard is loosened, not after.
+  replaced,
+  // The node went down, or no node runs at all. A format the server refuses
+  // ends here.
+  gone,
+};
+
+// Reads the outcome from what the tick can see.
+//
+// `same_node` is true only for the very node the start installed. A node the
+// server took down reads as gone whether or not something replaced it, so a
+// format mismatch that repeats still walks the wait up.
+inline StartOutcome StartOutcomeOf(bool same_node, bool current_running) {
+  if (!current_running)
+    return StartOutcome::gone;
+  return same_node ? StartOutcome::held : StartOutcome::replaced;
+}
+
+// When the frame thread may ask for the camera node again after a start that
+// failed.
+//
+// The wait grows with every failure, so a server that stays away is not asked
+// on every frame. It belongs to one run: a run that ended with the server away
+// must not leave its wait behind, or the next run waits the whole backoff
+// before it first asks.
+class PipeWireRestartBackoff final {
+public:
+  // A new run, and the first try may happen at once.
+  void Reset() {
+    attempts_ = 0;
+    next_at_ = std::chrono::steady_clock::time_point{};
+    pending_ = false;
+  }
+
+  bool Ready(std::chrono::steady_clock::time_point now) const {
+    return now >= next_at_;
+  }
+
+  // A start began, and its verdict is still to come.
+  //
+  // The node counts as running from before pw_stream_connect, and the server
+  // takes it down later, on the node's own loop thread, when the format it
+  // negotiates differs. A caller that asked the node in the same tick would
+  // call every such start a success and reset the wait, so a mismatch that
+  // repeats would churn a node once a second for ever. The caller therefore
+  // records the start here and gives the verdict on its next tick.
+  void Started() { pending_ = true; }
+
+  // True while a start waits for its verdict.
+  bool Pending() const { return pending_; }
+
+  // The verdict for the start that Started recorded.
+  //
+  // Does nothing when no start is waiting.
+  void Settle(StartOutcome outcome, std::chrono::steady_clock::time_point now) {
+    if (!pending_)
+      return;
+    pending_ = false;
+    switch (outcome) {
+    case StartOutcome::held:
+      // The node came up. The next failure starts from the shortest wait
+      // again.
+      Reset();
+      return;
+    case StartOutcome::replaced:
+      // Another node took its place, which happens on purpose and only for a
+      // healthy graph. There is no verdict to give, so the wait stays where it
+      // was: a replacement must neither excuse the failures before it nor add
+      // one of its own.
+      //
+      // RunOwnsOutput keeps this case unreachable while a run is up. A change
+      // that opens it must also stop a replacement that repeats from holding
+      // the wait at zero, or a node that something replaces on every tick
+      // churns once a second for ever.
+      return;
+    case StartOutcome::gone:
+      Failed(now);
+      return;
+    }
+  }
+
+  // The node did not come up. Holds the next try back for a growing wait.
+  void Failed(std::chrono::steady_clock::time_point now) {
+    ++attempts_;
+    next_at_ = now + studiocast::pw::NodeRestartDelay(attempts_);
+  }
+
+private:
+  int attempts_ = 0;
+  bool pending_ = false;
+  std::chrono::steady_clock::time_point next_at_{};
+};
+
+// Carries out camera node plans one at a time.
+//
+// The plan is decided inside the lock this holds, and that is the point of the
+// class. A plan decided before the lock can be stale by the time the lock is
+// free: two callers that each decided a restart would start two nodes of the
+// same name, and a consumer could bind the one that is about to go.
+//
+// `decide` answers with the plan for the state as it is now. It runs first and
+// with the lock held, and `carry_out` runs only for a plan that is not `keep`.
+class PipeWireNodePlanApplier final {
+public:
+  template <class Decide, class CarryOut>
+  void Apply(const Decide &decide, const CarryOut &carry_out) {
+    std::lock_guard<std::mutex> lock(mu_);
+    const PipeWireNodePlan plan = decide();
+    if (plan.action == PipeWireNodePlan::Action::keep)
+      return;
+    carry_out(plan);
+  }
+
+private:
+  std::mutex mu_;
+};
+
+// The rule the pipeline follows for its camera node. It reads state only, so
+// the pipeline can decide under its mutex and do the work without it.
+//
+// `wanted` is the configured output preference, `output` the format the
+// loopback negotiated, and `current` the node that runs now. An output with no
+// size yet gives `keep`, because there is nothing to offer a consumer.
+PipeWireNodePlan PlanPipeWireNode(bool wanted, const ActualFormat &output,
+                                  const PipeWireNodeState &current);
+
+// The `pipewire_output_state` text of the pipeline status.
+//
+// `wanted` is the configured output preference, `has_node` says whether a node
+// runs now, and `error` is the last failure of that node, empty when there was
+// none.
+std::string PipeWireOutputStateText(bool wanted, bool has_node,
+                                    const std::string &error);
+
+// The three `pipewire_output` fields of the pipeline status.
+struct PipeWireOutputStatus {
+  std::string state = "off";
+  std::uint32_t node_id = 0;
+  int consumer_count = 0;
+};
+
+// The whole `pipewire_output` part of the status, from one rule.
+//
+// The id and the consumer count belong to a node that is in the graph. A node
+// that is down has neither, whatever the numbers it last held say, and one
+// rule for all three keeps them from drifting apart.
+PipeWireOutputStatus PipeWireOutputStatusOf(bool wanted, bool node_up,
+                                            const std::string &error,
+                                            std::uint32_t node_id,
+                                            int consumer_count);
+
+} // namespace internal
+
 class CameraPipelineRunner {
 public:
   virtual ~CameraPipelineRunner() = default;
@@ -262,6 +482,35 @@ public:
                         std::string *error) override;
   void CloseOutput() override;
 
+  // Decides what the native PipeWire camera node needs. The caller must hold
+  // `mu_`, because the answer comes from the negotiated output format and the
+  // node that runs now.
+  internal::PipeWireNodePlan PlanPipeWireOutputLocked() const;
+
+  // Decides what the node needs and carries it out. The caller must NOT hold
+  // `mu_`: starting and stopping a node talks to the PipeWire server, which
+  // can block. Only the swap of the node pointer and its state takes the
+  // mutex, and only for that swap.
+  //
+  // The plan is decided inside `pw_applier_`, so two callers cannot each
+  // carry out the same restart.
+  void ApplyPipeWireOutputPlan();
+
+  // Hands one processed frame to the native camera node. It never blocks and
+  // never fails the pipeline.
+  //
+  // The caller must NOT hold `mu_`. This takes the mutex only to copy the
+  // node reference out and, if the write fails, to report the error.
+  void PublishToPipeWire(const std::uint8_t *data, std::size_t bytes);
+
+  // Puts the output node back when the server took it down.
+  //
+  // A node that left the graph never comes back by itself, and the plan was
+  // only decided when the output opened, so a node lost in the middle of a run
+  // stayed lost for the whole run. The frame thread calls this, and only the
+  // frame thread touches the three members below it.
+  void MaintainPipeWireOutput();
+
   CameraPipelineStatus Status() const override;
 
   // Live update of effects while running.
@@ -272,6 +521,14 @@ public:
   void SetMirrorEnabled(bool enabled) override;
 
 private:
+  // The only test seam of this class. The state a start is in — `starting_`
+  // set and `running_` not — lives inside Start() alone, between the launch
+  // of the frame thread and the notification Start() waits for. No caller
+  // reaches that window from outside. The test that holds EnsureOutputOpen
+  // and CloseOutput to internal::RunOwnsOutput therefore sets the two flags
+  // through this friend. Only tests/video_service_tests.cpp defines it.
+  friend class CameraPipelineTestAccess;
+
   // Opens (or reuses) the loopback writer.
   //
   // If `out_opened_or_renegotiated` is non-null, it will be set to true when we
@@ -329,6 +586,55 @@ private:
   // camera visible to apps even when we're idle.
   V4l2Writer writer_;
   std::string writer_device_;
+
+  // Optional second output. It carries the same buffer that goes to
+  // v4l2loopback, so it costs one memory copy a frame.
+  //
+  // The pointer is shared because the frame thread publishes with `mu_`
+  // released. It holds a reference for the length of one write, so a node that
+  // the supervisor thread swaps out lives until that write is done.
+  //
+  // Holds ApplyPipeWireOutputPlan to one caller at a time, and decides the
+  // plan inside that lock, so a plan another caller already carried out is
+  // never carried out twice. The lock order is always this one first, then
+  // `mu_`.
+  internal::PipeWireNodePlanApplier pw_applier_;
+
+  // `mu_` guards both the pointer and the error.
+  std::shared_ptr<studiocast::video::pw_backend::PipeWireCameraNode> pw_node_;
+  std::string pw_node_error_;
+
+  // Atomic, because Start and EnsureOutputOpen set it on the supervisor thread
+  // while Status reads it under `mu_` for the daemon, and the daemon polls the
+  // status all the time.
+  std::atomic<bool> pw_output_wanted_{false};
+
+  // Frame thread only. When to look at the node again, and when a failed start
+  // may be tried again, so a server that stays away is not asked on every
+  // frame. ThreadMain clears both, so no run inherits the wait of the last
+  // one.
+  std::chrono::steady_clock::time_point next_pw_check_at_{};
+  internal::PipeWireRestartBackoff pw_restart_backoff_;
+
+  // The node the last tick started, so the next tick can ask whether that same
+  // node is still the one that runs. It is weak because it must never keep a
+  // node alive, and because a node that went is not the node a new one at the
+  // same address would be.
+  //
+  // Only the frame thread reads it, and it reads it beside `pw_node_`, which
+  // the supervisor thread writes. Every read and every write of it is
+  // therefore under `mu_`, the lock that answer needs anyway. None of them is
+  // on the frame path: the tick that gives a verdict runs once a second.
+  std::weak_ptr<studiocast::video::pw_backend::PipeWireCameraNode>
+      pw_started_node_;
+
+  // Format the running node negotiated, so a renegotiated v4l2loopback format
+  // restarts the node instead of sending frames of the wrong size.
+  int pw_node_width_ = 0;
+  int pw_node_height_ = 0;
+  int pw_node_fps_ = 0;
+  PixelFormat pw_node_format_ = PixelFormat::rgb24;
+  std::size_t pw_node_stride_ = 0;
 
   // Idle keepalive frames: while the heavy pipeline is stopped, periodically
   // write a black frame to keep consumers from closing/re-opening due to a

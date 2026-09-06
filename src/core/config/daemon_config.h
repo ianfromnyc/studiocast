@@ -32,6 +32,10 @@ struct DaemonConfig {
       studiocast::video::PixelFormat::rgb24;
   bool video_prefer_mjpeg = true;
 
+  // Where the processed frames go: "auto" (v4l2loopback alone),
+  // "v4l2loopback", "pipewire" or "both". See docs/PIPEWIRE.md.
+  std::string video_output_backend = "auto";
+
   // Output scaling backend preference: "cpu" | "gpu" | "auto".
   // "auto" = use GPU scaling when available; otherwise CPU.
   std::string video_scaling_backend = "auto";
@@ -59,6 +63,9 @@ struct DaemonConfig {
   int audio_speaker_latency_ms = 10;
   std::string audio_source; // empty = Pulse default
 
+  // Sound server API for the virtual devices and the real-time streams:
+  // "pulse" (default), "auto" or "pipewire". See docs/PIPEWIRE.md.
+  std::string audio_backend = "pulse";
   // Microphone monitor: play the processed microphone feed on an output sink
   // so the user can hear the effects while adjusting them.
   bool audio_monitor_enabled = false;

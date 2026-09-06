@@ -13,6 +13,7 @@
 #include "core/audio/audio_device_safety.h"
 #include "core/audio/audio_pipeline.h"
 #include "core/audio/audio_processor.h"
+#include "core/audio/pipewire/pipewire_audio_devices.h"
 #include "core/audio/mic_monitor.h"
 #include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_mic.h"
@@ -488,7 +489,18 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
     monitor_output_lost_ = false;
     monitor_route_may_exist_ = false;
     consumer_detector_.reset();
+
+    const auto decision = ResolveServiceAudioTransport(cfg);
+    transport_active_ = decision.transport;
+    st_.transport_backend_active = std::string(ToString(decision.transport));
+    st_.transport_note = decision.note;
   }
+
+  // A native node would otherwise stay in the graph beside the Pulse devices
+  // when a running daemon moves back to the Pulse path. The Pulse modules need
+  // no matching step here: the native backend removes them when it comes up.
+  if (transport_active_ == studiocast::pw::AudioTransport::kPulse)
+    pw_backend::ShutdownNativeAudioDevices();
 
   try {
     // Clear the stop flag and publish the supervisor under one lock. Stop()
@@ -617,12 +629,26 @@ void VirtualAudioService::SleepFor(std::chrono::milliseconds d) const {
   std::this_thread::sleep_for(d);
 }
 
+studiocast::pw::AudioTransportDecision
+ResolveServiceAudioTransport(const VirtualAudioServiceConfig &cfg) {
+  return studiocast::pw::ResolveAudioTransport(cfg.transport,
+                                               studiocast::pw::ProbePipeWire());
+}
+
 std::unique_ptr<AudioPipelineRunner>
 VirtualAudioService::CreatePipeline(AudioProcessor *processor) const {
   if (hooks_.create_pipeline) {
     return hooks_.create_pipeline(processor);
   }
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
+  if (transport_active_ == studiocast::pw::AudioTransport::kPipeWire) {
+    AudioPipelineHooks hooks;
+    hooks.create_io = [] {
+      return studiocast::audio::pw_backend::CreatePipeWireAudioIo();
+    };
+    return std::make_unique<studiocast::audio::AudioPipeline>(processor,
+                                                              std::move(hooks));
+  }
   return std::make_unique<studiocast::audio::AudioPipeline>(processor);
 #else
   (void)processor;
@@ -630,9 +656,29 @@ VirtualAudioService::CreatePipeline(AudioProcessor *processor) const {
 #endif
 }
 
+// True when the service must talk to PipeWire directly instead of PulseAudio.
+bool VirtualAudioService::UseNativePipeWire() const {
+  return transport_active_ == studiocast::pw::AudioTransport::kPipeWire;
+}
+
+bool VirtualAudioService::NativeVirtualMicWentDown() const {
+  if (hooks_.create_virtual_mic || !UseNativePipeWire())
+    return false;
+  return pw_backend::NativeAudioDevices::Instance().MicWentDown();
+}
+
+bool VirtualAudioService::NativeVirtualSpeakerWentDown() const {
+  if (hooks_.create_virtual_speaker || !UseNativePipeWire())
+    return false;
+  return pw_backend::NativeAudioDevices::Instance().SpeakerWentDown();
+}
+
 bool VirtualAudioService::CreateVirtualMicDevice(std::string *error) const {
   if (hooks_.create_virtual_mic) {
     return hooks_.create_virtual_mic(error);
+  }
+  if (UseNativePipeWire()) {
+    return pw_backend::NativeAudioDevices::Instance().CreateVirtualMic(error);
   }
   return studiocast::audio::CreateVirtualMic(error);
 }
@@ -640,6 +686,10 @@ bool VirtualAudioService::CreateVirtualMicDevice(std::string *error) const {
 bool VirtualAudioService::CreateVirtualSpeakerDevice(std::string *error) const {
   if (hooks_.create_virtual_speaker) {
     return hooks_.create_virtual_speaker(error);
+  }
+  if (UseNativePipeWire()) {
+    return pw_backend::NativeAudioDevices::Instance().CreateVirtualSpeaker(
+        error);
   }
   return studiocast::audio::CreateVirtualSpeaker(error);
 }
@@ -650,6 +700,13 @@ bool VirtualAudioService::StartSpeakerLoopbackRoute(
   if (hooks_.start_speaker_loopback) {
     return hooks_.start_speaker_loopback(target_sink_name, latency_ms, error);
   }
+  if (UseNativePipeWire()) {
+    // PipeWire sets the route latency from the graph quantum, so the Pulse
+    // latency argument has no meaning here.
+    (void)latency_ms;
+    return pw_backend::NativeAudioDevices::Instance().StartSpeakerLoopback(
+        target_sink_name, error);
+  }
   return studiocast::audio::StartSpeakerLoopback(target_sink_name, latency_ms,
                                                  error);
 }
@@ -658,6 +715,10 @@ bool VirtualAudioService::StopSpeakerLoopbackRoute(std::string *error) const {
   if (hooks_.stop_speaker_loopback) {
     return hooks_.stop_speaker_loopback(error);
   }
+  if (UseNativePipeWire()) {
+    return pw_backend::NativeAudioDevices::Instance().StopSpeakerLoopback(
+        error);
+  }
   return studiocast::audio::StopSpeakerLoopback(error);
 }
 
@@ -665,6 +726,10 @@ bool VirtualAudioService::DestroyVirtualSpeakerDevice(
     std::string *error) const {
   if (hooks_.destroy_virtual_speaker) {
     return hooks_.destroy_virtual_speaker(error);
+  }
+  if (UseNativePipeWire()) {
+    return pw_backend::NativeAudioDevices::Instance().DestroyVirtualSpeaker(
+        error);
   }
   return studiocast::audio::DestroyVirtualSpeaker(error);
 }
@@ -731,6 +796,10 @@ AudioConsumerSnapshot VirtualAudioService::DetectMicrophoneConsumers() const {
   if (hooks_.detect_microphone_consumers) {
     return hooks_.detect_microphone_consumers();
   }
+  if (UseNativePipeWire()) {
+    return pw_backend::NativeAudioDevices::Instance()
+        .DetectMicrophoneConsumers();
+  }
   if (!consumer_detector_) {
     consumer_detector_ = CreateDefaultAudioConsumerDetector();
   }
@@ -740,6 +809,9 @@ AudioConsumerSnapshot VirtualAudioService::DetectMicrophoneConsumers() const {
 AudioConsumerSnapshot VirtualAudioService::DetectSpeakerConsumers() const {
   if (hooks_.detect_speaker_consumers) {
     return hooks_.detect_speaker_consumers();
+  }
+  if (UseNativePipeWire()) {
+    return pw_backend::NativeAudioDevices::Instance().DetectSpeakerConsumers();
   }
   if (!consumer_detector_) {
     consumer_detector_ = CreateDefaultAudioConsumerDetector();
@@ -800,6 +872,13 @@ void VirtualAudioService::ThreadMain() {
   // step that works clears that error, and only that one.
   bool monitorVolumeFailed = false;
   steady_clock::time_point nextMonitorVerify{};
+
+  // A PipeWire server restart takes every node with it. These count the
+  // attempts to put the devices back, so the wait between them can grow.
+  steady_clock::time_point nextMicRecreate{};
+  steady_clock::time_point nextSpeakerRecreate{};
+  int micRecreateAttempts = 0;
+  int speakerRecreateAttempts = 0;
   std::string speakerLoopbackStopRetryError;
   std::string speakerDestroyRetryError;
 
@@ -967,10 +1046,35 @@ void VirtualAudioService::ThreadMain() {
     bool speakerLoopbackStopBlockedProcessing = false;
     std::string speakerLoopbackStopError;
     {
+      // A node the server took down never comes back by itself, and the device
+      // owner still holds it, so the status would keep saying the microphone
+      // is there while every write failed. Let it go and let the create below
+      // make a new one, with a wait that grows while the server stays away.
+      if (mic_created_ && NativeVirtualMicWentDown()) {
+        const auto downNow = steady_clock::now();
+        if (downNow >= nextMicRecreate) {
+          std::string err;
+          (void)pw_backend::NativeAudioDevices::Instance().DestroyVirtualMic(
+              &err);
+          mic_created_ = false;
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            st_.mic_present = false;
+          }
+          SetLastError("The PipeWire server took the virtual microphone down; "
+                       "creating it again.");
+          ++micRecreateAttempts;
+          nextMicRecreate =
+              downNow + studiocast::pw::NodeRestartDelay(micRecreateAttempts);
+        }
+      }
+
       // Mic device.
       if (cfg.create_virtual_mic && !mic_created_) {
         std::string err;
         if (CreateVirtualMicDevice(&err)) {
+          micRecreateAttempts = 0;
+          nextMicRecreate = steady_clock::time_point{};
           std::lock_guard<std::mutex> lock(mu_);
           mic_created_ = true;
           st_.mic_present = true;
@@ -1062,9 +1166,38 @@ void VirtualAudioService::ThreadMain() {
       const bool wantSpeakersDevice =
           cfg.create_virtual_speakers || cfg.speakers_enabled;
 
+      // See the microphone above: a node the server dropped is replaced, and
+      // the route that read it has to be started again with it.
+      if (speakers_created_ && NativeVirtualSpeakerWentDown()) {
+        const auto downNow = steady_clock::now();
+        if (downNow >= nextSpeakerRecreate) {
+          std::string err;
+          (void)pw_backend::NativeAudioDevices::Instance()
+              .DestroyVirtualSpeaker(&err);
+          speakers_created_ = false;
+          speakers_loopback_running_ = false;
+          speakers_loopback_target_.clear();
+          speakers_loopback_latency_ms_ = 0;
+          {
+            std::lock_guard<std::mutex> lock(mu_);
+            st_.speakers_present = false;
+            st_.speakers_routing_active = false;
+            st_.speaker_target_sink_active.clear();
+          }
+          setSpeakersError("The PipeWire server took the virtual speakers "
+                           "down; creating them again.");
+          ++speakerRecreateAttempts;
+          nextSpeakerRecreate =
+              downNow +
+              studiocast::pw::NodeRestartDelay(speakerRecreateAttempts);
+        }
+      }
+
       if (wantSpeakersDevice && !speakers_created_) {
         std::string err;
         if (CreateVirtualSpeakerDevice(&err)) {
+          speakerRecreateAttempts = 0;
+          nextSpeakerRecreate = steady_clock::time_point{};
           speakers_created_ = true;
           {
             std::lock_guard<std::mutex> lock(mu_);

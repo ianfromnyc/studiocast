@@ -295,8 +295,11 @@ Bundled dlib in the RPM:
   entry, an icon, the license files, and the systemd user unit.
 - Run-time `Requires` are `pulseaudio-utils`, `v4l-utils`, and
   `hicolor-icon-theme`, plus the soname dependencies that rpmbuild finds for
-  Qt6, libpulse, ONNX Runtime, libjpeg, libpng, and libyuv, plus FlexiBLAS in
-  a dlib build. Nothing links sqlite, so the package has no sqlite dependency.
+  Qt6, libpulse, PipeWire, ONNX Runtime, libjpeg, libpng, and libyuv, plus
+  FlexiBLAS in a dlib build. Nothing links sqlite, so the package has no
+  sqlite dependency. `--without pipewire` drops the `pipewire-devel` build
+  dependency and the native backends; the package then uses PulseAudio and
+  v4l2loopback only.
   `Recommends: v4l2loopback` is a weak dependency, so `dnf` installs the package
   when it is absent. The module comes from RPM Fusion Free as
   `akmod-v4l2loopback`, and the virtual camera needs it.

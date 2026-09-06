@@ -36,6 +36,9 @@
 #                             STUDIOCAST_ENABLE_LIBYUV, so an on build fails
 #                             the configure step when libyuv is missing and an
 #                             off build ignores a libyuv that is installed.
+#   pipewire   (default on)   Native PipeWire audio and virtual camera nodes.
+#                             Turn it off to build a package that talks to the
+#                             sound server through PulseAudio only.
 #   tests      (default on)   Build the test suite and run ctest in %%check.
 #   installer  (default off)  The GUI installer and its backend. The backend is
 #                             an apt-based script for Ubuntu, so it is useless
@@ -46,6 +49,7 @@
 %bcond open_audio 1
 %bcond dlib 1
 %bcond libyuv 1
+%bcond pipewire 1
 %bcond tests 1
 %bcond installer 0
 
@@ -110,6 +114,10 @@ BuildRequires:  libpng-devel
 BuildRequires:  onnxruntime-devel
 %if %{with libyuv}
 BuildRequires:  libyuv-devel
+%endif
+
+%if %{with pipewire}
+BuildRequires:  pipewire-devel
 %endif
 %if %{with dlib}
 # dlib matrix code uses CBLAS and LAPACK. FlexiBLAS is the Fedora BLAS front
@@ -218,6 +226,7 @@ cp -p dlib-%{dlib_version}/LICENSE.txt dlib-LICENSE.txt
     -DSTUDIOCAST_ENABLE_OPEN_AUDIO=%{?with_open_audio:ON}%{!?with_open_audio:OFF} \
     -DSTUDIOCAST_ENABLE_DLIB=%{?with_dlib:ON}%{!?with_dlib:OFF} \
     -DSTUDIOCAST_ENABLE_LIBYUV=%{?with_libyuv:ON}%{!?with_libyuv:OFF} \
+    -DSTUDIOCAST_ENABLE_PIPEWIRE=%{?with_pipewire:ON}%{!?with_pipewire:OFF} \
 %if %{with dlib}
     -Ddlib_DIR=%{dlib_prefix}/%{_lib}/cmake/dlib \
 %endif

@@ -5,8 +5,10 @@ contributors should follow.
 
 Planned components:
 - GUI (Qt)
-- Audio Service (PipeWire graph node)
-- Video Service (V4L2 input + v4l2loopback output)
+- Audio Service (PulseAudio devices by default, optional native PipeWire graph
+  nodes; see `docs/PIPEWIRE.md`)
+- Video Service (V4L2 input + v4l2loopback output, optional PipeWire
+  `Video/Source` node beside it)
 - Effects Engine abstraction layer (multiple GPU engines: Maxine + Open CUDA)
 - SDK Manager (downloads/installs user-obtained Maxine assets)
 

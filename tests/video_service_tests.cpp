@@ -10,6 +10,7 @@
 #include <thread>
 #include <utility>
 
+#include "core/video/camera_pipeline.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/scaling_policy.h"
 #include "core/video/virtual_camera_service.h"
@@ -78,6 +79,39 @@ bool TestV4l2WriterRestoresOnlyTheBufferTypeARungChanged();
 bool TestV4l2WriterNamesTheRefusalsARetryCanOutlive();
 bool TestV4l2WriterRefusesADeviceThatCannotTakeWrites();
 } // namespace studiocast::tests
+
+namespace studiocast::video {
+
+// Reaches the run flags of a CameraPipeline, which only Start() sets. The
+// friend declaration in the pipeline names this, and this file is the only
+// place that defines it. See `camera output paths obey the run-owns-output
+// rule` below for what it is for.
+class CameraPipelineTestAccess final {
+public:
+  explicit CameraPipelineTestAccess(CameraPipeline &pipeline)
+      : pipeline_(pipeline) {}
+
+  // Puts the pipeline in a run state of the caller's choice. `running=false`
+  // with `starting=true` is the window Start() waits in.
+  void SetRunState(bool running, bool starting) {
+    std::lock_guard<std::mutex> lock(pipeline_.mu_);
+    pipeline_.running_ = running;
+    pipeline_.starting_ = starting;
+  }
+
+  // The output device the pipeline believes it holds. CloseOutput clears it
+  // and Status() reports it, so it tells a close that went through from one
+  // that was refused.
+  void SetOutputDevice(const std::string &device) {
+    std::lock_guard<std::mutex> lock(pipeline_.mu_);
+    pipeline_.output_device_ = device;
+  }
+
+private:
+  CameraPipeline &pipeline_;
+};
+
+} // namespace studiocast::video
 
 namespace {
 
@@ -953,6 +987,516 @@ bool TestVideoOutputRecoveryClearsUnavailableError() {
   return true;
 }
 
+// A node that runs but refuses frames must not read as "running". The status
+// text carries the failure, the way it does before the node comes up.
+bool TestPipeWireOutputStateReportsAWriteFailure() {
+  using studiocast::video::internal::PipeWireOutputStateText;
+
+  struct Case {
+    const char *name;
+    bool wanted;
+    bool has_node;
+    const char *error;
+    const char *want;
+  };
+
+  const Case cases[] = {
+      {"no node wanted", false, false, "", "off"},
+      {"a node that is asked for but not up yet", true, false, "", "starting"},
+      {"a node that failed to start", true, false, "start failed",
+       "start failed"},
+      {"a node the server took down", true, false, "the server took the node "
+                                                   "down",
+       "the server took the node down"},
+      {"a node that takes frames", true, true, "", "running"},
+      {"a node that refuses frames", true, true, "write failed",
+       "write failed"},
+  };
+
+  bool ok = true;
+  for (const auto &c : cases) {
+    const std::string got =
+        PipeWireOutputStateText(c.wanted, c.has_node, c.error);
+    if (got != c.want) {
+      std::cerr << "PipeWire output state for " << c.name << ": expected '"
+                << c.want << "', got '" << got << "'\n";
+      ok = false;
+    }
+  }
+  return ok;
+}
+
+// The three status fields of the camera node come from one rule, so they can
+// never drift apart: a node that is down has no id and no consumers, whatever
+// the numbers the node last held say.
+bool TestPipeWireOutputStatusHidesTheNumbersOfADownNode() {
+  using studiocast::video::internal::PipeWireOutputStatusOf;
+
+  const auto off = PipeWireOutputStatusOf(false, false, "", 42u, 2);
+  if (off.state != "off" || off.node_id != 0 || off.consumer_count != 0) {
+    std::cerr << "an output nobody wants reports nothing\n";
+    return false;
+  }
+
+  const auto up = PipeWireOutputStatusOf(true, true, "", 42u, 2);
+  if (up.state != "running" || up.node_id != 42u || up.consumer_count != 2) {
+    std::cerr << "a node that is up reports its id and its consumers\n";
+    return false;
+  }
+
+  const auto starting = PipeWireOutputStatusOf(true, false, "", 42u, 2);
+  if (starting.state != "starting" || starting.node_id != 0 ||
+      starting.consumer_count != 0) {
+    std::cerr << "a node that is not up yet has no id and no consumers\n";
+    return false;
+  }
+
+  const auto failed = PipeWireOutputStatusOf(true, false, "start failed", 42u,
+                                             2);
+  if (failed.state != "start failed" || failed.node_id != 0 ||
+      failed.consumer_count != 0) {
+    std::cerr << "a node that is down has no id and no consumers\n";
+    return false;
+  }
+  return true;
+}
+
+// The pipeline decides what its PipeWire camera node needs while it holds its
+// mutex, then starts or stops the node without the mutex, because that work
+// talks to the server. This pins the decision half of that split.
+bool TestPipeWireCameraNodePlanFollowsTheNegotiatedOutput() {
+  using studiocast::video::ActualFormat;
+  using studiocast::video::PixelFormat;
+  using studiocast::video::internal::PipeWireNodePlan;
+  using studiocast::video::internal::PipeWireNodeState;
+  using studiocast::video::internal::PlanPipeWireNode;
+  using Action = PipeWireNodePlan::Action;
+
+  ActualFormat out;
+  out.width = 1280;
+  out.height = 720;
+  out.fps = 30;
+  out.format = PixelFormat::rgb24;
+
+  const PipeWireNodeState no_node;
+
+  if (PlanPipeWireNode(false, out, no_node).action != Action::stop) {
+    std::cerr << "an output nobody wants should stop the node\n";
+    return false;
+  }
+
+  ActualFormat unnegotiated;
+  if (PlanPipeWireNode(true, unnegotiated, no_node).action != Action::keep) {
+    std::cerr << "an output with no size yet has nothing to offer\n";
+    return false;
+  }
+
+  const auto first = PlanPipeWireNode(true, out, no_node);
+  if (first.action != Action::restart || first.node.width != 1280 ||
+      first.node.height != 720 || first.node.fps != 30 ||
+      first.node.format != PixelFormat::rgb24) {
+    std::cerr << "the first node should take the negotiated output\n";
+    return false;
+  }
+
+  PipeWireNodeState running;
+  running.running = true;
+  running.width = 1280;
+  running.height = 720;
+  running.fps = 30;
+  running.format = PixelFormat::rgb24;
+  if (PlanPipeWireNode(true, out, running).action != Action::keep) {
+    std::cerr << "a node that already matches should be kept\n";
+    return false;
+  }
+
+  PipeWireNodeState stopped = running;
+  stopped.running = false;
+  if (PlanPipeWireNode(true, out, stopped).action != Action::restart) {
+    std::cerr << "a node that stopped should be started again\n";
+    return false;
+  }
+
+  ActualFormat other = out;
+  other.format = PixelFormat::yuyv;
+  const auto changed = PlanPipeWireNode(true, other, running);
+  if (changed.action != Action::restart ||
+      changed.node.format != PixelFormat::yuyv) {
+    std::cerr << "a new pixel format should restart the node\n";
+    return false;
+  }
+
+  // A loopback that reports no rate still needs a rate on the node.
+  ActualFormat no_rate = out;
+  no_rate.fps = 0;
+  const auto defaulted = PlanPipeWireNode(true, no_rate, no_node);
+  if (defaulted.action != Action::restart || defaulted.node.fps != 30) {
+    std::cerr << "an output with no rate should give the node 30\n";
+    return false;
+  }
+
+  return true;
+}
+
+// The node reads the pipeline's own output buffer, whose rows are
+// bytes_per_line apart. A node that assumed a packed row would read every row
+// after the first from the wrong offset, so the row size belongs in the plan
+// and a new row size alone must make a running node stale.
+bool TestPipeWireCameraNodePlanCarriesTheOutputRowSize() {
+  using studiocast::video::ActualFormat;
+  using studiocast::video::PixelFormat;
+  using studiocast::video::internal::PipeWireNodePlan;
+  using studiocast::video::internal::PipeWireNodeState;
+  using studiocast::video::internal::PlanPipeWireNode;
+  using Action = PipeWireNodePlan::Action;
+
+  // A loopback that pads its rows, which is what RefreshActual reports after a
+  // consumer renegotiates the format.
+  ActualFormat padded;
+  padded.width = 1280;
+  padded.height = 720;
+  padded.fps = 30;
+  padded.format = PixelFormat::rgb24;
+  padded.bytes_per_line = 1280u * 3u + 16u;
+  padded.size_image = padded.bytes_per_line * 720u;
+
+  const auto first = PlanPipeWireNode(true, padded, PipeWireNodeState{});
+  if (first.action != Action::restart ||
+      first.node.stride_bytes != padded.bytes_per_line) {
+    std::cerr << "the node should be told the row size of the output buffer\n";
+    return false;
+  }
+
+  PipeWireNodeState running;
+  running.running = true;
+  running.width = 1280;
+  running.height = 720;
+  running.fps = 30;
+  running.format = PixelFormat::rgb24;
+  running.stride = padded.bytes_per_line;
+  if (PlanPipeWireNode(true, padded, running).action != Action::keep) {
+    std::cerr << "a node that also matches the row size should be kept\n";
+    return false;
+  }
+
+  // Only the padding changed. The size, the rate and the format stay the same,
+  // so nothing but the row size can make this a restart.
+  ActualFormat packed = padded;
+  packed.bytes_per_line = 1280u * 3u;
+  packed.size_image = packed.bytes_per_line * 720u;
+  const auto repacked = PlanPipeWireNode(true, packed, running);
+  if (repacked.action != Action::restart ||
+      repacked.node.stride_bytes != packed.bytes_per_line) {
+    std::cerr << "a new row size alone should restart the node\n";
+    return false;
+  }
+
+  return true;
+}
+
+// Two threads ask for a node, and both decide a restart before either of them
+// starts one. The second must look again after it takes the lock: a plan that
+// another caller already carried out would put a second node of the same name
+// in the graph, where a consumer can bind the one that is about to go.
+bool TestCameraNodePlanApplierDecidesInsideItsLock() {
+  using studiocast::video::internal::PipeWireNodePlan;
+  using studiocast::video::internal::PipeWireNodePlanApplier;
+  using Action = PipeWireNodePlan::Action;
+
+  PipeWireNodePlanApplier applier;
+  // Both are read and written under the applier lock only.
+  bool node_runs = false;
+  int decisions = 0;
+  int starts = 0;
+
+  const auto decide = [&] {
+    ++decisions;
+    PipeWireNodePlan plan;
+    if (!node_runs)
+      plan.action = Action::restart;
+    return plan;
+  };
+  const auto carry_out = [&](const PipeWireNodePlan &plan) {
+    (void)plan;
+    // Starting a node talks to the server, which takes time. The wait makes
+    // the second caller arrive while the first still works.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    node_runs = true;
+    ++starts;
+  };
+
+  std::thread first([&] { applier.Apply(decide, carry_out); });
+  std::thread second([&] { applier.Apply(decide, carry_out); });
+  first.join();
+  second.join();
+
+  if (decisions != 2) {
+    std::cerr << "both callers should decide, got " << decisions << "\n";
+    return false;
+  }
+  if (starts != 1) {
+    std::cerr << "only one caller should start a node, got " << starts << "\n";
+    return false;
+  }
+  return true;
+}
+
+// A run that ended with the PipeWire server away must not leave its wait
+// behind. The next run would inherit the whole backoff and wait seconds before
+// it first asked for a node.
+bool TestCameraNodeRestartBackoffStartsFreshOnEveryRun() {
+  using studiocast::video::internal::PipeWireRestartBackoff;
+  using studiocast::video::internal::StartOutcome;
+  using Clock = std::chrono::steady_clock;
+
+  PipeWireRestartBackoff backoff;
+  const auto now = Clock::now();
+  if (!backoff.Ready(now)) {
+    std::cerr << "a backoff nothing failed on should be ready\n";
+    return false;
+  }
+
+  // Enough failures to reach the longest wait.
+  for (int i = 0; i < 8; ++i)
+    backoff.Failed(now);
+  if (backoff.Ready(now)) {
+    std::cerr << "a failed start should hold the next try back\n";
+    return false;
+  }
+
+  backoff.Reset();
+  if (!backoff.Ready(now)) {
+    std::cerr << "a new run should not inherit the wait of the last one\n";
+    return false;
+  }
+
+  // A node that came up ends the backoff the same way.
+  backoff.Failed(now);
+  backoff.Started();
+  backoff.Settle(StartOutcome::held, now);
+  if (!backoff.Ready(now)) {
+    std::cerr << "a node that came up should end the wait\n";
+    return false;
+  }
+  return true;
+}
+
+// A camera node counts as running before pw_stream_connect, and the server
+// takes it down later, on the node's own loop thread, when the format it
+// negotiates differs. A tick that judged the node it had just started would
+// call every such start a success, and a format mismatch would churn a node
+// once a second for ever with the wait never growing.
+bool TestCameraNodeRestartBackoffWaitsATickBeforeItTrustsAStart() {
+  using studiocast::video::internal::PipeWireRestartBackoff;
+  using studiocast::video::internal::StartOutcome;
+  using Clock = std::chrono::steady_clock;
+
+  PipeWireRestartBackoff backoff;
+  const auto now = Clock::now();
+
+  if (backoff.Pending()) {
+    std::cerr << "a backoff that started nothing has no verdict to give\n";
+    return false;
+  }
+
+  // A settle with no start behind it must change nothing.
+  backoff.Settle(StartOutcome::gone, now);
+  if (!backoff.Ready(now)) {
+    std::cerr << "a verdict for a start that never happened must not wait\n";
+    return false;
+  }
+
+  // The tick that starts a node only records it.
+  backoff.Started();
+  if (!backoff.Pending()) {
+    std::cerr << "a start that began should wait for its verdict\n";
+    return false;
+  }
+  if (!backoff.Ready(now)) {
+    std::cerr << "a start that began must not hold the next try back yet\n";
+    return false;
+  }
+
+  // The node went down before the next tick, so the start failed and the wait
+  // grows. A mismatch that repeats therefore backs off instead of churning.
+  backoff.Settle(StartOutcome::gone, now);
+  if (backoff.Pending()) {
+    std::cerr << "a verdict must be given once only\n";
+    return false;
+  }
+  if (backoff.Ready(now)) {
+    std::cerr << "a node that went down again should hold the next try back\n";
+    return false;
+  }
+
+  const auto first_wait_over = now + std::chrono::seconds(30);
+  backoff.Started();
+  backoff.Settle(StartOutcome::gone, first_wait_over);
+  if (backoff.Ready(first_wait_over + std::chrono::milliseconds(1))) {
+    std::cerr << "a second failed start should wait longer than the first\n";
+    return false;
+  }
+  return true;
+}
+
+// A node that another node replaced between the tick that started one and the
+// tick that judges it is not the node the frame thread started, but the graph
+// is healthy: a replacement made on purpose must not count against the wait,
+// or a later genuine restart sits out a backoff it did not earn. Nothing in
+// the daemon can do that while a run is up (see the test below), so this is
+// the rule alone.
+bool TestCameraNodeRestartBackoffIgnoresAReplacedNode() {
+  using studiocast::video::internal::PipeWireRestartBackoff;
+  using studiocast::video::internal::StartOutcome;
+  using studiocast::video::internal::StartOutcomeOf;
+  using Clock = std::chrono::steady_clock;
+
+  if (StartOutcomeOf(/*same_node=*/true, /*current_running=*/true) !=
+      StartOutcome::held) {
+    std::cerr << "the node that started and still runs must have held\n";
+    return false;
+  }
+  if (StartOutcomeOf(/*same_node=*/false, /*current_running=*/true) !=
+      StartOutcome::replaced) {
+    std::cerr << "another node that runs in its place is a replacement\n";
+    return false;
+  }
+  if (StartOutcomeOf(/*same_node=*/true, /*current_running=*/false) !=
+      StartOutcome::gone) {
+    std::cerr << "the node that started and went down must be gone\n";
+    return false;
+  }
+  if (StartOutcomeOf(/*same_node=*/false, /*current_running=*/false) !=
+      StartOutcome::gone) {
+    std::cerr << "no node running at all must be gone\n";
+    return false;
+  }
+
+  PipeWireRestartBackoff backoff;
+  const auto now = Clock::now();
+
+  // One failed start, so there is a wait to watch.
+  backoff.Started();
+  backoff.Settle(StartOutcome::gone, now);
+  const auto first_wait = studiocast::pw::NodeRestartDelay(1);
+
+  // The supervisor replaced the next start. The wait must neither grow nor go.
+  backoff.Started();
+  backoff.Settle(StartOutcome::replaced, now);
+  if (backoff.Pending()) {
+    std::cerr << "a verdict must be given once only\n";
+    return false;
+  }
+  if (backoff.Ready(now + first_wait - std::chrono::milliseconds(1))) {
+    std::cerr << "a replacement must not end the wait of the failure "
+                 "before it\n";
+    return false;
+  }
+  if (!backoff.Ready(now + first_wait)) {
+    std::cerr << "a replacement must not make the wait grow\n";
+    return false;
+  }
+  return true;
+}
+
+// A start that is under way, and a run that is up, both own the camera
+// output. EnsureOutputOpen and CloseOutput return on this rule, so between two
+// frame thread ticks nothing else writes the PipeWire node, and the replaced
+// outcome above cannot happen while a run is up. A change that lets another
+// thread through the rule has to answer for the restart wait as well: a node
+// replaced on every tick would hold that wait at zero for ever.
+bool TestCameraOutputBelongsToTheRunWhileItRuns() {
+  using studiocast::video::internal::RunOwnsOutput;
+
+  if (RunOwnsOutput(/*running=*/false, /*starting=*/false)) {
+    std::cerr << "an idle pipeline must let a caller open the output\n";
+    return false;
+  }
+  if (!RunOwnsOutput(/*running=*/true, /*starting=*/false)) {
+    std::cerr << "a run that is up owns the output\n";
+    return false;
+  }
+  if (!RunOwnsOutput(/*running=*/false, /*starting=*/true)) {
+    std::cerr << "a start under way owns the output already\n";
+    return false;
+  }
+  if (!RunOwnsOutput(/*running=*/true, /*starting=*/true)) {
+    std::cerr << "a run that is up owns the output whatever the start says\n";
+    return false;
+  }
+  return true;
+}
+
+// The rule above, held against the two paths that ask it. EnsureOutputOpen
+// and CloseOutput must both leave the output alone while a start is under
+// way, not while a run is up alone: `starting_` without `running_` is the
+// window Start() waits in, and a path that looks at `running_` there lets
+// another thread open or take down the output between two ticks of the frame
+// thread.
+//
+// The pipeline goes to a device that is not there, so a refusal and a real
+// try answer differently. Each half has its idle control beside it, which is
+// what tells the guard from an answer the pipeline would give anyway.
+bool TestCameraOutputPathsObeyTheRunOwnsOutputRule() {
+  using studiocast::video::CameraPipeline;
+  using studiocast::video::CameraPipelineTestAccess;
+
+  CameraPipeline pipeline;
+  CameraPipelineTestAccess access(pipeline);
+
+  CameraPipelineConfig cfg;
+  cfg.input_device = "/dev/studiocast-test-absent-camera";
+  cfg.output_device = "/dev/studiocast-test-absent-loopback";
+  cfg.width = 640;
+  cfg.height = 480;
+  cfg.fps = 30;
+
+  // Control: an idle pipeline goes to the device itself, and fails there.
+  access.SetRunState(/*running=*/false, /*starting=*/false);
+  std::string error;
+  if (pipeline.EnsureOutputOpen(cfg, &error)) {
+    std::cerr << "an idle pipeline must go to the output device itself\n";
+    return false;
+  }
+  if (error.empty()) {
+    std::cerr << "an open that failed must say why\n";
+    return false;
+  }
+
+  // A start under way owns the output, so the open is answered, not made.
+  access.SetRunState(/*running=*/false, /*starting=*/true);
+  error.clear();
+  if (!pipeline.EnsureOutputOpen(cfg, &error)) {
+    std::cerr << "a start under way must keep EnsureOutputOpen away from the "
+                 "output device: "
+              << error << "\n";
+    return false;
+  }
+  if (!error.empty()) {
+    std::cerr << "an open the run owns must report no failure\n";
+    return false;
+  }
+
+  // The same start owns the close.
+  const std::string held = "/dev/studiocast-test-held-output";
+  access.SetOutputDevice(held);
+  pipeline.CloseOutput();
+  if (pipeline.Status().output_device != held) {
+    std::cerr << "a start under way must keep CloseOutput away from the "
+                 "output\n";
+    return false;
+  }
+
+  // Control: the same close on an idle pipeline goes through.
+  access.SetRunState(/*running=*/false, /*starting=*/false);
+  pipeline.CloseOutput();
+  if (!pipeline.Status().output_device.empty()) {
+    std::cerr << "an idle pipeline must let CloseOutput take the output down\n";
+    return false;
+  }
+  return true;
+}
+
 bool TestStandaloneGpuScalerPolicySkipsInactiveBackendTransfers() {
   using studiocast::video::ShouldRunStandaloneGpuScaler;
 
@@ -1033,6 +1577,26 @@ int main() {
        &TestVideoConsumerDetectionErrorSurfacesWithoutStarting},
       {"video output open failure does not start pipeline",
        &TestVideoOutputOpenFailureDoesNotStartPipeline},
+      {"PipeWire camera node plan follows the negotiated output",
+       &TestPipeWireCameraNodePlanFollowsTheNegotiatedOutput},
+      {"camera node plan carries the output row size",
+       &TestPipeWireCameraNodePlanCarriesTheOutputRowSize},
+      {"camera node plan applier decides inside its lock",
+       &TestCameraNodePlanApplierDecidesInsideItsLock},
+      {"camera node restart backoff starts fresh on every run",
+       &TestCameraNodeRestartBackoffStartsFreshOnEveryRun},
+      {"camera node restart backoff waits a tick before it trusts a start",
+       &TestCameraNodeRestartBackoffWaitsATickBeforeItTrustsAStart},
+      {"camera node restart backoff ignores a replaced node",
+       &TestCameraNodeRestartBackoffIgnoresAReplacedNode},
+      {"camera output belongs to the run while it runs",
+       &TestCameraOutputBelongsToTheRunWhileItRuns},
+      {"camera output paths obey the run-owns-output rule",
+       &TestCameraOutputPathsObeyTheRunOwnsOutputRule},
+      {"PipeWire output state reports a write failure",
+       &TestPipeWireOutputStateReportsAWriteFailure},
+      {"pipewire output status hides the numbers of a down node",
+       &TestPipeWireOutputStatusHidesTheNumbersOfADownNode},
       {"video start failure backs off", &TestVideoStartFailureBacksOff},
       {"video start failure clears after recovery",
        &TestVideoStartFailureClearsAfterRecovery},
