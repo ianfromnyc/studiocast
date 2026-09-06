@@ -1,7 +1,6 @@
 #include "core/audio/audio_pipeline.h"
 
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -765,19 +764,31 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
     io_->SetStopRequestedFlag(&stop_);
   }
 
-  running_.store(true, std::memory_order_release);
   {
-    // Start the worker outside the lock so ThreadMain() never waits on it,
-    // then publish the handle under the lock.
-    std::thread worker([this, cfg] { ThreadMain(cfg); });
     std::lock_guard<std::mutex> lock(thread_mu_);
     // Two Start() callers at the same time both pass the running_ guard
     // above, because that guard is a test and then a store. Both then get
-    // here, and the move-assign onto a joinable handle ends the process. No
-    // caller starts twice today; this makes a future one fail in a debug
-    // build.
-    assert(!thread_.joinable());
-    thread_ = std::move(worker);
+    // here, and a move-assign onto a joinable handle ends the process. The
+    // second caller must find the handle in use and fail. The test is live in
+    // every build, because a release build defines NDEBUG and thus drops an
+    // assert(). No caller starts twice today; this makes a future one fail
+    // with a message.
+    //
+    // The failure is not full support for two Start() callers: the caller
+    // that fails here already made its own I/O backend, thus it replaced the
+    // backend of the caller that won. The shared reference keeps that backend
+    // alive for the worker that uses it.
+    if (thread_.joinable()) {
+      SetLastError("Audio pipeline is already starting.");
+      if (error)
+        *error = GetStats().last_error;
+      return false;
+    }
+    // Make the worker under the lock, thus nothing can take the handle
+    // between the test and the publish. ThreadMain() never takes this lock,
+    // thus it does not wait on it.
+    running_.store(true, std::memory_order_release);
+    thread_ = std::thread([this, cfg] { ThreadMain(cfg); });
   }
 
   std::unique_lock<std::mutex> startup_lock(startup_mu_);

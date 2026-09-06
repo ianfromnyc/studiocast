@@ -1,7 +1,6 @@
 #include "core/audio/virtual_audio_service.h"
 
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -459,12 +458,21 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
     // after that supervisor saw the flag. Without this, Stop() can join a
     // supervisor that was never told to stop, and then it never returns.
     std::lock_guard<std::mutex> lock(th_mu_);
-    stop_.store(false, std::memory_order_release);
     // Start() calls Stop() first, thus the handle is free here. Two Start()
-    // callers at the same time can still get here one after the other, and
-    // the move-assign onto a joinable handle ends the process. This makes
-    // that fail in a debug build instead.
-    assert(!th_.joinable());
+    // callers at the same time can still both leave that Stop() before either
+    // gets here, and a move-assign onto a joinable handle ends the process.
+    // The second caller must find the handle in use and fail. The test is
+    // live in every build, because a release build defines NDEBUG and thus
+    // drops an assert().
+    if (th_.joinable()) {
+      if (error)
+        *error = "Virtual audio service is already starting.";
+      return false;
+    }
+    stop_.store(false, std::memory_order_release);
+    // The supervisor is made under this lock on purpose: it must not run
+    // before the stop flag is clear, thus it cannot be made outside and moved
+    // in. ThreadMain() never takes th_mu_, thus it does not wait on it.
     th_ = std::thread([this]() { ThreadMain(); });
   } catch (const std::exception &e) {
     if (error)
