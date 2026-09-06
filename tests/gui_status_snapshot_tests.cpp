@@ -10,6 +10,7 @@
 
 #include <QApplication>
 #include <QAbstractItemModel>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QEventLoop>
 #include <QFrame>
@@ -17,11 +18,16 @@
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QTimer>
 #include <unistd.h>
 
+#include "core/audio/mic_monitor.h"
+#include "core/audio/pulse/pactl.h"
 #include "core/ipc/daemon_server.h"
 #include "core/ipc/daemon_socket.h"
+#include "core/util/exec.h"
+#include "gui/pages/audio_page.h"
 #include "gui/pages/engines_models_page.h"
 #include "gui/pages/video_page.h"
 #include "gui/status/daemon_status_snapshot.h"
@@ -1476,6 +1482,687 @@ bool TestPendingDaemonWriteGuardSkipsRoutineStatusUntilWriteSettles() {
                 "rejected write should allow forced daemon resync");
 }
 
+// Runs every pactl command through `hook` for the life of the object. The
+// audio page lists the audio devices on background threads, so the fake keeps
+// those threads off the sound server of whoever runs the tests.
+class ScopedPactlExecHook final {
+public:
+  explicit ScopedPactlExecHook(
+      studiocast::audio::pulse::PactlExecCaptureHook hook) {
+    studiocast::audio::pulse::SetPactlExecCaptureHookForTesting(
+        std::move(hook));
+  }
+
+  ~ScopedPactlExecHook() {
+    studiocast::audio::pulse::SetPactlExecCaptureHookForTesting(nullptr);
+  }
+
+  ScopedPactlExecHook(const ScopedPactlExecHook &) = delete;
+  ScopedPactlExecHook &operator=(const ScopedPactlExecHook &) = delete;
+};
+
+// One physical input and one physical output, the smallest machine the audio
+// page can list.
+ScopedPactlExecHook FakeSoundServer() {
+  return ScopedPactlExecHook([](const std::string &command) {
+    studiocast::util::ExecResult result;
+    result.exit_code = 0;
+    if (command == "pactl --version 2>&1") {
+      result.stdout_str = "pactl 17.0\n";
+    } else if (command == "pactl list short sources 2>&1") {
+      result.stdout_str = "2\tphysical_test_mic\tmodule-alsa-card.c\t"
+                          "s16le 2ch 48000Hz\tRUNNING\n";
+    } else if (command == "pactl list short sinks 2>&1") {
+      result.stdout_str = "3\tphysical_test_sink\tmodule-alsa-card.c\t"
+                          "s16le 2ch 48000Hz\tSUSPENDED\n";
+    } else if (command == "pactl get-default-source 2>&1") {
+      result.stdout_str = "physical_test_mic\n";
+    } else if (command == "pactl get-default-sink 2>&1") {
+      result.stdout_str = "physical_test_sink\n";
+    }
+    return result;
+  });
+}
+
+// The status a daemon without a microphone monitor sends: an audio object with
+// no "monitor" member.
+const char *const kAudioStatusWithoutMonitor = R"({
+        "service_running":true,
+        "audio":{
+          "enabled":false,
+          "mic_present":true,
+          "source_error":"",
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })";
+
+// The same status from a daemon that does report the monitor.
+const char *const kAudioStatusWithMonitor = R"({
+        "service_running":true,
+        "audio":{
+          "enabled":false,
+          "mic_present":true,
+          "source_error":"",
+          "monitor":{
+            "enabled":false,
+            "active":false,
+            "sink":"",
+            "latency_ms":20,
+            "volume":100
+          },
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })";
+
+// The page lists the audio devices on background threads. Nothing pumps the
+// event loop in these checks, so `deleteLater` never runs; a thread left
+// behind would still be inside popen when main() returns. The page must wait
+// for its own listings instead.
+bool TestAudioPageWaitsForItsDeviceListings() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-threads");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  std::atomic<int> commands{0};
+  ScopedPactlExecHook pactl([&commands](const std::string &) {
+    // A slow sound server, so a listing that outlives the page is visible.
+    std::this_thread::sleep_for(150ms);
+    commands.fetch_add(1, std::memory_order_relaxed);
+    studiocast::util::ExecResult result;
+    result.exit_code = 0;
+    return result;
+  });
+
+  {
+    studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+  }
+
+  const int atDestruction = commands.load(std::memory_order_relaxed);
+  std::this_thread::sleep_for(600ms);
+  const int later = commands.load(std::memory_order_relaxed);
+
+  bool ok = Expect(atDestruction > 0,
+                   "the page should have listed the audio devices");
+  ok = Expect(later == atDestruction,
+              "no device listing may keep running after the page is gone") &&
+       ok;
+  if (later != atDestruction) {
+    std::cerr << "pactl calls: " << atDestruction << " at destruction, "
+              << later << " afterwards\n";
+  }
+  return ok;
+}
+
+// Each device listing runs three pactl calls one after the other, and each
+// call can wait its full timeout on a wedged sound server. A page that goes
+// away must stop its listings between the calls, so that closing the window
+// waits for the one call that is running and not for all three.
+bool TestAudioPageStopsItsListingsBetweenPactlCalls() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-cancel");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  std::atomic<int> commands{0};
+  ScopedPactlExecHook pactl([&commands](const std::string &) {
+    // A slow sound server, so the page goes away while a call is running.
+    std::this_thread::sleep_for(200ms);
+    commands.fetch_add(1, std::memory_order_relaxed);
+    studiocast::util::ExecResult result;
+    result.exit_code = 0;
+    return result;
+  });
+
+  {
+    studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+  }
+
+  // The page starts two listings, of three calls each. Both are inside their
+  // first call when the page goes away, so a listing that stops between the
+  // calls runs about two calls in total, and one that does not runs six.
+  const int commandsRun = commands.load(std::memory_order_relaxed);
+  // The lower bound keeps the upper bound honest: a page that never listed
+  // anything would satisfy "at most four calls" without stopping a thing.
+  bool ok = Expect(commandsRun >= 1,
+                   "the page should have started its device listings");
+  ok = Expect(commandsRun <= 4,
+              "a listing should stop between its pactl calls when the page "
+              "goes away") &&
+       ok;
+  if (!ok)
+    std::cerr << "pactl calls before the page was gone: " << commandsRun
+              << "\n";
+  return ok;
+}
+
+// The daemon owns the monitor route, so a daemon that does not report a
+// monitor refuses every write the group can make. All of the controls must go
+// dead together, not the check box alone, and they must come back when a
+// daemon that has the monitor answers.
+bool TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() {
+  // The page reads the daemon socket under XDG_RUNTIME_DIR. Point it at an
+  // empty directory, so nothing here can reach a daemon of the person running
+  // the tests.
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  // No event loop runs in this test, on purpose: UpdateStatus is synchronous,
+  // which is all this test needs. The page still lists the audio devices on
+  // background threads, so a fake sound server keeps them off the host. It is
+  // declared before the page because ~AudioPage waits for those threads.
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *enableCheck =
+      page.findChild<QCheckBox *>(QStringLiteral("monitorEnableCheck"));
+  auto *sinkCombo =
+      page.findChild<QComboBox *>(QStringLiteral("monitorSinkCombo"));
+  auto *latencySpin =
+      page.findChild<QSpinBox *>(QStringLiteral("monitorLatencySpin"));
+  auto *volumeSpin =
+      page.findChild<QSpinBox *>(QStringLiteral("monitorVolumeSpin"));
+  auto *refreshBtn =
+      page.findChild<QPushButton *>(QStringLiteral("refreshMonitorSinksBtn"));
+
+  bool ok = Expect(enableCheck != nullptr && sinkCombo != nullptr &&
+                       latencySpin != nullptr && volumeSpin != nullptr &&
+                       refreshBtn != nullptr,
+                   "every monitor control should be findable");
+  if (!ok)
+    return false;
+
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(
+      QString::fromLatin1(kAudioStatusWithoutMonitor)));
+
+  ok = Expect(!enableCheck->isEnabled(),
+              "the monitor check box should be disabled without a monitor") &&
+       ok;
+  ok = Expect(!sinkCombo->isEnabled(),
+              "the monitor sink combo should be disabled without a monitor") &&
+       ok;
+  ok = Expect(!latencySpin->isEnabled(),
+              "the monitor delay should be disabled without a monitor") &&
+       ok;
+  ok = Expect(!volumeSpin->isEnabled(),
+              "the monitor volume should be disabled without a monitor") &&
+       ok;
+  ok = Expect(!refreshBtn->isEnabled(),
+              "the sink refresh should be disabled without a monitor") &&
+       ok;
+
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(
+      QString::fromLatin1(kAudioStatusWithMonitor)));
+
+  ok = Expect(enableCheck->isEnabled(),
+              "the monitor check box should come back with a monitor") &&
+       ok;
+  ok = Expect(latencySpin->isEnabled(),
+              "the monitor delay should come back with a monitor") &&
+       ok;
+  ok = Expect(volumeSpin->isEnabled(),
+              "the monitor volume should come back with a monitor") &&
+       ok;
+
+  // The sink combo and the refresh button also need pactl and a finished sink
+  // list, which a test machine need not have, so they are not checked here.
+
+  return ok;
+}
+
+// `pactl list short sinks` can fail although pactl itself runs. The monitor
+// sink list then holds "System default" alone, which reads like a machine with
+// one output. The status text must carry the reason, the way the speaker
+// target list reports it.
+bool TestAudioPageReportsAMonitorSinkListError() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-error");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  // No event loop and no real sound server, for the reasons given above.
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *statusText =
+      page.findChild<QPlainTextEdit *>(QStringLiteral("audioStatusText"));
+  auto *sinkCombo =
+      page.findChild<QComboBox *>(QStringLiteral("monitorSinkCombo"));
+  if (!Expect(statusText != nullptr && sinkCombo != nullptr,
+              "the status text and the monitor sink combo should be findable"))
+    return false;
+
+  const std::string listError = "pactl list short sinks failed: exit status 1";
+  page.ApplyMonitorSinkListForTesting({}, listError);
+
+  const QString text = statusText->toPlainText();
+  bool ok = Expect(text.contains(QString::fromStdString(listError)),
+                   "the status text should carry the sink listing error");
+  if (!ok)
+    std::cerr << "status text was: " << text.toStdString() << "\n";
+
+  ok = Expect(sinkCombo->count() == 1,
+              "a failed listing should leave the system default alone") &&
+       ok;
+  return ok;
+}
+
+// pactl can be missing altogether. The monitor sink list then holds the
+// "unavailable" line alone, so the status text must carry the reason, the way
+// the microphone input and speaker target listings report it.
+bool TestAudioPageReportsAnUnavailablePactlForTheMonitorSinks() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-pactl");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  // No event loop and no real sound server, for the reasons given above.
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *statusText =
+      page.findChild<QPlainTextEdit *>(QStringLiteral("audioStatusText"));
+  auto *sinkCombo =
+      page.findChild<QComboBox *>(QStringLiteral("monitorSinkCombo"));
+  if (!Expect(statusText != nullptr && sinkCombo != nullptr,
+              "the status text and the monitor sink combo should be findable"))
+    return false;
+
+  const std::string details = "pactl was not found on PATH";
+  page.ApplyMonitorSinkFailureForTesting(details);
+
+  const QString text = statusText->toPlainText();
+  bool ok = Expect(text.contains(QString::fromStdString(details)),
+                   "the status text should carry the pactl failure");
+  if (!ok)
+    std::cerr << "status text was: " << text.toStdString() << "\n";
+
+  ok = Expect(sinkCombo->count() == 1,
+              "an unavailable pactl should leave one line in the sink list") &&
+       ok;
+  return ok;
+}
+
+// A monitor that waits for microphone processing is an ordinary state the
+// user made one click ago. The page shows the daemon sentence for it and does
+// not send the user to Support.
+bool TestAudioPageShowsTheMonitorNoteWithoutSendingUserToSupport() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-note");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *statusLabel =
+      page.findChild<QLabel *>(QStringLiteral("monitorStatusLabel"));
+  if (!Expect(statusLabel != nullptr, "the monitor status label is findable"))
+    return false;
+
+  const char *const kIdleMonitor = R"({
+        "service_running":true,
+        "audio":{
+          "enabled":false,
+          "mic_present":true,
+          "source_error":"",
+          "monitor":{
+            "enabled":true,
+            "active":false,
+            "sink":"auto",
+            "latency_ms":20,
+            "volume":100,
+            "note":"Microphone processing is off, so the monitor stays idle.",
+            "last_error":""
+          },
+          "pipeline":{"running":false,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })";
+
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(
+      QString::fromLatin1(kIdleMonitor)));
+
+  const QString text = statusLabel->text();
+  bool ok = Expect(text.contains(QStringLiteral(
+                       "Microphone processing is off, so the monitor stays "
+                       "idle.")),
+                   "the page should show the daemon sentence for the note");
+  ok = Expect(!text.contains(QStringLiteral("Open Support")),
+              "an ordinary note must not send the user to Support") &&
+       ok;
+  if (!ok)
+    std::cerr << "monitor status was: " << text.toStdString() << "\n";
+  return ok;
+}
+
+// A machine with no usable output is the most likely first-run failure of the
+// monitor, and the answer is to select or plug in an output. The page must say
+// so instead of asking the user to open Support.
+bool TestAudioPageShowsTheNoSafeOutputAdviceForTheMonitor() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-no-sink");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *statusLabel =
+      page.findChild<QLabel *>(QStringLiteral("monitorStatusLabel"));
+  if (!Expect(statusLabel != nullptr, "the monitor status label is findable"))
+    return false;
+
+  // The sentence the service writes when the sink choice found nothing safe,
+  // wrapped by the supervisor the way the daemon reports it.
+  const QString lastError =
+      QStringLiteral("Failed to start the microphone monitor: ") +
+      QString::fromLatin1(studiocast::audio::kNoSafeMicMonitorSinkMessage) +
+      QStringLiteral(" Choose a physical output sink.");
+
+  const QString status =
+      QStringLiteral(R"({
+        "service_running":true,
+        "audio":{
+          "enabled":true,
+          "mic_present":true,
+          "source_error":"",
+          "monitor":{
+            "enabled":true,
+            "active":false,
+            "sink":"auto",
+            "latency_ms":20,
+            "volume":100,
+            "note":"",
+            "last_error":"%1"
+          },
+          "pipeline":{"running":true,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })")
+          .arg(lastError);
+
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(status));
+
+  const QString text = statusLabel->text();
+  bool ok = Expect(text.contains(QStringLiteral("output")) &&
+                       text.contains(QStringLiteral("Choose")),
+                   "the page should say which output to choose");
+  ok = Expect(!text.contains(QStringLiteral("Open Support")),
+              "a missing output is not a Support case") &&
+       ok;
+  if (!ok)
+    std::cerr << "monitor status was: " << text.toStdString() << "\n";
+  return ok;
+}
+
+// A sound server that is only busy clears itself in seconds and needs nothing
+// from the user. The page must say the monitor waits for it, instead of asking
+// the user to open a support case.
+bool TestAudioPageShowsABusySoundServerAsAWaitForTheMonitor() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-busy-server");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *statusLabel =
+      page.findChild<QLabel *>(QStringLiteral("monitorStatusLabel"));
+  if (!Expect(statusLabel != nullptr, "the monitor status label is findable"))
+    return false;
+
+  // The sentence the daemon writes when the sound server did not answer, the
+  // way a failed start reports it.
+  const QString lastError =
+      QStringLiteral("Failed to start the microphone monitor: ") +
+      QString::fromLatin1(studiocast::audio::kSoundServerNoAnswerMessage) +
+      QStringLiteral(" in time, so the microphone monitor did not start.");
+
+  const QString status =
+      QStringLiteral(R"({
+        "service_running":true,
+        "audio":{
+          "enabled":true,
+          "mic_present":true,
+          "source_error":"",
+          "monitor":{
+            "enabled":true,
+            "active":false,
+            "sink":"auto",
+            "latency_ms":20,
+            "volume":100,
+            "note":"",
+            "last_error":"%1"
+          },
+          "pipeline":{"running":true,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })")
+          .arg(lastError);
+
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(status));
+
+  const QString text = statusLabel->text();
+  bool ok = Expect(text.contains(QStringLiteral("busy")),
+                   "the page should say the sound server is busy");
+  ok = Expect(text.contains(QStringLiteral("on its own")),
+              "the page should say the monitor comes back without the user") &&
+       ok;
+  ok = Expect(!text.contains(QStringLiteral("Open Support")),
+              "a busy sound server is not a Support case") &&
+       ok;
+  if (!ok)
+    std::cerr << "monitor status was: " << text.toStdString() << "\n";
+  return ok;
+}
+
+// A stop the sound server did not answer is the opposite state of a start it
+// did not answer: the loopback can still play the microphone into the
+// speakers. The page must not tell a user who turned the monitor off that it
+// starts on its own.
+bool TestAudioPageShowsAFailedStopAsAMonitorThatMayStillPlay() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-busy-stop");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *statusLabel =
+      page.findChild<QLabel *>(QStringLiteral("monitorStatusLabel"));
+  if (!Expect(statusLabel != nullptr, "the monitor status label is findable"))
+    return false;
+
+  // The sentence the daemon writes when the sound server did not answer a
+  // stop, the way `StopMicMonitor` reports it.
+  const QString lastError =
+      QStringLiteral("Failed to stop the microphone monitor: ") +
+      QString::fromLatin1(
+          studiocast::audio::kSoundServerNoAnswerOnStopMessage);
+
+  const QString status =
+      QStringLiteral(R"({
+        "service_running":true,
+        "audio":{
+          "enabled":true,
+          "mic_present":true,
+          "source_error":"",
+          "monitor":{
+            "enabled":false,
+            "active":false,
+            "sink":"auto",
+            "latency_ms":20,
+            "volume":100,
+            "note":"",
+            "last_error":"%1"
+          },
+          "pipeline":{"running":true,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })")
+          .arg(lastError);
+
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(status));
+
+  const QString text = statusLabel->text();
+  bool ok = Expect(text.contains(QStringLiteral("busy")),
+                   "the page should say the sound server is busy");
+  ok = Expect(!text.contains(QStringLiteral("starts on its own")),
+              "a monitor the user turned off does not start on its own") &&
+       ok;
+  ok = Expect(text.contains(QStringLiteral("may still")),
+              "the page should say the monitor may still be playing") &&
+       ok;
+  ok = Expect(!text.contains(QStringLiteral("Open Support")),
+              "a busy sound server is not a Support case") &&
+       ok;
+  if (!ok)
+    std::cerr << "monitor status was: " << text.toStdString() << "\n";
+  return ok;
+}
+
+// Every step of the monitor volume used to be its own blocking daemon write,
+// and each write costs the daemon two more pactl runs. The steps must coalesce
+// into one debounced write, the way the rest of this page writes.
+bool TestAudioPageDebouncesTheMonitorWrites() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-debounce");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *volumeSpin =
+      page.findChild<QSpinBox *>(QStringLiteral("monitorVolumeSpin"));
+  auto *timer =
+      page.findChild<QTimer *>(QStringLiteral("monitorWriteDebounceTimer"));
+  if (!Expect(volumeSpin != nullptr && timer != nullptr,
+              "the monitor volume and its write timer should be findable"))
+    return false;
+
+  bool ok = Expect(!timer->isActive(), "no monitor write is pending yet");
+  ok = Expect(timer->isSingleShot(),
+              "the debounced write should run once per burst") &&
+       ok;
+  ok =
+      Expect(timer->interval() >= 100,
+             "the debounce should be long enough to coalesce spin box steps") &&
+      ok;
+
+  volumeSpin->setValue(volumeSpin->value() - 1);
+  ok = Expect(timer->isActive(),
+              "a volume step should schedule a debounced write") &&
+       ok;
+
+  volumeSpin->setValue(volumeSpin->value() - 1);
+  ok = Expect(timer->isActive(),
+              "a second step should still leave one pending write") &&
+       ok;
+  return ok;
+}
+
+// The status a daemon with the monitor turned on sends.
+const char *const kAudioStatusWithMonitorOn = R"({
+        "service_running":true,
+        "audio":{
+          "enabled":true,
+          "mic_present":true,
+          "source_error":"",
+          "monitor":{
+            "enabled":true,
+            "active":true,
+            "sink":"auto",
+            "sink_resolved":"physical_test_sink",
+            "latency_ms":20,
+            "volume":100,
+            "note":"",
+            "last_error":""
+          },
+          "pipeline":{"running":true,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })";
+
+// A routine status that was already in flight when the user clicked must not
+// undo the click. Every other daemon-backed control on this page is behind
+// `PendingDaemonWriteGuard`, and the monitor controls belong there too.
+bool TestAudioPageKeepsTheMonitorControlsWhileAWriteIsPending() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-guard");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *enableCheck =
+      page.findChild<QCheckBox *>(QStringLiteral("monitorEnableCheck"));
+  if (!Expect(enableCheck != nullptr, "the monitor check box is findable"))
+    return false;
+
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(
+      QString::fromLatin1(kAudioStatusWithMonitorOn)));
+  if (!Expect(enableCheck->isChecked(),
+              "the page should follow a daemon that reports the monitor on"))
+    return false;
+
+  // The user turns the monitor off. The write to the daemon is in flight.
+  enableCheck->setChecked(false);
+
+  // A routine status from before the click arrives.
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(
+      QString::fromLatin1(kAudioStatusWithMonitorOn)));
+
+  return Expect(!enableCheck->isChecked(),
+                "a routine status must not undo the user's click");
+}
+
 bool TestVideoPageKeepsUserSelectedInputWhenRoutineStatusStillAuto() {
   studiocast::gui::VideoPage page;
   auto *inputCombo =
@@ -1759,5 +2446,17 @@ int main(int argc, char **argv) {
   ok = TestVideoPageKeepsUserSelectedInputWhenRoutineStatusStillAuto() && ok;
   ok = TestVideoPageEnablesAvailableVirtualBackgroundRemoveMode() && ok;
   ok = TestVideoPageKeepsReplaceModeSelectedWhileImagePathIsMissing() && ok;
+
+  ok = TestAudioPageWaitsForItsDeviceListings() && ok;
+  ok = TestAudioPageStopsItsListingsBetweenPactlCalls() && ok;
+  ok = TestAudioPageShowsTheMonitorNoteWithoutSendingUserToSupport() && ok;
+  ok = TestAudioPageShowsTheNoSafeOutputAdviceForTheMonitor() && ok;
+  ok = TestAudioPageShowsABusySoundServerAsAWaitForTheMonitor() && ok;
+  ok = TestAudioPageShowsAFailedStopAsAMonitorThatMayStillPlay() && ok;
+  ok = TestAudioPageDebouncesTheMonitorWrites() && ok;
+  ok = TestAudioPageKeepsTheMonitorControlsWhileAWriteIsPending() && ok;
+  ok = TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() && ok;
+  ok = TestAudioPageReportsAMonitorSinkListError() && ok;
+  ok = TestAudioPageReportsAnUnavailablePactlForTheMonitorSinks() && ok;
   return ok ? 0 : 1;
 }

@@ -404,6 +404,82 @@ Expected:
   pipeline.
 - The error tells the tester to choose a physical microphone/input source.
 
+### Microphone Monitor
+
+- [ ] On the Microphone page, pick a physical input, keep processing on, plug in
+  headphones, then turn on **Monitor processed microphone** and choose the
+  headphone output.
+
+Expected:
+
+- You hear your own processed voice on the selected output.
+- `build/studiocastctl audio monitor status` reports `on (playing)`, the
+  requested sink, and the resolved sink.
+- `pactl list short modules` shows one `module-loopback` from `studiocast_mic`
+  carrying `StudioCast_Microphone_Monitor`.
+- `build/studiocastctl status` prints the raw status JSON. Its `audio` object
+  has `"mic_monitor_consumer_count":1` and `"mic_app_consumer_count":0` while
+  no app uses StudioCast Microphone. (`studiocastctl audio monitor status`
+  prints the monitor block in plain words, but not these two counts.)
+
+- [ ] Change the monitor output to another sink, then change the delay.
+
+Expected:
+
+- The old loopback is unloaded before the new one is loaded; only one monitor
+  loopback exists at a time.
+- `audio.monitor.sink_resolved` follows the new sink.
+
+- [ ] Try to select a StudioCast sink for the monitor through the CLI:
+
+```bash
+build/studiocastctl audio monitor on --sink studiocast_sink
+```
+
+Expected:
+
+- The daemon refuses the change and says the sink would feed StudioCast audio
+  back into itself.
+- The GUI output list never offers StudioCast virtual sinks.
+
+- [ ] With the monitor playing, unplug the headphones, then plug them back in.
+
+Expected:
+
+- Status reports that the monitor output disappeared and that the monitor
+  stopped. The sentence is shown as written, with no request to open Support.
+- If the sound server cannot release the old output, the status adds that the
+  microphone may still be heard. That sentence goes away on its own when the
+  output is released.
+- StudioCast does not move the monitor to another output by itself. The default
+  output after an unplug is usually the loudspeakers, which would feed the
+  microphone back into itself.
+- Plugging the headphones back in does not start the monitor again. Turn the
+  monitor off and on again, or select the output, to hear it there.
+- Turning microphone processing off and on again also counts as a restart, so
+  it too puts a monitor set to "auto" on the output that is the default at that
+  moment.
+
+- [ ] With the monitor on, change an unrelated audio setting (the effects
+  intensity, for example) while no output sink is usable.
+
+Expected:
+
+- The reply carries a warning that says the monitor cannot start.
+- `audio.monitor.enabled` in the daemon config file is still `true`. The daemon
+  never writes the monitor setting back, and the check box in the GUI does not
+  un-tick itself.
+- The monitor starts on its own when a usable output comes back.
+
+- [ ] Turn microphone processing off while the monitor is on, then stop the
+  daemon.
+
+Expected:
+
+- Status says the monitor stays idle until microphone processing is on.
+- No `module-loopback` from `studiocast_mic` is left loaded after the daemon
+  stops.
+
 - [ ] Open the Speakers page and inspect the output selector.
 
 Expected:

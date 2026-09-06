@@ -13,6 +13,7 @@
 #include "core/audio/audio_device_safety.h"
 #include "core/audio/audio_pipeline.h"
 #include "core/audio/audio_processor.h"
+#include "core/audio/mic_monitor.h"
 #include "core/audio/pulse/pactl.h"
 #include "core/audio/virtual_mic.h"
 #include "core/audio/virtual_speaker.h"
@@ -196,8 +197,7 @@ void ApplyOpenAudioRuntimeWarning(OpenAudioRuntimeStatus *status,
   if (!status || pipeline_error.find("Open Audio") == std::string::npos)
     return;
 
-  const std::string warning =
-      StripAudioProcessorWarningPrefix(pipeline_error);
+  const std::string warning = StripAudioProcessorWarningPrefix(pipeline_error);
   status->last_runtime_warning = warning;
 
   if (warning.find("switched to CPU fallback") != std::string::npos) {
@@ -223,9 +223,8 @@ ChooseSpeakerTargetSinkName(const std::string &configured_target,
 
 bool PulseSourceListContains(const std::vector<pulse::PactlSource> &sources,
                              const std::string &name) {
-  return std::any_of(sources.begin(), sources.end(), [&](const auto &source) {
-    return source.name == name;
-  });
+  return std::any_of(sources.begin(), sources.end(),
+                     [&](const auto &source) { return source.name == name; });
 }
 
 MicrophoneSourceStatus
@@ -480,6 +479,14 @@ bool VirtualAudioService::Start(const VirtualAudioServiceConfig &cfg,
     speakers_loopback_running_ = false;
     speakers_loopback_target_.clear();
     speakers_loopback_latency_ms_ = 0;
+    monitor_running_ = false;
+    monitor_sink_requested_.clear();
+    monitor_sink_resolved_.clear();
+    monitor_module_id_ = -1;
+    monitor_latency_ms_ = 0;
+    monitor_volume_ = 0;
+    monitor_output_lost_ = false;
+    monitor_route_may_exist_ = false;
     consumer_detector_.reset();
   }
 
@@ -567,6 +574,22 @@ void VirtualAudioService::Stop() {
     st_.speakers_pipeline_pulse_playback_latency_us_last = 0;
     st_.speakers_pipeline_pulse_latency_us_max = 0;
     st_.speakers_pipeline_resync_events = 0;
+    st_.mic_app_consumer_count = 0;
+    st_.mic_monitor_consumer_count = 0;
+    st_.monitor_active = false;
+    st_.monitor_module_id = -1;
+    st_.monitor_sink_active.clear();
+    st_.monitor_latency_ms_active = 0;
+    st_.monitor_note.clear();
+    st_.monitor_last_error.clear();
+    monitor_running_ = false;
+    monitor_sink_requested_.clear();
+    monitor_sink_resolved_.clear();
+    monitor_module_id_ = -1;
+    monitor_latency_ms_ = 0;
+    monitor_volume_ = 0;
+    monitor_output_lost_ = false;
+    monitor_route_may_exist_ = false;
     consumer_detector_.reset();
   }
 }
@@ -646,6 +669,47 @@ bool VirtualAudioService::DestroyVirtualSpeakerDevice(
   return studiocast::audio::DestroyVirtualSpeaker(error);
 }
 
+bool VirtualAudioService::StartMicMonitorRoute(
+    const MicMonitorConfig &cfg, const std::string &mic_source_name,
+    MicMonitorState *out, std::string *error) const {
+  if (hooks_.start_mic_monitor) {
+    return hooks_.start_mic_monitor(cfg, mic_source_name, out, error);
+  }
+  return studiocast::audio::StartMicMonitor(cfg, mic_source_name, out, error);
+}
+
+bool VirtualAudioService::StopMicMonitorRoute(std::string *error) const {
+  if (hooks_.stop_mic_monitor) {
+    return hooks_.stop_mic_monitor(error);
+  }
+  return studiocast::audio::StopMicMonitor(error);
+}
+
+bool VirtualAudioService::SetMicMonitorRouteVolume(int module_id, int volume,
+                                                   std::string *error) const {
+  if (hooks_.set_mic_monitor_volume) {
+    return hooks_.set_mic_monitor_volume(module_id, volume, error);
+  }
+  return studiocast::audio::SetMicMonitorVolume(module_id, volume, error);
+}
+
+MicMonitorState
+VirtualAudioService::DetectMicMonitorRoute(std::string *error) const {
+  if (hooks_.detect_mic_monitor) {
+    return hooks_.detect_mic_monitor(error);
+  }
+  return studiocast::audio::DetectMicMonitor(error);
+}
+
+std::optional<bool>
+VirtualAudioService::MicMonitorSinkPresentRoute(const std::string &sink_name,
+                                                std::string *error) const {
+  if (hooks_.mic_monitor_sink_present) {
+    return hooks_.mic_monitor_sink_present(sink_name, error);
+  }
+  return studiocast::audio::MicMonitorSinkPresent(sink_name, error);
+}
+
 AudioBackendAvailability
 VirtualAudioService::ProbeMicrophoneBackendAvailability(
     const VirtualAudioServiceConfig &cfg) const {
@@ -697,6 +761,45 @@ void VirtualAudioService::ThreadMain() {
   steady_clock::time_point nextSpeakerLoopbackStartRetry{};
   steady_clock::time_point nextSpeakerLoopbackStopRetry{};
   steady_clock::time_point nextSpeakerDestroyRetry{};
+  steady_clock::time_point nextMonitorStartRetry{};
+  // Consecutive failed monitor starts. Each one spaces the next retry further
+  // out, so a setting that can never work stops running pactl every quarter
+  // second for the life of the daemon.
+  int monitorStartFailures = 0;
+  // The settings the last start attempt used, whether it worked or not. A
+  // change to them is a fresh try, so the wait starts over.
+  std::string monitorAttemptSink;
+  int monitorAttemptLatencyMs = 0;
+  steady_clock::time_point nextMonitorStopRetry{};
+  steady_clock::time_point nextMonitorVolumeRetry{};
+  // The stop and the volume space their retries out the same way the start
+  // does. Each one runs several pactl processes, so a failure that never ends
+  // must not run them four times a second for the life of the daemon.
+  int monitorStopFailures = 0;
+  int monitorVolumeFailures = 0;
+  // The cleanup that runs while the output is lost keeps its own counter and
+  // deadline: the monitor is still wanted there, and the wait of the stop the
+  // user asks for starts over on every pass of a wanted monitor.
+  //
+  // It also gives up at the top of its backoff, which the other loops never
+  // do. Only the user ends a lost output, so a cleanup that never gave up
+  // would block the audio supervisor for one stop deadline per backoff step
+  // for the rest of the run. A stop that failed this many times with a growing
+  // wait will not work on the next try for a reason the wait can fix.
+  constexpr int kMonitorLostCleanupMaxTries = 8;
+  // A cleanup that failed once is a hiccup the next try fixes, so the note
+  // waits for the second failure before it warns that the microphone may still
+  // play. Below this the warning would come and go on every lost output.
+  constexpr int kMonitorLostCleanupWarnTries = 2;
+  steady_clock::time_point nextMonitorLostCleanup{};
+  int monitorLostCleanupFailures = 0;
+  // The output the lost-output note names. The note is rewritten while the
+  // cleanup runs, and the resolved name is dropped with the pin.
+  std::string monitorLostSink;
+  // True while the reported error belongs to a failed volume step. A later
+  // step that works clears that error, and only that one.
+  bool monitorVolumeFailed = false;
+  steady_clock::time_point nextMonitorVerify{};
   std::string speakerLoopbackStopRetryError;
   std::string speakerDestroyRetryError;
 
@@ -783,6 +886,21 @@ void VirtualAudioService::ThreadMain() {
     st_.speakers_pipeline_resync_events = 0;
   };
 #endif
+
+  // A daemon that is killed while the monitor plays leaves its tagged loopback
+  // loaded, and nothing else removes it. Clear it once per service start, off
+  // the caller's thread, whatever the monitor setting says.
+  {
+    std::string staleErr;
+    if (StopMicMonitorRoute(&staleErr)) {
+      monitor_route_may_exist_ = false;
+    } else {
+      monitor_route_may_exist_ = true;
+      std::lock_guard<std::mutex> lock(mu_);
+      st_.monitor_last_error =
+          "Failed to remove a leftover microphone monitor: " + staleErr;
+    }
+  }
 
   while (!stop_.load(std::memory_order_acquire)) {
     VirtualAudioServiceConfig cfg;
@@ -1204,6 +1322,373 @@ void VirtualAudioService::ThreadMain() {
       }
     }
 
+    // Microphone monitor supervisor.
+    //
+    // The monitor loops the processed microphone feed to an output sink. It is
+    // a Pulse consumer of `studiocast_mic`, so it also starts the microphone
+    // pipeline. The consumer counts below keep it apart from real apps.
+    {
+      const auto monitorCfg = NormalizeMicMonitorConfig(cfg.monitor);
+      // The monitor loops from `studiocast_mic`, so it needs the virtual
+      // microphone. Without it every start would fail, forever.
+      const bool wantMonitor =
+          monitorCfg.enabled && cfg.enabled && mic_created_;
+      const auto monitorNow = steady_clock::now();
+      // The consumer snapshot for this pass was taken before this block runs,
+      // so it knows only the route that was already loaded. Split the counts
+      // by that, not by the route this pass is about to load or unload.
+      const bool monitorRanWhenConsumersWereCounted = monitor_running_;
+
+      auto setMonitorError = [&](std::string msg) {
+        // Any other write owns the reported error from here on, so a later
+        // volume step must not clear it.
+        monitorVolumeFailed = false;
+        std::lock_guard<std::mutex> lock(mu_);
+        st_.monitor_last_error = std::move(msg);
+      };
+      auto setMonitorNote = [&](std::string msg) {
+        std::lock_guard<std::mutex> lock(mu_);
+        st_.monitor_note = std::move(msg);
+      };
+      // Forgets the live route but keeps what the last start asked for, so a
+      // settings change stays tellable from a lost output.
+      auto clearMonitorRouteState = [&]() {
+        monitor_running_ = false;
+        std::lock_guard<std::mutex> lock(mu_);
+        st_.monitor_active = false;
+        st_.monitor_module_id = -1;
+        st_.monitor_sink_active.clear();
+        st_.monitor_latency_ms_active = 0;
+      };
+      auto forgetMonitorRequest = [&]() {
+        monitor_sink_requested_.clear();
+        monitor_sink_resolved_.clear();
+        monitor_module_id_ = -1;
+        monitor_latency_ms_ = 0;
+        monitor_volume_ = 0;
+      };
+      // True only when the sound server answered and the sink was not in its
+      // list. A sound server that cannot be reached gives no answer at all,
+      // and then the monitor keeps its pin and retries: a monitor that waits
+      // for the sound server comes back on its own, while a lost output needs
+      // the user.
+      //
+      // Why the sound server could not answer is known here and nowhere else,
+      // so it is kept for the error of the failed start. A monitor that
+      // retries a pinned start would otherwise leave no trace of whether the
+      // sink list timed out, failed, or was never asked.
+      std::string monitorSinkQuestionError;
+      auto monitorOutputIsGone = [&](const std::string &sink) {
+        monitorSinkQuestionError.clear();
+        std::string presentErr;
+        const auto present = MicMonitorSinkPresentRoute(sink, &presentErr);
+        if (!present.has_value() && !presentErr.empty())
+          monitorSinkQuestionError = presentErr;
+        return present.has_value() && !*present;
+      };
+      // What the status says while the output is lost.
+      //
+      // "The monitor stopped" is only the whole truth while no loopback is
+      // left. A stop that keeps failing can leave one playing the microphone
+      // into the speakers, so the note says that too, and drops it again when
+      // a stop works. One failure is a hiccup the next try fixes, so the
+      // warning waits for the second. It stays in the note, because it is
+      // still an ordinary state the daemon explains in plain words.
+      auto monitorLostNote = [&]() {
+        std::string note = "The monitor output '" + monitorLostSink +
+                           "' disappeared, so the monitor stopped. Choose "
+                           "another output, or turn the monitor off and on "
+                           "again to use the system default.";
+        if (monitor_route_may_exist_ &&
+            monitorLostCleanupFailures >= kMonitorLostCleanupWarnTries) {
+          note += monitorLostCleanupFailures < kMonitorLostCleanupMaxTries
+                      ? " The old output is not released yet, so you may still"
+                        " hear the microphone. This clears itself when the"
+                        " sound server answers."
+                      : " The old output could not be released, so you may"
+                        " still hear the microphone. Turn the monitor off and"
+                        " on again to try once more.";
+        }
+        return note;
+      };
+      // The output the monitor played on is gone, for example because the
+      // headset was unplugged. A configured sink of "auto" would now resolve
+      // to whatever the Pulse default has become, usually the built-in
+      // speakers, which is a feedback loop the user never asked for. Stop
+      // instead and say what happened.
+      //
+      // The pin on the resolved output goes with the output it names, so the
+      // next explicit restart resolves "auto" afresh instead of asking for a
+      // sink that is gone.
+      //
+      // This is the failure the feature is designed for, and the sentence says
+      // what to do about it. It goes in the note, which the GUI prints as
+      // written. An error would become "The monitor needs attention. Open
+      // Support for technical details."
+      // `lost_sink` is taken by value because a caller may hand in
+      // `monitor_sink_resolved_`, which this drops.
+      //
+      // This says nothing about `monitor_route_may_exist_`. A lost output is
+      // an answer about the sink list, and only the module list, or a stop
+      // that worked, says whether a loopback is still loaded. A caller that
+      // has such an answer clears the flag itself.
+      auto reportMonitorOutputLost = [&](std::string lost_sink) {
+        clearMonitorRouteState();
+        monitor_output_lost_ = true;
+        nextMonitorLostCleanup = steady_clock::time_point{};
+        monitorLostCleanupFailures = 0;
+        monitorLostSink = std::move(lost_sink);
+        monitor_sink_resolved_.clear();
+        monitorStartFailures = 0;
+        nextMonitorStartRetry = steady_clock::time_point{};
+        setMonitorError(std::string());
+        setMonitorNote(monitorLostNote());
+      };
+
+      if (!wantMonitor) {
+        if (monitor_output_lost_) {
+          // Turning the monitor off ends the lost-output stop and its message.
+          monitor_output_lost_ = false;
+          forgetMonitorRequest();
+          setMonitorError(std::string());
+        }
+        if ((monitor_running_ || monitor_route_may_exist_) &&
+            monitorNow >= nextMonitorStopRetry) {
+          std::string err;
+          if (StopMicMonitorRoute(&err)) {
+            monitor_route_may_exist_ = false;
+            monitorStopFailures = 0;
+            nextMonitorStopRetry = steady_clock::time_point{};
+            clearMonitorRouteState();
+            forgetMonitorRequest();
+            setMonitorError(std::string());
+          } else {
+            // The loopback may still play, so keep coming back to it instead
+            // of forgetting it.
+            monitor_route_may_exist_ = true;
+            monitorStopFailures = std::min(monitorStopFailures + 1, 8);
+            nextMonitorStopRetry =
+                monitorNow + StartFailureRetryDelay(cfg) * monitorStopFailures;
+            setMonitorError("Failed to stop the microphone monitor: " + err);
+          }
+        } else if (!monitor_running_ && !monitor_route_may_exist_) {
+          // Nothing plays and nothing is wanted, so an older failure, a failed
+          // start included, is history. Keeping it would tell the user for
+          // ever that a monitor they turned off needs attention.
+          setMonitorError(std::string());
+        }
+        nextMonitorStartRetry = steady_clock::time_point{};
+        monitorStartFailures = 0;
+        monitorAttemptSink.clear();
+        monitorAttemptLatencyMs = 0;
+        // A monitor that waits for microphone processing, or for the virtual
+        // microphone, is an ordinary state and not a failure, so it goes in
+        // the note.
+        std::string monitorNote;
+        if (monitorCfg.enabled && !cfg.enabled) {
+          monitorNote = "Microphone processing is off, so the monitor stays "
+                        "idle. Turn microphone processing on to hear the "
+                        "monitor.";
+        } else if (monitorCfg.enabled && !mic_created_) {
+          monitorNote = "StudioCast Microphone is not available yet, so the "
+                        "monitor stays idle.";
+        }
+        setMonitorNote(std::move(monitorNote));
+      } else {
+        // A monitor the user wants again starts its stop wait over. The
+        // deadline goes with the counter: keeping it would make the next stop
+        // the user asks for wait out the backoff of the failures before it.
+        monitorStopFailures = 0;
+        nextMonitorStopRetry = steady_clock::time_point{};
+        // A lost output keeps its note until something restarts the monitor.
+        if (!monitor_output_lost_)
+          setMonitorNote(std::string());
+        // A changed setting is an explicit restart by the user: it resolves
+        // the output afresh and ends a lost-output stop.
+        const bool monitorSettingsChanged =
+            monitor_sink_requested_ != monitorCfg.sink ||
+            monitor_latency_ms_ != monitorCfg.latency_ms;
+        if (monitorSettingsChanged) {
+          monitor_output_lost_ = false;
+          setMonitorNote(std::string());
+        }
+        if (monitorAttemptSink != monitorCfg.sink ||
+            monitorAttemptLatencyMs != monitorCfg.latency_ms) {
+          monitorAttemptSink = monitorCfg.sink;
+          monitorAttemptLatencyMs = monitorCfg.latency_ms;
+          monitorStartFailures = 0;
+          nextMonitorStartRetry = steady_clock::time_point{};
+        }
+
+        // The Pulse server unloads the loopback when the sink disappears, for
+        // example when a headset is unplugged. Re-check now and then so the
+        // status follows the route.
+        if (monitor_running_ && monitorNow >= nextMonitorVerify) {
+          std::string detectErr;
+          const auto live = DetectMicMonitorRoute(&detectErr);
+          nextMonitorVerify = monitorNow + seconds(2);
+          if (!detectErr.empty()) {
+            // A failed check says nothing about the loopback, so the status
+            // must not go on claiming an active monitor. Stop the route the
+            // service can no longer see, and keep the knowledge that it may
+            // still play when the stop fails too.
+            std::string stopErr;
+            if (StopMicMonitorRoute(&stopErr))
+              monitor_route_may_exist_ = false;
+            clearMonitorRouteState();
+            setMonitorError("Failed to check the microphone monitor: " +
+                            detectErr);
+          } else if (!live.active) {
+            // Pulse unloads the loopback when the output disappears. The
+            // check read the module list and found no tagged loopback, so
+            // nothing is left to remove.
+            monitor_route_may_exist_ = false;
+            reportMonitorOutputLost(monitor_sink_resolved_.empty()
+                                        ? monitorCfg.sink
+                                        : monitor_sink_resolved_);
+          }
+        }
+
+        // The volume belongs to the loopback sink input, so it applies in
+        // place. Reloading the module for it would break the sound once per
+        // step of the volume control.
+        if (monitor_running_ && monitor_volume_ != monitorCfg.volume &&
+            monitorNow >= nextMonitorVolumeRetry) {
+          std::string volumeErr;
+          if (SetMicMonitorRouteVolume(monitor_module_id_, monitorCfg.volume,
+                                       &volumeErr)) {
+            monitor_volume_ = monitorCfg.volume;
+            monitorVolumeFailures = 0;
+            nextMonitorVolumeRetry = steady_clock::time_point{};
+            if (monitorVolumeFailed) {
+              monitorVolumeFailed = false;
+              setMonitorError(std::string());
+            }
+          } else {
+            monitorVolumeFailures = std::min(monitorVolumeFailures + 1, 8);
+            nextMonitorVolumeRetry = monitorNow + StartFailureRetryDelay(cfg) *
+                                                      monitorVolumeFailures;
+            setMonitorError("Failed to set the microphone monitor volume: " +
+                            volumeErr);
+            monitorVolumeFailed = true;
+          }
+        }
+
+        // A lost output stops the monitor but removes no loopback: a stop that
+        // failed in the same window can have left one loaded, and it plays the
+        // microphone into the speakers until something unloads it. The cleanup
+        // therefore keeps its retry while the output is lost, instead of
+        // waiting for the service to stop. It stays quiet, because the note
+        // already tells the user what to do and the shutdown cleanup reports a
+        // stop that never works.
+        //
+        // The retry ends at the top of the backoff. Every try blocks the audio
+        // supervisor for one stop deadline, and only the user ends a lost
+        // output, so a retry without an end would block the supervisor for the
+        // rest of the run. The knowledge that a loopback may still play stays
+        // behind, and the stop at shutdown, or the next thing the user asks
+        // for, uses it.
+        if (monitor_output_lost_ && monitor_route_may_exist_ &&
+            monitorLostCleanupFailures < kMonitorLostCleanupMaxTries &&
+            monitorNow >= nextMonitorLostCleanup) {
+          std::string cleanupErr;
+          if (StopMicMonitorRoute(&cleanupErr)) {
+            monitor_route_may_exist_ = false;
+            monitorLostCleanupFailures = 0;
+            nextMonitorLostCleanup = steady_clock::time_point{};
+            clearMonitorRouteState();
+          } else {
+            monitorLostCleanupFailures = std::min(
+                monitorLostCleanupFailures + 1, kMonitorLostCleanupMaxTries);
+            nextMonitorLostCleanup =
+                monitorNow +
+                StartFailureRetryDelay(cfg) * monitorLostCleanupFailures;
+          }
+          // The cleanup says nothing of its own, but it changes what is true
+          // of the monitor, so the note follows it.
+          setMonitorNote(monitorLostNote());
+        }
+
+        const bool needRestart = !monitor_output_lost_ &&
+                                 (!monitor_running_ || monitorSettingsChanged);
+
+        if (needRestart && monitorNow >= nextMonitorStartRetry) {
+          // A restart the user did not ask for keeps the output the last start
+          // really used. Only a settings change, or a monitor that was off,
+          // resolves "auto" afresh: doing it here would let a failed check
+          // move the monitor onto the new Pulse default, which is the feedback
+          // loop the lost-output stop exists to prevent.
+          MicMonitorConfig startCfg = monitorCfg;
+          const bool startUsedThePin =
+              !monitorSettingsChanged && !monitor_sink_resolved_.empty();
+          if (startUsedThePin)
+            startCfg.sink = monitor_sink_resolved_;
+
+          MicMonitorState state;
+          std::string err;
+          if (StartMicMonitorRoute(startCfg, micSourceStatus.selected_source,
+                                   &state, &err)) {
+            monitor_running_ = true;
+            monitor_route_may_exist_ = true;
+            monitor_sink_requested_ = monitorCfg.sink;
+            monitor_sink_resolved_ = state.sink;
+            monitor_module_id_ = state.module_id;
+            monitor_latency_ms_ = monitorCfg.latency_ms;
+            monitor_volume_ = monitorCfg.volume;
+            monitorStartFailures = 0;
+            nextMonitorStartRetry = steady_clock::time_point{};
+            nextMonitorVolumeRetry = steady_clock::time_point{};
+            nextMonitorVerify = monitorNow + seconds(2);
+            monitorVolumeFailed = false;
+            monitorVolumeFailures = 0;
+            {
+              std::lock_guard<std::mutex> lock(mu_);
+              st_.monitor_active = true;
+              st_.monitor_module_id = state.module_id;
+              st_.monitor_sink_active = state.sink;
+              st_.monitor_latency_ms_active = state.latency_ms;
+              st_.monitor_last_error = state.warning;
+            }
+          } else if (startUsedThePin && monitorOutputIsGone(startCfg.sink)) {
+            // A pinned start that fails is the moment to ask whether the
+            // output the pin names is still there. A failed route check
+            // already stopped the route without noticing the loss, so this is
+            // the only place the loss can still be found: retrying it would
+            // ask a sink that no longer exists for the rest of the run.
+            reportMonitorOutputLost(startCfg.sink);
+          } else {
+            monitorStartFailures = std::min(monitorStartFailures + 1, 8);
+            nextMonitorStartRetry =
+                monitorNow + StartFailureRetryDelay(cfg) * monitorStartFailures;
+            clearMonitorRouteState();
+            std::string message =
+                "Failed to start the microphone monitor: " + err;
+            if (!monitorSinkQuestionError.empty()) {
+              // The pin holds, so say why the sound server could not say
+              // whether the output is still there. The message opens with the
+              // shared no-answer text, because the GUI reads that text as a
+              // wait and not as a request to open Support.
+              message += " " + std::string(kSoundServerNoAnswerMessage) +
+                         ", so it is not known whether the output '" +
+                         startCfg.sink +
+                         "' is still there: " + monitorSinkQuestionError;
+            }
+            setMonitorError(message);
+          }
+        }
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        st_.mic_monitor_consumer_count =
+            (monitorRanWhenConsumersWereCounted && st_.mic_consumer_count > 0)
+                ? 1
+                : 0;
+        st_.mic_app_consumer_count = std::max(
+            0, st_.mic_consumer_count - st_.mic_monitor_consumer_count);
+      }
+    }
+
     (void)speakerLoopbackStopError;
 
 #if STUDIOCAST_HAVE_PULSE_SIMPLE
@@ -1544,9 +2029,9 @@ void VirtualAudioService::ThreadMain() {
                   st_.speakers_open_audio_runtime = {};
                   SetOpenAudioRuntimeModel(&st_.speakers_open_audio_runtime,
                                            selected);
-                  MarkOpenAudioRuntimeDisabled(
-                      &st_.speakers_open_audio_runtime,
-                      "Open Audio init failed: " + oerr);
+                  MarkOpenAudioRuntimeDisabled(&st_.speakers_open_audio_runtime,
+                                               "Open Audio init failed: " +
+                                                   oerr);
                   st_.speakers_backend_active = "passthrough";
                   st_.speakers_effects_note =
                       "Open-source speaker backend failed to initialize; using "
@@ -2602,6 +3087,32 @@ void VirtualAudioService::ThreadMain() {
 
     SleepFor(milliseconds(pollMs));
 #endif
+  }
+
+  // The monitor is a listening aid, not a route other apps depend on. Stop it
+  // with the service so no loopback outlives the daemon session. A failed
+  // check earlier can have cleared `monitor_running_` while the module was
+  // still loaded, so the stop follows what may exist as well.
+  if (monitor_running_ || monitor_route_may_exist_) {
+    std::string err;
+    if (StopMicMonitorRoute(&err)) {
+      monitor_route_may_exist_ = false;
+      monitor_running_ = false;
+      monitor_sink_requested_.clear();
+      monitor_sink_resolved_.clear();
+      monitor_module_id_ = -1;
+      monitor_latency_ms_ = 0;
+      monitor_volume_ = 0;
+      monitor_output_lost_ = false;
+      std::lock_guard<std::mutex> lock(mu_);
+      st_.monitor_active = false;
+      st_.monitor_module_id = -1;
+      st_.monitor_sink_active.clear();
+      st_.monitor_latency_ms_active = 0;
+    } else {
+      std::lock_guard<std::mutex> lock(mu_);
+      st_.monitor_last_error = "Failed to stop the microphone monitor: " + err;
+    }
   }
 
 #if STUDIOCAST_HAVE_PULSE_SIMPLE

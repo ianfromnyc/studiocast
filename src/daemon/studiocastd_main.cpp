@@ -640,6 +640,12 @@ EndpointReadiness BuildMicrophoneEndpointReadiness(
     out.summary = ast.pipeline_starting || pipelineState == "starting"
                       ? "Microphone processing is starting."
                       : "Microphone processing is active.";
+    // The monitor is a consumer of StudioCast Microphone, so it starts the
+    // pipeline on its own. Say so rather than implying an app is connected.
+    if (ast.monitor_active && ast.mic_app_consumer_count == 0) {
+      out.detail = "Only the microphone monitor is listening. Waiting for an "
+                   "app to use StudioCast Microphone.";
+    }
     return out;
   }
 
@@ -1492,6 +1498,50 @@ StatusToJson(const studiocast::video::VirtualCameraServiceStatus &st,
   oss << "\"mic_consumer_count\":" << ast.mic_consumer_count << ",";
   oss << "\"mic_consumer_error\":\"" << JsonEscape(ast.mic_consumer_error)
       << "\",";
+  oss << "\"mic_app_consumer_count\":" << ast.mic_app_consumer_count << ",";
+  oss << "\"mic_monitor_consumer_count\":" << ast.mic_monitor_consumer_count
+      << ",";
+
+  // Microphone monitor: the processed microphone feed played on an output sink
+  // so the user can hear the effects.
+  {
+    std::string monitorSinkResolved = ast.monitor_sink_active.empty()
+                                          ? acfg.monitor.sink
+                                          : ast.monitor_sink_active;
+    std::string monitorSinkError;
+    {
+      // A source of "auto" names no input, so the feedback check reads the
+      // source the service resolved instead of the configured name.
+      std::string reason;
+      if (studiocast::audio::IsUnsafeMicMonitorSinkName(
+              acfg.monitor.sink, audioSourceResolved, &reason)) {
+        monitorSinkError = reason;
+      }
+    }
+
+    oss << "\"monitor\":{";
+    oss << "\"enabled\":" << BoolJson(acfg.monitor.enabled) << ",";
+    oss << "\"active\":" << BoolJson(ast.monitor_active) << ",";
+    oss << "\"sink\":\""
+        << JsonEscape(acfg.monitor.sink.empty() ? std::string("auto")
+                                                : acfg.monitor.sink)
+        << "\",";
+    oss << "\"sink_resolved\":\""
+        << JsonEscape(monitorSinkResolved.empty() ? std::string("auto")
+                                                  : monitorSinkResolved)
+        << "\",";
+    oss << "\"sink_error\":\"" << JsonEscape(monitorSinkError) << "\",";
+    oss << "\"module_id\":" << ast.monitor_module_id << ",";
+    oss << "\"latency_ms\":" << acfg.monitor.latency_ms << ",";
+    oss << "\"latency_ms_active\":" << ast.monitor_latency_ms_active << ",";
+    // There is no "volume_active": Pulse keeps the volume on the loopback
+    // sink input, and reading it back would cost another pactl run on every
+    // status. "volume" is what StudioCast asked for.
+    oss << "\"volume\":" << acfg.monitor.volume << ",";
+    oss << "\"note\":\"" << JsonEscape(ast.monitor_note) << "\",";
+    oss << "\"last_error\":\"" << JsonEscape(ast.monitor_last_error) << "\"";
+    oss << "},";
+  }
 
   const EndpointReadiness microphoneReadiness =
       BuildMicrophoneEndpointReadiness(ast, acfg, audioSourceError);
@@ -1760,10 +1810,57 @@ AudioConfigToJson(const studiocast::audio::VirtualAudioServiceConfig &cfg) {
       << JsonEscape(cfg.source_name.empty() ? std::string("auto")
                                             : cfg.source_name)
       << "\",";
+  oss << "\"monitor\":{";
+  oss << "\"enabled\":" << BoolJson(cfg.monitor.enabled) << ",";
+  oss << "\"sink\":\""
+      << JsonEscape(cfg.monitor.sink.empty() ? std::string("auto")
+                                             : cfg.monitor.sink)
+      << "\",";
+  oss << "\"latency_ms\":" << cfg.monitor.latency_ms << ",";
+  oss << "\"volume\":" << cfg.monitor.volume;
+  oss << "},";
   oss << "\"audio_effects\":"
       << studiocast::audio::effects::BroadcastAudioEffectsToJson(cfg.effects);
   oss << "}";
   return oss.str();
+}
+
+// Reads one JSON number that must be a whole number in `min`..`max`.
+//
+// JSON has one number type, so 12.5 is a valid number for a field that counts
+// milliseconds. Rounding it would accept a value the caller never asked for,
+// so refuse it and name the field.
+bool ParseIntegerMember(const studiocast::util::json::Value &value,
+                        const char *name, int min, int max, int *out,
+                        std::string *error) {
+  const double *n = value.AsNumber();
+  if (!n) {
+    if (error)
+      *error = std::string(name) + " must be a number";
+    return false;
+  }
+  // Judge the double before it becomes an int. A NaN, an infinity, or a value
+  // outside the int range makes that conversion undefined, so every check
+  // below stays in double arithmetic.
+  if (!std::isfinite(*n)) {
+    if (error)
+      *error = std::string(name) + " must be a finite number";
+    return false;
+  }
+  if (std::floor(*n) != *n) {
+    if (error)
+      *error = std::string(name) + " must be an integer";
+    return false;
+  }
+  if (*n < static_cast<double>(min) || *n > static_cast<double>(max)) {
+    if (error) {
+      *error = std::string(name) + " out of range (expected " +
+               std::to_string(min) + ".." + std::to_string(max) + ")";
+    }
+    return false;
+  }
+  *out = static_cast<int>(*n);
+  return true;
 }
 
 bool ApplyAudioConfigPatchJsonText(
@@ -1843,21 +1940,9 @@ bool ApplyAudioConfigPatchJsonText(
 
   // speaker_latency_ms
   if (auto it = obj->find("speaker_latency_ms"); it != obj->end()) {
-    const double *n = it->second.AsNumber();
-    if (!n) {
-      if (error)
-        *error = "speaker_latency_ms must be a number";
-      return false;
-    }
-    const int v = static_cast<int>(std::lround(*n));
-    if (std::fabs(*n - static_cast<double>(v)) > 1e-6) {
-      if (error)
-        *error = "speaker_latency_ms must be an integer";
-      return false;
-    }
-    if (v < 1 || v > 5000) {
-      if (error)
-        *error = "speaker_latency_ms out of range (expected 1..5000)";
+    int v = 0;
+    if (!ParseIntegerMember(it->second, "speaker_latency_ms", 1, 5000, &v,
+                            error)) {
       return false;
     }
     cfg->speaker_latency_ms = v;
@@ -1877,6 +1962,57 @@ bool ApplyAudioConfigPatchJsonText(
       return false;
     }
     cfg->source_name = (*s == "auto") ? std::string() : *s;
+  }
+
+  // monitor (microphone monitor). Additive object; every member is optional.
+  if (auto it = obj->find("monitor"); it != obj->end()) {
+    const auto *monitor = it->second.AsObject();
+    if (!monitor) {
+      if (error)
+        *error = "monitor must be a JSON object";
+      return false;
+    }
+
+    if (auto m = monitor->find("enabled"); m != monitor->end()) {
+      const bool *b = m->second.AsBool();
+      if (!b) {
+        if (error)
+          *error = "monitor.enabled must be a boolean";
+        return false;
+      }
+      cfg->monitor.enabled = *b;
+    }
+
+    if (auto m = monitor->find("sink"); m != monitor->end()) {
+      const std::string *s = m->second.AsString();
+      if (!s) {
+        if (error)
+          *error = "monitor.sink must be a string";
+        return false;
+      }
+      cfg->monitor.sink = s->empty() ? std::string("auto") : *s;
+    }
+
+    if (auto m = monitor->find("latency_ms"); m != monitor->end()) {
+      int v = 0;
+      if (!ParseIntegerMember(m->second, "monitor.latency_ms",
+                              studiocast::audio::kMicMonitorMinLatencyMs,
+                              studiocast::audio::kMicMonitorMaxLatencyMs, &v,
+                              error)) {
+        return false;
+      }
+      cfg->monitor.latency_ms = v;
+    }
+
+    if (auto m = monitor->find("volume"); m != monitor->end()) {
+      int v = 0;
+      if (!ParseIntegerMember(m->second, "monitor.volume", 0, 100, &v, error)) {
+        return false;
+      }
+      cfg->monitor.volume = v;
+    }
+
+    cfg->monitor = studiocast::audio::NormalizeMicMonitorConfig(cfg->monitor);
   }
 
   // effects blob
@@ -1909,9 +2045,28 @@ bool ApplyAudioConfigPatchJsonText(
   return true;
 }
 
+// Checks an audio config the daemon is about to apply. A microphone monitor
+// that no output can satisfy gives a warning rather than a refusal, because a
+// refusal would also refuse microphone processing, the feature the user asked
+// for. The monitor setting itself is left alone: the caller writes this object
+// to the config file, and the check also fails when the sound server is only
+// unreadable for a moment.
 bool ValidateAudioConfigSafetyForDaemon(
-    const studiocast::audio::VirtualAudioServiceConfig &cfg,
-    std::vector<std::string> *warnings, std::string *error) {
+    studiocast::audio::VirtualAudioServiceConfig *cfg_inout,
+    const std::string &resolved_source_name, std::vector<std::string> *warnings,
+    std::string *error) {
+  if (!cfg_inout)
+    return false;
+  studiocast::audio::VirtualAudioServiceConfig &cfg = *cfg_inout;
+
+  // A source of "auto" names no input. The feedback checks below need the
+  // input the service really captures, so read the resolved name and keep the
+  // configured one for the case where the service has not resolved one yet.
+  const std::string micSource =
+      (cfg.source_name.empty() || cfg.source_name == "auto") &&
+              !resolved_source_name.empty()
+          ? resolved_source_name
+          : cfg.source_name;
   std::string reason;
   if (studiocast::audio::IsUnsafeInputSourceName(cfg.source_name, &reason)) {
     if (error) {
@@ -1943,6 +2098,35 @@ bool ValidateAudioConfigSafetyForDaemon(
     if (warnings) {
       warnings->insert(warnings->end(), source.warnings.begin(),
                        source.warnings.end());
+    }
+  }
+
+  if (studiocast::audio::IsUnsafeMicMonitorSinkName(cfg.monitor.sink, micSource,
+                                                    &reason)) {
+    if (error) {
+      *error = "Unsafe microphone monitor output: " + reason +
+               " Select a physical output sink or use monitor.sink=\"auto\".";
+    }
+    return false;
+  }
+
+  if (cfg.monitor.enabled && cfg.enabled) {
+    std::string monitorErr;
+    if (!studiocast::audio::ChooseSafeMicMonitorSinkName(
+            cfg.monitor.sink, micSource, &monitorErr)) {
+      // The monitor only lets the user hear the effects. Refusing the config
+      // would also refuse microphone processing, so warn instead. The setting
+      // stays as the user wrote it: the audio service re-checks the output on
+      // every start attempt and reports what it finds, so a sound server that
+      // comes back makes the monitor play again with no further action.
+      if (warnings) {
+        warnings->push_back(
+            "The microphone monitor cannot start because no safe output was "
+            "found: " +
+            (monitorErr.empty() ? std::string("no safe physical output sink "
+                                              "was found")
+                                : monitorErr));
+      }
     }
   }
 
@@ -2312,8 +2496,9 @@ int main(int argc, char **argv) {
 
               std::vector<std::string> warnings;
               std::string verr;
-              if (!ValidateAudioConfigSafetyForDaemon(newCfg, &warnings,
-                                                      &verr)) {
+              if (!ValidateAudioConfigSafetyForDaemon(
+                      &newCfg, audioSvc.Status().selected_source, &warnings,
+                      &verr)) {
                 return std::string("ERR ") +
                        ErrorJson(verr.empty() ? "invalid audio config" : verr);
               }
@@ -2365,8 +2550,9 @@ int main(int argc, char **argv) {
                        ErrorJson(jerr.empty() ? "invalid audio config JSON"
                                               : jerr);
               }
-              if (!ValidateAudioConfigSafetyForDaemon(newCfg, &warnings,
-                                                      &jerr)) {
+              if (!ValidateAudioConfigSafetyForDaemon(
+                      &newCfg, audioSvc.Status().selected_source, &warnings,
+                      &jerr)) {
                 return std::string("ERR ") +
                        ErrorJson(jerr.empty() ? "invalid audio config" : jerr);
               }

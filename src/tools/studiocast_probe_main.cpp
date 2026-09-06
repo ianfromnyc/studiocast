@@ -2793,6 +2793,10 @@ int RunSelfTest(const SelfTestOptions &self_test_options) {
         dc_audio.audio_speaker_target_sink = "dummy_sink";
         dc_audio.audio_speaker_latency_ms = 15;
         dc_audio.audio_source = "dummy_source";
+        dc_audio.audio_monitor_enabled = true;
+        dc_audio.audio_monitor_sink = "dummy_monitor_sink";
+        dc_audio.audio_monitor_latency_ms = 30;
+        dc_audio.audio_monitor_volume = 70;
         dc_audio.audio_effects.microphone.noise_removal_enabled = true;
         dc_audio.audio_effects.microphone.room_echo_removal_enabled = true;
         dc_audio.audio_effects.microphone.strength = 55;
@@ -2811,6 +2815,13 @@ int RunSelfTest(const SelfTestOptions &self_test_options) {
         expectIntEq("ToAudioServiceConfig speaker_latency_ms",
                     ac.speaker_latency_ms, 15);
         expectEq("ToAudioServiceConfig source", ac.source_name, "dummy_source");
+        expectTrue("ToAudioServiceConfig monitor enabled", ac.monitor.enabled);
+        expectEq("ToAudioServiceConfig monitor sink", ac.monitor.sink,
+                 "dummy_monitor_sink");
+        expectIntEq("ToAudioServiceConfig monitor latency_ms",
+                    ac.monitor.latency_ms, 30);
+        expectIntEq("ToAudioServiceConfig monitor volume", ac.monitor.volume,
+                    70);
         expectTrue("ToAudioServiceConfig noise enabled",
                    ac.effects.microphone.noise_removal_enabled);
         expectTrue("ToAudioServiceConfig echo enabled",
@@ -2830,6 +2841,10 @@ int RunSelfTest(const SelfTestOptions &self_test_options) {
         dc_save.audio_speaker_target_sink = "dummy_sink";
         dc_save.audio_speaker_latency_ms = 15;
         dc_save.audio_source = "dummy_source";
+        dc_save.audio_monitor_enabled = true;
+        dc_save.audio_monitor_sink = "dummy_monitor_sink";
+        dc_save.audio_monitor_latency_ms = 30;
+        dc_save.audio_monitor_volume = 70;
         dc_save.audio_effects.microphone.noise_removal_enabled = true;
         dc_save.audio_effects.microphone.room_echo_removal_enabled = true;
         dc_save.audio_effects.microphone.strength = 55;
@@ -2897,6 +2912,12 @@ int RunSelfTest(const SelfTestOptions &self_test_options) {
         expectIntEq("roundtrip audio speaker_latency_ms",
                     ac2.speaker_latency_ms, 15);
         expectEq("roundtrip audio source", ac2.source_name, "dummy_source");
+        expectTrue("roundtrip audio monitor enabled", ac2.monitor.enabled);
+        expectEq("roundtrip audio monitor sink", ac2.monitor.sink,
+                 "dummy_monitor_sink");
+        expectIntEq("roundtrip audio monitor latency_ms",
+                    ac2.monitor.latency_ms, 30);
+        expectIntEq("roundtrip audio monitor volume", ac2.monitor.volume, 70);
         expectTrue("roundtrip audio noise enabled",
                    ac2.effects.microphone.noise_removal_enabled);
         expectTrue("roundtrip audio echo enabled",

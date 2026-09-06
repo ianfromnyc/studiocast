@@ -48,6 +48,19 @@ std::string FirstLineOrEmpty(const std::string &s) {
   return util::FirstNonEmptyLine(s);
 }
 
+// Why a listing command failed. A pactl that was killed at its deadline
+// prints nothing at all, and an empty error beside an empty list reads as "the
+// list is empty", which is a different answer. Every listing therefore says
+// something, so a caller can tell a failure from an empty list.
+std::string ListFailureMessage(const util::ExecResult &res,
+                               const std::string &command_name) {
+  const std::string out = util::TrimCopy(res.stdout_str);
+  if (!out.empty())
+    return out;
+  return res.timed_out ? (command_name + " did not answer in time")
+                       : (command_name + " failed");
+}
+
 std::string ShellQuoteSingle(const std::string &s) {
   // Safe single-quote for /bin/sh -c
   std::string out;
@@ -162,14 +175,20 @@ ParseDefaultFromPactlInfo(const std::string &pactl_info_text,
 }
 
 bool PactlAvailable(std::string *details) {
+  return PactlAvailable(details, nullptr);
+}
+
+bool PactlAvailable(std::string *details, bool *timed_out) {
+  if (timed_out)
+    *timed_out = false;
   auto res = RunPactlCommand("pactl --version 2>&1");
-  if (res.exit_code != 0) {
-    if (details)
-      *details = util::TrimCopy(res.stdout_str);
-    return false;
-  }
   if (details)
     *details = util::TrimCopy(res.stdout_str);
+  if (res.timed_out || res.exit_code != 0) {
+    if (timed_out)
+      *timed_out = res.timed_out;
+    return false;
+  }
   return true;
 }
 
@@ -202,7 +221,7 @@ std::vector<PactlModule> ListModules(std::string *error) {
   auto res = RunPactlCommand("pactl list short modules 2>&1");
   if (res.exit_code != 0) {
     if (error)
-      *error = util::TrimCopy(res.stdout_str);
+      *error = ListFailureMessage(res, "pactl list short modules");
     return {};
   }
 
@@ -230,7 +249,7 @@ std::vector<PactlSource> ListSources(std::string *error) {
   auto res = RunPactlCommand("pactl list short sources 2>&1");
   if (res.exit_code != 0) {
     if (error)
-      *error = util::TrimCopy(res.stdout_str);
+      *error = ListFailureMessage(res, "pactl list short sources");
     return {};
   }
 
@@ -257,7 +276,7 @@ std::vector<PactlSink> ListSinks(std::string *error) {
   auto res = RunPactlCommand("pactl list short sinks 2>&1");
   if (res.exit_code != 0) {
     if (error)
-      *error = util::TrimCopy(res.stdout_str);
+      *error = ListFailureMessage(res, "pactl list short sinks");
     return {};
   }
 
@@ -284,7 +303,7 @@ std::vector<PactlSourceOutput> ListSourceOutputs(std::string *error) {
   auto res = RunPactlCommand("pactl list short source-outputs 2>&1");
   if (res.exit_code != 0) {
     if (error)
-      *error = util::TrimCopy(res.stdout_str);
+      *error = ListFailureMessage(res, "pactl list short source-outputs");
     return {};
   }
 
@@ -311,7 +330,7 @@ std::vector<PactlSinkInput> ListSinkInputs(std::string *error) {
   auto res = RunPactlCommand("pactl list short sink-inputs 2>&1");
   if (res.exit_code != 0) {
     if (error)
-      *error = util::TrimCopy(res.stdout_str);
+      *error = ListFailureMessage(res, "pactl list short sink-inputs");
     return {};
   }
 
@@ -342,7 +361,7 @@ std::vector<PactlSourceInfo> ListSourcesDetailed(std::string *error) {
   auto res = RunPactlCommand("pactl list sources 2>&1");
   if (res.exit_code != 0) {
     if (error)
-      *error = util::TrimCopy(res.stdout_str);
+      *error = ListFailureMessage(res, "pactl list sources");
     return {};
   }
 
@@ -551,6 +570,92 @@ bool UpdateSourceProplist(const std::string &source_name_or_index,
   if (res.exit_code != 0 || LooksLikeFailure(out)) {
     if (error)
       *error = out.empty() ? "update-source-proplist failed" : out;
+    return false;
+  }
+  return true;
+}
+
+std::vector<PactlSinkInputInfo> ListSinkInputsDetailed(std::string *error) {
+  auto res = RunPactlCommand("pactl list sink-inputs 2>&1");
+  if (res.exit_code != 0) {
+    if (error)
+      *error = ListFailureMessage(res, "pactl list sink-inputs");
+    return {};
+  }
+
+  std::vector<PactlSinkInputInfo> out;
+  PactlSinkInputInfo cur;
+  bool haveCur = false;
+
+  auto flush = [&]() {
+    if (haveCur && cur.id >= 0)
+      out.push_back(cur);
+    cur = PactlSinkInputInfo{};
+    haveCur = false;
+  };
+
+  auto unquote = [](std::string s) {
+    s = util::TrimCopy(s);
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
+      s = s.substr(1, s.size() - 2);
+    return s;
+  };
+
+  for (const auto &raw : util::SplitLines(res.stdout_str)) {
+    const auto t = util::TrimCopy(raw);
+    if (t.empty())
+      continue;
+
+    if (StartsWith(t, "Sink Input #")) {
+      flush();
+      haveCur = true;
+      cur.id = std::atoi(t.substr(std::string("Sink Input #").size()).c_str());
+      continue;
+    }
+
+    if (!haveCur)
+      continue;
+
+    if (StartsWith(t, "Owner Module:")) {
+      const auto v =
+          util::TrimCopy(t.substr(std::string("Owner Module:").size()));
+      cur.owner_module = (v == "n/a") ? -1 : std::atoi(v.c_str());
+      continue;
+    }
+
+    if (StartsWith(t, "Sink:")) {
+      cur.sink = util::TrimCopy(t.substr(std::string("Sink:").size()));
+      continue;
+    }
+
+    if (StartsWith(t, "media.name")) {
+      const auto eq = t.find('=');
+      if (eq != std::string::npos)
+        cur.media_name = unquote(t.substr(eq + 1));
+      continue;
+    }
+  }
+
+  flush();
+  return out;
+}
+
+bool SetSinkInputVolumePercent(int sink_input_id, int percent,
+                               std::string *error) {
+  if (sink_input_id < 0) {
+    if (error)
+      *error = "invalid sink input id";
+    return false;
+  }
+
+  std::ostringstream oss;
+  oss << "pactl set-sink-input-volume " << sink_input_id << " " << percent
+      << "% 2>&1";
+  auto res = RunPactlCommand(oss.str());
+  const auto out = util::TrimCopy(res.stdout_str);
+  if (res.exit_code != 0 || LooksLikeFailure(out)) {
+    if (error)
+      *error = out.empty() ? "set-sink-input-volume failed" : out;
     return false;
   }
   return true;

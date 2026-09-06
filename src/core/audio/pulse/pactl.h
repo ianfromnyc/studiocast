@@ -35,6 +35,13 @@ struct PactlSinkInput {
   std::string sink;
 };
 
+struct PactlSinkInputInfo {
+  int id = -1;
+  int owner_module = -1; // -1 when the stream has no owner module
+  std::string sink;      // sink index or name as reported by pactl
+  std::string media_name;
+};
+
 struct PactlPort {
   std::string name;        // e.g. "analog-input-internal-mic"
   std::string description; // e.g. "Internal Microphone"
@@ -54,6 +61,13 @@ bool SetSourcePort(const std::string &source_name, const std::string &port_name,
                    std::string *error);
 
 bool PactlAvailable(std::string *details);
+
+// Same check, but it also says why `pactl` is unavailable. `timed_out` is set
+// when `pactl --version` ran but did not answer in time. Only an unavailable
+// `pactl` that did not time out means there is no sound server to talk to: a
+// sound server that is slow or wedged is still there, with its modules and
+// its streams.
+bool PactlAvailable(std::string *details, bool *timed_out);
 
 using PactlExecCaptureHook =
     std::function<studiocast::util::ExecResult(const std::string &)>;
@@ -89,5 +103,13 @@ bool UpdateSinkProplist(const std::string &sink_name_or_index,
 bool UpdateSourceProplist(const std::string &source_name_or_index,
                           const std::vector<std::string> &kv_pairs,
                           std::string *error);
+
+// Detailed sink input list. Use it to find a stream by its owner module or by
+// a property that StudioCast set when the stream was created.
+std::vector<PactlSinkInputInfo> ListSinkInputsDetailed(std::string *error);
+
+// Sets the volume of one sink input, in percent (0..100 and above).
+bool SetSinkInputVolumePercent(int sink_input_id, int percent,
+                               std::string *error);
 
 } // namespace studiocast::audio::pulse

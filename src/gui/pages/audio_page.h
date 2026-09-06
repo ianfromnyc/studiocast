@@ -4,6 +4,8 @@
 #include <QStringList>
 #include <QWidget>
 
+#include <atomic>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -11,6 +13,7 @@
 #include "core/audio/pulse/pactl.h"
 #include "gui/status/pending_daemon_write_guard.h"
 
+class QCheckBox;
 class QComboBox;
 class QGroupBox;
 class QLabel;
@@ -37,7 +40,19 @@ class AudioPage final : public QWidget {
 
 public:
   explicit AudioPage(AudioPageMode mode, QWidget *parent = nullptr);
+  ~AudioPage() override;
   void UpdateStatus(const DaemonStatusSnapshot &snapshot);
+
+  // Test seam. Apply the outcome of one monitor sink listing, the way the
+  // background refresh applies it when it ends. The real listing needs a
+  // running pactl and an event loop, which the offscreen checks do not have.
+  void ApplyMonitorSinkListForTesting(
+      const std::vector<studiocast::audio::pulse::PactlSink> &sinks,
+      const std::string &listError);
+
+  // Test seam. Apply the outcome of a monitor sink listing that never ran
+  // because pactl is unavailable.
+  void ApplyMonitorSinkFailureForTesting(const std::string &pactlDetails);
 
 signals:
   void StatusRefreshRequested();
@@ -77,6 +92,12 @@ private slots:
 
   void OnToggleAdvanced(bool checked);
 
+  void RefreshMonitorSinks();
+  void OnMonitorEnabledToggled(bool checked);
+  void OnMonitorSinkChanged(int index);
+  void OnMonitorLatencyChanged(int value);
+  void OnMonitorVolumeChanged(int value);
+
 private:
   struct SourceRefreshResult {
     bool pactlOk = false;
@@ -99,9 +120,20 @@ private:
   void ApplySourceRefreshResult(const SourceRefreshResult &result);
   void ApplySpeakerTargetRefreshResult(
       const SpeakerTargetRefreshResult &result);
+  void ApplyMonitorSinkRefreshResult(const SpeakerTargetRefreshResult &result);
+
+  // Enable or disable every monitor control together, from the state the
+  // daemon reports and the state of the sink list.
+  void UpdateMonitorControlsEnabled();
+  void PushDaemonMonitorConfig();
+
+  // Microphone input the monitor sink rule must be checked against. Empty
+  // when it is not known yet.
+  std::string CurrentMicSourceName() const;
   void RefreshStatusFromCachedDaemon(bool forceControlResync);
   void ApplyCachedDaemonAudioStatus(bool forceControlResync = false);
   void ScheduleDaemonAudioConfigWrite();
+  void ScheduleDaemonMonitorConfigWrite();
   void UpdateReleaseControlsFromCachedStatus();
   void PushDaemonAudioConfig();
   void PushDaemonSourceSelection();
@@ -162,6 +194,15 @@ private:
   QLineEdit *openAudioModelPathEdit_ = nullptr;
   QPushButton *browseOpenAudioModelBtn_ = nullptr;
   QPushButton *openAudioInstallHintsBtn_ = nullptr;
+
+  // Microphone monitor: hear the processed feed on a chosen output.
+  QGroupBox *monitorBox_ = nullptr;
+  QCheckBox *monitorEnableCheck_ = nullptr;
+  QComboBox *monitorSinkCombo_ = nullptr;
+  QPushButton *refreshMonitorSinksBtn_ = nullptr;
+  QSpinBox *monitorLatencySpin_ = nullptr;
+  QSpinBox *monitorVolumeSpin_ = nullptr;
+  QLabel *monitorStatusLabel_ = nullptr;
 
   // Advanced / legacy loopback and virtual device controls (microphone).
   QGroupBox *legacyInputBox_ = nullptr;
@@ -232,6 +273,18 @@ private:
   QString daemonSpeakersRouteMode_;
   QString daemonSpeakerTarget_;
 
+  // Last microphone monitor state reported by the daemon.
+  bool updatingMonitorUi_ = false;
+  bool daemonMonitorReported_ = false;
+  bool monitorSinksUsable_ = false;
+  QString daemonMonitorSink_;
+
+  // Microphone input the daemon resolved, and the input the monitor sink list
+  // was built for. A change means the list can hold a sink that would now feed
+  // back into the capture.
+  QString daemonSourceResolved_;
+  QString monitorSinkListMicSource_;
+
   // Cached daemon effects blob so we can preserve fields not represented in
   // this UI.
   QJsonObject lastAudioEffectsObj_;
@@ -242,9 +295,19 @@ private:
   QStringList openAudioInstallHints_;
 
   QTimer *audioWriteDebounceTimer_ = nullptr;
+  // The monitor writes have their own timer: they carry a different patch
+  // from the effects write, and the volume control sends a burst of steps.
+  QTimer *monitorWriteDebounceTimer_ = nullptr;
   PendingDaemonWriteGuard audioWriteGuard_;
   QThread *sourceRefreshThread_ = nullptr;
   QThread *speakerTargetRefreshThread_ = nullptr;
+  QThread *monitorSinkRefreshThread_ = nullptr;
+  // Set when the page goes away. Each listing reads it between its pactl
+  // calls, so closing the window on a wedged sound server waits for the call
+  // that is running and not for all three of them. The listings hold their own
+  // reference, so the flag outlives the page.
+  std::shared_ptr<std::atomic<bool>> refreshCancelled_ =
+      std::make_shared<std::atomic<bool>>(false);
 };
 
 } // namespace studiocast::gui

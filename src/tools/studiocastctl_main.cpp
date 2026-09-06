@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +15,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/audio/mic_monitor.h"
 #include "core/ipc/daemon_client.h"
 #include "core/maxine/reason_codes.h"
 #include "core/util/exec.h"
@@ -140,6 +142,36 @@ std::optional<double> ParseDouble(std::string_view s) {
   return v;
 }
 
+// Reads a whole decimal number from a command line option.
+//
+// The whole argument must be the number, so "12abc" and "12.5" are errors
+// rather than 12. `what` names the option in the message.
+std::optional<int> ParseIntArg(std::string_view s, int min, int max,
+                               const char *what, std::string *error) {
+  const std::string tmp(s);
+  // strtol skips leading blanks and accepts a leading '+', so the first
+  // character is checked here to keep the promise above.
+  const bool startsWithNumber =
+      !tmp.empty() && (tmp.front() == '-' ||
+                       std::isdigit(static_cast<unsigned char>(tmp.front())));
+  const char *begin = tmp.c_str();
+  char *end = nullptr;
+  errno = 0;
+  const long v = std::strtol(begin, &end, 10);
+
+  const bool wholeString = !tmp.empty() && end && *end == '\0';
+  if (!startsWithNumber || !wholeString || errno == ERANGE || v < min ||
+      v > max) {
+    if (error) {
+      *error = std::string(what) + " needs a whole number in " +
+               std::to_string(min) + ".." + std::to_string(max) + ", got '" +
+               tmp + "'";
+    }
+    return std::nullopt;
+  }
+  return static_cast<int>(v);
+}
+
 bool ParseBoolArg(std::string_view s, bool *out) {
   if (!out)
     return false;
@@ -162,6 +194,95 @@ std::string ToLower(std::string s) {
 
 std::string MaxineReasonToEnglish(const std::string &code) {
   return studiocast::maxine::reasons::ToEnglish(code);
+}
+
+// Prints the microphone monitor block of the status JSON in plain language.
+void PrintAudioMonitorPretty(const Value::Object *root) {
+  const Value::Object *audio = nullptr;
+  if (root) {
+    if (auto it = root->find("audio"); it != root->end())
+      audio = it->second.AsObject();
+  }
+  const Value::Object *monitor = nullptr;
+  if (audio) {
+    if (auto it = audio->find("monitor"); it != audio->end())
+      monitor = it->second.AsObject();
+  }
+  if (!monitor) {
+    std::cout << "Microphone monitor: (not reported by daemon)\n";
+    return;
+  }
+
+  auto boolField = [&](const char *key) {
+    if (auto it = monitor->find(key); it != monitor->end()) {
+      if (const auto *b = it->second.AsBool())
+        return *b;
+    }
+    return false;
+  };
+  auto stringField = [&](const char *key) -> std::string {
+    if (auto it = monitor->find(key); it != monitor->end()) {
+      if (const auto *s = it->second.AsString())
+        return *s;
+    }
+    return {};
+  };
+  auto intField = [&](const char *key) {
+    if (auto it = monitor->find(key); it != monitor->end()) {
+      if (const auto *n = it->second.AsNumber())
+        return static_cast<int>(*n);
+    }
+    return 0;
+  };
+
+  const bool enabled = boolField("enabled");
+  const bool active = boolField("active");
+  std::cout << "Microphone monitor: "
+            << (enabled ? (active ? "on (playing)" : "on (not playing)")
+                        : "off")
+            << "\n";
+  std::cout << "  sink_requested: " << stringField("sink") << "\n";
+  std::cout << "  sink_resolved: " << stringField("sink_resolved") << "\n";
+  std::cout << "  latency_ms: " << intField("latency_ms") << "\n";
+  std::cout << "  volume: " << intField("volume") << "\n";
+  if (active)
+    std::cout << "  module_id: " << intField("module_id") << "\n";
+  const std::string note = stringField("note");
+  if (!note.empty())
+    std::cout << "  note: " << note << "\n";
+  const std::string sinkError = stringField("sink_error");
+  if (!sinkError.empty())
+    std::cout << "  sink_error: " << sinkError << "\n";
+  const std::string lastError = stringField("last_error");
+  if (!lastError.empty())
+    std::cout << "  last_error: " << lastError << "\n";
+}
+
+// `studiocastctl audio monitor status`: read GET_STATUS and print only the
+// monitor block.
+bool PrintAudioMonitorStatus() {
+  studiocast::ipc::DaemonCallResult res;
+  std::string err;
+  if (!studiocast::ipc::DaemonCall("GET_STATUS", &res, &err)) {
+    std::cerr << "ERROR: " << err << "\n";
+    return false;
+  }
+  if (!res.ok) {
+    std::cerr << (res.error_json.empty()
+                      ? std::string("{\"error\":\"daemon_error\"}")
+                      : res.error_json)
+              << "\n";
+    return false;
+  }
+
+  Value root;
+  std::string jerr;
+  if (!studiocast::util::json::Parse(res.json, &root, &jerr)) {
+    std::cerr << "ERROR: invalid status JSON: " << jerr << "\n";
+    return false;
+  }
+  PrintAudioMonitorPretty(root.AsObject());
+  return true;
 }
 
 void PrintMaxinePrettyFromStatusJson(const std::string &statusJson) {
@@ -233,6 +354,10 @@ void PrintMaxinePrettyFromStatusJson(const std::string &statusJson) {
   } else {
     std::cout << "Maxine: (not reported by daemon)\n";
   }
+
+  // Microphone monitor. Printed before the video block, which may return
+  // early when the daemon reports no video.
+  PrintAudioMonitorPretty(o);
 
   // ----------------
   // Video negotiated formats
@@ -738,6 +863,10 @@ void Usage(const char *argv0) {
       << "  " << argv0 << " audio set --file <audio.json|->\n"
       << "  " << argv0 << " audio start\n"
       << "  " << argv0 << " audio stop\n"
+      << "  " << argv0
+      << " audio monitor on|off [--sink NAME|auto] [--latency-ms 1..500] "
+         "[--volume 0..100]\n"
+      << "  " << argv0 << " audio monitor status\n"
       << "  " << argv0
       << " effects enable <effect_id> [--engine auto|maxine|open_cuda] "
          "[--model <id>] [--strength N|0..1] [--intensity N|0..1] ...\n"
@@ -1351,6 +1480,80 @@ int main(int argc, char **argv) {
     }
     if (sub == "stop") {
       return CallOrDie("AUDIO_STOP") ? 0 : 1;
+    }
+    if (sub == "monitor") {
+      if (argc < 4) {
+        std::cerr << "audio monitor requires on|off|status\n";
+        return 2;
+      }
+
+      const std::string action = argv[3] ? std::string(argv[3]) : std::string();
+      if (action == "status")
+        return PrintAudioMonitorStatus() ? 0 : 1;
+      if (action != "on" && action != "off") {
+        std::cerr << "audio monitor requires on|off|status\n";
+        return 2;
+      }
+
+      std::optional<std::string> sink;
+      std::optional<int> latency;
+      std::optional<int> volume;
+      for (int i = 4; i < argc; ++i) {
+        const std::string_view a =
+            argv[i] ? std::string_view(argv[i]) : std::string_view();
+        const bool hasValue = (i + 1 < argc) && argv[i + 1];
+        const bool takesValue =
+            a == "--sink" || a == "--latency-ms" || a == "--volume";
+        if (takesValue && !hasValue) {
+          // The option is known; only the value is missing. Say which.
+          std::cerr << a << " requires a value\n";
+          return 2;
+        }
+        if (a == "--sink") {
+          // An empty value means the system default, which the daemon reads
+          // as "auto".
+          const std::string value = argv[++i];
+          sink = value.empty() ? std::string("auto") : value;
+          continue;
+        }
+        if (a == "--latency-ms" && hasValue) {
+          std::string parseError;
+          latency =
+              ParseIntArg(argv[++i], studiocast::audio::kMicMonitorMinLatencyMs,
+                          studiocast::audio::kMicMonitorMaxLatencyMs,
+                          "--latency-ms", &parseError);
+          if (!latency) {
+            std::cerr << parseError << "\n";
+            return 2;
+          }
+          continue;
+        }
+        if (a == "--volume" && hasValue) {
+          std::string parseError;
+          volume = ParseIntArg(argv[++i], 0, 100, "--volume", &parseError);
+          if (!volume) {
+            std::cerr << parseError << "\n";
+            return 2;
+          }
+          continue;
+        }
+        std::cerr << "Unknown audio monitor option: " << a << "\n";
+        return 2;
+      }
+
+      std::string patch = "{\"monitor\":{\"enabled\":";
+      patch += (action == "on") ? "true" : "false";
+      if (sink) {
+        patch +=
+            ",\"sink\":\"" + studiocast::util::json::EscapeString(*sink) + "\"";
+      }
+      if (latency)
+        patch += ",\"latency_ms\":" + std::to_string(*latency);
+      if (volume)
+        patch += ",\"volume\":" + std::to_string(*volume);
+      patch += "}}";
+
+      return CallOrDie(std::string("SET_AUDIO_CONFIG ") + patch) ? 0 : 1;
     }
     if (sub == "set") {
       std::string path;

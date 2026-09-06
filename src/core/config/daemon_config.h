@@ -59,6 +59,15 @@ struct DaemonConfig {
   int audio_speaker_latency_ms = 10;
   std::string audio_source; // empty = Pulse default
 
+  // Microphone monitor: play the processed microphone feed on an output sink
+  // so the user can hear the effects while adjusting them.
+  bool audio_monitor_enabled = false;
+
+  // "auto" (or empty) = Pulse default sink.
+  std::string audio_monitor_sink = "auto";
+  int audio_monitor_latency_ms = 20;
+  int audio_monitor_volume = 100;
+
   // Canonical Broadcast-style audio effects.
   // Persisted as a single JSON blob under `audio.effects.json`.
   studiocast::audio::effects::BroadcastAudioEffects audio_effects{};

@@ -1577,6 +1577,35 @@ bool TestAudioSourceSafetyRejectsVirtualAndMonitorSources() {
   return true;
 }
 
+// Pulse names a monitor source "<sink>.monitor", always as a suffix. Matching
+// ".monitor" anywhere hides a legitimately named device from the output lists
+// and makes the daemon refuse it.
+bool TestMonitorNameRuleMatchesTheSuffixOnly() {
+  struct Case {
+    const char *name;
+    bool monitor;
+  };
+  const Case cases[] = {
+      {"alsa_output.pci_test.monitor", true},
+      {"studiocast_sink.monitor", true},
+      // Devices whose own name carries the word, but which are not monitors.
+      {"alsa_output.monitor_speakers", false},
+      {"desk.monitor.usb", false},
+      {"alsa_input.usb_test_mic", false},
+  };
+
+  bool ok = true;
+  for (const auto &c : cases) {
+    const bool got = studiocast::audio::IsPulseMonitorSourceName(c.name);
+    if (got != c.monitor) {
+      std::cerr << "'" << c.name << "': got monitor=" << got << " want "
+                << c.monitor << "\n";
+      ok = false;
+    }
+  }
+  return ok;
+}
+
 bool TestAudioSourceAutoFallsBackFromUnsafeDefaultSource() {
   std::vector<std::string> commands;
   ScopedPactlExecHook hook([&](const std::string &command) {
@@ -1737,12 +1766,23 @@ bool TestVirtualAudioServiceReportsResolvedAutoSourceAndWarnings() {
     return false;
   }
 
+  // The service clears a leftover monitor loopback at every start, before
+  // anything else. Those calls are not part of the resolution under test.
+  std::vector<std::string> resolutionCommands;
+  for (const auto &command : commands) {
+    if (command == "pactl --version 2>&1" ||
+        command == "pactl list short modules 2>&1")
+      continue;
+    resolutionCommands.push_back(command);
+  }
+
   const std::vector<std::string> expected = {
       "pactl get-default-source 2>&1",
       "pactl list short sources 2>&1",
   };
-  if (commands.size() < expected.size() ||
-      !std::equal(expected.begin(), expected.end(), commands.begin())) {
+  if (resolutionCommands.size() < expected.size() ||
+      !std::equal(expected.begin(), expected.end(),
+                  resolutionCommands.begin())) {
     std::cerr << "unexpected source resolution command prefix\n";
     for (const auto &command : commands)
       std::cerr << "  " << command << "\n";
@@ -1807,11 +1847,22 @@ bool TestVirtualAudioServicePreservesUnavailableConfiguredSource() {
     return false;
   }
 
+  // The service clears a leftover monitor loopback at every start, before
+  // anything else. Those calls are not part of the resolution under test.
+  std::vector<std::string> resolutionCommands;
+  for (const auto &command : commands) {
+    if (command == "pactl --version 2>&1" ||
+        command == "pactl list short modules 2>&1")
+      continue;
+    resolutionCommands.push_back(command);
+  }
+
   const std::vector<std::string> expected = {
       "pactl list short sources 2>&1",
   };
-  if (commands.size() < expected.size() ||
-      !std::equal(expected.begin(), expected.end(), commands.begin())) {
+  if (resolutionCommands.size() < expected.size() ||
+      !std::equal(expected.begin(), expected.end(),
+                  resolutionCommands.begin())) {
     std::cerr << "unexpected unavailable-source command prefix\n";
     for (const auto &command : commands)
       std::cerr << "  " << command << "\n";
@@ -7135,6 +7186,8 @@ int main() {
        &TestPactlProplistCommandsQuoteArgumentsAndDetectFailures},
       {"pactl consumer lists parse source outputs and sink inputs",
        &TestPactlConsumerListsParseSourceOutputsAndSinkInputs},
+      {"monitor name rule matches the suffix only",
+       &TestMonitorNameRuleMatchesTheSuffixOnly},
       {"audio source safety rejects virtual and monitor sources",
        &TestAudioSourceSafetyRejectsVirtualAndMonitorSources},
       {"audio source auto falls back from unsafe default source",

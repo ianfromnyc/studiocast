@@ -475,6 +475,8 @@ Use `studiocastctl` when possible instead of manually writing socket messages:
 ./build/studiocastctl effects set --file effects.json
 ./build/studiocastctl audio get
 ./build/studiocastctl audio set --file audio.json
+./build/studiocastctl audio monitor on --sink alsa_output.usb_headset
+./build/studiocastctl audio monitor status
 ```
 
 ## Audio pipeline overview
@@ -485,6 +487,8 @@ Important pieces:
 
 - `virtual_mic.*`: StudioCast virtual microphone management.
 - `virtual_speaker.*`: StudioCast virtual speaker management.
+- `mic_monitor.*`: microphone monitor loopback (`studiocast_mic` to a chosen
+  output sink) with its own safety and stale-module rules.
 - `virtual_audio_service.*`: high-level virtual audio service coordination.
 - `audio_pipeline.*`: real-time processing path when libpulse-simple is
   available.
@@ -502,6 +506,116 @@ possible; otherwise status should report an actionable error.
 
 Canonical audio effects are persisted under `audio.effects.json` in the daemon
 config.
+
+### Microphone monitor
+
+The monitor plays the processed microphone feed on an output sink so the user
+can hear the effects while adjusting them. It is a Pulse `module-loopback` from
+`studiocast_mic` into the chosen sink. Both loopback streams carry
+`media.name=StudioCast_Microphone_Monitor`. The name has no spaces because the
+Pulse module argument parser keeps only the text before the first space of a
+property value. StudioCast finds and unloads its own monitor loopback by that
+tag. The service does this once at every start, whatever the monitor setting
+says, so a loopback that a killed daemon left behind is removed and a daemon
+restart never leaves a second monitor behind.
+
+Config lives in the audio config JSON under an additive `monitor` object
+(`enabled`, `sink`, `latency_ms`, `volume`) and in the daemon config under
+`audio.monitor.*`. The audio config JSON carries no schema version of its own,
+so additive fields need no version bump.
+
+Safety reuses the speaker target rules and adds one more: the monitor refuses a
+sink whose monitor source is the selected microphone input, because that is a
+feedback loop.
+
+A sink of `"auto"` is resolved once, at the start, and the resolved name is
+pinned. Only an explicit restart resolves it again: a change to the sink or the
+delay, or the monitor going from off to on. A restart the user did not ask for,
+such as the one after a failed route check, uses the pinned name. This is
+because Pulse moves its default output on an unplug, usually to the built-in
+loudspeakers, so a monitor that resolved `"auto"` again would build a feedback
+loop on its own. When the output disappears the monitor stops and writes what
+happened to `monitor.note`, not to `monitor.last_error`, because the GUI prints
+the note as written and turns an error it does not know into a request to open
+Support.
+
+Some errors are an exception, because they clear themselves and ask nothing of
+the user. The GUI finds them by the text the daemon writes, so each text lives
+in one place. Three constants carry the rule, and each one names the messages
+that must use it:
+
+- `kNoSafeMicMonitorSinkMessage` opens the message
+  `ChooseSafeMicMonitorSinkName` writes when it finds no safe output. The page
+  prints advice: choose a physical output sink.
+- `kSoundServerNoAnswerMessage` opens two messages, both about a *start*: the
+  one `StartMicMonitor` writes when `pactl --version` gave no answer, and the
+  sink-question detail the service appends to a failed pinned start. The page
+  prints a wait, and says the monitor starts on its own.
+- `kSoundServerNoAnswerOnStopMessage` is the whole message `StopMicMonitor`
+  writes when `pactl --version` gave no answer to a *stop*. It needs a text of
+  its own because the state is the opposite one: the loopback can still play
+  the microphone into the speakers. The page prints a wait that says so. The
+  text opens with `kSoundServerNoAnswerMessage`, so the page must match on it
+  first.
+
+The failed route check is deliberately not on this list. It writes "Failed to
+check the microphone monitor: …", which can also end in "did not answer in
+time", but the monitor does not retry out of that state the way a failed start
+or stop does, so the page sends it to Support. Do not give it one of the
+constants without giving the daemon a retry the page can promise.
+
+A new message of one of the three kinds must start from its constant, or the
+page sends the user to Support for a state that needs nothing from them.
+
+The pin does not outlive the output it names. A start that used the pinned name
+and failed asks the sound server whether that sink is still in its list. While
+the sink is there the pin holds and the start is retried, so a sound server
+hiccup cannot move the monitor. When the sink is gone the service reports the
+lost output, drops the pin and stops, so the next explicit restart resolves
+`"auto"` afresh instead of asking for a sink that no longer exists. A sound
+server that cannot be reached gives no answer at all, and no answer keeps the
+pin: a monitor that only waits for the sound server comes back on its own,
+while a lost output needs the user.
+
+A lost output is an answer about the sink list, and it says nothing about the
+loopback. Only a stop that worked, or a route check that read the module list
+and found no tagged loopback, clears the knowledge that one may still play. A
+stop that failed in the same window therefore keeps its retry while the output
+is lost, and the service stops the route again when it stops. A loopback that
+plays the microphone into the speakers cannot outlive the daemon because the
+output disappeared.
+
+The note follows that retry. "The monitor stopped" is the whole truth only
+while no loopback is left, so after the second failed cleanup the note adds
+that the microphone may still be heard, and drops the sentence again when a
+stop works. The warning stays in the note, because a user who hears the
+microphone needs plain words and not a support case.
+
+That retry ends at the top of its backoff, which the other retry loops of the
+monitor do not do. Each try blocks the audio supervisor for one `pactl`
+deadline, and only the user ends a lost output, so a retry without an end would
+block the supervisor for the rest of the run. The knowledge that a loopback may
+still play stays behind after the retry gives up, so the stop at shutdown, and
+the next thing the user asks for, still removes it.
+
+The daemon never writes the monitor setting back. A safety check that finds no
+usable output gives a warning and leaves `monitor.enabled` as the user wrote
+it, because the same check fails when the sound server is only unreadable for a
+moment and the config it checks is the one that is saved to disk.
+
+The monitor talks to Pulse directly: `StartMicMonitor` and `StopMicMonitor`
+call `pactl` and know `module-loopback` and the name `studiocast_mic`.
+`VirtualAudioServiceHooks` gives a seam for the tests, but there is no
+transport seam, so the monitor needs `pipewire-pulse` (or a real PulseAudio
+server) even when the rest of the audio path uses another backend. A native
+transport would need a second implementation of the route, which the monitor
+does not have yet.
+
+The monitor is a consumer of `studiocast_mic`, so it starts the microphone
+pipeline on its own. Status reports `mic_app_consumer_count` and
+`mic_monitor_consumer_count` next to `mic_consumer_count` so readiness text can
+still speak about apps, and the microphone readiness detail says when only the
+monitor is listening.
 
 ## Video, effects, and model backends
 

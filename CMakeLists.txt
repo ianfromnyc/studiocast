@@ -309,6 +309,8 @@ add_library(studiocast_core
         src/core/audio/virtual_speaker_state.cpp
         src/core/audio/virtual_speaker.h
         src/core/audio/virtual_speaker.cpp
+        src/core/audio/mic_monitor.h
+        src/core/audio/mic_monitor.cpp
         src/core/audio/virtual_audio_service.h
         src/core/audio/virtual_audio_service.cpp
         src/core/video/v4l2loopback.h
@@ -839,6 +841,30 @@ elseif (BUILD_TESTING)
 endif()
 
 if (BUILD_TESTING)
+    add_executable(studiocast-mic-monitor-tests
+            tests/mic_monitor_tests.cpp
+    )
+
+    target_link_libraries(studiocast-mic-monitor-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-mic-monitor-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-mic-monitor-tests)
+    studiocast_enable_sanitizers(studiocast-mic-monitor-tests)
+
+    set_target_properties(studiocast-mic-monitor-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-mic-monitor-tests COMMAND studiocast-mic-monitor-tests)
+endif()
+
+if (BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if (Python3_Interpreter_FOUND)
         add_test(NAME studiocast-embedded-ptx-freshness
@@ -1071,6 +1097,8 @@ if (BUILD_TESTING)
             tests/gui_status_snapshot_tests.cpp
             src/gui/text_edit_utils.h
             src/gui/text_edit_utils.cpp
+            src/gui/pages/audio_page.h
+            src/gui/pages/audio_page.cpp
             src/gui/pages/engines_models_page.h
             src/gui/pages/engines_models_page.cpp
             src/gui/pages/video_page.h
