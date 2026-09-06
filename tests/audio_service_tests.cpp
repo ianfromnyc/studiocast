@@ -5342,16 +5342,18 @@ bool TestStopKeepsTheStopFlagUpForTheWorkerItJoins() {
   });
 
   // Wait for the flag to fall. Start() clears it as soon as it is past the
-  // join at the top of its body, thus this ends in milliseconds when Stop()
-  // raised the flag outside the worker lock. When Stop() holds that lock,
-  // Start() waits for it and this wait runs out, which is the pass.
+  // handle lock at the top of its body, thus this ends in milliseconds when
+  // Stop() raised the flag outside that lock. When Stop() holds the lock,
+  // Start() waits for it and this wait runs out, which is the pass. Half a
+  // second is a hundred times the margin the failing shape needs, and the
+  // passing shape cannot end this wait at any budget.
   const bool flag_cleared = WaitUntil(
       [&] {
         std::lock_guard<std::mutex> lock(io_state->mu);
         return io_state->stop_flag != nullptr &&
                !io_state->stop_flag->load(std::memory_order_acquire);
       },
-      2000ms);
+      500ms);
 
   {
     std::lock_guard<std::mutex> lock(io_state->mu);
@@ -5556,7 +5558,7 @@ bool TestStopRaisesTheStopFlagUnderTheWorkerLock() {
         return io_state->stop_flag != nullptr &&
                io_state->stop_flag->load(std::memory_order_acquire);
       },
-      1000ms);
+      500ms);
 
   fx->ReleaseFactory();
 
@@ -5992,7 +5994,9 @@ bool TestConcurrentServiceStartFailsAndKeepsTheProcess() {
     return false;
   }
 
-  constexpr int kAttempts = 64;
+  // The start mark makes every attempt meet, thus the sweep no longer needs
+  // to cover a window: 32 attempts give about 40 refusals on this host.
+  constexpr int kAttempts = 32;
   constexpr int kCallers = 4;
   for (int attempt = 0; attempt < kAttempts; ++attempt) {
     fx->ArmGate();
