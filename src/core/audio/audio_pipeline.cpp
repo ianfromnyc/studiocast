@@ -814,14 +814,20 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
       startup_ok_ = false;
       startup_error_.clear();
     }
+    // The backend of the last run, when a Start() runs again without a
+    // Stop() in between. It is destroyed after io_mu_ is free again, for the
+    // reason the release in Stop() gives.
+    std::shared_ptr<AudioPipelineIo> replaced;
     {
       std::lock_guard<std::mutex> io_lock(io_mu_);
+      replaced = std::move(io_);
       io_ = CreateIo();
       io_made = static_cast<bool>(io_);
       if (io_made) {
         io_->SetStopRequestedFlag(&stop_);
       }
     }
+    replaced.reset();
     if (io_made) {
       // Make the worker under the lock, thus nothing can take the handle
       // between the start mark and the publish. ThreadMain() never takes
@@ -855,11 +861,12 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
 void AudioPipeline::Stop() {
   {
     // Hold the worker lock across the raise of the stop flag, the request to
-    // the backend, the join and the release of the backend. The lock makes
-    // those and the publish in Start() one step, thus a second Stop() caller
-    // waits here instead of joining the same worker again, and the worker
-    // that this caller joins is always one that sees the flag and whose
-    // backend got the request. Without the lock on the raise, a Start()
+    // the backend, the join and the release of the backend. That release
+    // ends in a destructor, not in a pointer store: see the note on it
+    // below. The lock makes those and the publish in Start() one step, thus
+    // a second Stop() caller waits here instead of joining the same worker
+    // again, and the worker that this caller joins is always one that sees
+    // the flag and whose backend got the request. Without the lock, a Start()
     // clears the flag and publishes a new worker in between, and the join
     // waits for a worker that nobody told to stop.
     //
@@ -868,9 +875,9 @@ void AudioPipeline::Stop() {
     // thread_mu_ and then mu_, where Start() reports a second caller;
     // thread_mu_ and then startup_mu_, where the publish block of Start()
     // resets the startup handshake. No path takes any of them the other way
-    // round, thus this cannot deadlock. The worker takes
-    // io_mu_, mu_ and startup_mu_ and never thread_mu_, thus a join under
-    // thread_mu_ does not wait on the worker for a lock. RequestStop() does
+    // round, thus this cannot deadlock. The worker takes io_mu_, mu_ and
+    // startup_mu_ and never thread_mu_, thus a join under thread_mu_ does
+    // not wait on the worker for a lock. RequestStop() does
     // not wait for the worker; it only marks the backend and wakes the Pulse
     // main loop.
     //
@@ -895,10 +902,21 @@ void AudioPipeline::Stop() {
     if (thread_.joinable()) {
       thread_.join();
     }
+    // Take the backend out of the handle under io_mu_, and destroy it after
+    // that lock is free again. The release is a destructor, not a pointer
+    // store: ~PulseAsyncAudioIo() runs Shutdown(), which stops and joins the
+    // Pulse main loop. Under io_mu_ that wait would also hold up
+    // GetActiveIo(), which is the call a worker makes to keep its backend
+    // alive. The destructor stays under thread_mu_ on purpose, because the
+    // release of the handle must not cross the publish of a later Start().
+    // The wait is bounded either way: the main loop of a backend that got
+    // RequestStop() above is on its way out.
+    std::shared_ptr<AudioPipelineIo> released;
     {
       std::lock_guard<std::mutex> lock(io_mu_);
-      io_.reset();
+      released = std::move(io_);
     }
+    released.reset();
   }
   running_.store(false, std::memory_order_release);
 }
