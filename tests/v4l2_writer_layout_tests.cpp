@@ -993,4 +993,116 @@ bool TestV4l2WriterFormatLadderPutsTheDeviceFormatBack() {
   return true;
 }
 
+// The format the walk saves goes back to the device with S_FMT, thus it must
+// be a format the device can be asked to take again. A blank report is not:
+// S_FMT of 0x0 does not fail on v4l2loopback, it takes the driver's default
+// geometry, so "putting it back" would change the frame every consumer sees.
+// The window in which the driver gives that report is the consumer-disconnect
+// window, which is also the window in which the walk most often fails.
+//
+// So the save asks the same question of the held format that the parse asks
+// of a rung: `FrameIsUsable`. A format the writer cannot fill is still a
+// format the device held, thus only the blank is refused. A save that answers
+// no leaves the device alone, which is the right answer for a report the
+// writer already decided it cannot read.
+bool TestV4l2WriterRestoresOnlyAFormatItCouldUse() {
+  using video::ChooseOutputFormat;
+  using video::FormatLadderResult;
+  using video::FormatLadderRung;
+  using video::FormatRestore;
+  using video::SavedOutputFmtIsRestorable;
+
+  struct SavedCase {
+    const char *name;
+    LayoutCase report;
+    bool want;
+  };
+
+  const SavedCase cases[] = {
+      {"the format a live device holds",
+       {"1920x1080 YUYV", V4L2_PIX_FMT_YUYV, 1920, 1080, 3840, 4147200, 0u, 0u},
+       true},
+      // The writer cannot fill MJPEG, but the device held it before the walk
+      // asked for anything, thus putting it back is leaving the device alone.
+      {"a format the writer cannot fill",
+       {"MJPEG", V4L2_PIX_FMT_MJPEG, 640, 480, 0, 100000, 0u, 0u},
+       true},
+      {"the blank report of a disconnect window",
+       {"0x0", V4L2_PIX_FMT_YUYV, 0, 0, 0, 0, 0u, 0u},
+       false},
+      {"a report of no columns",
+       {"0x480", V4L2_PIX_FMT_YUYV, 0, 480, 0, 0, 0u, 0u},
+       false},
+      {"a report of no rows",
+       {"640x0", V4L2_PIX_FMT_YUYV, 640, 0, 1280, 0, 0u, 0u},
+       false},
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
+      {"the mplane arm of a live device",
+       {"1920x1080 YUYV mplane", V4L2_PIX_FMT_YUYV, 1920, 1080, 3840, 4147200,
+        0u, 0u, true},
+       true},
+      {"the mplane arm of a blank report",
+       {"0x0 mplane", V4L2_PIX_FMT_YUYV, 0, 0, 0, 0, 0u, 0u, true},
+       false},
+#endif
+  };
+
+  for (const SavedCase &c : cases) {
+    v4l2_format f{};
+    FillDriverFormat(&f, c.report);
+    const bool got = SavedOutputFmtIsRestorable(f, c.report.mplane);
+    if (!Expect(got == c.want, "the save must refuse a blank report alone")) {
+      std::cerr << "  " << c.name << ": expected " << c.want << ", got " << got
+                << "\n";
+      return false;
+    }
+  }
+
+  // A save that answers no leaves the device alone, even after a rung that
+  // changed the format the device holds.
+  {
+    const LayoutCase unusable = {"MJPEG the writer cannot fill",
+                                 V4L2_PIX_FMT_MJPEG,
+                                 640,
+                                 480,
+                                 0,
+                                 100000,
+                                 0u,
+                                 0u};
+
+    auto SetFmt = [](const char *name, const LayoutCase &c) {
+      FormatLadderRung r;
+      r.name = name;
+      r.mplane = c.mplane;
+      r.mutates = true;
+      r.ask = [c](v4l2_format *outFmt, std::string *) {
+        FillDriverFormat(outFmt, c);
+        return true;
+      };
+      return r;
+    };
+
+    int restores = 0;
+    FormatRestore guard;
+    guard.save = [](v4l2_format *) { return false; };
+    guard.restore = [&](const v4l2_format &) { ++restores; };
+
+    const std::vector<FormatLadderRung> rungs = {
+        SetFmt("VIDEO_OUTPUT S_FMT(with stride)", unusable),
+        SetFmt("VIDEO_OUTPUT S_FMT(no stride)", unusable),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30, guard);
+    if (!Expect(!got.ok, "a ladder no rung parses must fail"))
+      return false;
+    if (!Expect(restores == 0,
+                "a walk that saved nothing must put nothing back")) {
+      std::cerr << "  restored " << restores << " formats\n";
+      return false;
+    }
+  }
+
+  return true;
+}
+
 } // namespace studiocast::tests

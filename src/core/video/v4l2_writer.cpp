@@ -407,6 +407,19 @@ bool OutputDeviceCanWrite(std::uint32_t caps, std::string *outErr) {
   return false;
 }
 
+bool SavedOutputFmtIsRestorable(const v4l2_format &f, bool mplane) {
+  if (!mplane) {
+    return FrameIsUsable(static_cast<int>(f.fmt.pix.width),
+                         static_cast<int>(f.fmt.pix.height));
+  }
+#if STUDIOCAST_V4L2_HAS_MPLANE
+  return FrameIsUsable(static_cast<int>(f.fmt.pix_mp.width),
+                       static_cast<int>(f.fmt.pix_mp.height));
+#else
+  return false;
+#endif
+}
+
 bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
                           ActualFormat *out, std::string *outErr) {
   if (!out)
@@ -709,14 +722,20 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
   }
 
   // A walk that keeps no rung must leave the device as it found it, thus the
-  // walk reads the format the device holds first. G_FMT answers under the
-  // buffer type the device has, so the first type that answers is that type,
-  // and the answer carries it back to the S_FMT that puts the format back.
+  // walk reads the format the device holds before the first rung that changes
+  // it. G_FMT answers under the buffer type the device has, so the first type
+  // that answers a format worth putting back is that type, and the answer
+  // carries it back to the S_FMT that puts the format back.
   FormatRestore restore;
   restore.save = [fd, &types](v4l2_format *outFmt) {
     for (const auto &t : types) {
       std::string err;
-      if (TryGetFmtAny(fd, t, outFmt, &err))
+      if (!TryGetFmtAny(fd, t, outFmt, &err))
+        continue;
+      // A blank report names no format the device can be asked to take again,
+      // thus a walk that reads one has nothing to put back and leaves the
+      // device alone.
+      if (SavedOutputFmtIsRestorable(*outFmt, t.mplane))
         return true;
     }
     return false;

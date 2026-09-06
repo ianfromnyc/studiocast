@@ -79,6 +79,21 @@ bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
 // Exposed for tests; `V4l2Writer::Open()` is the only other caller.
 bool OutputDeviceCanWrite(std::uint32_t caps, std::string *outErr);
 
+// True when a format read back from the device names a frame the device can
+// be asked to take again. It is the question `ParseChosenOutputFmt` asks of a
+// rung, asked of the format the walk saves.
+//
+// A blank report, of width or height 0, is refused: S_FMT of a blank does not
+// fail on v4l2loopback, the driver rewrites the blank to its default geometry
+// and sets the format every consumer sees, thus "putting it back" would
+// change the device the walk was to leave alone. A format the writer cannot
+// fill still passes, because the device held it before the writer asked for
+// anything.
+//
+// Exposed for tests; the format restore of `V4l2Writer::Open()` is the only
+// other caller.
+bool SavedOutputFmtIsRestorable(const v4l2_format &f, bool mplane);
+
 // One rung of the format ladder: a question for the driver, and the union arm
 // the answer lands in.
 struct FormatLadderRung {
