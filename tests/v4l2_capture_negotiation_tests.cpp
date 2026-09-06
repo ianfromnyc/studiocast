@@ -642,6 +642,23 @@ bool TestCaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop() {
               "an accepted frame must carry the buffer the driver dequeued"))
     return false;
 
+  // The first of the two refusals: an offset the payload does not reach. Only
+  // a multi-planar buffer carries an offset, and the driver dequeued this one
+  // as well, so this refusal must keep the index too.
+  buf.bytesused = 32;
+  buf.data_offset = 64;
+
+  CapturedFrameView short_payload{};
+  if (!Expect(!CaptureAcceptDequeuedBuffer(buf, fmt, &short_payload, nullptr),
+              "an offset past the payload must refuse the frame"))
+    return false;
+
+  if (!Expect(short_payload.index == 3,
+              "a payload refusal must keep the buffer index as well"))
+    return false;
+
+  buf.bytesused = mapping.size();
+
   // The same buffer with an offset the mapping cannot absorb. The capture
   // refuses it after the driver dequeued it, so the buffer is out of the
   // queue and only the caller can put it back.
