@@ -252,9 +252,15 @@ public:
         Report("no supervisor loop in " +
                    std::to_string(stall_timeout_.count()) + " ms",
                loc, done, max_loops, start);
-      break;
+      return pred();
     }
-    return pred();
+    // The budget is the third way to stop short. The supervisor is healthy,
+    // thus the loop count tells whether the budget was the bound.
+    if (pred())
+      return true;
+    Report("the budget of supervisor loops ran out", loc, LoopCount(),
+           max_loops, start);
+    return false;
   }
 
 private:
@@ -430,6 +436,46 @@ bool TestSupervisorLoopCounterCapsTheWallClock() {
   }
   if (log.find("wall-clock") == std::string::npos)
     return ReportMissing(log, "wall-clock");
+  return true;
+}
+
+// A healthy supervisor that loops the whole budget is the likely failure.
+// The report must show that the budget was the bound, and not leave the
+// reader to guess why the wait stopped.
+bool TestSupervisorLoopCounterReportsAnExhaustedBudget() {
+  SupervisorLoopCounter loops;
+  loops.SetTimeoutsForTesting(30s, 60s);
+
+  VirtualAudioServiceHooks hooks;
+  loops.HookSleep(&hooks);
+  std::atomic<bool> stop{false};
+  std::thread supervisor([&] {
+    while (!stop.load(std::memory_order_relaxed))
+      hooks.sleep_for(25ms);
+  });
+
+  std::string log;
+  bool reached = true;
+  {
+    ScopedCerrCapture capture;
+    reached = loops.WaitUntil([] { return false; }, 5);
+    log = capture.text();
+  }
+  stop.store(true, std::memory_order_relaxed);
+  supervisor.join();
+
+  if (reached) {
+    std::cerr << "the wait passed although the predicate is never true\n";
+    return false;
+  }
+  if (log.find("audio_service_tests.cpp:") == std::string::npos)
+    return ReportMissing(log, "audio_service_tests.cpp:");
+  if (log.find("ran out") == std::string::npos)
+    return ReportMissing(log, "ran out");
+  if (log.find("of a budget of 5") == std::string::npos)
+    return ReportMissing(log, "of a budget of 5");
+  if (log.find("elapsed") == std::string::npos)
+    return ReportMissing(log, "elapsed");
   return true;
 }
 
@@ -4902,6 +4948,8 @@ int main() {
        &TestSupervisorLoopCounterDetectsReplacedSleepHook},
       {"supervisor loop counter caps the wall-clock time",
        &TestSupervisorLoopCounterCapsTheWallClock},
+      {"supervisor loop counter reports an exhausted budget",
+       &TestSupervisorLoopCounterReportsAnExhaustedBudget},
       {"pactl load-module quotes vector arguments",
        &TestPactlLoadModuleQuotesVectorArguments},
       {"pactl load-module string compatibility splitter",
