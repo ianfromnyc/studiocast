@@ -12,6 +12,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <source_location>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -161,6 +163,351 @@ bool WaitUntil(const std::function<bool()> &pred,
     std::this_thread::sleep_for(1ms);
   }
   return pred();
+}
+
+// Counts the supervisor loops of a `VirtualAudioService`.
+//
+// The service calls the `sleep_for` hook one time at the end of each loop,
+// thus a new count shows that the loop published its status. Tests that
+// measure the progress of the service in loops, and not in wall-clock time,
+// keep the same number of chances on a busy machine as on an idle one.
+//
+// A test that follows a wait with a fixed "settle" window keeps its meaning.
+// The wait ends at the service event that makes the predicate true, and the
+// service sets each retry deadline to `now + delay` at that same event, and
+// never at `Start()`. A wait that needs more loops thus moves the event and
+// the window that follows it together, and each settle window stays shorter
+// than the backoff that it must not cross.
+//
+// The check for a detached hook has one known limit: it asks if a copy of
+// the counting hook is alive, thus a test that keeps an unused copy and then
+// replaces `sleep_for` detaches the counter without a report.
+class SupervisorLoopCounter final {
+public:
+  // Installs the sleep hook that counts the loops. Call this after the test
+  // sets the other hooks, because it replaces `sleep_for`. `WaitUntil` finds
+  // an assignment that comes later and fails the test.
+  void HookSleep(VirtualAudioServiceHooks *hooks) {
+    auto inner = std::move(hooks->sleep_for);
+    hooks->sleep_for = [this, inner,
+                        token = token_](std::chrono::milliseconds delay) {
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        ++count_;
+      }
+      cv_.notify_all();
+      if (inner) {
+        inner(delay);
+        return;
+      }
+      // The service clamps `poll_ms` to a minimum of 25 ms, thus `delay` is
+      // always 25 ms. Ignore it, as the replaced hooks did: a short sleep
+      // keeps the supervisor fast without a busy loop.
+      std::this_thread::sleep_for(1ms);
+    };
+  }
+
+  // Shortens the safety timeouts. Only the self-tests of this class use it.
+  void SetTimeoutsForTesting(std::chrono::milliseconds stall,
+                             std::chrono::milliseconds cap) {
+    stall_timeout_ = stall;
+    wall_clock_cap_ = cap;
+  }
+
+  // Waits until `pred` is true. Gives the supervisor up to `max_loops` more
+  // loops in place of a wall-clock deadline: CPU load changes how long a loop
+  // takes, but not how many chances the service gets. The wall-clock cap is
+  // the second bound, and it stops a hung predicate. A wait that stops
+  // before the predicate is true prints why, and where the wait was.
+  bool WaitUntil(
+      const std::function<bool()> &pred, int max_loops,
+      const std::source_location loc = std::source_location::current()) const {
+    const auto start = std::chrono::steady_clock::now();
+    // The counter counts the loops of the whole test. Only the loops after
+    // this point are of this wait, thus each report subtracts the loops that
+    // came before. A report of the total would compare a number of many
+    // waits with the budget of one.
+    const long long loops_at_start = LoopCount();
+    const auto deadline = start + wall_clock_cap_;
+    if (!HookIsInstalled()) {
+      Report("the counting sleep hook is gone; call HookSleep after the test "
+             "sets the other hooks, and never assign sleep_for later",
+             loc, LoopCount() - loops_at_start, max_loops, start);
+      return false;
+    }
+    for (int i = 0; i < max_loops; ++i) {
+      long long seen = 0;
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        seen = count_;
+      }
+      if (pred())
+        return true;
+      std::unique_lock<std::mutex> lock(mu_);
+      const std::chrono::nanoseconds left =
+          deadline - std::chrono::steady_clock::now();
+      if (left > std::chrono::nanoseconds::zero() &&
+          cv_.wait_for(lock,
+                       std::min<std::chrono::nanoseconds>(stall_timeout_, left),
+                       [&] { return count_ > seen; }))
+        continue;
+      const long long done = count_;
+      lock.unlock();
+      if (std::chrono::steady_clock::now() >= deadline)
+        Report("the wait reached the wall-clock cap of " +
+                   std::to_string(wall_clock_cap_.count()) + " ms",
+               loc, done - loops_at_start, max_loops, start);
+      else
+        Report("no supervisor loop in " +
+                   std::to_string(stall_timeout_.count()) + " ms",
+               loc, done - loops_at_start, max_loops, start);
+      return pred();
+    }
+    // The budget is the third way to stop short. The supervisor is healthy,
+    // thus the loop count tells whether the budget was the bound.
+    if (pred())
+      return true;
+    Report("the budget of supervisor loops ran out", loc,
+           LoopCount() - loops_at_start, max_loops, start);
+    return false;
+  }
+
+private:
+  // True while a copy of the counting hook is alive. An assignment to
+  // `hooks.sleep_for` after `HookSleep` destroys the last copy, thus the
+  // token shows that the counter no longer sees the loops.
+  bool HookIsInstalled() const { return token_.use_count() > 1; }
+
+  long long LoopCount() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return count_;
+  }
+
+  // Prints why a wait stopped early. The source location tells which of the
+  // many waits it was, and `loops` is the number of loops of that wait.
+  void Report(const std::string &reason, const std::source_location &loc,
+              long long loops, int max_loops,
+              std::chrono::steady_clock::time_point start) const {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+    std::string file(loc.file_name());
+    const auto slash = file.find_last_of('/');
+    if (slash != std::string::npos)
+      file = file.substr(slash + 1);
+    std::cerr << "supervisor loop counter: " << reason << " at " << file << ":"
+              << loc.line() << "; " << loops << " loops done of a budget of "
+              << max_loops << ", elapsed " << elapsed.count() << " ms\n";
+  }
+
+  // Safety net for a supervisor that stopped or is stuck. Only a failed test
+  // waits this long.
+  std::chrono::milliseconds stall_timeout_{std::chrono::seconds(10)};
+
+  // Second bound of a wait. A predicate that hangs cannot keep CI for the
+  // budget of loops multiplied by the stall timeout.
+  std::chrono::milliseconds wall_clock_cap_{std::chrono::seconds(60)};
+
+  // Held by the counter and by every live copy of the counting hook.
+  std::shared_ptr<const int> token_ = std::make_shared<const int>(0);
+
+  mutable std::mutex mu_;
+  mutable std::condition_variable cv_;
+  long long count_ = 0;
+};
+
+// Collects what the code under test writes to `std::cerr`.
+class ScopedCerrCapture final {
+public:
+  ScopedCerrCapture() : old_(std::cerr.rdbuf(buffer_.rdbuf())) {}
+
+  ~ScopedCerrCapture() { std::cerr.rdbuf(old_); }
+
+  ScopedCerrCapture(const ScopedCerrCapture &) = delete;
+  ScopedCerrCapture &operator=(const ScopedCerrCapture &) = delete;
+
+  std::string text() const { return buffer_.str(); }
+
+private:
+  std::ostringstream buffer_;
+  std::streambuf *old_;
+};
+
+bool ReportMissing(const std::string &log, const std::string &needle) {
+  std::cerr << "the stall report has no '" << needle << "'; report was '" << log
+            << "'\n";
+  return false;
+}
+
+// Gives a wait a supervisor that does `loops` more loops and then stops. The
+// predicate is never true, thus each test of it that is inside the budget
+// gives the wait one loop. The count is exact, which no free-running thread
+// can promise.
+std::function<bool()>
+SupervisorThatStopsAfter(int loops, VirtualAudioServiceHooks *hooks) {
+  auto done = std::make_shared<int>(0);
+  return [done, loops, hooks] {
+    if (*done < loops) {
+      ++*done;
+      hooks->sleep_for(25ms);
+    }
+    return false;
+  };
+}
+
+// A supervisor that stops to loop must give a report that shows where the
+// test waited, how many loops the service did, and how long the wait was.
+// The loops are the loops of this wait: the counter also holds the loops of
+// the test before the wait, and that larger number has no meaning here.
+bool TestSupervisorLoopCounterReportsStall() {
+  SupervisorLoopCounter loops;
+  loops.SetTimeoutsForTesting(100ms, 60s);
+
+  VirtualAudioServiceHooks hooks;
+  loops.HookSleep(&hooks);
+  for (int i = 0; i < 3; ++i)
+    hooks.sleep_for(25ms);
+
+  std::string log;
+  bool reached = true;
+  {
+    ScopedCerrCapture capture;
+    reached = loops.WaitUntil(SupervisorThatStopsAfter(3, &hooks), 5);
+    log = capture.text();
+  }
+
+  if (reached) {
+    std::cerr << "the wait passed although the predicate is never true\n";
+    return false;
+  }
+  if (log.find("audio_service_tests.cpp:") == std::string::npos)
+    return ReportMissing(log, "audio_service_tests.cpp:");
+  if (log.find("3 loops done of a budget of 5") == std::string::npos)
+    return ReportMissing(log, "3 loops done of a budget of 5");
+  if (log.find("elapsed") == std::string::npos)
+    return ReportMissing(log, "elapsed");
+  return true;
+}
+
+// An assignment to `sleep_for` after `HookSleep` detaches the counter. The
+// wait must find it at once, and not pass because the predicate is already
+// true.
+bool TestSupervisorLoopCounterDetectsReplacedSleepHook() {
+  SupervisorLoopCounter loops;
+  loops.SetTimeoutsForTesting(5s, 60s);
+
+  VirtualAudioServiceHooks hooks;
+  loops.HookSleep(&hooks);
+  hooks.sleep_for = [](std::chrono::milliseconds) {};
+
+  std::string log;
+  bool reached = true;
+  const auto start = std::chrono::steady_clock::now();
+  {
+    ScopedCerrCapture capture;
+    reached = loops.WaitUntil([] { return true; }, 5);
+    log = capture.text();
+  }
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+
+  if (reached) {
+    std::cerr << "the wait passed although the counter is detached\n";
+    return false;
+  }
+  if (elapsed > 1s) {
+    std::cerr << "the wait took " << elapsed.count()
+              << " ms; it must not wait for the stall timeout\n";
+    return false;
+  }
+  if (log.find("HookSleep") == std::string::npos)
+    return ReportMissing(log, "HookSleep");
+  return true;
+}
+
+// A loop budget alone lets a wait run for `max_loops` stall timeouts. A
+// second bound in wall-clock time keeps a broken build inside a normal CI
+// step.
+bool TestSupervisorLoopCounterCapsTheWallClock() {
+  SupervisorLoopCounter loops;
+  loops.SetTimeoutsForTesting(30s, 200ms);
+
+  VirtualAudioServiceHooks hooks;
+  loops.HookSleep(&hooks);
+  std::atomic<bool> stop{false};
+  std::thread supervisor([&] {
+    while (!stop.load(std::memory_order_relaxed))
+      hooks.sleep_for(25ms);
+  });
+
+  std::string log;
+  bool reached = true;
+  const auto start = std::chrono::steady_clock::now();
+  {
+    ScopedCerrCapture capture;
+    reached = loops.WaitUntil([] { return false; }, 3000);
+    log = capture.text();
+  }
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+  stop.store(true, std::memory_order_relaxed);
+  supervisor.join();
+
+  if (reached) {
+    std::cerr << "the wait passed although the predicate is never true\n";
+    return false;
+  }
+  if (elapsed > 2s) {
+    std::cerr << "the wait took " << elapsed.count()
+              << " ms; the wall-clock cap did not stop it\n";
+    return false;
+  }
+  if (log.find("wall-clock") == std::string::npos)
+    return ReportMissing(log, "wall-clock");
+  return true;
+}
+
+// A healthy supervisor that loops the whole budget is the likely failure.
+// The report must show that the budget was the bound, and not leave the
+// reader to guess why the wait stopped. The report must also count only the
+// loops of this wait: the counter lives as long as the test, thus a report
+// of its total gives a number that the budget cannot explain.
+bool TestSupervisorLoopCounterReportsAnExhaustedBudget() {
+  SupervisorLoopCounter loops;
+  loops.SetTimeoutsForTesting(30s, 60s);
+
+  VirtualAudioServiceHooks hooks;
+  loops.HookSleep(&hooks);
+  constexpr int kBudget = 5;
+
+  // A first wait uses its whole budget and thus puts 5 loops in the counter.
+  // The wait that follows must still report 5 loops, and not the total of 10.
+  {
+    ScopedCerrCapture capture;
+    loops.WaitUntil(SupervisorThatStopsAfter(kBudget, &hooks), kBudget);
+  }
+
+  std::string log;
+  bool reached = true;
+  {
+    ScopedCerrCapture capture;
+    reached =
+        loops.WaitUntil(SupervisorThatStopsAfter(kBudget, &hooks), kBudget);
+    log = capture.text();
+  }
+
+  if (reached) {
+    std::cerr << "the wait passed although the predicate is never true\n";
+    return false;
+  }
+  if (log.find("audio_service_tests.cpp:") == std::string::npos)
+    return ReportMissing(log, "audio_service_tests.cpp:");
+  if (log.find("ran out") == std::string::npos)
+    return ReportMissing(log, "ran out");
+  if (log.find("5 loops done of a budget of 5") == std::string::npos)
+    return ReportMissing(log, "5 loops done of a budget of 5");
+  if (log.find("elapsed") == std::string::npos)
+    return ReportMissing(log, "elapsed");
+  return true;
 }
 
 AudioConsumerSnapshot ConsumerSnapshot(bool present, int count = 1) {
@@ -1273,6 +1620,7 @@ bool TestVirtualAudioServiceReportsResolvedAutoSourceAndWarnings() {
   std::atomic<int> pipeline_creates{0};
   std::string pipeline_source;
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -1303,9 +1651,7 @@ bool TestVirtualAudioServiceReportsResolvedAutoSourceAndWarnings() {
     };
     return std::make_unique<CapturingPipeline>(&pipeline_source);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -1321,7 +1667,7 @@ bool TestVirtualAudioServiceReportsResolvedAutoSourceAndWarnings() {
     return false;
   }
 
-  const bool resolved = WaitUntil(
+  const bool resolved = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_creates.load(std::memory_order_relaxed) == 1 &&
@@ -1329,7 +1675,7 @@ bool TestVirtualAudioServiceReportsResolvedAutoSourceAndWarnings() {
                status.selected_source == "alsa_input.usb_service_mic" &&
                status.source_error.empty() && !status.source_warnings.empty();
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -1370,10 +1716,9 @@ bool TestVirtualAudioServicePreservesUnavailableConfiguredSource() {
     return ExecResult(99, "unexpected command: " + command);
   });
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -1388,7 +1733,7 @@ bool TestVirtualAudioServicePreservesUnavailableConfiguredSource() {
     return false;
   }
 
-  const bool reported = WaitUntil(
+  const bool reported = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return status.selected_source == "alsa_input.disconnected_mic" &&
@@ -1396,7 +1741,7 @@ bool TestVirtualAudioServicePreservesUnavailableConfiguredSource() {
                status.source_error.find("not currently available") !=
                    std::string::npos;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   const auto preservedConfig = service.Config();
   service.Stop();
@@ -2044,6 +2389,7 @@ bool TestMicrophonePipelineDoesNotStartWithoutConsumer() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<bool> mic_consumer_present{false};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -2051,9 +2397,7 @@ bool TestMicrophonePipelineDoesNotStartWithoutConsumer() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2069,14 +2413,14 @@ bool TestMicrophonePipelineDoesNotStartWithoutConsumer() {
     return false;
   }
 
-  const bool saw_idle = WaitUntil(
+  const bool saw_idle = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return status.pipeline_state == "idle_no_consumer" &&
                !status.pipeline_active_needed && !status.pipeline_running &&
                !status.mic_consumer_present;
       },
-      250ms);
+      250);
   std::this_thread::sleep_for(30ms);
   const int creates = pipeline_creates.load(std::memory_order_relaxed);
   const auto status = service.Status();
@@ -2097,6 +2441,7 @@ bool TestMicrophonePipelineStartsWhenConsumerAppears() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<bool> mic_consumer_present{false};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -2104,9 +2449,7 @@ bool TestMicrophonePipelineStartsWhenConsumerAppears() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2122,16 +2465,16 @@ bool TestMicrophonePipelineStartsWhenConsumerAppears() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] { return service.Status().pipeline_state == "idle_no_consumer"; },
-          250ms)) {
+          250)) {
     std::cerr << "microphone pipeline did not reach no-consumer idle state\n";
     service.Stop();
     return false;
   }
 
   mic_consumer_present.store(true, std::memory_order_relaxed);
-  const bool started = WaitUntil(
+  const bool started = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_creates.load(std::memory_order_relaxed) >= 1 &&
@@ -2139,7 +2482,7 @@ bool TestMicrophonePipelineStartsWhenConsumerAppears() {
                status.pipeline_state == "running" &&
                status.mic_consumer_present;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -2159,6 +2502,7 @@ bool TestMicrophonePipelineStopsWhenConsumerDisappears() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -2166,9 +2510,7 @@ bool TestMicrophonePipelineStopsWhenConsumerDisappears() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2184,19 +2526,19 @@ bool TestMicrophonePipelineStopsWhenConsumerDisappears() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             return pipeline_creates.load(std::memory_order_relaxed) >= 1 &&
                    service.Status().pipeline_running;
           },
-          250ms)) {
+          250)) {
     std::cerr << "microphone pipeline did not start before consumer vanished\n";
     service.Stop();
     return false;
   }
 
   mic_consumer_present.store(false, std::memory_order_relaxed);
-  const bool stopped = WaitUntil(
+  const bool stopped = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_stops.load(std::memory_order_relaxed) >= 1 &&
@@ -2204,7 +2546,7 @@ bool TestMicrophonePipelineStopsWhenConsumerDisappears() {
                status.pipeline_state == "idle_no_consumer" &&
                !status.pipeline_active_needed;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -2224,6 +2566,7 @@ bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -2231,9 +2574,7 @@ bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2249,14 +2590,14 @@ bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return pipeline_creates.load(std::memory_order_relaxed) == 1 &&
                    status.pipeline_running &&
                    status.pipeline_state == "running";
           },
-          250ms)) {
+          250)) {
     std::cerr << "microphone pipeline did not start before flapping test\n";
     service.Stop();
     return false;
@@ -2280,12 +2621,12 @@ bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
     }
 
     mic_consumer_present.store(true, std::memory_order_relaxed);
-    if (!WaitUntil(
+    if (!loops.WaitUntil(
             [&] {
               const auto status = service.Status();
               return status.pipeline_running && status.mic_consumer_present;
             },
-            100ms)) {
+            100)) {
       std::cerr << "microphone consumer did not recover during flap cycle\n";
       service.Stop();
       return false;
@@ -2302,14 +2643,14 @@ bool TestMicrophoneGraceWindowAbsorbsConsumerFlapping() {
   }
 
   mic_consumer_present.store(false, std::memory_order_relaxed);
-  const bool stopped = WaitUntil(
+  const bool stopped = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_stops.load(std::memory_order_relaxed) == 1 &&
                !status.pipeline_running && !status.pipeline_active_needed &&
                status.pipeline_state == "idle_no_consumer";
       },
-      700ms);
+      700);
   const auto status = service.Status();
   service.Stop();
 
@@ -2330,6 +2671,7 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<int> detection_stage{0};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   hooks.detect_microphone_consumers = [&] {
     AudioConsumerSnapshot out;
@@ -2348,9 +2690,7 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2366,7 +2706,7 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return status.pipeline_state == "idle_no_consumer" &&
@@ -2374,7 +2714,7 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
                        std::string::npos &&
                    pipeline_creates.load(std::memory_order_relaxed) == 0;
           },
-          250ms)) {
+          250)) {
     const auto status = service.Status();
     std::cerr << "microphone detection error was not surfaced; state='"
               << status.pipeline_state << "' error='"
@@ -2385,7 +2725,7 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
   }
 
   detection_stage.store(1, std::memory_order_relaxed);
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return status.pipeline_state == "idle_no_consumer" &&
@@ -2393,7 +2733,7 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
                        std::string::npos &&
                    pipeline_creates.load(std::memory_order_relaxed) == 0;
           },
-          250ms)) {
+          250)) {
     const auto status = service.Status();
     std::cerr << "missing virtual mic source was not surfaced; state='"
               << status.pipeline_state << "' error='"
@@ -2404,14 +2744,14 @@ bool TestMicrophoneConsumerDetectionRecoversAfterErrors() {
   }
 
   detection_stage.store(2, std::memory_order_relaxed);
-  const bool recovered = WaitUntil(
+  const bool recovered = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_creates.load(std::memory_order_relaxed) == 1 &&
                status.pipeline_running && status.pipeline_state == "running" &&
                status.mic_consumer_present && status.mic_consumer_error.empty();
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -2433,6 +2773,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> speaker_consumer_present{false};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -2452,9 +2793,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2473,7 +2812,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
     return false;
   }
 
-  const bool saw_idle = WaitUntil(
+  const bool saw_idle = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return status.speakers_pipeline_state == "idle_no_consumer" &&
@@ -2481,7 +2820,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
                !status.speakers_pipeline_running &&
                !status.speakers_consumer_present;
       },
-      250ms);
+      250);
   std::this_thread::sleep_for(30ms);
   if (!saw_idle || pipeline_creates.load(std::memory_order_relaxed) != 0) {
     const auto status = service.Status();
@@ -2494,7 +2833,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
   }
 
   speaker_consumer_present.store(true, std::memory_order_relaxed);
-  const bool started = WaitUntil(
+  const bool started = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_creates.load(std::memory_order_relaxed) >= 1 &&
@@ -2502,7 +2841,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
                status.speakers_pipeline_active_needed &&
                status.speakers_pipeline_state == "running";
       },
-      250ms);
+      250);
   if (!started) {
     const auto status = service.Status();
     std::cerr << "speaker pipeline did not start after consumer appeared; "
@@ -2514,7 +2853,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
   }
 
   speaker_consumer_present.store(false, std::memory_order_relaxed);
-  const bool stopped = WaitUntil(
+  const bool stopped = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_stops.load(std::memory_order_relaxed) >= 1 &&
@@ -2522,7 +2861,7 @@ bool TestSpeakerPipelineFollowsConsumerGate() {
                status.speakers_pipeline_state == "idle_no_consumer" &&
                !status.speakers_pipeline_active_needed;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -2542,6 +2881,7 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> speaker_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -2561,9 +2901,7 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2582,14 +2920,14 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return pipeline_creates.load(std::memory_order_relaxed) == 1 &&
                    status.speakers_pipeline_running &&
                    status.speakers_pipeline_state == "running";
           },
-          250ms)) {
+          250)) {
     std::cerr << "speaker pipeline did not start before flapping test\n";
     service.Stop();
     return false;
@@ -2613,13 +2951,13 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
     }
 
     speaker_consumer_present.store(true, std::memory_order_relaxed);
-    if (!WaitUntil(
+    if (!loops.WaitUntil(
             [&] {
               const auto status = service.Status();
               return status.speakers_pipeline_running &&
                      status.speakers_consumer_present;
             },
-            100ms)) {
+            100)) {
       std::cerr << "speaker consumer did not recover during flap cycle\n";
       service.Stop();
       return false;
@@ -2636,7 +2974,7 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
   }
 
   speaker_consumer_present.store(false, std::memory_order_relaxed);
-  const bool stopped = WaitUntil(
+  const bool stopped = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_stops.load(std::memory_order_relaxed) == 1 &&
@@ -2644,7 +2982,7 @@ bool TestSpeakerGraceWindowAbsorbsConsumerFlapping() {
                !status.speakers_pipeline_active_needed &&
                status.speakers_pipeline_state == "idle_no_consumer";
       },
-      700ms);
+      700);
   const auto status = service.Status();
   service.Stop();
 
@@ -2665,6 +3003,7 @@ bool TestSpeakerLoopbackPassThroughStatusIsNotConsumerGated() {
   std::atomic<int> loopback_start_calls{0};
   std::atomic<int> speaker_detection_calls{0};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   hooks.create_virtual_speaker = [](std::string *error) {
     if (error)
@@ -2682,9 +3021,7 @@ bool TestSpeakerLoopbackPassThroughStatusIsNotConsumerGated() {
     speaker_detection_calls.fetch_add(1, std::memory_order_relaxed);
     return ConsumerSnapshot(false, 0);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2702,7 +3039,7 @@ bool TestSpeakerLoopbackPassThroughStatusIsNotConsumerGated() {
     return false;
   }
 
-  const bool active = WaitUntil(
+  const bool active = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return loopback_start_calls.load(std::memory_order_relaxed) >= 1 &&
@@ -2712,7 +3049,7 @@ bool TestSpeakerLoopbackPassThroughStatusIsNotConsumerGated() {
                status.speakers_pipeline_idle_reason ==
                    "Speaker processing is not requested.";
       },
-      250ms);
+      250);
   std::this_thread::sleep_for(30ms);
   const auto status = service.Status();
   const int detections =
@@ -2744,6 +3081,7 @@ bool TestMicrophonePipelineRestartsWhenWorkerDies() {
   std::atomic<int> sleep_calls{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -2755,6 +3093,7 @@ bool TestMicrophonePipelineRestartsWhenWorkerDies() {
     sleep_calls.fetch_add(1, std::memory_order_relaxed);
     std::this_thread::sleep_for(1ms);
   };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2771,7 +3110,7 @@ bool TestMicrophonePipelineRestartsWhenWorkerDies() {
   }
 
   const bool restarted =
-      WaitUntil([&] { return pipeline_creates.load() >= 2; }, 250ms);
+      loops.WaitUntil([&] { return pipeline_creates.load() >= 2; }, 250);
   service.Stop();
 
   if (!restarted) {
@@ -2795,6 +3134,7 @@ bool TestMicrophonePipelinePreservesWorkerDeathError() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -2807,9 +3147,7 @@ bool TestMicrophonePipelinePreservesWorkerDeathError() {
     }
     return std::make_unique<FixedStatsPipeline>(true, "", &pipeline_stops);
   };
-  hooks.sleep_for = [&](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2826,7 +3164,7 @@ bool TestMicrophonePipelinePreservesWorkerDeathError() {
   }
 
   const bool restarted =
-      WaitUntil([&] { return pipeline_creates.load() >= 2; }, 250ms);
+      loops.WaitUntil([&] { return pipeline_creates.load() >= 2; }, 250);
   const auto status = service.Status();
   service.Stop();
 
@@ -2920,15 +3258,14 @@ bool TestStatusDoesNotBlockDuringRetrySleep() {
 
 bool TestMicrophoneNullPipelineFactoryFailsWithoutCrash() {
   std::atomic<bool> mic_consumer_present{true};
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
       [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     return nullptr;
   };
-  hooks.sleep_for = [&](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -2944,14 +3281,14 @@ bool TestMicrophoneNullPipelineFactoryFailsWithoutCrash() {
     return false;
   }
 
-  const bool saw_error = WaitUntil(
+  const bool saw_error = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return !status.pipeline_running &&
                status.last_error.find("pipeline factory returned null") !=
                    std::string::npos;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -2970,6 +3307,7 @@ bool TestSpeakerPipelineStartFailureClearsRouteState() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<bool> speaker_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -2989,9 +3327,7 @@ bool TestSpeakerPipelineStartFailureClearsRouteState() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<StartFailPipeline>();
   };
-  hooks.sleep_for = [&](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3010,13 +3346,13 @@ bool TestSpeakerPipelineStartFailureClearsRouteState() {
     return false;
   }
 
-  const bool saw_failure = WaitUntil(
+  const bool saw_failure = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return status.speakers_pipeline_last_error.find(
                    "synthetic start failure") != std::string::npos;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -3042,6 +3378,7 @@ bool TestOpenAudioFailureCooldownAvoidsRestartChurn() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.probe_microphone_backend_availability =
@@ -3055,9 +3392,7 @@ bool TestOpenAudioFailureCooldownAvoidsRestartChurn() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [&](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3079,7 +3414,7 @@ bool TestOpenAudioFailureCooldownAvoidsRestartChurn() {
   }
 
   const bool started_fallback =
-      WaitUntil([&] { return pipeline_creates.load() >= 1; }, 250ms);
+      loops.WaitUntil([&] { return pipeline_creates.load() >= 1; }, 250);
   std::this_thread::sleep_for(75ms);
   const int creates_after_cooldown_window = pipeline_creates.load();
   const auto status = service.Status();
@@ -3114,6 +3449,7 @@ bool TestForcedMaxineMicrophoneFailureFallsBackToPassthrough() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.probe_microphone_backend_availability =
@@ -3129,9 +3465,7 @@ bool TestForcedMaxineMicrophoneFailureFallsBackToPassthrough() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3150,7 +3484,7 @@ bool TestForcedMaxineMicrophoneFailureFallsBackToPassthrough() {
     return false;
   }
 
-  const bool started_fallback = WaitUntil(
+  const bool started_fallback = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return pipeline_creates.load(std::memory_order_relaxed) >= 1 &&
@@ -3159,7 +3493,7 @@ bool TestForcedMaxineMicrophoneFailureFallsBackToPassthrough() {
                status.effects_note.find("using pass-through") !=
                    std::string::npos;
       },
-      300ms);
+      300);
   std::this_thread::sleep_for(75ms);
   const int creates_after_settle =
       pipeline_creates.load(std::memory_order_relaxed);
@@ -3189,6 +3523,7 @@ bool TestMicrophoneAvailabilityCacheIgnoresSpeakerOnlyChanges() {
   std::atomic<int> mic_probes{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.probe_microphone_backend_availability =
@@ -3203,9 +3538,7 @@ bool TestMicrophoneAvailabilityCacheIgnoresSpeakerOnlyChanges() {
       [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3221,7 +3554,7 @@ bool TestMicrophoneAvailabilityCacheIgnoresSpeakerOnlyChanges() {
     return false;
   }
 
-  if (!WaitUntil([&] { return mic_probes.load() >= 1; }, 250ms)) {
+  if (!loops.WaitUntil([&] { return mic_probes.load() >= 1; }, 250)) {
     std::cerr << "microphone availability was not probed\n";
     service.Stop();
     return false;
@@ -3249,6 +3582,7 @@ bool TestSpeakerAvailabilityCacheIgnoresMicrophoneOnlyChanges() {
   std::atomic<int> speaker_probes{0};
   std::atomic<bool> speaker_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -3268,9 +3602,7 @@ bool TestSpeakerAvailabilityCacheIgnoresMicrophoneOnlyChanges() {
       [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3288,7 +3620,7 @@ bool TestSpeakerAvailabilityCacheIgnoresMicrophoneOnlyChanges() {
     return false;
   }
 
-  if (!WaitUntil([&] { return speaker_probes.load() >= 1; }, 250ms)) {
+  if (!loops.WaitUntil([&] { return speaker_probes.load() >= 1; }, 250)) {
     std::cerr << "speaker availability was not probed\n";
     service.Stop();
     return false;
@@ -3317,6 +3649,7 @@ bool TestMicrophoneDeadWorkerBacksOffBeforeRestart() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> mic_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookMicrophoneConsumerFlag(&hooks, &mic_consumer_present);
   hooks.create_pipeline =
@@ -3324,9 +3657,7 @@ bool TestMicrophoneDeadWorkerBacksOffBeforeRestart() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<DeadPipeline>(&pipeline_stops);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3342,7 +3673,7 @@ bool TestMicrophoneDeadWorkerBacksOffBeforeRestart() {
     return false;
   }
 
-  if (!WaitUntil([&] { return pipeline_creates.load() >= 1; }, 250ms)) {
+  if (!loops.WaitUntil([&] { return pipeline_creates.load() >= 1; }, 250)) {
     std::cerr << "microphone pipeline was not started\n";
     service.Stop();
     return false;
@@ -3351,7 +3682,7 @@ bool TestMicrophoneDeadWorkerBacksOffBeforeRestart() {
   std::this_thread::sleep_for(40ms);
   const int creates_during_backoff = pipeline_creates.load();
   const bool restarted =
-      WaitUntil([&] { return pipeline_creates.load() >= 2; }, 300ms);
+      loops.WaitUntil([&] { return pipeline_creates.load() >= 2; }, 300);
   service.Stop();
 
   if (creates_during_backoff != 1) {
@@ -3374,6 +3705,7 @@ bool TestSpeakerDeadWorkerBacksOffAndClearsRoute() {
   std::atomic<int> pipeline_stops{0};
   std::atomic<bool> speaker_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -3393,9 +3725,7 @@ bool TestSpeakerDeadWorkerBacksOffAndClearsRoute() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<DeadPipeline>(&pipeline_stops);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3414,13 +3744,13 @@ bool TestSpeakerDeadWorkerBacksOffAndClearsRoute() {
     return false;
   }
 
-  if (!WaitUntil([&] { return pipeline_creates.load() >= 1; }, 250ms)) {
+  if (!loops.WaitUntil([&] { return pipeline_creates.load() >= 1; }, 250)) {
     std::cerr << "speaker pipeline was not started\n";
     service.Stop();
     return false;
   }
 
-  const bool saw_inactive = WaitUntil(
+  const bool saw_inactive = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return !status.speakers_routing_active &&
@@ -3428,11 +3758,11 @@ bool TestSpeakerDeadWorkerBacksOffAndClearsRoute() {
                status.speakers_pipeline_last_error.find(
                    "Speaker audio pipeline stopped") != std::string::npos;
       },
-      250ms);
+      250);
   std::this_thread::sleep_for(40ms);
   const int creates_during_backoff = pipeline_creates.load();
   const bool restarted =
-      WaitUntil([&] { return pipeline_creates.load() >= 2; }, 300ms);
+      loops.WaitUntil([&] { return pipeline_creates.load() >= 2; }, 300);
   service.Stop();
 
   if (!saw_inactive) {
@@ -3469,6 +3799,7 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
   synthetic_stats.pulse_latency_us_max = 3000;
   synthetic_stats.resync_events = 4;
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -3488,9 +3819,7 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
           AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
     return std::make_unique<FixedStatsPipeline>(synthetic_stats);
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3508,13 +3837,13 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
     return false;
   }
 
-  const bool saw_stats = WaitUntil(
+  const bool saw_stats = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return status.speakers_pipeline_frames_processed == 123 &&
                status.speakers_pipeline_pulse_latency_us_max == 3000;
       },
-      250ms);
+      250);
   if (!saw_stats) {
     const auto status = service.Status();
     std::cerr << "speaker pipeline stats were not published; frames="
@@ -3526,7 +3855,7 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
 
   cfg.speakers_enabled = false;
   service.UpdateConfig(cfg);
-  const bool cleared = WaitUntil(
+  const bool cleared = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return status.speakers_route_mode == "off" &&
@@ -3538,7 +3867,7 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
                status.speakers_pipeline_pulse_latency_us_max == 0 &&
                status.speakers_pipeline_resync_events == 0;
       },
-      250ms);
+      250);
   const auto status = service.Status();
   service.Stop();
 
@@ -3558,6 +3887,7 @@ bool TestSpeakerPipelineStatsClearWhenProcessingDisabled() {
 bool TestSpeakerLoopbackRestartFailureClearsRouteState() {
   std::atomic<int> loopback_start_calls{0};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   hooks.create_virtual_speaker = [](std::string *error) {
     if (error)
@@ -3577,9 +3907,7 @@ bool TestSpeakerLoopbackRestartFailureClearsRouteState() {
       *error = "synthetic loopback load failure";
     return false;
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3597,14 +3925,14 @@ bool TestSpeakerLoopbackRestartFailureClearsRouteState() {
     return false;
   }
 
-  const bool first_route_active = WaitUntil(
+  const bool first_route_active = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return loopback_start_calls.load(std::memory_order_relaxed) >= 1 &&
                status.speakers_routing_active &&
                status.speakers_route_mode == "loopback";
       },
-      250ms);
+      250);
   if (!first_route_active) {
     const auto status = service.Status();
     std::cerr << "speaker loopback route did not become active; starts="
@@ -3619,7 +3947,7 @@ bool TestSpeakerLoopbackRestartFailureClearsRouteState() {
   cfg.speaker_target_sink = "other_physical_test_sink";
   service.UpdateConfig(cfg);
 
-  const bool cleared_after_failure = WaitUntil(
+  const bool cleared_after_failure = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return loopback_start_calls.load(std::memory_order_relaxed) >= 2 &&
@@ -3628,7 +3956,7 @@ bool TestSpeakerLoopbackRestartFailureClearsRouteState() {
                status.speakers_last_error.find(
                    "synthetic loopback load failure") != std::string::npos;
       },
-      250ms);
+      250);
   const int starts_after_failure =
       loopback_start_calls.load(std::memory_order_relaxed);
   std::this_thread::sleep_for(50ms);
@@ -3689,10 +4017,9 @@ bool TestSpeakerLoopbackRealHelperStopFailureKeepsOldRouteActive() {
     return ExecResult(99, "unexpected command: " + command);
   });
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3709,7 +4036,7 @@ bool TestSpeakerLoopbackRealHelperStopFailureKeepsOldRouteActive() {
     return false;
   }
 
-  const bool old_route_preserved = WaitUntil(
+  const bool old_route_preserved = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return unload_calls.load(std::memory_order_relaxed) >= 1 &&
@@ -3720,7 +4047,7 @@ bool TestSpeakerLoopbackRealHelperStopFailureKeepsOldRouteActive() {
                    "synthetic old loopback unload failure") !=
                    std::string::npos;
       },
-      250ms);
+      250);
   const int unloads_after_failure =
       unload_calls.load(std::memory_order_relaxed);
   std::this_thread::sleep_for(50ms);
@@ -3762,6 +4089,7 @@ bool TestVirtualSpeakerDestroyFailureBacksOffAndKeepsPresent() {
   std::atomic<int> create_calls{0};
   std::atomic<int> destroy_calls{0};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   hooks.create_virtual_speaker = [&](std::string *error) {
     create_calls.fetch_add(1, std::memory_order_relaxed);
@@ -3775,9 +4103,7 @@ bool TestVirtualSpeakerDestroyFailureBacksOffAndKeepsPresent() {
       *error = "synthetic virtual speaker destroy failure";
     return false;
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3794,13 +4120,13 @@ bool TestVirtualSpeakerDestroyFailureBacksOffAndKeepsPresent() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return create_calls.load(std::memory_order_relaxed) >= 1 &&
                    status.speakers_present;
           },
-          250ms)) {
+          250)) {
     std::cerr << "virtual speakers did not become present before destroy\n";
     service.Stop();
     return false;
@@ -3809,7 +4135,7 @@ bool TestVirtualSpeakerDestroyFailureBacksOffAndKeepsPresent() {
   cfg.create_virtual_speakers = false;
   service.UpdateConfig(cfg);
 
-  const bool destroy_failed = WaitUntil(
+  const bool destroy_failed = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return destroy_calls.load(std::memory_order_relaxed) >= 1 &&
@@ -3818,7 +4144,7 @@ bool TestVirtualSpeakerDestroyFailureBacksOffAndKeepsPresent() {
                    "synthetic virtual speaker destroy failure") !=
                    std::string::npos;
       },
-      250ms);
+      250);
   const int destroys_after_failure =
       destroy_calls.load(std::memory_order_relaxed);
   std::this_thread::sleep_for(50ms);
@@ -3851,6 +4177,7 @@ bool TestSpeakerLoopbackStopFailureBlocksPipelineStart() {
   std::atomic<int> pipeline_creates{0};
   std::atomic<bool> speaker_consumer_present{true};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   HookSpeakerConsumerFlag(&hooks, &speaker_consumer_present);
   hooks.create_virtual_speaker = [](std::string *error) {
@@ -3883,9 +4210,7 @@ bool TestSpeakerLoopbackStopFailureBlocksPipelineStart() {
     pipeline_creates.fetch_add(1, std::memory_order_relaxed);
     return std::make_unique<FixedStatsPipeline>(true, "");
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -3902,14 +4227,14 @@ bool TestSpeakerLoopbackStopFailureBlocksPipelineStart() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return loopback_start_calls.load(std::memory_order_relaxed) >= 1 &&
                    status.speakers_route_mode == "loopback" &&
                    status.speakers_routing_active;
           },
-          250ms)) {
+          250)) {
     const auto status = service.Status();
     std::cerr << "speaker loopback did not become active before processing "
                  "transition; starts="
@@ -3923,7 +4248,7 @@ bool TestSpeakerLoopbackStopFailureBlocksPipelineStart() {
   cfg.effects.speaker.noise_removal_enabled = true;
   service.UpdateConfig(cfg);
 
-  const bool stop_failed = WaitUntil(
+  const bool stop_failed = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return loopback_stop_calls.load(std::memory_order_relaxed) >= 1 &&
@@ -3934,7 +4259,7 @@ bool TestSpeakerLoopbackStopFailureBlocksPipelineStart() {
                status.speakers_last_error.find("synthetic loopback stop "
                                                "failure") != std::string::npos;
       },
-      250ms);
+      250);
   const int stops_after_failure =
       loopback_stop_calls.load(std::memory_order_relaxed);
   std::this_thread::sleep_for(30ms);
@@ -3977,6 +4302,7 @@ bool TestSpeakerLoopbackStopFailurePreventsDestroyAndKeepsRoute() {
   std::atomic<int> loopback_stop_calls{0};
   std::atomic<int> destroy_calls{0};
 
+  SupervisorLoopCounter loops;
   VirtualAudioServiceHooks hooks;
   hooks.create_virtual_speaker = [](std::string *error) {
     if (error)
@@ -4002,9 +4328,7 @@ bool TestSpeakerLoopbackStopFailurePreventsDestroyAndKeepsRoute() {
       error->clear();
     return true;
   };
-  hooks.sleep_for = [](std::chrono::milliseconds) {
-    std::this_thread::sleep_for(1ms);
-  };
+  loops.HookSleep(&hooks);
 
   VirtualAudioService service(std::move(hooks));
   VirtualAudioServiceConfig cfg;
@@ -4021,14 +4345,14 @@ bool TestSpeakerLoopbackStopFailurePreventsDestroyAndKeepsRoute() {
     return false;
   }
 
-  if (!WaitUntil(
+  if (!loops.WaitUntil(
           [&] {
             const auto status = service.Status();
             return loopback_start_calls.load(std::memory_order_relaxed) >= 1 &&
                    status.speakers_route_mode == "loopback" &&
                    status.speakers_routing_active;
           },
-          250ms)) {
+          250)) {
     std::cerr << "speaker loopback did not become active before disable\n";
     service.Stop();
     return false;
@@ -4038,7 +4362,7 @@ bool TestSpeakerLoopbackStopFailurePreventsDestroyAndKeepsRoute() {
   cfg.create_virtual_speakers = false;
   service.UpdateConfig(cfg);
 
-  const bool stop_failed = WaitUntil(
+  const bool stop_failed = loops.WaitUntil(
       [&] {
         const auto status = service.Status();
         return loopback_stop_calls.load(std::memory_order_relaxed) >= 1 &&
@@ -4047,7 +4371,7 @@ bool TestSpeakerLoopbackStopFailurePreventsDestroyAndKeepsRoute() {
                status.speakers_last_error.find("synthetic loopback stop "
                                                "failure") != std::string::npos;
       },
-      250ms);
+      250);
   const int stops_after_failure =
       loopback_stop_calls.load(std::memory_order_relaxed);
   std::this_thread::sleep_for(30ms);
@@ -4649,6 +4973,14 @@ int main() {
     bool (*fn)();
     bool mock_safe_mic_source = false;
   } tests[] = {
+      {"supervisor loop counter reports a stall",
+       &TestSupervisorLoopCounterReportsStall},
+      {"supervisor loop counter detects a replaced sleep hook",
+       &TestSupervisorLoopCounterDetectsReplacedSleepHook},
+      {"supervisor loop counter caps the wall-clock time",
+       &TestSupervisorLoopCounterCapsTheWallClock},
+      {"supervisor loop counter reports an exhausted budget",
+       &TestSupervisorLoopCounterReportsAnExhaustedBudget},
       {"pactl load-module quotes vector arguments",
        &TestPactlLoadModuleQuotesVectorArguments},
       {"pactl load-module string compatibility splitter",
