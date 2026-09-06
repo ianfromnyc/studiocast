@@ -161,6 +161,10 @@ private:
   // joinable handle and both join the same worker, which is undefined
   // behaviour.
   //
+  // Stop() raises stop_ under this lock as well, thus a Start() cannot clear
+  // the flag and publish a new worker between the raise and the join.
+  // VirtualAudioService uses th_mu_ for the same two jobs.
+  //
   // Stop() holds this lock across the join on purpose. src/core/video does
   // the opposite: VideoFeed::Stop() moves the handle out under the lock and
   // joins outside it, thus a second Stop() there returns before the worker is

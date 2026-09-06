@@ -795,24 +795,35 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
 }
 
 void AudioPipeline::Stop() {
-  stop_.store(true, std::memory_order_release);
   {
-    std::lock_guard<std::mutex> lock(io_mu_);
-    if (io_) {
-      io_->RequestStop();
+    // Hold the worker lock across the raise of the stop flag, the request to
+    // the backend and the join. The lock makes those and the publish in
+    // Start() one step, thus a second Stop() caller waits here instead of
+    // joining the same worker again, and the worker that this caller joins is
+    // always one that sees the flag. Without the lock on the raise, a Start()
+    // clears the flag and publishes a new worker in between, and the join
+    // waits for a worker that nobody told to stop.
+    //
+    // The order is thread_mu_ and then io_mu_. No path takes them the other
+    // way round, thus this cannot deadlock. RequestStop() does not wait for
+    // the worker; it only marks the backend and wakes the Pulse main loop.
+    //
+    // The lock does not keep the I/O backend alive for the worker; the shared
+    // reference that ThreadMain() holds does. A Stop() that gets this lock
+    // before Start() publishes the handle skips the join and releases io_
+    // while that worker is still in Open(), thus the backend must outlive
+    // io_.
+    std::lock_guard<std::mutex> thread_lock(thread_mu_);
+    stop_.store(true, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lock(io_mu_);
+      if (io_) {
+        io_->RequestStop();
+      }
     }
-  }
-  // Hold the worker lock across the join. The lock makes the joinable test,
-  // the join and the publish in Start() one step, thus a second Stop() caller
-  // waits here instead of joining the same worker again.
-  //
-  // The lock does not keep the I/O backend alive for the worker; the shared
-  // reference that ThreadMain() holds does. A Stop() that gets this lock
-  // before Start() publishes the handle skips the join and releases io_ while
-  // that worker is still in Open(), thus the backend must outlive io_.
-  std::lock_guard<std::mutex> thread_lock(thread_mu_);
-  if (thread_.joinable()) {
-    thread_.join();
+    if (thread_.joinable()) {
+      thread_.join();
+    }
   }
   {
     std::lock_guard<std::mutex> lock(io_mu_);
