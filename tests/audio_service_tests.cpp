@@ -5831,18 +5831,17 @@ struct DoublePipelineStartFixture : DoubleStartFixture {
 };
 
 // Two Start() callers on one pipeline at the same time. The running_ guard is
-// a test and then a store, thus both callers pass it and both reach the
-// move-assign of the worker handle. A move-assign onto a joinable handle ends
-// the process with std::terminate().
+// a test and then a store, thus both callers pass it and, without the start
+// mark, both reach the move-assign of the worker handle. A move-assign onto a
+// joinable handle ends the process with std::terminate().
 //
 // The check that stops this must be live in a release build: every automated
 // configure passes -DCMAKE_BUILD_TYPE=Release, thus an assert() is in no
 // binary that CI or a package makes. The second caller must get an error.
 //
-// CreateIo() holds the I/O lock, thus a caller that is held inside it makes
-// the other caller wait for that lock and both then go to the publish
-// together. That is the widest seam Start() gives; the attempts cover the
-// rest of the window.
+// CreateIo() runs under the worker lock, thus a caller that is held inside it
+// keeps the other caller at the start mark. That is the widest seam Start()
+// gives; the attempts cover the rest of the window.
 bool TestConcurrentPipelineStartFailsAndKeepsTheProcess() {
   auto fx = std::make_shared<DoublePipelineStartFixture>();
   auto *raw = fx.get();
@@ -5893,7 +5892,7 @@ bool TestConcurrentPipelineStartFailsAndKeepsTheProcess() {
     std::thread first(starter);
     std::thread second(starter);
     // Both callers are in the lambda before either calls Start(), thus the
-    // one that does not hold the gate always reaches the I/O lock.
+    // one that does not hold the gate always reaches the start mark.
     WaitUntil(
         [&] {
           return raw->starts_entered.load(std::memory_order_acquire) == 2;
@@ -5924,8 +5923,8 @@ bool TestConcurrentPipelineStartFailsAndKeepsTheProcess() {
   }
 
   if (fx->already_starting.load(std::memory_order_relaxed) == 0) {
-    std::cerr << "no attempt ever put two Start() callers at the publish of "
-                 "the worker handle, thus the sweep proves nothing\n";
+    std::cerr << "no attempt ever put two Start() callers in Start() at the "
+                 "same time, thus the sweep proves nothing\n";
     return false;
   }
 
@@ -6065,8 +6064,8 @@ bool TestConcurrentServiceStartFailsAndKeepsTheProcess() {
   fx->service->Stop();
 
   if (fx->already_starting.load(std::memory_order_relaxed) == 0) {
-    std::cerr << "no attempt ever put two Start() callers at the publish of "
-                 "the supervisor handle, thus the sweep proves nothing\n";
+    std::cerr << "no attempt ever put two Start() callers in Start() at the "
+                 "same time, thus the sweep proves nothing\n";
     return false;
   }
 
