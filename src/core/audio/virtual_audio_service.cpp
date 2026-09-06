@@ -737,8 +737,15 @@ void VirtualAudioService::ThreadMain() {
   // for the rest of the run. A stop that failed this many times with a growing
   // wait will not work on the next try for a reason the wait can fix.
   constexpr int kMonitorLostCleanupMaxTries = 8;
+  // A cleanup that failed once is a hiccup the next try fixes, so the note
+  // waits for the second failure before it warns that the microphone may still
+  // play. Below this the warning would come and go on every lost output.
+  constexpr int kMonitorLostCleanupWarnTries = 2;
   steady_clock::time_point nextMonitorLostCleanup{};
   int monitorLostCleanupFailures = 0;
+  // The output the lost-output note names. The note is rewritten while the
+  // cleanup runs, and the resolved name is dropped with the pin.
+  std::string monitorLostSink;
   // True while the reported error belongs to a failed volume step. A later
   // step that works clears that error, and only that one.
   bool monitorVolumeFailed = false;
@@ -1329,6 +1336,31 @@ void VirtualAudioService::ThreadMain() {
           monitorSinkQuestionError = presentErr;
         return present.has_value() && !*present;
       };
+      // What the status says while the output is lost.
+      //
+      // "The monitor stopped" is only the whole truth while no loopback is
+      // left. A stop that keeps failing can leave one playing the microphone
+      // into the speakers, so the note says that too, and drops it again when
+      // a stop works. One failure is a hiccup the next try fixes, so the
+      // warning waits for the second. It stays in the note, because it is
+      // still an ordinary state the daemon explains in plain words.
+      auto monitorLostNote = [&]() {
+        std::string note = "The monitor output '" + monitorLostSink +
+                           "' disappeared, so the monitor stopped. Choose "
+                           "another output, or turn the monitor off and on "
+                           "again to use the system default.";
+        if (monitor_route_may_exist_ &&
+            monitorLostCleanupFailures >= kMonitorLostCleanupWarnTries) {
+          note += monitorLostCleanupFailures < kMonitorLostCleanupMaxTries
+                      ? " The old output is not released yet, so you may still"
+                        " hear the microphone. This clears itself when the"
+                        " sound server answers."
+                      : " The old output could not be released, so you may"
+                        " still hear the microphone. Turn the monitor off and"
+                        " on again to try once more.";
+        }
+        return note;
+      };
       // The output the monitor played on is gone, for example because the
       // headset was unplugged. A configured sink of "auto" would now resolve
       // to whatever the Pulse default has become, usually the built-in
@@ -1355,14 +1387,12 @@ void VirtualAudioService::ThreadMain() {
         monitor_output_lost_ = true;
         nextMonitorLostCleanup = steady_clock::time_point{};
         monitorLostCleanupFailures = 0;
+        monitorLostSink = std::move(lost_sink);
         monitor_sink_resolved_.clear();
         monitorStartFailures = 0;
         nextMonitorStartRetry = steady_clock::time_point{};
         setMonitorError(std::string());
-        setMonitorNote("The monitor output '" + lost_sink +
-                       "' disappeared, so the monitor stopped. Choose another "
-                       "output, or turn the monitor off and on again to use "
-                       "the system default.");
+        setMonitorNote(monitorLostNote());
       };
 
       if (!wantMonitor) {
@@ -1524,6 +1554,9 @@ void VirtualAudioService::ThreadMain() {
                 monitorNow +
                 StartFailureRetryDelay(cfg) * monitorLostCleanupFailures;
           }
+          // The cleanup says nothing of its own, but it changes what is true
+          // of the monitor, so the note follows it.
+          setMonitorNote(monitorLostNote());
         }
 
         const bool needRestart = !monitor_output_lost_ &&

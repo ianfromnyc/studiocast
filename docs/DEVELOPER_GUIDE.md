@@ -566,6 +566,12 @@ is lost, and the service stops the route again when it stops. A loopback that
 plays the microphone into the speakers cannot outlive the daemon because the
 output disappeared.
 
+The note follows that retry. "The monitor stopped" is the whole truth only
+while no loopback is left, so after the second failed cleanup the note adds
+that the microphone may still be heard, and drops the sentence again when a
+stop works. The warning stays in the note, because a user who hears the
+microphone needs plain words and not a support case.
+
 That retry ends at the top of its backoff, which the other retry loops of the
 monitor do not do. Each try blocks the audio supervisor for one `pactl`
 deadline, and only the user ends a lost output, so a retry without an end would

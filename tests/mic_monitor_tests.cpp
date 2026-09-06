@@ -1507,6 +1507,101 @@ bool TestServiceCleansUpTheLoopbackAfterALostOutput() {
   return ok;
 }
 
+// The lost-output note says the monitor stopped. While the cleanup keeps
+// failing that is not true: a loopback may still play the microphone into the
+// speakers, which is the failure the lost-output stop exists to prevent. The
+// note must say so while it lasts, and go back to the plain sentence when the
+// stop works.
+bool TestServiceSaysTheLostOutputMayStillPlay() {
+  MonitorRecorder rec;
+  std::atomic<bool> sink_gone{false};
+  std::atomic<bool> start_fails{false};
+
+  VirtualAudioServiceHooks hooks;
+  HookQuietService(&hooks);
+  HookMonitor(&hooks, &rec);
+
+  auto start_monitor = hooks.start_mic_monitor;
+  hooks.start_mic_monitor = [&](const MicMonitorConfig &cfg,
+                                const std::string &source, MicMonitorState *out,
+                                std::string *error) {
+    if (start_fails.load(std::memory_order_relaxed)) {
+      rec.starts.fetch_add(1, std::memory_order_relaxed);
+      if (error)
+        *error = "synthetic monitor start failure";
+      return false;
+    }
+    return start_monitor(cfg, source, out, error);
+  };
+  hooks.mic_monitor_sink_present = [&](const std::string &,
+                                       std::string *error) {
+    if (error)
+      error->clear();
+    return std::optional<bool>(!sink_gone.load(std::memory_order_relaxed));
+  };
+
+  VirtualAudioService service(std::move(hooks));
+  const auto cfg = MonitorServiceConfig();
+
+  std::string err;
+  if (!service.Start(cfg, &err)) {
+    std::cerr << "service.Start failed: " << err << "\n";
+    return false;
+  }
+  if (!WaitUntil([&] { return service.Status().monitor_active; }, 1000ms)) {
+    std::cerr << "the monitor did not start\n";
+    service.Stop();
+    return false;
+  }
+
+  // The sound server goes wrong and the output is gone: the loopback of the
+  // first start stays loaded, because no stop works.
+  rec.fail_detect.store(true, std::memory_order_relaxed);
+  start_fails.store(true, std::memory_order_relaxed);
+  rec.fail_stop.store(true, std::memory_order_relaxed);
+  sink_gone.store(true, std::memory_order_relaxed);
+  if (!WaitUntil(
+          [&] {
+            return service.Status().monitor_note.find("still hear") !=
+                   std::string::npos;
+          },
+          10000ms)) {
+    std::cerr << "the note said the monitor stopped while a loopback may "
+                 "still play: note='"
+              << service.Status().monitor_note << "'\n";
+    service.Stop();
+    return false;
+  }
+
+  bool ok = true;
+  if (service.Status().monitor_note.find("disappeared") == std::string::npos) {
+    std::cerr << "the note lost the sentence that says what to do: '"
+              << service.Status().monitor_note << "'\n";
+    ok = false;
+  }
+
+  // A stop that works ends it, and the note goes back to the plain sentence.
+  rec.fail_stop.store(false, std::memory_order_relaxed);
+  if (!WaitUntil(
+          [&] {
+            return service.Status().monitor_note.find("still hear") ==
+                   std::string::npos;
+          },
+          6000ms)) {
+    std::cerr << "the note still warned about the microphone after the stop "
+                 "worked: '"
+              << service.Status().monitor_note << "'\n";
+    ok = false;
+  }
+
+  service.Stop();
+  if (rec.running.load(std::memory_order_relaxed)) {
+    std::cerr << "a monitor loopback outlived the service\n";
+    ok = false;
+  }
+  return ok;
+}
+
 // The lost-output cleanup runs a stop on the audio supervisor thread, and in
 // production a stop is a pactl process with a deadline. The state that drives
 // the cleanup is terminal: only the user ends a lost output. A stop that keeps
@@ -2566,6 +2661,8 @@ int main() {
        &TestServiceStopsAMonitorItCanNoLongerSee},
       {"service cleans up the loopback after a lost output",
        &TestServiceCleansUpTheLoopbackAfterALostOutput},
+      {"service says a lost output may still play",
+       &TestServiceSaysTheLostOutputMayStillPlay},
       {"service stops retrying the lost-output cleanup",
        &TestServiceStopsRetryingTheLostOutputCleanup},
       {"service reports why the sink question had no answer",

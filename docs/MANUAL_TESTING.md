@@ -448,6 +448,9 @@ Expected:
 
 - Status reports that the monitor output disappeared and that the monitor
   stopped. The sentence is shown as written, with no request to open Support.
+- If the sound server cannot release the old output, the status adds that the
+  microphone may still be heard. That sentence goes away on its own when the
+  output is released.
 - StudioCast does not move the monitor to another output by itself. The default
   output after an unplug is usually the loudspeakers, which would feed the
   microphone back into itself.
