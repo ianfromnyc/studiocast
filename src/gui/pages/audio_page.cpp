@@ -2298,6 +2298,16 @@ void AudioPage::ApplyCachedDaemonAudioStatus(bool forceControlResync) {
         sourceLines << QStringLiteral("Apps using microphone: %1")
                            .arg(micConsumerCount);
       }
+      // Which sound server API the daemon runs on. Only the native backend is
+      // worth naming, because PulseAudio is the default.
+      const QString transport =
+          audio.value("transport_backend").toString().trimmed();
+      if (transport == QStringLiteral("pipewire"))
+        sourceLines << QStringLiteral("Sound server: PipeWire (native nodes)");
+      const QString transportNote =
+          audio.value("transport_backend_note").toString().trimmed();
+      if (!transportNote.isEmpty())
+        sourceLines << transportNote;
       bool hasWarning = false;
       for (const auto &v : sourceWarnings) {
         const QString warning = v.toString().trimmed();

@@ -3,6 +3,8 @@
 /.junie
 /*.zip
 /build/
+# Second configure directory, used to check the build without PipeWire.
+/build-*/
 /dist/
 **/*.onnx
 /scripts/models/build_open_video_eye_contact_models.py

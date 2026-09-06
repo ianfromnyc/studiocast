@@ -49,6 +49,26 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(PULSE_SIMPLE QUIET IMPORTED_TARGET libpulse-simple)
 
+# PipeWire (optional) for the native audio and video graph backends.
+#
+# The option default follows detection: ON when pkg-config finds the library,
+# OFF otherwise. A build with the option OFF must behave exactly like a build
+# from before the native backends existed, so no PipeWire header is included
+# and no PipeWire library is linked.
+pkg_check_modules(PIPEWIRE QUIET IMPORTED_TARGET libpipewire-0.3)
+option(STUDIOCAST_ENABLE_PIPEWIRE
+        "Enable the native PipeWire backends (needs libpipewire-0.3)"
+        ${PIPEWIRE_FOUND})
+
+set(_studiocast_have_pipewire FALSE)
+if (STUDIOCAST_ENABLE_PIPEWIRE)
+    if (TARGET PkgConfig::PIPEWIRE)
+        set(_studiocast_have_pipewire TRUE)
+    else()
+        message(WARNING "STUDIOCAST_ENABLE_PIPEWIRE is ON but pkg-config did not find libpipewire-0.3. Install pipewire-devel (Fedora) or libpipewire-0.3-dev (Ubuntu). The native PipeWire backends stay disabled.")
+    endif()
+endif()
+
 # libyuv (optional) for SIMD-optimized RGB/YUV conversions. Keep a scalar
 # fallback so StudioCast still builds on minimal systems.
 #
@@ -284,8 +304,16 @@ add_library(studiocast_core
         src/core/maxine/effects/ar_eye_contact_effect.cpp
         src/core/maxine/effects/ar_auto_frame_tracker.h
         src/core/maxine/effects/ar_auto_frame_tracker.cpp
+        src/core/pipewire/pipewire_support.h
+        src/core/pipewire/pipewire_support.cpp
+        src/core/pipewire/pipewire_audio_node.h
+        src/core/pipewire/pipewire_audio_node.cpp
+        src/core/pipewire/spsc_byte_ring.h
+        src/core/pipewire/triple_frame_buffer.h
         src/core/audio/pulse/pactl.h
         src/core/audio/pulse/pactl.cpp
+        src/core/audio/pipewire/pipewire_audio_devices.h
+        src/core/audio/pipewire/pipewire_audio_devices.cpp
         src/core/audio/audio_consumer_detector.h
         src/core/audio/audio_consumer_detector.cpp
         src/core/audio/audio_device_safety.h
@@ -313,6 +341,8 @@ add_library(studiocast_core
         src/core/audio/mic_monitor.cpp
         src/core/audio/virtual_audio_service.h
         src/core/audio/virtual_audio_service.cpp
+        src/core/video/pipewire/pipewire_camera_node.h
+        src/core/video/pipewire/pipewire_camera_node.cpp
         src/core/video/v4l2loopback.h
         src/core/video/v4l2loopback.cpp
         src/core/video/v4l2_writer.h
@@ -462,6 +492,19 @@ if (TARGET PNG::PNG)
 else()
     target_include_directories(studiocast_core PUBLIC ${PNG_INCLUDE_DIRS})
     target_link_libraries(studiocast_core PUBLIC ${PNG_LIBRARIES})
+endif()
+
+if (_studiocast_have_pipewire)
+    # PipeWire and SPA headers use macros that trip the project warning set, so
+    # they come in as system includes.
+    set_property(TARGET PkgConfig::PIPEWIRE PROPERTY
+            INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${PIPEWIRE_INCLUDE_DIRS}")
+    target_link_libraries(studiocast_core PUBLIC PkgConfig::PIPEWIRE)
+    target_compile_definitions(studiocast_core PUBLIC STUDIOCAST_HAVE_PIPEWIRE=1)
+    message(STATUS "libpipewire-0.3 found (${PIPEWIRE_VERSION}); native PipeWire backends enabled.")
+else()
+    target_compile_definitions(studiocast_core PUBLIC STUDIOCAST_HAVE_PIPEWIRE=0)
+    message(STATUS "Native PipeWire backends disabled; StudioCast uses PulseAudio and v4l2loopback only.")
 endif()
 
 if (PULSE_SIMPLE_FOUND)
@@ -1374,4 +1417,26 @@ if (BUILD_TESTING)
 
     add_test(NAME studiocast-v4l2loopback-diagnostics-tests
             COMMAND studiocast-v4l2loopback-diagnostics-tests)
+
+    add_executable(studiocast-pipewire-tests
+            tests/pipewire_backend_tests.cpp
+    )
+
+    target_link_libraries(studiocast-pipewire-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-pipewire-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-pipewire-tests)
+    studiocast_enable_sanitizers(studiocast-pipewire-tests)
+
+    set_target_properties(studiocast-pipewire-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-pipewire-tests COMMAND studiocast-pipewire-tests)
 endif()

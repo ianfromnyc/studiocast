@@ -194,6 +194,12 @@ DaemonConfig LoadDaemonConfig() {
         if (const auto parsed = studiocast::video::ParsePixelFormat(it->second))
           s.video_output_format = *parsed;
       }
+      if (auto it = kv.find("video.output.backend"); it != kv.end()) {
+        // An unknown name keeps the default, so a typo cannot silently drop
+        // the v4l2loopback output.
+        if (studiocast::pw::ParseVideoOutputPreference(it->second))
+          s.video_output_backend = it->second;
+      }
       if (auto it = kv.find("video.prefer_mjpeg"); it != kv.end()) {
         s.video_prefer_mjpeg = ParseBool(it->second, s.video_prefer_mjpeg);
       }
@@ -242,6 +248,12 @@ DaemonConfig LoadDaemonConfig() {
       if (auto it = kv.find("audio.speakers.latency_ms"); it != kv.end()) {
         s.audio_speaker_latency_ms =
             ParseInt(it->second, s.audio_speaker_latency_ms);
+      }
+      if (auto it = kv.find("audio.backend"); it != kv.end()) {
+        // An unknown name keeps the default, so a typo cannot silently move a
+        // working machine onto another backend.
+        if (studiocast::pw::ParseAudioTransportPreference(it->second))
+          s.audio_backend = it->second;
       }
       if (auto it = kv.find("audio.source"); it != kv.end()) {
         s.audio_source = it->second;
@@ -687,6 +699,7 @@ bool SaveDaemonConfig(const DaemonConfig &s, std::string *error) {
   out << "video.fps = " << s.video_fps << "\n";
   out << "video.output_format = "
       << studiocast::video::PixelFormatName(s.video_output_format) << "\n";
+  out << "video.output.backend = " << s.video_output_backend << "\n";
   out << "video.prefer_mjpeg = " << (s.video_prefer_mjpeg ? "true" : "false")
       << "\n";
   out << "video.scaling.backend = " << s.video_scaling_backend << "\n";
@@ -709,6 +722,7 @@ bool SaveDaemonConfig(const DaemonConfig &s, std::string *error) {
   out << "audio.speakers.latency_ms = " << s.audio_speaker_latency_ms << "\n";
   if (!s.audio_source.empty())
     out << "audio.source = " << s.audio_source << "\n";
+  out << "audio.backend = " << s.audio_backend << "\n";
   out << "audio.monitor.enabled = "
       << (s.audio_monitor_enabled ? "true" : "false") << "\n";
   if (!s.audio_monitor_sink.empty())
@@ -754,6 +768,16 @@ ToVideoServiceConfig(const DaemonConfig &s) {
   cfg.pipeline.fps = s.video_fps;
   cfg.pipeline.output_format = s.video_output_format;
   cfg.pipeline.prefer_mjpeg = s.video_prefer_mjpeg;
+  {
+    // v4l2loopback stays the frame source of truth, so the native node is a
+    // mirror. `pipewire` therefore still opens the loopback device.
+    const auto pref = studiocast::pw::ParseVideoOutputPreference(
+                          s.video_output_backend)
+                          .value_or(studiocast::pw::VideoOutputPreference::kAuto);
+    const auto decision = studiocast::pw::ResolveVideoOutputBackends(
+        pref, studiocast::pw::ProbePipeWire());
+    cfg.pipeline.pipewire_output = decision.backends.pipewire;
+  }
   cfg.pipeline.scaling_backend = ParseScalingBackendPreference(
       s.video_scaling_backend,
       studiocast::video::ScalingBackendPreference::auto_select);
@@ -804,6 +828,9 @@ ToAudioServiceConfig(const DaemonConfig &s) {
   cfg.speaker_target_sink = s.audio_speaker_target_sink;
   cfg.speaker_latency_ms = s.audio_speaker_latency_ms;
   cfg.source_name = s.audio_source;
+  if (const auto pref =
+          studiocast::pw::ParseAudioTransportPreference(s.audio_backend))
+    cfg.transport = *pref;
   cfg.monitor.enabled = s.audio_monitor_enabled;
   cfg.monitor.sink = s.audio_monitor_sink;
   cfg.monitor.latency_ms = s.audio_monitor_latency_ms;
@@ -826,6 +853,11 @@ void ApplyAudioServiceConfigToDaemonConfig(
   out->audio_speaker_target_sink = cfg.speaker_target_sink;
   out->audio_speaker_latency_ms = cfg.speaker_latency_ms;
   out->audio_source = cfg.source_name;
+  // `audio.backend` is not written back. The value in the running service can
+  // come from the `--audio-backend` flag, which is meant for one run, and this
+  // function runs whenever any audio setting is saved from the GUI, so writing
+  // it would make that flag permanent. The matching video preference is not
+  // written back either. Change the file to change the backend.
   out->audio_monitor_enabled = cfg.monitor.enabled;
   out->audio_monitor_sink = cfg.monitor.sink;
   out->audio_monitor_latency_ms = cfg.monitor.latency_ms;

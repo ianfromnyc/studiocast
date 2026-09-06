@@ -13,6 +13,7 @@
 
 #include "core/audio/audio_backend_resolver.h"
 #include "core/audio/effects/broadcast_audio_effects.h"
+#include "core/pipewire/pipewire_support.h"
 #include "core/audio/mic_monitor.h"
 
 namespace studiocast::audio {
@@ -47,6 +48,15 @@ struct VirtualAudioServiceConfig {
   // Selected input source (Pulse source name). Empty = Pulse default source.
   std::string source_name;
 
+  // Which sound server API carries the virtual devices and the real-time
+  // streams.
+  //
+  // The default is PulseAudio, which works on a PulseAudio server and on a
+  // PipeWire server through pipewire-pulse. Set `kAuto` to let StudioCast
+  // prefer native PipeWire when a PipeWire server answers, or `kPipeWire` to
+  // require it.
+  studiocast::pw::AudioTransportPreference transport =
+      studiocast::pw::AudioTransportPreference::kPulse;
   // Microphone monitor: play the processed microphone feed on an output sink
   // so the user can hear the effects while adjusting them.
   MicMonitorConfig monitor{};
@@ -83,6 +93,12 @@ struct OpenAudioRuntimeStatus {
 
 struct VirtualAudioServiceStatus {
   bool service_running = false;
+
+  // Active sound server API: "pulse" or "pipewire".
+  std::string transport_backend_active = "pulse";
+
+  // Why the active transport is not the requested one, if that happened.
+  std::string transport_note;
 
   bool mic_present = false;
   bool mic_consumer_present = false;
@@ -196,6 +212,11 @@ class AudioPipelineRunner;
 class AudioProcessor;
 class AudioConsumerDetector;
 
+// Resolves the transport the service will use from the configured preference
+// and the real availability of a PipeWire server.
+studiocast::pw::AudioTransportDecision
+ResolveServiceAudioTransport(const VirtualAudioServiceConfig &cfg);
+
 struct VirtualAudioServiceHooks {
   std::function<void(std::chrono::milliseconds)> sleep_for;
   std::function<std::unique_ptr<AudioPipelineRunner>(AudioProcessor *)>
@@ -255,6 +276,12 @@ private:
   void SleepFor(std::chrono::milliseconds d) const;
   std::unique_ptr<AudioPipelineRunner>
   CreatePipeline(AudioProcessor *processor) const;
+  // True when a native device the service created has left the graph. A node
+  // the server took down never comes back by itself, so the supervisor makes a
+  // new one. A test that drives the devices through hooks answers false.
+  bool NativeVirtualMicWentDown() const;
+  bool NativeVirtualSpeakerWentDown() const;
+
   bool CreateVirtualMicDevice(std::string *error) const;
   bool CreateVirtualSpeakerDevice(std::string *error) const;
   bool StartSpeakerLoopbackRoute(const std::string &target_sink_name,
@@ -274,6 +301,7 @@ private:
       const VirtualAudioServiceConfig &cfg) const;
   AudioBackendAvailability
   ProbeSpeakerBackendAvailability(const VirtualAudioServiceConfig &cfg) const;
+  bool UseNativePipeWire() const;
   AudioConsumerSnapshot DetectMicrophoneConsumers() const;
   AudioConsumerSnapshot DetectSpeakerConsumers() const;
   void SetLastError(std::string msg);
@@ -319,6 +347,9 @@ private:
   std::string speakers_loopback_target_;
   int speakers_loopback_latency_ms_ = 0;
 
+  // Transport chosen at Start and used by every device and stream call.
+  studiocast::pw::AudioTransport transport_active_ =
+      studiocast::pw::AudioTransport::kPulse;
   bool monitor_running_ = false;
   std::string monitor_sink_requested_;
   // The output the last successful start really used. A configured sink of
