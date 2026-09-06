@@ -716,8 +716,9 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
     //
     // The test comes before the stats, the startup handshake and the
     // backend, thus the caller that fails leaves all of those as the caller
-    // that won made them. It writes last_error_, which the next GetStats()
-    // reports; that is the whole of what it changes.
+    // that won made them. It writes last_error_, and that is the whole of
+    // what it changes; the caller that won can clear that string again
+    // before anyone reads it.
     if (starting_ || running_.load(std::memory_order_acquire)) {
       // Report the message itself, not the last error that it writes. The
       // caller that won clears the last error a few instructions later, thus
