@@ -715,6 +715,30 @@ bool CaptureFramePayload(std::size_t mapped_length, std::size_t bytesused,
   return true;
 }
 
+bool CaptureRawWalkFitsMapping(std::size_t mapped_length,
+                               std::size_t data_offset,
+                               const CaptureFormat &fmt, std::string *outErr) {
+  // Compressed frames walk `bytesused`, which the mapping already bounds.
+  if (fmt.format == CapturePixelFormat::mjpeg)
+    return true;
+
+  const std::size_t rows =
+      fmt.height > 0 ? static_cast<std::size_t>(fmt.height) : 0u;
+  const std::size_t walk = fmt.bytes_per_line * rows;
+
+  const std::size_t room =
+      data_offset < mapped_length ? mapped_length - data_offset : 0u;
+  if (room >= walk)
+    return true;
+
+  if (outErr)
+    *outErr = "Driver reported a plane data_offset of " +
+              std::to_string(data_offset) + " bytes, which leaves " +
+              std::to_string(room) + " bytes of the mapping for a frame of " +
+              std::to_string(walk) + " bytes";
+  return false;
+}
+
 bool ShouldPreferMjpegForResolution(int width, int height) {
   // Heuristic: uncompressed YUYV at 720p+ tends to be unsupported, unstable,
   // or bandwidth-limited on many UVC webcams, while MJPEG often supports HD+.
@@ -1407,6 +1431,12 @@ bool V4l2Capture::AcquireFrame(CapturedFrameView *out, int timeout_ms,
                              /*data_offset=*/0u, &off, &bytes, error))
       return false;
 
+    // The raw readers walk the negotiated frame from `out->data`, not
+    // `out->bytes`, so the mapping has to hold that walk from where the image
+    // starts. An offset of 0 always does, and this arm has no other offset.
+    if (!CaptureRawWalkFitsMapping(buffers_[idx].length, off, actual_, error))
+      return false;
+
     out->bytes = bytes;
     out->data = static_cast<const std::uint8_t *>(buffers_[idx].start) + off;
     return true;
@@ -1448,6 +1478,12 @@ bool V4l2Capture::AcquireFrame(CapturedFrameView *out, int timeout_ms,
   if (!CaptureFramePayload(
           buffers_[idx].length, static_cast<std::size_t>(planes[0].bytesused),
           static_cast<std::size_t>(planes[0].data_offset), &off, &bytes, error))
+    return false;
+
+  // The raw readers walk the negotiated frame from `out->data`, not
+  // `out->bytes`, so a `data_offset` moves the walk later in the mapping
+  // without making it shorter. Refuse the frame rather than walk off the end.
+  if (!CaptureRawWalkFitsMapping(buffers_[idx].length, off, actual_, error))
     return false;
 
   out->bytes = bytes;

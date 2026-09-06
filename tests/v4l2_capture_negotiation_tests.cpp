@@ -482,10 +482,68 @@ bool TestCaptureFramePayloadStaysInsideTheMapping() {
                 "an offset outside the mapping must refuse the frame");
 }
 
+// The raw read path does not walk the payload length: it walks
+// `bytes_per_line * height` from the start of the image, which a plane
+// `data_offset` moves later in the mapping without making it shorter. The
+// mapping is the length that walk has to stay inside.
+bool TestCaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset() {
+  using studiocast::video::CaptureFormat;
+  using studiocast::video::CaptureRawWalkFitsMapping;
+
+  // 640x480 YUYV, the layout both devices on this host report: the driver
+  // maps exactly the frame it negotiated, to the byte.
+  CaptureFormat fmt;
+  fmt.width = 640;
+  fmt.height = 480;
+  fmt.format = CapturePixelFormat::yuyv;
+  fmt.bytes_per_line = 1280;
+  fmt.size_image = 614400;
+
+  if (!Expect(CaptureRawWalkFitsMapping(614400u, /*data_offset=*/0u, fmt,
+                                        nullptr),
+              "a frame at the start of the mapping must be accepted"))
+    return false;
+
+  // The walk keeps its full length, so an image 64 bytes later ends 64 bytes
+  // past the end of the mapping.
+  std::string err;
+  if (!Expect(!CaptureRawWalkFitsMapping(614400u, /*data_offset=*/64u, fmt,
+                                         &err),
+              "an offset the mapping cannot absorb must refuse the frame"))
+    return false;
+
+  if (!Expect(!err.empty(), "the refusal must name the reason"))
+    return false;
+
+  if (!Expect(CaptureRawWalkFitsMapping(614464u, /*data_offset=*/64u, fmt,
+                                        nullptr),
+              "a mapping with room for the offset must be accepted"))
+    return false;
+
+  if (!Expect(!CaptureRawWalkFitsMapping(614400u, /*data_offset=*/700000u, fmt,
+                                         nullptr),
+              "an offset past the mapping must refuse the frame"))
+    return false;
+
+  // Compressed frames walk the payload length, which is already bounded by
+  // the mapping, so the offset costs them nothing.
+  CaptureFormat jpg;
+  jpg.width = 640;
+  jpg.height = 480;
+  jpg.format = CapturePixelFormat::mjpeg;
+  return Expect(CaptureRawWalkFitsMapping(4096u, /*data_offset=*/64u, jpg,
+                                          nullptr),
+                "a compressed frame must not be refused for an offset");
+}
+
 } // namespace
 
 bool TestV4l2CaptureFramePayloadStaysInsideTheMapping() {
   return TestCaptureFramePayloadStaysInsideTheMapping();
+}
+
+bool TestV4l2CaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset() {
+  return TestCaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset();
 }
 
 bool TestV4l2CapturePreferenceTreats720pAsMjpegWorthy() {

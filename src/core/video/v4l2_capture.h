@@ -99,6 +99,22 @@ bool CaptureFramePayload(std::size_t mapped_length, std::size_t bytesused,
                          std::size_t data_offset, std::size_t *out_offset,
                          std::size_t *out_bytes, std::string *outErr);
 
+// True when the walk the raw read path makes stays inside the mapping after a
+// plane `data_offset` moves the start of the image.
+//
+// A raw reader does not walk the payload length: it walks
+// `bytes_per_line * height` from the start of the image, because that is the
+// layout negotiation gave it. An offset therefore moves the walk later in the
+// mapping but does not make it shorter, and the last `data_offset` bytes of
+// it fall past the end of the mapping. A compressed frame walks the payload
+// length instead, which `CaptureFramePayload` already bounds, so it is always
+// inside.
+//
+// Exposed for tests; `V4l2Capture::AcquireFrame()` is the only other caller.
+bool CaptureRawWalkFitsMapping(std::size_t mapped_length,
+                               std::size_t data_offset,
+                               const CaptureFormat &fmt, std::string *outErr);
+
 struct CapturedFrameView {
   const std::uint8_t *data = nullptr;
   std::size_t bytes = 0;
