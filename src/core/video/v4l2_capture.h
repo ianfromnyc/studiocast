@@ -196,10 +196,10 @@ public:
   // queue, and the view carries its `index`, so ReleaseFrame() gives that
   // buffer back. The one exception is a buffer index the driver reports out of
   // range: no buffer of this capture answers to it, so the view keeps `index`
-  // at -1 and STREAMOFF is what reclaims that one buffer. A failure before
-  // VIDIOC_DQBUF - a poll error, a timeout - dequeues nothing and leaves
-  // `index` at -1 as well. ReleaseFrame() returns early on either, so the call
-  // is correct after any failure.
+  // at -1 and STREAMOFF is what reclaims that one buffer. A failure that
+  // dequeues no buffer - a poll error, a timeout, a VIDIOC_DQBUF that returns
+  // an error - leaves `index` at -1 as well. ReleaseFrame() returns early on
+  // either, so the call is correct after any failure.
   bool AcquireFrame(CapturedFrameView *out, int timeout_ms, std::string *error);
 
   // Release a frame back to driver (QBUF).
