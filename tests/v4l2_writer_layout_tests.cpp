@@ -36,7 +36,7 @@ struct LayoutCase {
 };
 
 // Builds the `v4l2_format` the driver hands back from VIDIOC_S_FMT. The union
-// arm follows `c.mplane`, which is what `ParseChosenFormat` has to read.
+// arm follows `c.mplane`, which is what `ParseChosenOutputFmt` has to read.
 void FillDriverFormat(v4l2_format *f, const LayoutCase &c,
                       std::uint8_t num_planes = 1) {
   *f = v4l2_format{};
@@ -114,7 +114,7 @@ bool TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair() {
 // converter writes into it. The frame size then follows the row.
 bool TestV4l2WriterFormatParseReadsBothUnionArms() {
   using video::ActualFormat;
-  using video::ParseChosenFormat;
+  using video::ParseChosenOutputFmt;
   using video::PixelFormat;
 
   const LayoutCase cases[] = {
@@ -150,7 +150,7 @@ bool TestV4l2WriterFormatParseReadsBothUnionArms() {
 
     ActualFormat got{};
     std::string err;
-    if (!Expect(ParseChosenFormat(f, c.mplane, /*fps=*/30, &got, &err),
+    if (!Expect(ParseChosenOutputFmt(f, c.mplane, /*fps=*/30, &got, &err),
                 "a supported driver report must parse")) {
       std::cerr << "  " << c.name << ": " << err << "\n";
       return false;
@@ -209,7 +209,7 @@ bool TestV4l2WriterFormatParseReadsBothUnionArms() {
 
     ActualFormat got{};
     std::string err;
-    if (!Expect(!ParseChosenFormat(f, c.mplane, /*fps=*/30, &got, &err),
+    if (!Expect(!ParseChosenOutputFmt(f, c.mplane, /*fps=*/30, &got, &err),
                 "a pixel format the writer cannot fill must be refused")) {
       std::cerr << "  " << c.name << "\n";
       return false;
@@ -236,7 +236,7 @@ bool TestV4l2WriterFormatParseReadsBothUnionArms() {
 bool TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite() {
 #ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
   using video::ActualFormat;
-  using video::ParseChosenFormat;
+  using video::ParseChosenOutputFmt;
 
   const LayoutCase c = {"mplane report with the wrong plane count",
                         V4L2_PIX_FMT_YUYV,
@@ -254,8 +254,9 @@ bool TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite() {
 
     ActualFormat got{};
     std::string err;
-    if (!Expect(!ParseChosenFormat(f, /*mplane=*/true, /*fps=*/30, &got, &err),
-                "an mplane report of other than one plane must be refused")) {
+    if (!Expect(
+            !ParseChosenOutputFmt(f, /*mplane=*/true, /*fps=*/30, &got, &err),
+            "an mplane report of other than one plane must be refused")) {
       std::cerr << "  num_planes " << num_planes << "\n";
       return false;
     }
@@ -272,8 +273,9 @@ bool TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite() {
 
   ActualFormat got{};
   std::string err;
-  return Expect(ParseChosenFormat(ok, /*mplane=*/true, /*fps=*/30, &got, &err),
-                "an mplane report of one plane must still be accepted");
+  return Expect(
+      ParseChosenOutputFmt(ok, /*mplane=*/true, /*fps=*/30, &got, &err),
+      "an mplane report of one plane must still be accepted");
 #else
   return true;
 #endif
@@ -290,7 +292,7 @@ bool TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite() {
 // raise gives it the value the stride implies. That case must stay accepted.
 bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold() {
   using video::ActualFormat;
-  using video::ParseChosenFormat;
+  using video::ParseChosenOutputFmt;
 
   const LayoutCase refused[] = {
       {"padded YUYV rows overrun the reported frame", V4L2_PIX_FMT_YUYV, 640,
@@ -313,7 +315,7 @@ bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold() {
 
     ActualFormat got{};
     std::string err;
-    if (!Expect(!ParseChosenFormat(f, c.mplane, /*fps=*/30, &got, &err),
+    if (!Expect(!ParseChosenOutputFmt(f, c.mplane, /*fps=*/30, &got, &err),
                 "rows the reported frame size cannot hold must be refused")) {
       std::cerr << "  " << c.name << ": got size_image " << got.size_image
                 << "\n";
@@ -346,7 +348,7 @@ bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold() {
 
     ActualFormat got{};
     std::string err;
-    if (!Expect(ParseChosenFormat(f, c.mplane, /*fps=*/30, &got, &err),
+    if (!Expect(ParseChosenOutputFmt(f, c.mplane, /*fps=*/30, &got, &err),
                 "a report that is not self-contradictory must be accepted")) {
       std::cerr << "  " << c.name << ": " << err << "\n";
       return false;

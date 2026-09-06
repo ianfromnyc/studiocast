@@ -58,8 +58,8 @@ struct ActualFormat {
 // would then push more bytes than the frame the driver sized.
 //
 // Exposed for tests; the writer itself is the only other caller.
-bool ParseChosenFormat(const v4l2_format &f, bool mplane, int fps,
-                       ActualFormat *out, std::string *outErr);
+bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
+                          ActualFormat *out, std::string *outErr);
 
 class V4l2Writer final {
 public:

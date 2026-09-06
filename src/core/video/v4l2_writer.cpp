@@ -360,8 +360,8 @@ bool TryGetFmtAny(int fd, const TypeSpec &t, v4l2_format *outFmt,
 
 } // namespace
 
-bool ParseChosenFormat(const v4l2_format &f, bool mplane, int fps,
-                       ActualFormat *out, std::string *outErr) {
+bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
+                          ActualFormat *out, std::string *outErr) {
   if (!out)
     return false;
 
@@ -671,7 +671,7 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
 
   std::string perr;
   ActualFormat a;
-  if (!ParseChosenFormat(chosen, chosenMplane, negotiatedFps, &a, &perr)) {
+  if (!ParseChosenOutputFmt(chosen, chosenMplane, negotiatedFps, &a, &perr)) {
     res.error = "Format negotiation succeeded but parsing failed: " + perr;
     return res;
   }
@@ -897,7 +897,7 @@ bool V4l2Writer::RefreshActual(std::string *error) {
 
   ActualFormat a;
   std::string perr;
-  if (!ParseChosenFormat(chosen, chosenMplane, negotiatedFps, &a, &perr)) {
+  if (!ParseChosenOutputFmt(chosen, chosenMplane, negotiatedFps, &a, &perr)) {
     if (error)
       *error = "Queried format parsing failed: " + perr;
     return false;
