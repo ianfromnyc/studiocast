@@ -4689,14 +4689,6 @@ bool TestStopInterruptsBlockedPlaybackWrite() {
   return true;
 }
 
-// Keeps a fixture alive after a stop thread wedged inside join(). A wedged
-// thread cannot be cancelled, so the test leaves it detached and holds its
-// state here instead of letting a dangling reference outlive the test.
-std::vector<std::shared_ptr<void>> &WedgedFixtures() {
-  static std::vector<std::shared_ptr<void>> fixtures;
-  return fixtures;
-}
-
 struct ConcurrentStopFixture {
   std::atomic<int> stops_entered{0};
   std::atomic<int> stops_done{0};
@@ -4807,7 +4799,6 @@ bool TestConcurrentPipelineStopJoinsWorkerOnce() {
     // failure instead of corrupting the tests that follow.
     first_stop.detach();
     second_stop.detach();
-    WedgedFixtures().push_back(fx);
     std::cout.flush();
     std::cerr << "[FAIL] concurrent pipeline Stop() never returned; a join() "
                  "is stuck on a worker that another Stop() already joined"
@@ -4942,7 +4933,6 @@ bool TestConcurrentServiceStopJoinsSupervisorOnce() {
     // recovered, thus the run ends here.
     first_stop.detach();
     second_stop.detach();
-    WedgedFixtures().push_back(fx);
     std::cout.flush();
     std::cerr << "[FAIL] concurrent service Stop() never returned; a join() "
                  "is stuck on a supervisor that another Stop() already joined"
