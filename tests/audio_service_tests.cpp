@@ -4698,6 +4698,7 @@ std::vector<std::shared_ptr<void>> &WedgedFixtures() {
 }
 
 struct ConcurrentStopFixture {
+  std::atomic<int> stops_entered{0};
   std::atomic<int> stops_done{0};
   std::atomic<int> join_errors{0};
   std::mutex text_mu;
@@ -4766,6 +4767,7 @@ bool TestConcurrentPipelineStopJoinsWorkerOnce() {
   // exactly once: a second join on the same worker either throws
   // "Invalid argument" or waits for a thread that no longer exists.
   auto stopper = [fx] {
+    fx->stops_entered.fetch_add(1, std::memory_order_release);
     try {
       fx->pipeline->Stop();
     } catch (const std::system_error &e) {
@@ -4777,8 +4779,21 @@ bool TestConcurrentPipelineStopJoinsWorkerOnce() {
   std::thread first_stop(stopper);
   std::thread second_stop(stopper);
 
-  // Hold the worker until both callers are inside Stop().
-  std::this_thread::sleep_for(100ms);
+  // Hold the worker until both callers are inside Stop(). A fixed sleep can
+  // pass on a loaded runner without ever making the race, thus wait for the
+  // two callers and then give them a short moment to reach the join.
+  if (!WaitUntil(
+          [&] {
+            return fx->stops_entered.load(std::memory_order_acquire) == 2;
+          },
+          2000ms)) {
+    std::cerr << "both Stop() callers never entered Stop()\n";
+    fx->ReleaseWorker();
+    first_stop.join();
+    second_stop.join();
+    return false;
+  }
+  std::this_thread::sleep_for(20ms);
   fx->ReleaseWorker();
 
   const bool both_returned = WaitUntil(
@@ -4889,6 +4904,7 @@ bool TestConcurrentServiceStopJoinsSupervisorOnce() {
   // Two callers stop the same service at once. The supervisor must be joined
   // exactly once.
   auto stopper = [fx] {
+    fx->stops_entered.fetch_add(1, std::memory_order_release);
     try {
       fx->service->Stop();
     } catch (const std::system_error &e) {
@@ -4900,8 +4916,21 @@ bool TestConcurrentServiceStopJoinsSupervisorOnce() {
   std::thread first_stop(stopper);
   std::thread second_stop(stopper);
 
-  // Hold the supervisor until both callers are inside Stop().
-  std::this_thread::sleep_for(100ms);
+  // Hold the supervisor until both callers are inside Stop(). A fixed sleep
+  // can pass on a loaded runner without ever making the race, thus wait for
+  // the two callers and then give them a short moment to reach the join.
+  if (!WaitUntil(
+          [&] {
+            return fx->stops_entered.load(std::memory_order_acquire) == 2;
+          },
+          2000ms)) {
+    std::cerr << "both Stop() callers never entered Stop()\n";
+    fx->ReleaseSupervisor();
+    first_stop.join();
+    second_stop.join();
+    return false;
+  }
+  std::this_thread::sleep_for(20ms);
   fx->ReleaseSupervisor();
 
   const bool both_returned = WaitUntil(
