@@ -64,6 +64,7 @@ bool TestBackgroundRemoveCpuMatchesReferenceAndPreservesPadding();
 bool TestBackgroundBlurCpuMatchesReferenceAndPreservesPadding();
 bool TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair();
 bool TestV4l2WriterFormatParseReadsBothUnionArms();
+bool TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite();
 } // namespace studiocast::tests
 
 namespace {
@@ -1135,6 +1136,9 @@ int main() {
        &studiocast::tests::TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair},
       {"V4L2 writer format parse reads both union arms",
        &studiocast::tests::TestV4l2WriterFormatParseReadsBothUnionArms},
+      {"V4L2 writer refuses an mplane plane count it cannot write",
+       &studiocast::tests::
+           TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite},
       {"V4L2 capture negotiation keeps the driver row stride",
        &studiocast::tests::TestV4l2CaptureNegotiationKeepsTheDriverRowStride},
       {"V4L2 capture negotiation refuses rows the frame size cannot hold",

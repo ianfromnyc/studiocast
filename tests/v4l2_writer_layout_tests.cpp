@@ -224,4 +224,59 @@ bool TestV4l2WriterFormatParseReadsBothUnionArms() {
   return true;
 }
 
+// The writer gives the driver a frame with write(), and the kernel refuses
+// that I/O method on a buffer of more than one plane: `__vb2_init_fileio` in
+// videobuf2-core.c answers -EBUSY when `vb->num_planes != 1`. A report of no
+// planes has nothing to read at all, because the arm reads `plane_fmt[0]`
+// alone.
+//
+// So one plane is the only count the writer can use. Name the count at
+// negotiation, where the layout is still in hand, rather than let the open
+// succeed and every write() fail with "Device or resource busy".
+bool TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite() {
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
+  using video::ActualFormat;
+  using video::ParseChosenFormat;
+
+  const LayoutCase c = {"mplane report with the wrong plane count",
+                        V4L2_PIX_FMT_YUYV,
+                        640,
+                        480,
+                        1280,
+                        614400,
+                        0u,
+                        0u,
+                        true};
+
+  for (const int num_planes : {0, 2, 3}) {
+    v4l2_format f{};
+    FillDriverFormat(&f, c, static_cast<std::uint8_t>(num_planes));
+
+    ActualFormat got{};
+    std::string err;
+    if (!Expect(!ParseChosenFormat(f, /*mplane=*/true, /*fps=*/30, &got, &err),
+                "an mplane report of other than one plane must be refused")) {
+      std::cerr << "  num_planes " << num_planes << "\n";
+      return false;
+    }
+
+    if (!Expect(!err.empty(), "the refusal must name the reason")) {
+      std::cerr << "  num_planes " << num_planes << "\n";
+      return false;
+    }
+  }
+
+  // One plane is the count the writer asks for and the only one it can use.
+  v4l2_format ok{};
+  FillDriverFormat(&ok, c, /*num_planes=*/1);
+
+  ActualFormat got{};
+  std::string err;
+  return Expect(ParseChosenFormat(ok, /*mplane=*/true, /*fps=*/30, &got, &err),
+                "an mplane report of one plane must still be accepted");
+#else
+  return true;
+#endif
+}
+
 } // namespace studiocast::tests
