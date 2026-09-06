@@ -54,11 +54,18 @@ struct ActualFormat {
 // takes a buffer of one plane only, so a multi-planar report of any other
 // plane count is refused.
 //
+// A blank frame, of width or height 0, is refused: it takes no bytes at all,
+// and it is what a v4l2loopback device reports while a consumer disconnects.
+//
 // A row too short to hold the pixels is raised to the packed row size, then
 // the rows the writer walks are measured against the frame size the driver
 // reported. A report whose rows do not fit that frame is refused, because the
 // writer would then push more bytes than the frame the driver sized. A frame
 // size of 0 is no report at all, thus it follows the rows instead.
+//
+// The frame the parse gives back is bounded, because it sizes buffers as well
+// as writes. A report of a frame larger than 256 MiB, which is more than
+// twice an 8K RGB24 frame, is refused.
 //
 // Exposed for tests; the writer itself is the only other caller.
 bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,

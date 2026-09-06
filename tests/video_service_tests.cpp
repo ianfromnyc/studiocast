@@ -68,6 +68,7 @@ bool TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite();
 bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold();
 bool TestV4l2WriterFormatLadderStepsPastAParseRefusal();
 bool TestV4l2WriterFormatLadderRefusesABlankFrameReport();
+bool TestV4l2WriterRefusesAFrameLargerThanItCanHold();
 bool TestV4l2WriterRefusesADeviceThatCannotTakeWrites();
 } // namespace studiocast::tests
 
@@ -1149,6 +1150,8 @@ int main() {
        &studiocast::tests::TestV4l2WriterFormatLadderStepsPastAParseRefusal},
       {"V4L2 writer format ladder refuses a blank frame report",
        &studiocast::tests::TestV4l2WriterFormatLadderRefusesABlankFrameReport},
+      {"V4L2 writer refuses a frame larger than it can hold",
+       &studiocast::tests::TestV4l2WriterRefusesAFrameLargerThanItCanHold},
       {"V4L2 writer refuses a device that cannot take writes",
        &studiocast::tests::TestV4l2WriterRefusesADeviceThatCannotTakeWrites},
       {"V4L2 capture negotiation keeps the driver row stride",

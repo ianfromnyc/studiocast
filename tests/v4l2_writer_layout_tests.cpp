@@ -679,4 +679,80 @@ bool TestV4l2WriterFormatLadderRefusesABlankFrameReport() {
   return true;
 }
 
+// `size_image` is not only the count of bytes each write() sends: the
+// pipeline and the feed give their frame buffers that size. A report the
+// writer takes at face value thus sizes an allocation, and a driver that
+// reports `sizeimage = 0` gets its frame size from the row alone, where a
+// nonsense row of 4 GB asks for a 4 TB buffer.
+//
+// So the writer takes no frame larger than a documented maximum. 8K RGB24 is
+// 95 MiB, thus the bound is far above every frame this daemon sends and no
+// real report comes near it.
+bool TestV4l2WriterRefusesAFrameLargerThanItCanHold() {
+  using video::ActualFormat;
+  using video::ParseChosenOutputFmt;
+
+  const LayoutCase refused[] = {
+      // No frame size at all, and a row of 4 GB: the implied frame is 4.3 TB.
+      {"a nonsense row with no frame size", V4L2_PIX_FMT_YUYV, 1920, 1080,
+       4000000000u, 0, 0u, 0u},
+      // A report that agrees with itself, and still names a 3.9 GB frame.
+      {"a self-consistent frame of gigabytes", V4L2_PIX_FMT_YUYV, 1920, 1000,
+       3900000u, 3900000000u, 0u, 0u},
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
+      {"a nonsense row with no frame size, mplane", V4L2_PIX_FMT_YUYV, 1920,
+       1080, 4000000000u, 0, 0u, 0u, true},
+#endif
+  };
+
+  for (const LayoutCase &c : refused) {
+    v4l2_format f{};
+    FillDriverFormat(&f, c);
+
+    ActualFormat got{};
+    std::string err;
+    if (!Expect(!ParseChosenOutputFmt(f, c.mplane, /*fps=*/30, &got, &err),
+                "a frame larger than the writer takes must be refused")) {
+      std::cerr << "  " << c.name << ": got size_image " << got.size_image
+                << "\n";
+      return false;
+    }
+
+    if (!Expect(!err.empty(), "the refusal must name the reason")) {
+      std::cerr << "  " << c.name << "\n";
+      return false;
+    }
+  }
+
+  // The bound sits far above the largest frame the daemon sends, thus an 8K
+  // RGB24 frame of 95 MiB still parses.
+  const LayoutCase accepted[] = {
+      {"8K RGB24 stays inside the bound", V4L2_PIX_FMT_RGB24, 7680, 4320, 23040,
+       99532800u, 23040u, 99532800u},
+  };
+
+  for (const LayoutCase &c : accepted) {
+    v4l2_format f{};
+    FillDriverFormat(&f, c);
+
+    ActualFormat got{};
+    std::string err;
+    if (!Expect(ParseChosenOutputFmt(f, c.mplane, /*fps=*/30, &got, &err),
+                "a large but plausible frame must be accepted")) {
+      std::cerr << "  " << c.name << ": " << err << "\n";
+      return false;
+    }
+
+    if (!Expect(got.bytes_per_line == c.want_bytes_per_line &&
+                    got.size_image == c.want_size_image,
+                "the accepted report must take the implied layout")) {
+      std::cerr << "  " << c.name << ": got " << got.bytes_per_line << " and "
+                << got.size_image << "\n";
+      return false;
+    }
+  }
+
+  return true;
+}
+
 } // namespace studiocast::tests

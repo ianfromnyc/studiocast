@@ -379,6 +379,16 @@ bool TryGetFmtAny(int fd, const TypeSpec &t, v4l2_format *outFmt,
 // question, so that the ladder and the refresh give the same answer.
 bool FrameIsUsable(int width, int height) { return width > 0 && height > 0; }
 
+// The largest frame the writer takes from a driver report. An 8K RGB24 frame
+// is 7680 * 4320 * 3 bytes, thus 95 MiB, and every frame this daemon sends is
+// far smaller. The bound is on the frame size the parse gives the caller,
+// because that number sizes buffers as well as writes: the pipeline holds one
+// frame in `std::vector<std::uint8_t> outBuf(outA.size_image)` and the feed
+// does the same. A driver that reports `sizeimage = 0` takes its frame size
+// from the row it reported, so without this bound a row of 4 GB asks for a
+// buffer of 4 TB.
+constexpr std::size_t kMaxFrameBytes = 256u * 1024u * 1024u;
+
 } // namespace
 
 bool OutputDeviceCanWrite(std::uint32_t caps, std::string *outErr) {
@@ -477,6 +487,7 @@ bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
   // Only a row too short to hold the pixels is raised, because the converter
   // writes the whole packed row and the driver cannot have meant less.
   const std::size_t driverBpl = bpl;
+  const std::size_t driverSize = size;
   const std::size_t minBpl = MinBytesPerLine(a.width, a.format);
   if (bpl < minBpl)
     bpl = minBpl;
@@ -508,6 +519,22 @@ bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
 
   if (size < minSize)
     size = minSize;
+
+  // `size_image` is more than the count of bytes each write() sends: the
+  // pipeline and the feed give their frame buffers that size. A frame size of
+  // 0 takes the row the driver reported instead, thus a nonsense row of
+  // gigabytes asks for a buffer of terabytes. Refuse a frame above the bound,
+  // which no report from a real device comes near.
+  if (size > kMaxFrameBytes) {
+    if (outErr)
+      *outErr = "Driver reported bytesperline=" + std::to_string(driverBpl) +
+                " and sizeimage=" + std::to_string(driverSize) + ", which is " +
+                "a frame of " + std::to_string(size) +
+                " bytes, more than the " + std::to_string(kMaxFrameBytes) +
+                " byte maximum the writer takes";
+    return false;
+  }
+
   a.size_image = size;
 
   *out = a;
