@@ -4969,6 +4969,8 @@ bool TestConcurrentServiceStopJoinsSupervisorOnce() {
 constexpr const char *kOverlapOpenError = "overlap io refuses to open";
 constexpr const char *kOverlapNoIoError =
     "Audio pipeline I/O backend is not available.";
+constexpr const char *kPipelineAlreadyRunningError =
+    "Audio pipeline is already running.";
 
 // I/O for the Start()/Stop() overlap test. Open() fails at once, thus the
 // worker exits by itself and stays in the handle: the next Start() must join
@@ -5595,6 +5597,285 @@ bool TestConcurrentServiceStartStopKeepsSupervisorHandleUsable() {
   return true;
 }
 
+constexpr const char *kPipelineAlreadyStartingError =
+    "Audio pipeline is already starting.";
+constexpr const char *kServiceAlreadyStartingError =
+    "Virtual audio service is already starting.";
+
+struct DoubleStartFixture {
+  // The gate that holds the first caller of an attempt, so that the second
+  // caller reaches the publish of the handle in the same window.
+  std::mutex gate_mu;
+  std::condition_variable gate_cv;
+  bool gate_released = false;
+
+  std::atomic<int> starts_entered{0};
+  std::atomic<int> already_starting{0};
+  std::atomic<int> unexpected{0};
+  std::mutex text_mu;
+  std::string unexpected_text;
+
+  void RecordUnexpected(const std::string &text) {
+    unexpected.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(text_mu);
+    if (unexpected_text.empty())
+      unexpected_text = text;
+  }
+
+  std::string UnexpectedText() {
+    std::lock_guard<std::mutex> lock(text_mu);
+    return unexpected_text;
+  }
+
+  void ArmGate() {
+    std::lock_guard<std::mutex> lock(gate_mu);
+    gate_released = false;
+  }
+
+  void OpenGate() {
+    {
+      std::lock_guard<std::mutex> lock(gate_mu);
+      gate_released = true;
+    }
+    gate_cv.notify_all();
+  }
+};
+
+struct DoublePipelineStartFixture : DoubleStartFixture {
+  int create_io_entered = 0; // guarded by gate_mu
+  CopyProcessor processor;
+  std::unique_ptr<AudioPipeline> pipeline;
+};
+
+// Two Start() callers on one pipeline at the same time. The running_ guard is
+// a test and then a store, thus both callers pass it and both reach the
+// move-assign of the worker handle. A move-assign onto a joinable handle ends
+// the process with std::terminate().
+//
+// The check that stops this must be live in a release build: every automated
+// configure passes -DCMAKE_BUILD_TYPE=Release, thus an assert() is in no
+// binary that CI or a package makes. The second caller must get an error.
+//
+// CreateIo() holds the I/O lock, thus a caller that is held inside it makes
+// the other caller wait for that lock and both then go to the publish
+// together. That is the widest seam Start() gives; the attempts cover the
+// rest of the window.
+bool TestConcurrentPipelineStartFailsAndKeepsTheProcess() {
+  auto fx = std::make_shared<DoublePipelineStartFixture>();
+  auto *raw = fx.get();
+
+  AudioPipelineHooks hooks;
+  hooks.create_io = [raw]() -> std::unique_ptr<AudioPipelineIo> {
+    {
+      std::unique_lock<std::mutex> lock(raw->gate_mu);
+      ++raw->create_io_entered;
+      raw->gate_cv.notify_all();
+      if (raw->create_io_entered == 1)
+        raw->gate_cv.wait(lock, [raw] { return raw->gate_released; });
+    }
+    return std::make_unique<OverlapIo>();
+  };
+
+  fx->pipeline =
+      std::make_unique<AudioPipeline>(&fx->processor, std::move(hooks));
+
+  const AudioPipelineConfig cfg;
+  constexpr int kAttempts = 64;
+  for (int attempt = 0; attempt < kAttempts; ++attempt) {
+    {
+      std::lock_guard<std::mutex> lock(fx->gate_mu);
+      fx->create_io_entered = 0;
+      fx->gate_released = false;
+    }
+    fx->starts_entered.store(0, std::memory_order_release);
+
+    std::atomic<bool> go{false};
+    auto starter = [raw, cfg, &go] {
+      raw->starts_entered.fetch_add(1, std::memory_order_release);
+      while (!go.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      std::string start_error;
+      if (raw->pipeline->Start(cfg, &start_error)) {
+        raw->RecordUnexpected("Start reported success though the I/O refuses "
+                              "to open");
+      } else if (start_error == kPipelineAlreadyStartingError) {
+        raw->already_starting.fetch_add(1, std::memory_order_relaxed);
+      } else if (start_error != kOverlapOpenError &&
+                 start_error != kOverlapNoIoError &&
+                 start_error != kPipelineAlreadyRunningError) {
+        raw->RecordUnexpected(start_error);
+      }
+    };
+
+    std::thread first(starter);
+    std::thread second(starter);
+    // Both callers are in the lambda before either calls Start(), thus the
+    // one that does not hold the gate always reaches the I/O lock.
+    WaitUntil(
+        [&] {
+          return raw->starts_entered.load(std::memory_order_acquire) == 2;
+        },
+        5000ms);
+    go.store(true, std::memory_order_release);
+
+    WaitUntil(
+        [&] {
+          std::lock_guard<std::mutex> lock(raw->gate_mu);
+          return raw->create_io_entered >= 1;
+        },
+        5000ms);
+    fx->OpenGate();
+
+    first.join();
+    second.join();
+
+    if (fx->unexpected.load(std::memory_order_relaxed) != 0) {
+      std::cerr << "pipeline.Start gave an unexpected result on attempt "
+                << attempt << ": " << fx->UnexpectedText() << "\n";
+      fx->pipeline->Stop();
+      return false;
+    }
+
+    // Leave the next attempt a stopped pipeline with a free handle.
+    fx->pipeline->Stop();
+  }
+
+  if (fx->already_starting.load(std::memory_order_relaxed) == 0) {
+    std::cerr << "no attempt ever put two Start() callers at the publish of "
+                 "the worker handle, thus the sweep proves nothing\n";
+    return false;
+  }
+
+  if (fx->pipeline->GetStats().running) {
+    std::cerr << "pipeline still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
+struct DoubleServiceStartFixture : DoubleStartFixture {
+  std::atomic<bool> mic_consumer_present{true};
+  int sleepers_parked = 0; // guarded by gate_mu
+  std::unique_ptr<VirtualAudioService> service;
+};
+
+// Two Start() callers on one service at the same time. Start() calls Stop()
+// first, thus both callers can leave that Stop() before either publishes the
+// supervisor, and the second move-assign lands on a joinable handle. As in
+// the pipeline test, the check must be live in a release build.
+//
+// The seam is the sleep of the supervisor: a parked supervisor holds the
+// Stop() of the first caller inside its join, and that Stop() holds the
+// handle lock, thus the second caller waits there. Both then go to the
+// publish together.
+bool TestConcurrentServiceStartFailsAndKeepsTheProcess() {
+  auto fx = std::make_shared<DoubleServiceStartFixture>();
+  auto *raw = fx.get();
+
+  VirtualAudioServiceHooks hooks;
+  HookMicrophoneConsumerFlag(&hooks, &fx->mic_consumer_present);
+  hooks.probe_microphone_backend_availability =
+      [](const VirtualAudioServiceConfig &) {
+        AudioBackendAvailability avail;
+        avail.open_source_ok = true;
+        return avail;
+      };
+  hooks.create_pipeline =
+      [](AudioProcessor *) -> std::unique_ptr<AudioPipelineRunner> {
+    return std::make_unique<StartFailPipeline>();
+  };
+  hooks.sleep_for = [raw](std::chrono::milliseconds) {
+    std::unique_lock<std::mutex> lock(raw->gate_mu);
+    ++raw->sleepers_parked;
+    raw->gate_cv.notify_all();
+    raw->gate_cv.wait(lock, [raw] { return raw->gate_released; });
+    --raw->sleepers_parked;
+  };
+
+  fx->service = std::make_unique<VirtualAudioService>(std::move(hooks));
+
+  VirtualAudioServiceConfig cfg;
+  cfg.enabled = true;
+  cfg.create_virtual_mic = false;
+  cfg.create_virtual_speakers = false;
+  cfg.poll_ms = 1;
+  cfg.start_retry_ms = 1;
+
+  std::string err;
+  if (!fx->service->Start(cfg, &err)) {
+    std::cerr << "service.Start failed before the sweep: " << err << "\n";
+    return false;
+  }
+
+  constexpr int kAttempts = 64;
+  for (int attempt = 0; attempt < kAttempts; ++attempt) {
+    fx->ArmGate();
+    fx->starts_entered.store(0, std::memory_order_release);
+
+    std::atomic<bool> go{false};
+    auto starter = [raw, cfg, &go] {
+      raw->starts_entered.fetch_add(1, std::memory_order_release);
+      while (!go.load(std::memory_order_acquire))
+        std::this_thread::yield();
+      std::string start_error;
+      if (!raw->service->Start(cfg, &start_error)) {
+        if (start_error == kServiceAlreadyStartingError)
+          raw->already_starting.fetch_add(1, std::memory_order_relaxed);
+        else
+          raw->RecordUnexpected(start_error);
+      }
+    };
+
+    // Park the supervisor before the callers run, thus the Stop() that
+    // Start() makes first waits inside its join.
+    WaitUntil(
+        [&] {
+          std::lock_guard<std::mutex> lock(raw->gate_mu);
+          return raw->sleepers_parked >= 1;
+        },
+        5000ms);
+
+    std::thread first(starter);
+    std::thread second(starter);
+    WaitUntil(
+        [&] {
+          return raw->starts_entered.load(std::memory_order_acquire) == 2;
+        },
+        5000ms);
+    go.store(true, std::memory_order_release);
+    std::this_thread::sleep_for(5ms);
+    fx->OpenGate();
+
+    first.join();
+    second.join();
+
+    if (fx->unexpected.load(std::memory_order_relaxed) != 0) {
+      std::cerr << "service.Start gave an unexpected result on attempt "
+                << attempt << ": " << fx->UnexpectedText() << "\n";
+      fx->OpenGate();
+      fx->service->Stop();
+      return false;
+    }
+  }
+
+  fx->OpenGate();
+  fx->service->Stop();
+
+  if (fx->already_starting.load(std::memory_order_relaxed) == 0) {
+    std::cerr << "no attempt ever put two Start() callers at the publish of "
+                 "the supervisor handle, thus the sweep proves nothing\n";
+    return false;
+  }
+
+  if (fx->service->Status().service_running) {
+    std::cerr << "service still reports running after the last Stop()\n";
+    return false;
+  }
+
+  return true;
+}
+
 } // namespace
 
 int main() {
@@ -5714,9 +5995,9 @@ int main() {
        &TestStopInterruptsBlockedCaptureRead},
       {"stop interrupts blocked playback write",
        &TestStopInterruptsBlockedPlaybackWrite},
-      // The tests below can end the run with std::_Exit(1), thus they come
-      // last: a wedge in one of them must not hide the result of another
-      // test.
+      // The tests below can end the run, with std::_Exit(1) on a wedge or
+      // with std::terminate() on a double start, thus they come last: an end
+      // in one of them must not hide the result of another test.
       {"concurrent pipeline stop joins the worker once",
        &TestConcurrentPipelineStopJoinsWorkerOnce},
       {"concurrent service stop joins the supervisor once",
@@ -5727,6 +6008,10 @@ int main() {
        &TestConcurrentServiceStartStopKeepsSupervisorHandleUsable},
       {"stop keeps the stop flag up for the worker it joins",
        &TestStopKeepsTheStopFlagUpForTheWorkerItJoins},
+      {"concurrent pipeline start fails and keeps the process",
+       &TestConcurrentPipelineStartFailsAndKeepsTheProcess},
+      {"concurrent service start fails and keeps the process",
+       &TestConcurrentServiceStartFailsAndKeepsTheProcess},
   };
 
   int failed = 0;
