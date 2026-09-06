@@ -862,10 +862,12 @@ void AudioPipeline::Stop() {
     // clears the flag and publishes a new worker in between, and the join
     // waits for a worker that nobody told to stop.
     //
-    // Two lock orders exist and both start at thread_mu_: thread_mu_ and
-    // then io_mu_, here and in the publish block of Start(); thread_mu_ and
-    // then mu_, where Start() reports a second caller. No path takes any of
-    // them the other way round, thus this cannot deadlock. The worker takes
+    // Three lock orders exist and all of them start at thread_mu_:
+    // thread_mu_ and then io_mu_, here and in the publish block of Start();
+    // thread_mu_ and then mu_, where Start() reports a second caller;
+    // thread_mu_ and then startup_mu_, where the publish block of Start()
+    // resets the startup handshake. No path takes any of them the other way
+    // round, thus this cannot deadlock. The worker takes
     // io_mu_, mu_ and startup_mu_ and never thread_mu_, thus a join under
     // thread_mu_ does not wait on the worker for a lock. RequestStop() does
     // not wait for the worker; it only marks the backend and wakes the Pulse
