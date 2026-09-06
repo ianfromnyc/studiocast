@@ -755,4 +755,158 @@ bool TestV4l2WriterRefusesAFrameLargerThanItCanHold() {
   return true;
 }
 
+// The walk goes on past an S_FMT the driver accepted whose answer the parse
+// refused, thus a walk that fails altogether can leave the device holding a
+// format the writer named as one it cannot use. That is not the format the
+// device held before the writer asked, and no other opener asked for it.
+//
+// So the walk reads the format the device holds before the first rung, and
+// puts it back when no rung gives a usable layout. The device the walk
+// changed nothing on gets no S_FMT at all: a driver that answered no rung
+// still holds the format it held.
+bool TestV4l2WriterFormatLadderPutsTheDeviceFormatBack() {
+  using video::ChooseOutputFormat;
+  using video::FormatLadderResult;
+  using video::FormatLadderRung;
+  using video::FormatRestore;
+
+  // Builds a rung that answers with one driver report.
+  auto Answer = [](const char *name, const LayoutCase &c) {
+    FormatLadderRung r;
+    r.name = name;
+    r.mplane = c.mplane;
+    r.ask = [c](v4l2_format *outFmt, std::string *) {
+      FillDriverFormat(outFmt, c);
+      return true;
+    };
+    return r;
+  };
+
+  // Builds a rung the driver refuses outright.
+  auto Refuse = [](const char *name) {
+    FormatLadderRung r;
+    r.name = name;
+    r.ask = [](v4l2_format *, std::string *outErr) {
+      if (outErr)
+        *outErr = "VIDIOC_S_FMT failed: Invalid argument";
+      return false;
+    };
+    return r;
+  };
+
+  // The format the device holds before the writer asks anything.
+  const LayoutCase held = {"the format the device already holds",
+                           V4L2_PIX_FMT_YUYV,
+                           1920,
+                           1080,
+                           3840,
+                           4147200,
+                           3840u,
+                           4147200u};
+  // MJPEG is a format the writer cannot fill, so every rung of it is refused.
+  const LayoutCase unusable = {"MJPEG the writer cannot fill",
+                               V4L2_PIX_FMT_MJPEG,
+                               640,
+                               480,
+                               0,
+                               100000,
+                               0u,
+                               0u};
+  const LayoutCase sane = {"driver sized both numbers itself",
+                           V4L2_PIX_FMT_YUYV,
+                           640,
+                           480,
+                           1280,
+                           614400,
+                           1280u,
+                           614400u};
+
+  int saves = 0;
+  std::vector<int> restored;
+  FormatRestore guard;
+  guard.save = [&](v4l2_format *outFmt) {
+    ++saves;
+    FillDriverFormat(outFmt, held);
+    return true;
+  };
+  guard.restore = [&](const v4l2_format &f) {
+    restored.push_back(static_cast<int>(f.fmt.pix.width));
+  };
+
+  // A walk that ends with no usable layout puts the saved format back.
+  {
+    saves = 0;
+    restored.clear();
+    const std::vector<FormatLadderRung> rungs = {
+        Answer("VIDEO_OUTPUT S_FMT(with stride)", unusable),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", unusable),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30, guard);
+    if (!Expect(!got.ok, "a ladder no rung parses must fail"))
+      return false;
+    if (!Expect(saves == 1, "the walk must read the held format once")) {
+      std::cerr << "  saved " << saves << " times\n";
+      return false;
+    }
+    if (!Expect(restored.size() == 1u && restored[0] == 1920,
+                "the failed walk must put the held format back")) {
+      std::cerr << "  restored " << restored.size() << " formats\n";
+      return false;
+    }
+  }
+
+  // A walk that keeps a rung leaves the device holding that rung's format.
+  {
+    saves = 0;
+    restored.clear();
+    const std::vector<FormatLadderRung> rungs = {
+        Answer("VIDEO_OUTPUT S_FMT(with stride)", unusable),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", sane),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30, guard);
+    if (!Expect(got.ok && got.rung == 1u, "the walk must keep the sane rung"))
+      return false;
+    if (!Expect(restored.empty(),
+                "a walk that kept a rung must not put anything back")) {
+      std::cerr << "  restored " << restored.size() << " formats\n";
+      return false;
+    }
+  }
+
+  // A device that answered no rung was never asked to take a format, thus it
+  // needs no S_FMT to put one back.
+  {
+    saves = 0;
+    restored.clear();
+    const std::vector<FormatLadderRung> rungs = {
+        Refuse("VIDEO_OUTPUT S_FMT(with stride)"),
+        Refuse("VIDEO_OUTPUT S_FMT(no stride)"),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30, guard);
+    if (!Expect(!got.ok, "a ladder no rung answers must fail"))
+      return false;
+    if (!Expect(restored.empty(),
+                "a device the walk did not change must get no S_FMT")) {
+      std::cerr << "  restored " << restored.size() << " formats\n";
+      return false;
+    }
+  }
+
+  // The walk still runs when the caller gives it no way to save or restore.
+  {
+    const std::vector<FormatLadderRung> rungs = {
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", sane),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30);
+    if (!Expect(got.ok, "a walk without a restore must still keep its rung"))
+      return false;
+  }
+
+  return true;
+}
+
 } // namespace studiocast::tests

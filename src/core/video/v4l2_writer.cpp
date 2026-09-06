@@ -542,9 +542,17 @@ bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
 }
 
 FormatLadderResult
-ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps) {
+ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
+                   const FormatRestore &restore) {
   FormatLadderResult res;
   std::ostringstream log;
+
+  // The format the device holds before the walk asks it for another one. A
+  // walk that keeps no rung puts this back, because the rungs it walked past
+  // may have left the device holding a format the writer refused.
+  v4l2_format held{};
+  const bool haveHeld = restore.save && restore.save(&held);
+  bool answered = false;
 
   for (std::size_t i = 0; i < rungs.size(); ++i) {
     const FormatLadderRung &r = rungs[i];
@@ -556,6 +564,7 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps) {
           << "\n";
       continue;
     }
+    answered = true;
 
     ActualFormat a;
     std::string perr;
@@ -577,6 +586,12 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps) {
   }
 
   res.attempt_log = log.str();
+
+  // A device that answered no rung was never asked to take a format, thus it
+  // holds the format it held and needs no S_FMT to put one back.
+  if (answered && haveHeld && restore.restore)
+    restore.restore(held);
+
   return res;
 }
 
@@ -666,7 +681,25 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
     rungTypes.push_back(t.type);
   }
 
-  const FormatLadderResult ladder = ChooseOutputFormat(rungs, fps);
+  // A walk that keeps no rung must leave the device as it found it, thus the
+  // walk reads the format the device holds first. G_FMT answers under the
+  // buffer type the device has, so the first type that answers is that type,
+  // and the answer carries it back to the S_FMT that puts the format back.
+  FormatRestore restore;
+  restore.save = [fd, &types](v4l2_format *outFmt) {
+    for (const auto &t : types) {
+      std::string err;
+      if (TryGetFmtAny(fd, t, outFmt, &err))
+        return true;
+    }
+    return false;
+  };
+  restore.restore = [fd](const v4l2_format &fmt) {
+    v4l2_format put = fmt;
+    (void)IoctlRetry(fd, VIDIOC_S_FMT, &put);
+  };
+
+  const FormatLadderResult ladder = ChooseOutputFormat(rungs, fps, restore);
   if (ladder.ok) {
     res.chosen_buf_type = rungTypes[ladder.rung];
     res.chosen_mplane = rungs[ladder.rung].mplane;

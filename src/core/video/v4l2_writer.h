@@ -108,6 +108,23 @@ struct FormatLadderResult {
   std::string first_refusal;
 };
 
+// How the walk puts the device format back. A rung that asks S_FMT changes
+// the format the device holds, and the walk goes on past an S_FMT the driver
+// accepted whose answer the parse refused, thus a walk that fails altogether
+// can leave the device holding a format the writer named as one it cannot
+// use. Both members are best effort, and a walk given neither changes nothing
+// on failure.
+struct FormatRestore {
+  // Reads the format the device holds before the first rung. True when the
+  // answer is one the walk can put back.
+  std::function<bool(v4l2_format *outFmt)> save;
+
+  // Asks the device to take the saved format again. The walk calls this only
+  // when it failed after a rung the driver answered, and it does not read the
+  // outcome: the caller is on its way to reporting the failure.
+  std::function<void(const v4l2_format &fmt)> restore;
+};
+
 // Walks the rungs in order and keeps the first one the driver answers *and*
 // `ParseChosenOutputFmt` can use.
 //
@@ -116,9 +133,14 @@ struct FormatLadderResult {
 // of a with-stride S_FMT and echoes the frame size back computes both numbers
 // itself when the writer asks for no stride.
 //
+// A walk that keeps a rung leaves the device holding that rung's format. A
+// walk that fails puts back the format `restore.save` read, so that a failed
+// open leaves the device as it found it.
+//
 // Exposed for tests; `V4l2Writer::Open()` is the only other caller.
 FormatLadderResult
-ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps);
+ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
+                   const FormatRestore &restore = {});
 
 class V4l2Writer final {
 public:
