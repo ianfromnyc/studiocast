@@ -257,6 +257,13 @@ private:
   std::thread th_;
   std::atomic_bool stop_{false};
 
+  // True from the moment a Start() takes the handle until that call returns.
+  // Guarded by th_mu_. A second Start() must fail before it stops the
+  // supervisor of the first and before it replaces the config and the
+  // status, because a move-assign onto a joinable handle ends the process
+  // and a caller that fails must leave nothing of its own behind.
+  bool starting_ = false;
+
   bool running_ = false;
   bool mic_created_ = false;
 

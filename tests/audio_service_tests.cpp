@@ -5943,15 +5943,17 @@ struct DoubleServiceStartFixture : DoubleStartFixture {
   std::unique_ptr<VirtualAudioService> service;
 };
 
-// Two Start() callers on one service at the same time. Start() calls Stop()
-// first, thus both callers can leave that Stop() before either publishes the
-// supervisor, and the second move-assign lands on a joinable handle. As in
-// the pipeline test, the check must be live in a release build.
+// Two Start() callers on one service at the same time. Without the start
+// mark both callers leave the Stop() that Start() makes first before either
+// publishes the supervisor, and the second move-assign lands on a joinable
+// handle. As in the pipeline test, the check must be live in a release
+// build.
 //
 // The seam is the sleep of the supervisor: a parked supervisor holds the
-// Stop() of the first caller inside its join, and that Stop() holds the
-// handle lock, thus the second caller waits there. Both then go to the
-// publish together.
+// Stop() that the first caller makes inside its join, and that Stop() holds
+// the handle lock, thus every other caller waits at the start mark behind
+// it. Each attempt also proves that a caller that fails leaves the service
+// of the caller that won running.
 bool TestConcurrentServiceStartFailsAndKeepsTheProcess() {
   auto fx = std::make_shared<DoubleServiceStartFixture>();
   auto *raw = fx.get();
@@ -5989,21 +5991,6 @@ bool TestConcurrentServiceStartFailsAndKeepsTheProcess() {
   if (!fx->service->Start(cfg, &err)) {
     std::cerr << "service.Start failed before the sweep: " << err << "\n";
     return false;
-  }
-
-  // Readers of the status keep the object mutex busy, as the IPC threads of
-  // the daemon do. Start() takes that mutex twice between the handle lock of
-  // its Stop() and the publish, thus a busy mutex holds the first caller
-  // there and lets the other callers leave their own Stop() first. Without
-  // this the first caller takes the handle lock again before the others wake,
-  // and the callers never meet at the publish.
-  std::atomic<bool> readers_stop{false};
-  std::vector<std::thread> readers;
-  for (int i = 0; i < 8; ++i) {
-    readers.emplace_back([raw, &readers_stop] {
-      while (!readers_stop.load(std::memory_order_acquire))
-        (void)raw->service->Status();
-    });
   }
 
   constexpr int kAttempts = 64;
@@ -6055,18 +6042,26 @@ bool TestConcurrentServiceStartFailsAndKeepsTheProcess() {
       std::cerr << "service.Start gave an unexpected result on attempt "
                 << attempt << ": " << fx->UnexpectedText() << "\n";
       fx->OpenGate();
-      readers_stop.store(true, std::memory_order_release);
-      for (auto &t : readers)
-        t.join();
+      fx->service->Stop();
+      return false;
+    }
+
+    // A caller that fails must leave the service of the caller that won
+    // alone. Start() stops the supervisor of the last run and clears the
+    // status before it publishes, thus a caller that fails after all of that
+    // leaves service_running down while the supervisor of the winner is
+    // alive, and it restores none of it.
+    if (!fx->service->Status().service_running) {
+      std::cerr << "the status reported the service down on attempt " << attempt
+                << ", thus a Start() caller that failed left the service of "
+                   "the caller that won stopped\n";
+      fx->OpenGate();
       fx->service->Stop();
       return false;
     }
   }
 
   fx->OpenGate();
-  readers_stop.store(true, std::memory_order_release);
-  for (auto &t : readers)
-    t.join();
   fx->service->Stop();
 
   if (fx->already_starting.load(std::memory_order_relaxed) == 0) {
