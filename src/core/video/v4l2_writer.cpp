@@ -66,7 +66,7 @@ std::optional<PixelFormat> PixelFormatFromFourcc(std::uint32_t f) {
 bool IsOutputBufType(__u32 t) {
   if (t == V4L2_BUF_TYPE_VIDEO_OUTPUT)
     return true;
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
   if (t == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
     return true;
 #endif
@@ -79,11 +79,11 @@ const char *BufTypeName(__u32 t) {
     return "VIDEO_OUTPUT";
   case V4L2_BUF_TYPE_VIDEO_CAPTURE:
     return "VIDEO_CAPTURE";
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
   case V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
     return "VIDEO_OUTPUT_MPLANE";
 #endif
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
   case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
     return "VIDEO_CAPTURE_MPLANE";
 #endif
@@ -268,7 +268,7 @@ bool TryGetFmtSinglePlane(int fd, __u32 bufType, v4l2_format *outFmt,
   return false;
 }
 
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
 bool TrySetFmtMPlane(int fd, __u32 bufType, int width, int height,
                      PixelFormat desired, bool setStrideAndSize,
                      v4l2_format *outFmt, std::string *outErr) {
@@ -333,7 +333,7 @@ bool TrySetFmtAny(int fd, const TypeSpec &t, int width, int height,
     return TrySetFmtSinglePlane(fd, t.type, width, height, desired,
                                 setStrideAndSize, outFmt, outErr);
   }
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
   return TrySetFmtMPlane(fd, t.type, width, height, desired, setStrideAndSize,
                          outFmt, outErr);
 #else
@@ -348,7 +348,7 @@ bool TryGetFmtAny(int fd, const TypeSpec &t, v4l2_format *outFmt,
   if (!t.mplane) {
     return TryGetFmtSinglePlane(fd, t.type, outFmt, outErr);
   }
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
   return TryGetFmtMPlane(fd, t.type, outFmt, outErr);
 #else
   if (outErr)
@@ -376,7 +376,7 @@ bool ParseChosenFormat(const v4l2_format &f, bool mplane, int fps,
     bpl = static_cast<std::size_t>(f.fmt.pix.bytesperline);
     size = static_cast<std::size_t>(f.fmt.pix.sizeimage);
   } else {
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
     w = static_cast<int>(f.fmt.pix_mp.width);
     h = static_cast<int>(f.fmt.pix_mp.height);
     fourcc = f.fmt.pix_mp.pixelformat;
@@ -455,11 +455,11 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
   // Prefer output types first; then capture types. Try mplane variants too.
   const TypeSpec types[] = {
       {V4L2_BUF_TYPE_VIDEO_OUTPUT, false},
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
       {V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, true},
 #endif
       {V4L2_BUF_TYPE_VIDEO_CAPTURE, false},
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
       {V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, true},
 #endif
   };
@@ -787,11 +787,11 @@ bool V4l2Writer::RefreshActual(std::string *error) {
   // expose both and/or allow querying only one side.
   const TypeSpec types[] = {
       {V4L2_BUF_TYPE_VIDEO_OUTPUT, false},
-#ifdef V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
       {V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, true},
 #endif
       {V4L2_BUF_TYPE_VIDEO_CAPTURE, false},
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
       {V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, true},
 #endif
   };
