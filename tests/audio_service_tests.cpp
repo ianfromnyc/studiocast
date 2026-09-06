@@ -4985,9 +4985,12 @@ constexpr const char *kPipelineAlreadyRunningError =
 // I/O for the Start()/Stop() overlap test. Open() fails at once, thus the
 // worker exits by itself and stays in the handle: the next Start() must join
 // it, and so must a Stop() that runs at the same time. A Stop() that reaches
-// the handle before Start() publishes it releases io_ while this worker is
-// inside Open(); the worker keeps the backend through the shared reference
-// that GetActiveIo() gives it, thus the call stays defined.
+// the handle first now finds no backend of this worker to release, because
+// Start() sets io_ and publishes the worker in one hold of thread_mu_. The
+// window that is left is a worker that Start() took out of the handle and
+// joins outside every lock: a Stop() can release io_ while that worker is
+// still inside Open(), and the worker keeps the backend through the shared
+// reference that GetActiveIo() gives it, thus the call stays defined.
 class OverlapIo final : public AudioPipelineIo {
 public:
   bool Open(const AudioPipelineConfig &, std::string *error) override {
