@@ -5262,8 +5262,9 @@ bool TestConcurrentServiceStartStopKeepsSupervisorHandleUsable() {
       std::cout.flush();
       std::cerr << "[FAIL] service Start()/Stop() overlap never returned on "
                    "attempt "
-                << attempt << "; a join() is stuck on a supervisor that "
-                             "another caller already joined"
+                << attempt
+                << "; a join() is stuck on a supervisor that "
+                   "another caller already joined"
                 << std::endl;
       std::_Exit(1);
     }
