@@ -725,11 +725,11 @@ bool TestCaptureAcquireClearsTheViewBeforeItCanFail() {
                 "buffer to release");
 }
 
-// One check serves both buffer types, and each type reaches it for its own
-// reason. A plane offset is what moves the walk past the end of the mapping on
-// the multi-planar arm; the single-plane arm has no offset, so only a mapping
-// shorter than the walk can refuse a frame there. The message must name the
-// one that applies, because it is what the operator acts on.
+// One check refuses a frame for either of two causes, and the message must
+// name the one that applies, because it is what the operator acts on. The
+// offset is the cause only when the mapping alone would have held the walk;
+// with a mapping shorter than the walk the offset is beside the point, however
+// large it is.
 bool TestCaptureRawWalkRefusalNamesItsCause() {
   using studiocast::video::CaptureFormat;
   using studiocast::video::CaptureRawWalkFitsMapping;
@@ -775,9 +775,30 @@ bool TestCaptureRawWalkRefusalNamesItsCause() {
               "a refusal with no offset must not blame the offset"))
     return false;
 
-  return Expect(Contains(mapping_err, "capture buffer of 614399 bytes") &&
-                    Contains(mapping_err, "frame of 614400 bytes"),
-                "a mapping refusal must name the mapping and the walk");
+  if (!Expect(Contains(mapping_err, "capture buffer of 614399 bytes") &&
+                  Contains(mapping_err, "frame of 614400 bytes"),
+              "a mapping refusal must name the mapping and the walk"))
+    return false;
+
+  // A mapping far shorter than the walk, with an offset as well. The offset
+  // takes 64 bytes off a mapping that was already 613400 bytes short, so it is
+  // not what refused the frame and the message must not lead with it.
+  std::string both_err;
+  if (!Expect(!CaptureRawWalkFitsMapping(1000u, /*data_offset=*/64u, fmt,
+                                         &both_err),
+              "a mapping shorter than the walk must refuse the frame with an "
+              "offset as well"))
+    return false;
+
+  if (!Expect(!Contains(both_err, "data_offset"),
+              "a refusal a mapping of any offset would have made must not "
+              "blame the offset"))
+    return false;
+
+  return Expect(Contains(both_err, "capture buffer of 1000 bytes") &&
+                    Contains(both_err, "frame of 614400 bytes"),
+                "a mapping refusal must name the mapping, not the mapping "
+                "less the offset");
 }
 
 } // namespace

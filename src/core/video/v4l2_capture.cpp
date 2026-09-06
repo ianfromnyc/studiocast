@@ -731,20 +731,23 @@ bool CaptureRawWalkFitsMapping(std::size_t mapped_length,
   if (room >= walk)
     return true;
 
-  // Both buffer types reach this check, and each has its own cause. On the
-  // multi-planar arm the offset is what moves the end of the walk past the end
-  // of the mapping. The single-plane arm has no offset, so only a mapping
-  // shorter than the walk can get here, and a message that names an offset of
-  // 0 points at the wrong number.
+  // Two causes reach this refusal, and the message names the one the operator
+  // acts on. The offset is the cause only when the mapping alone would have
+  // held the walk, because that is when taking the offset off it is what made
+  // the walk too long. A mapping shorter than the walk is the cause of its own
+  // refusal, however large the offset is, so that message names the mapping
+  // rather than the mapping less the offset. The single-plane arm has no
+  // offset and can only reach the second message.
   if (outErr) {
-    if (data_offset > 0)
+    if (mapped_length >= walk)
       *outErr = "Driver reported a plane data_offset of " +
                 std::to_string(data_offset) + " bytes, which leaves " +
                 std::to_string(room) + " bytes of the mapping for a frame of " +
                 std::to_string(walk) + " bytes";
     else
-      *outErr = "Driver mapped a capture buffer of " + std::to_string(room) +
-                " bytes for a frame of " + std::to_string(walk) + " bytes";
+      *outErr = "Driver mapped a capture buffer of " +
+                std::to_string(mapped_length) + " bytes for a frame of " +
+                std::to_string(walk) + " bytes";
   }
   return false;
 }
