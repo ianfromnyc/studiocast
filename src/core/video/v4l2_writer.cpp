@@ -370,6 +370,15 @@ bool TryGetFmtAny(int fd, const TypeSpec &t, v4l2_format *outFmt,
 #endif
 }
 
+// True when a driver report names a frame the writer can fill. Some
+// v4l2loopback configurations transiently report a "blank" format, of width
+// or height 0, while a consumer disconnects or a renegotiation window is
+// open. A frame of no rows takes no bytes, thus `WriteFrame` would push
+// nothing at all and the output would stay silent until something
+// renegotiated. `ParseChosenOutputFmt` and `RefreshActual` both ask this
+// question, so that the ladder and the refresh give the same answer.
+bool FrameIsUsable(int width, int height) { return width > 0 && height > 0; }
+
 } // namespace
 
 bool OutputDeviceCanWrite(std::uint32_t caps, std::string *outErr) {
@@ -431,6 +440,16 @@ bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
       *outErr = "mplane not supported";
     return false;
 #endif
+  }
+
+  // A blank report is a rung the writer cannot use, thus the ladder must step
+  // past it to the rung below, where the driver often names the real frame.
+  if (!FrameIsUsable(w, h)) {
+    if (outErr) {
+      *outErr = "Driver reported a blank frame: " + std::to_string(w) + "x" +
+                std::to_string(h);
+    }
+    return false;
   }
 
   const auto pf = PixelFormatFromFourcc(fourcc);
@@ -987,11 +1006,10 @@ bool V4l2Writer::RefreshActual(std::string *error) {
     return false;
   }
 
-  // Some v4l2loopback configurations transiently report a "blank" format
-  // (e.g. width/height=0) during consumer disconnect / renegotiation windows.
-  // Treat that as a failed refresh so we don't overwrite a previously-valid
-  // cached format and trigger output renegotiation thrash.
-  if (a.width <= 0 || a.height <= 0) {
+  // The parse refuses a blank format on its own, thus this is the second
+  // guard on the same rule: it holds the previously-valid cached format, and
+  // it keeps the refresh free of output renegotiation thrash.
+  if (!FrameIsUsable(a.width, a.height)) {
     if (error) {
       std::ostringstream oss;
       oss << "Queried format invalid: " << a.width << "x" << a.height

@@ -568,4 +568,115 @@ bool TestV4l2WriterRefusesADeviceThatCannotTakeWrites() {
   return true;
 }
 
+// Some v4l2loopback configurations transiently report a "blank" format, of
+// width and height 0, while a consumer disconnects or a renegotiation window
+// is open. A frame of no rows takes no bytes, so `WriteFrame` would push
+// nothing at all and the output would stay silent until something
+// renegotiated. `RefreshActual` has always refused such a report; the parse
+// must refuse it too, because the ladder is the machinery that steps past a
+// rung the writer cannot use, and this is one of those rungs.
+bool TestV4l2WriterFormatLadderRefusesABlankFrameReport() {
+  using video::ActualFormat;
+  using video::ChooseOutputFormat;
+  using video::FormatLadderResult;
+  using video::FormatLadderRung;
+  using video::ParseChosenOutputFmt;
+
+  const LayoutCase blank[] = {
+      {"no width and no height", V4L2_PIX_FMT_YUYV, 0, 0, 0, 0, 0u, 0u},
+      {"no height", V4L2_PIX_FMT_YUYV, 640, 0, 1280, 0, 0u, 0u},
+      {"no width", V4L2_PIX_FMT_YUYV, 0, 480, 0, 614400, 0u, 0u},
+#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
+      {"no width and no height, mplane", V4L2_PIX_FMT_YUYV, 0, 0, 0, 0, 0u, 0u,
+       true},
+#endif
+  };
+
+  for (const LayoutCase &c : blank) {
+    v4l2_format f{};
+    FillDriverFormat(&f, c);
+
+    ActualFormat got{};
+    std::string err;
+    if (!Expect(!ParseChosenOutputFmt(f, c.mplane, /*fps=*/30, &got, &err),
+                "a blank frame report must be refused")) {
+      std::cerr << "  " << c.name << ": got " << got.width << "x" << got.height
+                << " size_image " << got.size_image << "\n";
+      return false;
+    }
+
+    if (!Expect(!err.empty(), "the refusal must name the reason")) {
+      std::cerr << "  " << c.name << "\n";
+      return false;
+    }
+  }
+
+  // Builds a rung that answers with one driver report.
+  auto Answer = [](const char *name, const LayoutCase &c) {
+    FormatLadderRung r;
+    r.name = name;
+    r.mplane = c.mplane;
+    r.ask = [c](v4l2_format *outFmt, std::string *) {
+      FillDriverFormat(outFmt, c);
+      return true;
+    };
+    return r;
+  };
+
+  const LayoutCase real = {"the frame the device holds",
+                           V4L2_PIX_FMT_YUYV,
+                           640,
+                           480,
+                           1280,
+                           614400,
+                           1280u,
+                           614400u};
+
+  // The rung below a blank report is the one the driver answers once the
+  // window closes, so the walk must reach it.
+  {
+    const std::vector<FormatLadderRung> rungs = {
+        Answer("VIDEO_OUTPUT S_FMT(with stride)", blank[0]),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", real),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30);
+    if (!Expect(got.ok && got.rung == 1u,
+                "the rung below a blank report must be kept")) {
+      std::cerr << "  ok " << got.ok << ", kept rung " << got.rung << "\n";
+      return false;
+    }
+    if (!Expect(got.actual.width == 640 && got.actual.height == 480 &&
+                    got.actual.size_image == 614400u,
+                "the kept rung must give the frame the writer fills")) {
+      std::cerr << "  got " << got.actual.width << "x" << got.actual.height
+                << " size_image " << got.actual.size_image << "\n";
+      return false;
+    }
+  }
+
+  // A ladder of blank rungs alone gives no layout, and the failure names the
+  // blank report rather than an empty frame the writer would never fill.
+  {
+    const std::vector<FormatLadderRung> rungs = {
+        Answer("VIDEO_OUTPUT S_FMT(with stride)", blank[0]),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", blank[1]),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30);
+    if (!Expect(!got.ok, "a ladder of blank rungs alone must fail")) {
+      std::cerr << "  kept rung " << got.rung << " with size_image "
+                << got.actual.size_image << "\n";
+      return false;
+    }
+    if (!Expect(got.first_refusal.find("blank frame") != std::string::npos,
+                "the failure must name the blank report")) {
+      std::cerr << "  got '" << got.first_refusal << "'\n";
+      return false;
+    }
+  }
+
+  return true;
+}
+
 } // namespace studiocast::tests
