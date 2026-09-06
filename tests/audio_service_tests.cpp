@@ -12,6 +12,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <source_location>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -191,10 +193,19 @@ public:
     };
   }
 
+  // Shortens the safety timeout. Only the self-tests of this class use it.
+  void SetTimeoutsForTesting(std::chrono::milliseconds stall) {
+    stall_timeout_ = stall;
+  }
+
   // Waits until `pred` is true. Gives the supervisor up to `max_loops` more
   // loops in place of a wall-clock deadline: CPU load changes how long a loop
-  // takes, but not how many chances the service gets.
-  bool WaitUntil(const std::function<bool()> &pred, int max_loops) const {
+  // takes, but not how many chances the service gets. A wait that stops
+  // before the predicate is true prints why, and where the wait was.
+  bool WaitUntil(
+      const std::function<bool()> &pred, int max_loops,
+      const std::source_location loc = std::source_location::current()) const {
+    const auto start = std::chrono::steady_clock::now();
     for (int i = 0; i < max_loops; ++i) {
       long long seen = 0;
       {
@@ -204,21 +215,98 @@ public:
       if (pred())
         return true;
       std::unique_lock<std::mutex> lock(mu_);
-      if (!cv_.wait_for(lock, kStallTimeout, [&] { return count_ > seen; }))
+      if (!cv_.wait_for(lock, stall_timeout_, [&] { return count_ > seen; })) {
+        const long long done = count_;
+        lock.unlock();
+        Report("no supervisor loop in " +
+                   std::to_string(stall_timeout_.count()) + " ms",
+               loc, done, max_loops, start);
         break;
+      }
     }
     return pred();
   }
 
 private:
+  // Prints why a wait stopped early. The source location tells which of the
+  // many waits it was.
+  void Report(const std::string &reason, const std::source_location &loc,
+              long long loops, int max_loops,
+              std::chrono::steady_clock::time_point start) const {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+    std::string file(loc.file_name());
+    const auto slash = file.find_last_of('/');
+    if (slash != std::string::npos)
+      file = file.substr(slash + 1);
+    std::cerr << "supervisor loop counter: " << reason << " at " << file << ":"
+              << loc.line() << "; " << loops << " loops done of a budget of "
+              << max_loops << ", elapsed " << elapsed.count() << " ms\n";
+  }
+
   // Safety net for a supervisor that stopped or is stuck. Only a failed test
   // waits this long.
-  static constexpr std::chrono::seconds kStallTimeout{10};
+  std::chrono::milliseconds stall_timeout_{std::chrono::seconds(10)};
 
   mutable std::mutex mu_;
   mutable std::condition_variable cv_;
   long long count_ = 0;
 };
+
+// Collects what the code under test writes to `std::cerr`.
+class ScopedCerrCapture final {
+public:
+  ScopedCerrCapture() : old_(std::cerr.rdbuf(buffer_.rdbuf())) {}
+
+  ~ScopedCerrCapture() { std::cerr.rdbuf(old_); }
+
+  ScopedCerrCapture(const ScopedCerrCapture &) = delete;
+  ScopedCerrCapture &operator=(const ScopedCerrCapture &) = delete;
+
+  std::string text() const { return buffer_.str(); }
+
+private:
+  std::ostringstream buffer_;
+  std::streambuf *old_;
+};
+
+bool ReportMissing(const std::string &log, const std::string &needle) {
+  std::cerr << "the stall report has no '" << needle << "'; report was '" << log
+            << "'\n";
+  return false;
+}
+
+// A supervisor that stops to loop must give a report that shows where the
+// test waited, how many loops the service did, and how long the wait was.
+bool TestSupervisorLoopCounterReportsStall() {
+  SupervisorLoopCounter loops;
+  loops.SetTimeoutsForTesting(100ms);
+
+  VirtualAudioServiceHooks hooks;
+  loops.HookSleep(&hooks);
+  for (int i = 0; i < 3; ++i)
+    hooks.sleep_for(25ms);
+
+  std::string log;
+  bool reached = true;
+  {
+    ScopedCerrCapture capture;
+    reached = loops.WaitUntil([] { return false; }, 5);
+    log = capture.text();
+  }
+
+  if (reached) {
+    std::cerr << "the wait passed although the predicate is never true\n";
+    return false;
+  }
+  if (log.find("audio_service_tests.cpp:") == std::string::npos)
+    return ReportMissing(log, "audio_service_tests.cpp:");
+  if (log.find("3 loops") == std::string::npos)
+    return ReportMissing(log, "3 loops");
+  if (log.find("elapsed") == std::string::npos)
+    return ReportMissing(log, "elapsed");
+  return true;
+}
 
 AudioConsumerSnapshot ConsumerSnapshot(bool present, int count = 1) {
   AudioConsumerSnapshot out;
@@ -4683,6 +4771,8 @@ int main() {
     bool (*fn)();
     bool mock_safe_mic_source = false;
   } tests[] = {
+      {"supervisor loop counter reports a stall",
+       &TestSupervisorLoopCounterReportsStall},
       {"pactl load-module quotes vector arguments",
        &TestPactlLoadModuleQuotesVectorArguments},
       {"pactl load-module string compatibility splitter",
