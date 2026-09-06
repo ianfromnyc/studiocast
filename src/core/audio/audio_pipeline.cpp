@@ -806,11 +806,10 @@ void AudioPipeline::Stop() {
   // the join and the publish in Start() one step, thus a second Stop() caller
   // waits here instead of joining the same worker again.
   //
-  // The lock does not keep the I/O backend alive for the worker. ThreadMain()
-  // uses the raw pointer that GetActiveIo() gave it with no lock, thus a
-  // Stop() that gets this lock before Start() publishes the handle can
-  // release the backend while the worker is still in Open(). The join, not
-  // the lock, is what puts io_.reset() after the last use of the backend.
+  // The lock does not keep the I/O backend alive for the worker; the shared
+  // reference that ThreadMain() holds does. A Stop() that gets this lock
+  // before Start() publishes the handle skips the join and releases io_ while
+  // that worker is still in Open(), thus the backend must outlive io_.
   std::lock_guard<std::mutex> thread_lock(thread_mu_);
   if (thread_.joinable()) {
     thread_.join();
@@ -873,9 +872,9 @@ std::unique_ptr<AudioPipelineIo> AudioPipeline::CreateIo() const {
   return std::make_unique<PulseAsyncAudioIo>();
 }
 
-AudioPipelineIo *AudioPipeline::GetActiveIo() const {
+std::shared_ptr<AudioPipelineIo> AudioPipeline::GetActiveIo() const {
   std::lock_guard<std::mutex> lock(io_mu_);
-  return io_.get();
+  return io_;
 }
 
 void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
@@ -893,7 +892,10 @@ void AudioPipeline::ThreadMain(AudioPipelineConfig cfg) {
       static_cast<std::uint64_t>(cfg.frame_samples) * 1000000u /
       static_cast<std::uint64_t>(cfg.sample_rate);
 
-  AudioPipelineIo *io = GetActiveIo();
+  // Keep the backend for as long as this worker uses it. Stop() can release
+  // io_ at any moment after this point, and it does so without the join when
+  // Start() did not yet publish this worker.
+  const std::shared_ptr<AudioPipelineIo> io = GetActiveIo();
   if (!io) {
     const std::string startup_error =
         "Audio pipeline I/O backend is not available.";

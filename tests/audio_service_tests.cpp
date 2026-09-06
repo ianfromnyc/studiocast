@@ -4972,11 +4972,10 @@ constexpr const char *kOverlapNoIoError =
 
 // I/O for the Start()/Stop() overlap test. Open() fails at once, thus the
 // worker exits by itself and stays in the handle: the next Start() must join
-// it, and so must a Stop() that runs at the same time. Open() reads no member
-// of this object on purpose, because a Stop() that reaches the handle before
-// Start() publishes it releases the backend while the worker still holds the
-// raw pointer that GetActiveIo() gave it (see the comment on
-// AudioPipeline::Stop()).
+// it, and so must a Stop() that runs at the same time. A Stop() that reaches
+// the handle before Start() publishes it releases io_ while this worker is
+// inside Open(); the worker keeps the backend through the shared reference
+// that GetActiveIo() gives it, thus the call stays defined.
 class OverlapIo final : public AudioPipelineIo {
 public:
   bool Open(const AudioPipelineConfig &, std::string *error) override {

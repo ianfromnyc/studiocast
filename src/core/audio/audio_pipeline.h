@@ -114,7 +114,7 @@ private:
   void SetLastError(std::string msg);
   void CompleteStartup(bool ok, std::string error);
   std::unique_ptr<AudioPipelineIo> CreateIo() const;
-  AudioPipelineIo *GetActiveIo() const;
+  std::shared_ptr<AudioPipelineIo> GetActiveIo() const;
 
   AudioProcessor *processor_ = nullptr; // not owned
   AudioPipelineHooks hooks_;
@@ -123,8 +123,14 @@ private:
   mutable std::mutex mu_;
   std::string last_error_;
 
+  // The backend is shared, not owned alone, because ThreadMain() keeps its
+  // own reference for as long as it makes calls on the backend. Stop() can
+  // release io_ while a worker that Start() did not yet publish is inside
+  // Open(); with a raw pointer that call reads the vtable pointer of a freed
+  // object. The shared reference makes the last user, not Stop(), the one
+  // that frees the backend.
   mutable std::mutex io_mu_;
-  std::unique_ptr<AudioPipelineIo> io_;
+  std::shared_ptr<AudioPipelineIo> io_;
 
   // Hot-path stats are atomics to avoid lock contention on the real-time
   // thread.
