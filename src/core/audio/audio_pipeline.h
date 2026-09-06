@@ -142,7 +142,8 @@ private:
   std::shared_ptr<AudioPipelineIo> io_;
 
   // Hot-path stats are atomics to avoid lock contention on the real-time
-  // thread.
+  // thread. running_ is more than a stat: Start() and Stop() change it under
+  // thread_mu_. See part 1 of the note on that lock.
   std::atomic<bool> running_{false};
   std::atomic<std::uint64_t> frames_processed_{0};
   std::atomic<std::uint64_t> process_time_us_sum_{0};
@@ -172,13 +173,18 @@ private:
   //
   // The invariant this lock keeps has three parts:
   //
-  //  1. The worker handle, the backend io_ and the stop flag stop_ change
-  //     only under this lock, and always together. Thus the backend that
-  //     io_ holds is always the backend of the worker that thread_ holds,
-  //     and Stop() always reaches the backend of the worker it is about to
-  //     join. A backend released while its worker still parks in it can
-  //     never be asked to stop again, and the next join of that worker
-  //     never returns.
+  //  1. The worker handle, the backend io_, the stop flag stop_ and the
+  //     running flag running_ change only under this lock, and always
+  //     together. Thus the backend that io_ holds is always the backend of
+  //     the worker that thread_ holds, and Stop() always reaches the backend
+  //     of the worker it is about to join. A backend released while its
+  //     worker still parks in it can never be asked to stop again, and the
+  //     next join of that worker never returns. running_ is in the list
+  //     because Start() reads it before it takes the handle: a clear that
+  //     lands after a publish makes a running pipeline report itself
+  //     stopped, and the next Start() then joins a live worker.
+  //     ThreadMain() clears running_ as well, but only on its way out,
+  //     after its last call on the backend.
   //  2. Stop() raises stop_, asks the backend to stop, joins and releases
   //     the backend, all in one hold of this lock. A Start() thus cannot
   //     clear the flag or replace the backend in between.

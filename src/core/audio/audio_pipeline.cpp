@@ -917,11 +917,16 @@ void AudioPipeline::Stop() {
       released = std::move(io_);
     }
     released.reset();
+    // The running flag goes down under the same lock as the handle, the
+    // backend and the stop flag. Outside the lock, this store can land after
+    // a Start() that publishes a worker, thus the pipeline reports itself
+    // stopped while a worker of it runs. Start() sets the flag under this
+    // lock as well.
+    running_.store(false, std::memory_order_release);
   }
   if (hooks_.stop_released_worker_lock) {
     hooks_.stop_released_worker_lock();
   }
-  running_.store(false, std::memory_order_release);
 }
 
 AudioPipelineStats AudioPipeline::GetStats() const {

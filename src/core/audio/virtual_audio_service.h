@@ -266,6 +266,12 @@ private:
   // and a caller that fails must leave nothing of its own behind.
   bool starting_ = false;
 
+  // Guarded by mu_, not by th_mu_. AudioPipeline keeps its running flag
+  // under the lock of its worker handle, because Start() there reads the
+  // flag before it takes the handle and a clear that lands after a publish
+  // would make that Start() join a live worker. This flag guards nothing:
+  // Start() refuses a second caller on the start mark above, and Stop()
+  // clears this one after it joined the supervisor.
   bool running_ = false;
   bool mic_created_ = false;
 
