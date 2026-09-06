@@ -606,17 +606,23 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
   FormatLadderResult res;
   std::ostringstream log;
 
-  // The format the device holds before the walk asks it to take another one.
-  // A walk that keeps no rung puts this back, because the rungs it walked past
-  // may have left the device holding a format the writer refused. Only a rung
-  // that changes the format can do that, thus the read waits for the first
-  // such rung and a walk that reaches none reads nothing at all.
-  v4l2_format held{};
-  bool haveHeld = false;
-  bool readHeld = false;
+  // What one buffer type held before the walk asked it to take another
+  // format. A walk that keeps no rung puts this back, because the rungs it
+  // walked past may have left the type holding a format the writer refused.
+  // Only a rung that changes the format can do that, thus the read waits for
+  // the first such rung of the type and a type no such rung names is never
+  // read at all.
+  struct HeldFormat {
+    std::uint32_t buf_type = 0;
+    v4l2_format fmt{};
 
-  // True when a rung that changes the format the device holds answered.
-  bool changed = false;
+    // True when the save gave a format worth putting back.
+    bool have = false;
+
+    // True when a rung that changes this type answered.
+    bool changed = false;
+  };
+  std::vector<HeldFormat> held;
 
   // The first rung the driver answered whose answer the writer cannot use.
   // The failure message names it; a walk that keeps a rung reports none.
@@ -627,9 +633,22 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
   for (std::size_t i = 0; i < rungs.size(); ++i) {
     const FormatLadderRung &r = rungs[i];
 
-    if (r.mutates && !readHeld) {
-      readHeld = true;
-      haveHeld = restore.save && restore.save(&held);
+    // Read what this rung's buffer type holds, once per type, before the
+    // first rung that changes it.
+    std::size_t hi = held.size();
+    if (r.mutates) {
+      for (std::size_t k = 0; k < held.size(); ++k) {
+        if (held[k].buf_type == r.buf_type) {
+          hi = k;
+          break;
+        }
+      }
+      if (hi == held.size()) {
+        HeldFormat h;
+        h.buf_type = r.buf_type;
+        h.have = restore.save && restore.save(r, &h.fmt);
+        held.push_back(h);
+      }
     }
 
     std::string err;
@@ -640,7 +659,7 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
       continue;
     }
     if (r.mutates)
-      changed = true;
+      held[hi].changed = true;
 
     ActualFormat a;
     std::string perr;
@@ -668,12 +687,16 @@ ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps,
   res.first_refusal = firstRefusal;
   res.first_refusal_rung = firstRefusalRung;
 
-  // A device that answered no rung which asks it to take a format still holds
-  // the format it held, thus it needs no S_FMT to put one back. A G_FMT rung
-  // answers without changing anything, so a walk of those alone leaves the
-  // device as it found it on its own.
-  if (changed && haveHeld && restore.restore)
-    restore.restore(held);
+  // A buffer type that answered no rung which asks it to take a format still
+  // holds the format it held, thus it needs no S_FMT to put one back. A G_FMT
+  // rung answers without changing anything, so a walk of those alone leaves
+  // the device as it found it on its own.
+  if (restore.restore) {
+    for (const HeldFormat &h : held) {
+      if (h.have && h.changed)
+        restore.restore(h.fmt);
+    }
+  }
 
   return res;
 }
@@ -786,23 +809,20 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
   }
 
   // A walk that keeps no rung must leave the device as it found it, thus the
-  // walk reads the format the device holds before the first rung that changes
-  // it. G_FMT answers under the buffer type the device has, so the first type
-  // that answers a format worth putting back is that type, and the answer
-  // carries it back to the S_FMT that puts the format back.
+  // walk reads what a buffer type holds before the first rung that changes
+  // it. G_FMT answers under the type it is asked about, and the answer
+  // carries that type back to the S_FMT that puts the format back, thus the
+  // read names the type of the rung that is about to change it and no other.
   FormatRestore restore;
-  restore.save = [fd, &types](v4l2_format *outFmt) {
-    for (const auto &t : types) {
-      std::string err;
-      if (!TryGetFmtAny(fd, t, outFmt, &err))
-        continue;
-      // A blank report names no format the device can be asked to take again,
-      // thus a walk that reads one has nothing to put back and leaves the
-      // device alone.
-      if (SavedOutputFmtIsRestorable(*outFmt, t.mplane))
-        return true;
-    }
-    return false;
+  restore.save = [fd](const FormatLadderRung &r, v4l2_format *outFmt) {
+    const TypeSpec t{r.buf_type, r.mplane};
+    std::string err;
+    if (!TryGetFmtAny(fd, t, outFmt, &err))
+      return false;
+    // A blank report names no format the device can be asked to take again,
+    // thus a walk that reads one has nothing to put back and leaves the
+    // buffer type alone.
+    return SavedOutputFmtIsRestorable(*outFmt, t.mplane);
   };
   restore.restore = [fd](const v4l2_format &fmt) {
     v4l2_format put = fmt;

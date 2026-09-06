@@ -856,7 +856,7 @@ bool TestV4l2WriterFormatLadderPutsTheDeviceFormatBack() {
   int saves = 0;
   std::vector<int> restored;
   FormatRestore guard;
-  guard.save = [&](v4l2_format *outFmt) {
+  guard.save = [&](const FormatLadderRung &, v4l2_format *outFmt) {
     ++saves;
     FillDriverFormat(outFmt, held);
     return true;
@@ -1084,7 +1084,7 @@ bool TestV4l2WriterRestoresOnlyAFormatItCouldUse() {
 
     int restores = 0;
     FormatRestore guard;
-    guard.save = [](v4l2_format *) { return false; };
+    guard.save = [](const FormatLadderRung &, v4l2_format *) { return false; };
     guard.restore = [&](const v4l2_format &) { ++restores; };
 
     const std::vector<FormatLadderRung> rungs = {
@@ -1098,6 +1098,160 @@ bool TestV4l2WriterRestoresOnlyAFormatItCouldUse() {
     if (!Expect(restores == 0,
                 "a walk that saved nothing must put nothing back")) {
       std::cerr << "  restored " << restores << " formats\n";
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// The restore sends the saved format back with S_FMT under the buffer type
+// the save read it from, thus that type must be a type the walk changed. The
+// blank the save refuses is the report of a disconnect window, and it is the
+// output side that gives it: a save free to look at another type would answer
+// with the capture side, which the output rungs never touched, and the
+// restore would then S_FMT a type the walk never asked to take anything.
+//
+// So the save is asked for one buffer type at a time, the type of the rung
+// that is about to change it, and the walk puts back only the types a rung
+// of that type answered.
+bool TestV4l2WriterRestoresOnlyTheBufferTypeARungChanged() {
+  using video::ChooseOutputFormat;
+  using video::FormatLadderResult;
+  using video::FormatLadderRung;
+  using video::FormatRestore;
+
+  const LayoutCase held = {"the format the device already holds",
+                           V4L2_PIX_FMT_YUYV,
+                           1920,
+                           1080,
+                           3840,
+                           4147200,
+                           3840u,
+                           4147200u};
+  const LayoutCase unusable = {"MJPEG the writer cannot fill",
+                               V4L2_PIX_FMT_MJPEG,
+                               640,
+                               480,
+                               0,
+                               100000,
+                               0u,
+                               0u};
+
+  // An S_FMT rung of one buffer type that the driver answers with a report.
+  auto Answer = [](const char *name, __u32 buf_type, const LayoutCase &c) {
+    FormatLadderRung r;
+    r.name = name;
+    r.buf_type = buf_type;
+    r.mutates = true;
+    r.ask = [c](v4l2_format *outFmt, std::string *) {
+      FillDriverFormat(outFmt, c);
+      return true;
+    };
+    return r;
+  };
+
+  // An S_FMT rung of one buffer type that the driver refuses outright.
+  auto Refuse = [](const char *name, __u32 buf_type) {
+    FormatLadderRung r;
+    r.name = name;
+    r.buf_type = buf_type;
+    r.mutates = true;
+    r.ask = [](v4l2_format *, std::string *outErr) {
+      if (outErr)
+        *outErr = "VIDIOC_S_FMT failed: Invalid argument";
+      return false;
+    };
+    return r;
+  };
+
+  // The output side is blank, which is the disconnect window; the capture
+  // side holds a live format.
+  std::vector<__u32> asked;
+  std::vector<__u32> restored;
+  FormatRestore guard;
+  guard.save = [&](const FormatLadderRung &r, v4l2_format *outFmt) {
+    asked.push_back(r.buf_type);
+    if (r.buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT)
+      return false;
+    FillDriverFormat(outFmt, held);
+    // G_FMT answers under the type it was asked about, and the restore sends
+    // the struct back as it stands, thus the type rides along with it.
+    outFmt->type = r.buf_type;
+    return true;
+  };
+  guard.restore = [&](const v4l2_format &f) { restored.push_back(f.type); };
+
+  // The output rungs are the only ones the driver answered, and the output
+  // side had nothing to put back, thus the walk leaves the device alone.
+  {
+    asked.clear();
+    restored.clear();
+    const std::vector<FormatLadderRung> rungs = {
+        Answer("VIDEO_OUTPUT S_FMT(with stride)", V4L2_BUF_TYPE_VIDEO_OUTPUT,
+               unusable),
+        Refuse("VIDEO_CAPTURE S_FMT(with stride)", V4L2_BUF_TYPE_VIDEO_CAPTURE),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30, guard);
+    if (!Expect(!got.ok, "a ladder no rung parses must fail"))
+      return false;
+    if (!Expect(asked.size() == 2u && asked[0] == V4L2_BUF_TYPE_VIDEO_OUTPUT &&
+                    asked[1] == V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                "the walk must read each buffer type it is about to change")) {
+      std::cerr << "  read " << asked.size() << " buffer types\n";
+      return false;
+    }
+    if (!Expect(restored.empty(),
+                "a buffer type no rung answered must get no S_FMT")) {
+      std::cerr << "  restored " << restored.size() << " formats\n";
+      return false;
+    }
+  }
+
+  // The capture side is the side a rung answered, thus it is the side the
+  // walk puts back, and it puts back the format that side held.
+  {
+    asked.clear();
+    restored.clear();
+    const std::vector<FormatLadderRung> rungs = {
+        Refuse("VIDEO_OUTPUT S_FMT(with stride)", V4L2_BUF_TYPE_VIDEO_OUTPUT),
+        Answer("VIDEO_CAPTURE S_FMT(with stride)", V4L2_BUF_TYPE_VIDEO_CAPTURE,
+               unusable),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30, guard);
+    if (!Expect(!got.ok, "a ladder no rung parses must fail"))
+      return false;
+    if (!Expect(restored.size() == 1u &&
+                    restored[0] == V4L2_BUF_TYPE_VIDEO_CAPTURE,
+                "the walk must put back the format of the type it changed")) {
+      std::cerr << "  restored " << restored.size() << " formats\n";
+      return false;
+    }
+  }
+
+  // A type is read once, however many rungs of it the walk goes past.
+  {
+    asked.clear();
+    restored.clear();
+    const std::vector<FormatLadderRung> rungs = {
+        Answer("VIDEO_CAPTURE S_FMT(with stride)", V4L2_BUF_TYPE_VIDEO_CAPTURE,
+               unusable),
+        Answer("VIDEO_CAPTURE S_FMT(no stride)", V4L2_BUF_TYPE_VIDEO_CAPTURE,
+               unusable),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30, guard);
+    if (!Expect(!got.ok, "a ladder no rung parses must fail"))
+      return false;
+    if (!Expect(asked.size() == 1u, "the walk must read a buffer type once")) {
+      std::cerr << "  read " << asked.size() << " buffer types\n";
+      return false;
+    }
+    if (!Expect(restored.size() == 1u,
+                "the walk must put a buffer type back once")) {
+      std::cerr << "  restored " << restored.size() << " formats\n";
       return false;
     }
   }

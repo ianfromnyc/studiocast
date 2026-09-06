@@ -165,16 +165,23 @@ struct FormatLadderResult {
 // can leave the device holding a format the writer named as one it cannot
 // use. Both members are best effort, and a walk given neither changes nothing
 // on failure.
+//
+// The save and the restore work on one buffer type at a time, because the
+// S_FMT that puts a format back names the type the format was read under. A
+// walk that saved the format of one type and put it back on another would
+// write to a type its rungs never touched.
 struct FormatRestore {
-  // Reads the format the device holds. The walk calls this once, before the
-  // first rung whose `mutates` says it changes that format, thus a walk that
-  // reaches no such rung asks the device nothing. True when the answer is one
-  // the walk can put back.
-  std::function<bool(v4l2_format *outFmt)> save;
+  // Reads the format the device holds for the buffer type of one rung. The
+  // walk calls this before the first rung of that type whose `mutates` says
+  // it changes the format, thus it asks nothing about a type no rung changes
+  // and asks about each such type once. True when the answer is one the walk
+  // can put back.
+  std::function<bool(const FormatLadderRung &rung, v4l2_format *outFmt)> save;
 
-  // Asks the device to take the saved format again. The walk calls this only
-  // when it failed after a rung that changes the format answered, and it does
-  // not read the outcome: the caller is on its way to reporting the failure.
+  // Asks the device to take a saved format again. The walk calls this once
+  // for each buffer type it saved and a rung of that type then changed, and
+  // it does not read the outcome: the caller is on its way to reporting the
+  // failure.
   std::function<void(const v4l2_format &fmt)> restore;
 };
 
@@ -187,8 +194,9 @@ struct FormatRestore {
 // itself when the writer asks for no stride.
 //
 // A walk that keeps a rung leaves the device holding that rung's format. A
-// walk that keeps no rung puts back the format `restore.save` read, so that
-// it leaves the device as it found it.
+// walk that keeps no rung puts back the formats `restore.save` read, so that
+// it leaves the device as it found it. It puts back the format of a buffer
+// type only when a rung of that type changed it.
 //
 // That is a claim about the walk alone, not about the open. Everything after
 // a kept rung is outside it: a caller that opens the device and then closes
