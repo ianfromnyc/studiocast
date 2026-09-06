@@ -479,6 +479,45 @@ bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
   return true;
 }
 
+FormatLadderResult
+ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps) {
+  FormatLadderResult res;
+  std::ostringstream log;
+
+  for (std::size_t i = 0; i < rungs.size(); ++i) {
+    const FormatLadderRung &r = rungs[i];
+
+    std::string err;
+    v4l2_format f{};
+    if (!r.ask || !r.ask(&f, &err)) {
+      log << "Tried " << r.name << ": " << (err.empty() ? "(no detail)" : err)
+          << "\n";
+      continue;
+    }
+
+    ActualFormat a;
+    std::string perr;
+    if (ParseChosenOutputFmt(f, r.mplane, fps, &a, &perr)) {
+      res.ok = true;
+      res.actual = a;
+      res.rung = i;
+      res.attempt_log = log.str();
+      return res;
+    }
+
+    // The driver answered, but the writer cannot use the answer. Keep the
+    // first such message: it names the rung the writer wanted most.
+    if (res.first_refusal.empty())
+      res.first_refusal = perr;
+
+    log << "Tried " << r.name << ": the driver answered a format the writer "
+        << "cannot use: " << (perr.empty() ? "(no detail)" : perr) << "\n";
+  }
+
+  res.attempt_log = log.str();
+  return res;
+}
+
 namespace {
 
 struct NegotiationResult {
@@ -515,60 +554,60 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
 #endif
   };
 
-  // Try S_FMT (stride then no-stride) across types
-  std::ostringstream attemptLog;
-  v4l2_format chosen{};
-  bool chosenMplane = false;
-  bool ok = false;
+  // The ladder: S_FMT (with stride, then no stride) across the types, then
+  // G_FMT across them, in the same order. The walk keeps the first rung the
+  // driver answers with a layout the writer can use.
+  std::vector<FormatLadderRung> rungs;
+  std::vector<__u32> rungTypes;
+  rungs.reserve(std::size(types) * 3);
+  rungTypes.reserve(std::size(types) * 3);
 
   for (const auto &t : types) {
-    std::string e1, e2;
-    v4l2_format f{};
-    if (TrySetFmtAny(fd, t, width, height, desiredFmt, true, &f, &e1) ||
-        TrySetFmtAny(fd, t, width, height, desiredFmt, false, &f, &e2)) {
-      chosen = f;
-      chosenMplane = t.mplane;
-      res.chosen_buf_type = t.type;
-      res.chosen_mplane = t.mplane;
-      ok = true;
-      break;
-    }
-
-    attemptLog << "Tried " << BufTypeName(t.type)
-               << " S_FMT(with stride): " << (e1.empty() ? "(no detail)" : e1)
-               << "\n";
-    attemptLog << "Tried " << BufTypeName(t.type)
-               << " S_FMT(no stride):   " << (e2.empty() ? "(no detail)" : e2)
-               << "\n";
-  }
-
-  // If set failed everywhere, try G_FMT
-  if (!ok) {
-    for (const auto &t : types) {
-      std::string ge;
-      v4l2_format f{};
-      if (TryGetFmtAny(fd, t, &f, &ge)) {
-        chosen = f;
-        chosenMplane = t.mplane;
-        res.chosen_buf_type = t.type;
-        res.chosen_mplane = t.mplane;
-        ok = true;
-        break;
-      }
-      attemptLog << "Tried " << BufTypeName(t.type)
-                 << " G_FMT: " << (ge.empty() ? "(no detail)" : ge) << "\n";
+    for (const bool withStride : {true, false}) {
+      FormatLadderRung r;
+      r.name = std::string(BufTypeName(t.type)) +
+               (withStride ? " S_FMT(with stride)" : " S_FMT(no stride)");
+      r.mplane = t.mplane;
+      r.ask = [fd, t, width, height, desiredFmt,
+               withStride](v4l2_format *outFmt, std::string *outErr) {
+        return TrySetFmtAny(fd, t, width, height, desiredFmt, withStride,
+                            outFmt, outErr);
+      };
+      rungs.push_back(std::move(r));
+      rungTypes.push_back(t.type);
     }
   }
 
-  if (!ok) {
+  for (const auto &t : types) {
+    FormatLadderRung r;
+    r.name = std::string(BufTypeName(t.type)) + " G_FMT";
+    r.mplane = t.mplane;
+    r.ask = [fd, t](v4l2_format *outFmt, std::string *outErr) {
+      return TryGetFmtAny(fd, t, outFmt, outErr);
+    };
+    rungs.push_back(std::move(r));
+    rungTypes.push_back(t.type);
+  }
+
+  const FormatLadderResult ladder = ChooseOutputFormat(rungs, fps);
+  if (ladder.ok) {
+    res.chosen_buf_type = rungTypes[ladder.rung];
+    res.chosen_mplane = rungs[ladder.rung].mplane;
+  }
+
+  if (!ladder.ok) {
     std::ostringstream oss;
     oss << "Failed to set/query format for " << device
         << " (desired=" << PixelFormatName(desiredFmt) << ", " << width << "x"
         << height << ")\n"
         << "querycap.driver=" << cap.driver << " card=" << cap.card
         << " bus=" << cap.bus_info << "\n"
-        << "querycap.caps=" << CapsToString(caps) << "\n"
-        << attemptLog.str();
+        << "querycap.caps=" << CapsToString(caps) << "\n";
+    if (!ladder.first_refusal.empty()) {
+      oss << "First format the driver gave that the writer cannot use: "
+          << ladder.first_refusal << "\n";
+    }
+    oss << ladder.attempt_log;
     res.error = oss.str();
     return res;
   }
@@ -686,13 +725,10 @@ NegotiationResult NegotiateFormat(int fd, const std::string &device, int width,
     }
   }
 
-  std::string perr;
-  ActualFormat a;
-  if (!ParseChosenOutputFmt(chosen, chosenMplane, negotiatedFps, &a, &perr)) {
-    res.error = "Format negotiation succeeded but parsing failed: " + perr;
-    return res;
-  }
-
+  // The layout comes from the rung the walk kept. Only the frame rate is
+  // still open at this point, because the walk runs before the S_PARM above.
+  ActualFormat a = ladder.actual;
+  a.fps = negotiatedFps;
   a.fps_num = fpsNum;
   a.fps_den = fpsDen;
 

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include <linux/videodev2.h>
 
@@ -373,6 +374,143 @@ bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold() {
                 "the accepted report must take the implied layout")) {
       std::cerr << "  " << c.name << ": got " << got.bytes_per_line << " and "
                 << got.size_image << "\n";
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// Negotiation is a ladder: for each buffer type the writer asks S_FMT with a
+// stride, then S_FMT without one, and if no type answers at all it walks the
+// list again with G_FMT. A rung the driver answers is only usable if the
+// layout in that answer parses, so a rung the parse refuses must fall through
+// to the next one: the rung below often asks a question the driver answers
+// self-consistently. A driver that pads the stride of a with-stride S_FMT and
+// echoes the frame size back computes both numbers itself when the writer
+// asks for no stride.
+//
+// If no rung gives a usable layout, the first refusal is the one the caller
+// reports, because it names the rung the writer wanted most.
+bool TestV4l2WriterFormatLadderStepsPastAParseRefusal() {
+  using video::ChooseOutputFormat;
+  using video::FormatLadderResult;
+  using video::FormatLadderRung;
+
+  // Builds a rung that answers with one driver report.
+  auto Answer = [](const char *name, const LayoutCase &c) {
+    FormatLadderRung r;
+    r.name = name;
+    r.mplane = c.mplane;
+    r.ask = [c](v4l2_format *outFmt, std::string *) {
+      FillDriverFormat(outFmt, c);
+      return true;
+    };
+    return r;
+  };
+
+  // Builds a rung the driver refuses outright.
+  auto Refuse = [](const char *name, const char *why) {
+    FormatLadderRung r;
+    r.name = name;
+    r.ask = [why](v4l2_format *, std::string *outErr) {
+      if (outErr)
+        *outErr = why;
+      return false;
+    };
+    return r;
+  };
+
+  // 640x480 YUYV padded to a 1536 byte row, with the frame size the writer
+  // asked for echoed back: 480 rows of 1536 do not fit 614400 bytes.
+  const LayoutCase contradictory = {"padded row, echoed frame size",
+                                    V4L2_PIX_FMT_YUYV,
+                                    640,
+                                    480,
+                                    1536,
+                                    614400,
+                                    0u,
+                                    0u};
+  const LayoutCase sane = {"driver sized both numbers itself",
+                           V4L2_PIX_FMT_YUYV,
+                           640,
+                           480,
+                           1280,
+                           614400,
+                           1280u,
+                           614400u};
+
+  {
+    const std::vector<FormatLadderRung> rungs = {
+        Answer("VIDEO_OUTPUT S_FMT(with stride)", contradictory),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", sane),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30);
+    if (!Expect(got.ok, "the rung below a parse refusal must be tried"))
+      return false;
+    if (!Expect(got.rung == 1u, "the walk must keep the rung that parsed")) {
+      std::cerr << "  kept rung " << got.rung << "\n";
+      return false;
+    }
+    if (!Expect(got.actual.bytes_per_line == 1280u &&
+                    got.actual.size_image == 614400u,
+                "the kept rung must give its own layout")) {
+      std::cerr << "  got " << got.actual.bytes_per_line << " and "
+                << got.actual.size_image << "\n";
+      return false;
+    }
+    if (!Expect(!got.attempt_log.empty(),
+                "the refused rung must stay in the attempt log"))
+      return false;
+  }
+
+  // A rung the driver refuses outright is walked past the same way, and the
+  // walk goes on to the next buffer type.
+  {
+    const std::vector<FormatLadderRung> rungs = {
+        Refuse("VIDEO_OUTPUT S_FMT(with stride)", "S_FMT failed: Invalid "
+                                                  "argument"),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", contradictory),
+        Answer("VIDEO_CAPTURE S_FMT(with stride)", sane),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30);
+    if (!Expect(got.ok && got.rung == 2u,
+                "the walk must reach the next buffer type")) {
+      std::cerr << "  ok " << got.ok << ", kept rung " << got.rung << "\n";
+      return false;
+    }
+  }
+
+  // Every rung refused: the caller gets the first refusal, and a log of the
+  // whole ladder.
+  {
+    const LayoutCase unsupported = {"MJPEG the writer cannot fill",
+                                    V4L2_PIX_FMT_MJPEG,
+                                    640,
+                                    480,
+                                    0,
+                                    100000,
+                                    0u,
+                                    0u};
+
+    const std::vector<FormatLadderRung> rungs = {
+        Answer("VIDEO_OUTPUT S_FMT(with stride)", unsupported),
+        Answer("VIDEO_OUTPUT S_FMT(no stride)", contradictory),
+    };
+
+    const FormatLadderResult got = ChooseOutputFormat(rungs, /*fps=*/30);
+    if (!Expect(!got.ok, "a ladder no rung parses must fail"))
+      return false;
+    if (!Expect(got.first_refusal.find("MJPG") != std::string::npos,
+                "the failure must keep the first refusal")) {
+      std::cerr << "  got '" << got.first_refusal << "'\n";
+      return false;
+    }
+    if (!Expect(got.attempt_log.find("S_FMT(no stride)") != std::string::npos,
+                "the attempt log must name every rung tried")) {
+      std::cerr << "  got '" << got.attempt_log << "'\n";
       return false;
     }
   }

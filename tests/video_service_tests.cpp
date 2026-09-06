@@ -66,6 +66,7 @@ bool TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair();
 bool TestV4l2WriterFormatParseReadsBothUnionArms();
 bool TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite();
 bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold();
+bool TestV4l2WriterFormatLadderStepsPastAParseRefusal();
 } // namespace studiocast::tests
 
 namespace {
@@ -1142,6 +1143,8 @@ int main() {
            TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite},
       {"V4L2 writer refuses rows the frame size cannot hold",
        &studiocast::tests::TestV4l2WriterRefusesRowsTheFrameSizeCannotHold},
+      {"V4L2 writer format ladder steps past a parse refusal",
+       &studiocast::tests::TestV4l2WriterFormatLadderStepsPastAParseRefusal},
       {"V4L2 capture negotiation keeps the driver row stride",
        &studiocast::tests::TestV4l2CaptureNegotiationKeepsTheDriverRowStride},
       {"V4L2 capture negotiation refuses rows the frame size cannot hold",

@@ -2,8 +2,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
 // V4L2 format the driver reports back from VIDIOC_S_FMT. Only a reference to
 // one crosses this header, so it stays free of <linux/videodev2.h>.
@@ -61,6 +63,47 @@ struct ActualFormat {
 // Exposed for tests; the writer itself is the only other caller.
 bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
                           ActualFormat *out, std::string *outErr);
+
+// One rung of the format ladder: a question for the driver, and the union arm
+// the answer lands in.
+struct FormatLadderRung {
+  // Names the rung in the attempt log, e.g. "VIDEO_OUTPUT S_FMT(no stride)".
+  std::string name;
+
+  // True when the answer lands in `fmt.pix_mp`.
+  bool mplane = false;
+
+  // Asks the driver. Fills `*outFmt` on success, `*outErr` on failure.
+  std::function<bool(v4l2_format *outFmt, std::string *outErr)> ask;
+};
+
+// What the walk of the ladder found.
+struct FormatLadderResult {
+  bool ok = false;
+  ActualFormat actual{};
+
+  // Index in `rungs` of the rung that gave the layout. Only valid when `ok`.
+  std::size_t rung = 0;
+
+  // One line for each rung the walk tried and left, for the failure message.
+  std::string attempt_log;
+
+  // The message of the first rung whose answer the parse refused. Empty when
+  // no rung got that far.
+  std::string first_refusal;
+};
+
+// Walks the rungs in order and keeps the first one the driver answers *and*
+// `ParseChosenOutputFmt` can use.
+//
+// A parse refusal is not the end of the walk. The rung below often asks a
+// question the driver answers self-consistently: a driver that pads the row
+// of a with-stride S_FMT and echoes the frame size back computes both numbers
+// itself when the writer asks for no stride.
+//
+// Exposed for tests; `V4l2Writer::Open()` is the only other caller.
+FormatLadderResult
+ChooseOutputFormat(const std::vector<FormatLadderRung> &rungs, int fps);
 
 class V4l2Writer final {
 public:
