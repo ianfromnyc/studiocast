@@ -14,6 +14,18 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+// One spelling of "these headers know the multi-planar types". The two cap
+// macros have shipped together since Linux 2.6.39, but the mplane helpers
+// below are shared by the output and the capture type lists, thus a guard on
+// one family alone can put a capture-mplane type in a list that no helper can
+// answer.
+#if defined(V4L2_CAP_VIDEO_OUTPUT_MPLANE) ||                                   \
+    defined(V4L2_CAP_VIDEO_CAPTURE_MPLANE)
+#define STUDIOCAST_V4L2_HAS_MPLANE 1
+#else
+#define STUDIOCAST_V4L2_HAS_MPLANE 0
+#endif
+
 namespace studiocast::video {
 namespace {
 
@@ -269,7 +281,7 @@ bool TryGetFmtSinglePlane(int fd, __u32 bufType, v4l2_format *outFmt,
   return false;
 }
 
-#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
+#if STUDIOCAST_V4L2_HAS_MPLANE
 bool TrySetFmtMPlane(int fd, __u32 bufType, int width, int height,
                      PixelFormat desired, bool setStrideAndSize,
                      v4l2_format *outFmt, std::string *outErr) {
@@ -334,7 +346,7 @@ bool TrySetFmtAny(int fd, const TypeSpec &t, int width, int height,
     return TrySetFmtSinglePlane(fd, t.type, width, height, desired,
                                 setStrideAndSize, outFmt, outErr);
   }
-#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
+#if STUDIOCAST_V4L2_HAS_MPLANE
   return TrySetFmtMPlane(fd, t.type, width, height, desired, setStrideAndSize,
                          outFmt, outErr);
 #else
@@ -349,7 +361,7 @@ bool TryGetFmtAny(int fd, const TypeSpec &t, v4l2_format *outFmt,
   if (!t.mplane) {
     return TryGetFmtSinglePlane(fd, t.type, outFmt, outErr);
   }
-#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
+#if STUDIOCAST_V4L2_HAS_MPLANE
   return TryGetFmtMPlane(fd, t.type, outFmt, outErr);
 #else
   if (outErr)
@@ -377,7 +389,7 @@ bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
     bpl = static_cast<std::size_t>(f.fmt.pix.bytesperline);
     size = static_cast<std::size_t>(f.fmt.pix.sizeimage);
   } else {
-#ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
+#if STUDIOCAST_V4L2_HAS_MPLANE
     w = static_cast<int>(f.fmt.pix_mp.width);
     h = static_cast<int>(f.fmt.pix_mp.height);
     fourcc = f.fmt.pix_mp.pixelformat;
