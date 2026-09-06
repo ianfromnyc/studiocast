@@ -5397,16 +5397,30 @@ bool TestStopKeepsTheStopFlagUpForTheWorkerItJoins() {
 
   if (!all_returned) {
     // A caller is wedged inside a join on a worker that nobody told to stop.
-    // A wedged thread cannot be recovered and its stale thread id can go to a
-    // later test, thus the run ends here.
+    // The three threads are already detached here, thus the run can go on:
+    // the other tests do not get a stale thread id from them. Say which
+    // caller is still in flight, because that names the path that wedged.
     stopper.detach();
     starter.detach();
     cleaner.detach();
     std::cout.flush();
     std::cerr << "[FAIL] Start()/Stop() with a parked worker never returned; "
                  "a join() is stuck on a worker that was never told to stop"
+              << " (stopper_done="
+              << raw->stopper_done.load(std::memory_order_acquire)
+              << " starter_done="
+              << raw->starter_done.load(std::memory_order_acquire)
+              << " cleaner_done="
+              << raw->cleaner_done.load(std::memory_order_acquire)
+              << " ios_created="
+              << raw->ios_created.load(std::memory_order_relaxed) << ")"
               << std::endl;
-    std::_Exit(1);
+    // The three detached threads still read the fixture, and the destructor
+    // of the pipeline in it calls Stop(), which is the call that is wedged.
+    // Leak one more reference on purpose, thus the fixture stays alive and
+    // the run can go on with the other tests.
+    (void)new std::shared_ptr<StopOrderFixture>(fx);
+    return false;
   }
 
   stopper.join();
