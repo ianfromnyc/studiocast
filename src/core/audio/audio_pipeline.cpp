@@ -795,9 +795,15 @@ void AudioPipeline::Stop() {
       io_->RequestStop();
     }
   }
-  // Hold the worker lock across the join and the I/O release. A second Stop()
-  // caller then waits here instead of joining the same worker a second time,
-  // and it cannot release the I/O backend while the worker still uses it.
+  // Hold the worker lock across the join. The lock makes the joinable test,
+  // the join and the publish in Start() one step, thus a second Stop() caller
+  // waits here instead of joining the same worker again.
+  //
+  // The lock does not keep the I/O backend alive for the worker. ThreadMain()
+  // uses the raw pointer that GetActiveIo() gave it with no lock, thus a
+  // Stop() that gets this lock before Start() publishes the handle can
+  // release the backend while the worker is still in Open(). The join, not
+  // the lock, is what puts io_.reset() after the last use of the backend.
   std::lock_guard<std::mutex> thread_lock(thread_mu_);
   if (thread_.joinable()) {
     thread_.join();

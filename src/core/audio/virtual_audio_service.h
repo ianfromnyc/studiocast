@@ -241,10 +241,18 @@ private:
 
   mutable std::mutex mu_;
 
-  // Guards every use of the supervisor handle. Start() and Stop() can run at
-  // the same time, so the "is it joinable?" test and the join must be one
-  // step: without the lock two callers both see a joinable handle and both
-  // join the same supervisor, which is undefined behaviour.
+  // Guards the supervisor handle and the stop_ flag in Start() and in Stop().
+  // Start() and Stop() can run at the same time, so the "is it joinable?"
+  // test, the join and the publish must be one step: without the lock two
+  // callers both see a joinable handle and both join the same supervisor,
+  // which is undefined behaviour.
+  //
+  // Stop() holds this lock across the join on purpose. src/core/video does
+  // the opposite: VirtualCameraService::Stop() moves the handle out under the
+  // lock and joins outside it, thus a second Stop() there returns before the
+  // supervisor is gone. Do not change this side to match, because
+  // ~VirtualAudioService() calls Stop() and must not free the object under a
+  // live supervisor.
   std::mutex th_mu_;
   std::thread th_;
   std::atomic_bool stop_{false};
