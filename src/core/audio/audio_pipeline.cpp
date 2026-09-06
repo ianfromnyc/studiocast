@@ -702,11 +702,52 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
       *error = "Audio pipeline is already running.";
     return false;
   }
+  std::thread previous;
   {
     std::lock_guard<std::mutex> lock(thread_mu_);
-    if (thread_.joinable()) {
-      thread_.join();
+    // Two Start() callers at the same time both pass the running_ guard
+    // above, because that guard is a test and then a store. Both then get
+    // here, and a move-assign onto a joinable handle ends the process. The
+    // second caller must find a start in progress, or a worker that the
+    // first caller published, and fail. The test is live in every build,
+    // because a release build defines NDEBUG and thus drops an assert().
+    // No caller starts twice today; this makes a future one fail with a
+    // message.
+    //
+    // The test comes before the stats, the startup handshake and the
+    // backend, thus the caller that fails leaves all of those as the caller
+    // that won made them. It writes last_error_, which the next GetStats()
+    // reports; that is the whole of what it changes.
+    if (starting_ || running_.load(std::memory_order_acquire)) {
+      SetLastError(starting_ ? "Audio pipeline is already starting."
+                             : "Audio pipeline is already running.");
+      if (error)
+        *error = GetStats().last_error;
+      return false;
     }
+    starting_ = true;
+    // Take the worker of the last run out of the handle here and join it
+    // below, outside every lock. A join under thread_mu_ would hold that
+    // lock for as long as the worker runs, and Stop() needs it to reach
+    // RequestStop(); a worker parked in the backend leaves only on that
+    // call, thus the pair would never unwind.
+    previous = std::move(thread_);
+  }
+
+  // Clears the start mark on every way out of this function. Take the lock
+  // again, because the mark belongs to the handle.
+  struct StartMark {
+    AudioPipeline *self;
+    ~StartMark() {
+      std::lock_guard<std::mutex> lock(self->thread_mu_);
+      self->starting_ = false;
+    }
+  } start_mark{this};
+
+  // Reap the worker of the last run. It exited by itself, because a live
+  // worker keeps running_ up and the guard above then fails the call.
+  if (previous.joinable()) {
+    previous.join();
   }
 
   // Reset stats.
@@ -745,50 +786,50 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
     return false;
   }
 
-  stop_.store(false, std::memory_order_release);
+  bool io_made = false;
   {
-    std::lock_guard<std::mutex> lock(startup_mu_);
-    startup_complete_ = false;
-    startup_ok_ = false;
-    startup_error_.clear();
-  }
-  {
-    std::lock_guard<std::mutex> lock(io_mu_);
-    io_ = CreateIo();
-    if (!io_) {
-      SetLastError("Audio pipeline I/O backend creation failed.");
-      if (error)
-        *error = GetStats().last_error;
-      return false;
-    }
-    io_->SetStopRequestedFlag(&stop_);
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(thread_mu_);
-    // Two Start() callers at the same time both pass the running_ guard
-    // above, because that guard is a test and then a store. Both then get
-    // here, and a move-assign onto a joinable handle ends the process. The
-    // second caller must find the handle in use and fail. The test is live in
-    // every build, because a release build defines NDEBUG and thus drops an
-    // assert(). No caller starts twice today; this makes a future one fail
-    // with a message.
+    // The backend and the worker handle change together under thread_mu_.
+    // Stop() takes the same lock across the raise of the stop flag, the
+    // request to the backend, the join and the release of the backend, thus
+    // it always finds the backend of the worker that it is about to join.
+    // With the backend outside this lock, a Stop() that finds an empty
+    // handle can release the backend of a worker that this call publishes a
+    // moment later, and the next Stop() has nothing left to ask: it joins a
+    // parked worker that nobody can wake.
     //
-    // The failure is not full support for two Start() callers: the caller
-    // that fails here already made its own I/O backend, thus it replaced the
-    // backend of the caller that won. The shared reference keeps that backend
-    // alive for the worker that uses it.
-    if (thread_.joinable()) {
-      SetLastError("Audio pipeline is already starting.");
-      if (error)
-        *error = GetStats().last_error;
-      return false;
+    // The stop flag is cleared here, under the same lock that Stop() raises
+    // it under, thus the raise and the clear cannot cross.
+    // VirtualAudioService::Start() clears it under th_mu_ for the same
+    // reason.
+    std::lock_guard<std::mutex> lock(thread_mu_);
+    stop_.store(false, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> startup_lock(startup_mu_);
+      startup_complete_ = false;
+      startup_ok_ = false;
+      startup_error_.clear();
     }
-    // Make the worker under the lock, thus nothing can take the handle
-    // between the test and the publish. ThreadMain() never takes this lock,
-    // thus it does not wait on it.
-    running_.store(true, std::memory_order_release);
-    thread_ = std::thread([this, cfg] { ThreadMain(cfg); });
+    {
+      std::lock_guard<std::mutex> io_lock(io_mu_);
+      io_ = CreateIo();
+      io_made = static_cast<bool>(io_);
+      if (io_made) {
+        io_->SetStopRequestedFlag(&stop_);
+      }
+    }
+    if (io_made) {
+      // Make the worker under the lock, thus nothing can take the handle
+      // between the start mark and the publish. ThreadMain() never takes
+      // this lock, thus it does not wait on it.
+      running_.store(true, std::memory_order_release);
+      thread_ = std::thread([this, cfg] { ThreadMain(cfg); });
+    }
+  }
+  if (!io_made) {
+    SetLastError("Audio pipeline I/O backend creation failed.");
+    if (error)
+      *error = GetStats().last_error;
+    return false;
   }
 
   std::unique_lock<std::mutex> startup_lock(startup_mu_);
@@ -808,22 +849,33 @@ bool AudioPipeline::Start(const AudioPipelineConfig &cfg, std::string *error) {
 void AudioPipeline::Stop() {
   {
     // Hold the worker lock across the raise of the stop flag, the request to
-    // the backend and the join. The lock makes those and the publish in
-    // Start() one step, thus a second Stop() caller waits here instead of
-    // joining the same worker again, and the worker that this caller joins is
-    // always one that sees the flag. Without the lock on the raise, a Start()
+    // the backend, the join and the release of the backend. The lock makes
+    // those and the publish in Start() one step, thus a second Stop() caller
+    // waits here instead of joining the same worker again, and the worker
+    // that this caller joins is always one that sees the flag and whose
+    // backend got the request. Without the lock on the raise, a Start()
     // clears the flag and publishes a new worker in between, and the join
     // waits for a worker that nobody told to stop.
     //
-    // The order is thread_mu_ and then io_mu_. No path takes them the other
-    // way round, thus this cannot deadlock. RequestStop() does not wait for
-    // the worker; it only marks the backend and wakes the Pulse main loop.
+    // Two lock orders exist and both start at thread_mu_: thread_mu_ and
+    // then io_mu_, here and in the publish block of Start(); thread_mu_ and
+    // then mu_, where Start() reports a second caller. No path takes any of
+    // them the other way round, thus this cannot deadlock. The worker takes
+    // io_mu_, mu_ and startup_mu_ and never thread_mu_, thus a join under
+    // thread_mu_ does not wait on the worker for a lock. RequestStop() does
+    // not wait for the worker; it only marks the backend and wakes the Pulse
+    // main loop.
     //
-    // The lock does not keep the I/O backend alive for the worker; the shared
-    // reference that ThreadMain() holds does. A Stop() that gets this lock
-    // before Start() publishes the handle skips the join and releases io_
-    // while that worker is still in Open(), thus the backend must outlive
-    // io_.
+    // The backend goes with the handle: the release of io_ is inside this
+    // lock as well, thus this call cannot release the backend of a worker
+    // that a Start() publishes a moment later. Such a worker would park in a
+    // backend that no later Stop() could ask to stop, and the join of it
+    // would never return.
+    //
+    // The lock does not keep the I/O backend alive for the worker; the
+    // shared reference that ThreadMain() holds does. Start() joins the
+    // worker of the last run outside every lock, thus this call can release
+    // io_ while that worker still makes calls on the backend.
     std::lock_guard<std::mutex> thread_lock(thread_mu_);
     stop_.store(true, std::memory_order_release);
     {
@@ -835,10 +887,10 @@ void AudioPipeline::Stop() {
     if (thread_.joinable()) {
       thread_.join();
     }
-  }
-  {
-    std::lock_guard<std::mutex> lock(io_mu_);
-    io_.reset();
+    {
+      std::lock_guard<std::mutex> lock(io_mu_);
+      io_.reset();
+    }
   }
   running_.store(false, std::memory_order_release);
 }
