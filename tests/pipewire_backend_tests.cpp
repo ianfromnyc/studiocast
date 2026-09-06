@@ -1387,6 +1387,17 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
   // A write count no healthy run comes near, because 32 hand-offs need 32
   // writes at best and the writes above give thousands on an idle machine.
   constexpr std::uint64_t kWriteCap = kFrames * 500;
+  // The third bound, on the clock. The write cap counts writes, thus what it
+  // costs in time changes with the machine load: a buffer that hands nothing
+  // over reached the cap in 9.4 seconds on an idle machine, but was still
+  // writing after 300 seconds on one core that carried 32 other jobs. This
+  // bound ends such a run in seconds under any load.
+  //
+  // The clock can only fail this test, never pass it. A run that reaches the
+  // bound has too few hand-offs, thus the bound stops the loop and the test
+  // reports the wait as the failure. A test that ends well always ends on the
+  // count of the hand-offs.
+  constexpr int kDeadlineSeconds = 30;
 
   studiocast::pw::TripleFrameBuffer buffer;
   buffer.Reset(kFrameBytes);
@@ -1400,10 +1411,13 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
   // to know when to stop, and the test asserts on it, thus the stop rule and
   // the bar are the same number and cannot disagree.
   std::atomic<int> crossed{0};
+  std::atomic<bool> expired{false};
   std::thread producer([&] {
     std::vector<std::uint8_t> frame(kFrameBytes, 0);
+    const auto start = std::chrono::steady_clock::now();
     std::uint64_t written = 0;
     int seen = 0;
+    bool late = false;
     while (!torn.load(std::memory_order_relaxed) && written < kWriteCap &&
            (written < kFrames ||
             crossed.load(std::memory_order_relaxed) < kHandoffs)) {
@@ -1419,14 +1433,24 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
         // has gone: the consumer took it.
         ++seen;
       }
-      // The writes are done and the producer only waits for hand-offs now. It
-      // gives up the core, thus a consumer that has none can run.
+      // The writes are done and the producer only waits for hand-offs now.
       if (written >= kFrames &&
-          crossed.load(std::memory_order_relaxed) < kHandoffs)
+          crossed.load(std::memory_order_relaxed) < kHandoffs) {
+        // The wait is the only part of this loop the write cap does not hold
+        // to a time, thus the clock is read here and nowhere else.
+        if (std::chrono::steady_clock::now() - start >
+            std::chrono::seconds(kDeadlineSeconds)) {
+          late = true;
+          break;
+        }
+        // The producer gives up the core, thus a consumer that has none can
+        // run.
         std::this_thread::yield();
+      }
     }
     handoffs.store(seen, std::memory_order_relaxed);
     writes.store(written, std::memory_order_relaxed);
+    expired.store(late, std::memory_order_relaxed);
     done.store(true, std::memory_order_release);
   });
 
@@ -1461,6 +1485,9 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
 
   return Expect(!torn.load(std::memory_order_relaxed),
                 "the consumer read a frame that two writes tore apart") &&
+         Expect(!expired.load(std::memory_order_relaxed),
+                "the producer waited " + std::to_string(kDeadlineSeconds) +
+                    " seconds for the hand-offs and gave up") &&
          Expect(crossed.load(std::memory_order_relaxed) >= kHandoffs,
                 "the consumer took " +
                     std::to_string(crossed.load(std::memory_order_relaxed)) +
