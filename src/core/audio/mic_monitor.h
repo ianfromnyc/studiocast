@@ -58,12 +58,24 @@ bool IsUnsafeMicMonitorSinkName(const std::string &sink,
 inline constexpr char kNoSafeMicMonitorSinkMessage[] =
     "No safe output sink was found for the microphone monitor.";
 
-// Opening words of every message the daemon writes when the sound server gave
-// no answer at all. That state clears itself and asks nothing of the user, so
-// the GUI matches on this text to say the monitor waits instead of asking the
-// user to open Support. Both sides use this one text and cannot drift apart.
+// Opening words of the messages the daemon writes when the sound server gave
+// no answer to a request to start the monitor. That state clears itself and
+// asks nothing of the user, so the GUI matches on this text to say the monitor
+// waits instead of asking the user to open Support. Both sides use this one
+// text and cannot drift apart.
 inline constexpr char kSoundServerNoAnswerMessage[] =
     "The sound server did not answer";
+
+// The whole message the daemon writes when the sound server gave no answer to
+// a request to stop the monitor. It needs a text of its own because the two
+// states are opposites: a start that got no answer plays nothing, while a stop
+// that got no answer can leave the loopback playing the microphone into the
+// speakers. It opens with `kSoundServerNoAnswerMessage`, so the GUI must match
+// on this text first, or a failed stop reads as a monitor that starts again on
+// its own.
+inline constexpr char kSoundServerNoAnswerOnStopMessage[] =
+    "The sound server did not answer in time, so the microphone monitor "
+    "loopback was not removed.";
 
 // Resolves the configured sink ("auto" = Pulse default) to a safe output sink.
 // Returns no value when no safe sink is available; `error` says why.

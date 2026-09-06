@@ -396,6 +396,15 @@ bool TestStopReportsAFailureWhenPactlTimesOut() {
     std::cerr << "the failed stop said nothing about why\n";
     return false;
   }
+  // The GUI reads this text and has an arm of its own for it, because a stop
+  // that got no answer can leave the loopback playing. A sentence that only
+  // means the same thing reads as a monitor that starts again on its own.
+  if (error.find(studiocast::audio::kSoundServerNoAnswerOnStopMessage) ==
+      std::string::npos) {
+    std::cerr << "the failed stop did not use the shared text: '" << error
+              << "'\n";
+    return false;
+  }
   return true;
 }
 

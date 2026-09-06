@@ -259,8 +259,7 @@ bool StopMicMonitor(std::string *error) {
       // microphone into the speakers, so this is a failed stop: the caller
       // must keep the route in mind and try again.
       if (error) {
-        *error = "The sound server did not answer in time, so the microphone "
-                 "monitor loopback was not removed.";
+        *error = kSoundServerNoAnswerOnStopMessage;
         if (!details.empty())
           *error += " Details: " + details;
       }

@@ -1989,6 +1989,78 @@ bool TestAudioPageShowsABusySoundServerAsAWaitForTheMonitor() {
   return ok;
 }
 
+// A stop the sound server did not answer is the opposite state of a start it
+// did not answer: the loopback can still play the microphone into the
+// speakers. The page must not tell a user who turned the monitor off that it
+// starts on its own.
+bool TestAudioPageShowsAFailedStopAsAMonitorThatMayStillPlay() {
+  ScopedRuntimeDir runtime("studiocast-audio-page-monitor-busy-stop");
+  if (!Expect(runtime.ok(), runtime.error().c_str()))
+    return false;
+
+  const auto pactl = FakeSoundServer();
+  studiocast::gui::AudioPage page(studiocast::gui::AudioPageMode::Microphone);
+
+  auto *statusLabel =
+      page.findChild<QLabel *>(QStringLiteral("monitorStatusLabel"));
+  if (!Expect(statusLabel != nullptr, "the monitor status label is findable"))
+    return false;
+
+  // The sentence the daemon writes when the sound server did not answer a
+  // stop, the way `StopMicMonitor` reports it.
+  const QString lastError =
+      QStringLiteral("Failed to stop the microphone monitor: ") +
+      QString::fromLatin1(
+          studiocast::audio::kSoundServerNoAnswerOnStopMessage);
+
+  const QString status =
+      QStringLiteral(R"({
+        "service_running":true,
+        "audio":{
+          "enabled":true,
+          "mic_present":true,
+          "source_error":"",
+          "monitor":{
+            "enabled":false,
+            "active":false,
+            "sink":"auto",
+            "latency_ms":20,
+            "volume":100,
+            "note":"",
+            "last_error":"%1"
+          },
+          "pipeline":{"running":true,"starting":false,"last_error":""},
+          "speakers":{
+            "present":true,
+            "target_sink_error":"",
+            "routing_active":false,
+            "route_mode":"off",
+            "last_error":"",
+            "pipeline_last_error":""
+          }
+        }
+      })")
+          .arg(lastError);
+
+  page.UpdateStatus(studiocast::gui::DaemonStatusSnapshot::FromJson(status));
+
+  const QString text = statusLabel->text();
+  bool ok = Expect(text.contains(QStringLiteral("busy")),
+                   "the page should say the sound server is busy");
+  ok = Expect(!text.contains(QStringLiteral("starts on its own")),
+              "a monitor the user turned off does not start on its own") &&
+       ok;
+  ok = Expect(text.contains(QStringLiteral("may still")),
+              "the page should say the monitor may still be playing") &&
+       ok;
+  ok = Expect(!text.contains(QStringLiteral("Open Support")),
+              "a busy sound server is not a Support case") &&
+       ok;
+  if (!ok)
+    std::cerr << "monitor status was: " << text.toStdString() << "\n";
+  return ok;
+}
+
 // Every step of the monitor volume used to be its own blocking daemon write,
 // and each write costs the daemon two more pactl runs. The steps must coalesce
 // into one debounced write, the way the rest of this page writes.
@@ -2380,6 +2452,7 @@ int main(int argc, char **argv) {
   ok = TestAudioPageShowsTheMonitorNoteWithoutSendingUserToSupport() && ok;
   ok = TestAudioPageShowsTheNoSafeOutputAdviceForTheMonitor() && ok;
   ok = TestAudioPageShowsABusySoundServerAsAWaitForTheMonitor() && ok;
+  ok = TestAudioPageShowsAFailedStopAsAMonitorThatMayStillPlay() && ok;
   ok = TestAudioPageDebouncesTheMonitorWrites() && ok;
   ok = TestAudioPageKeepsTheMonitorControlsWhileAWriteIsPending() && ok;
   ok = TestAudioPageDisablesTheWholeMonitorGroupWithoutAMonitor() && ok;
