@@ -2701,7 +2701,12 @@ void VideoPage::OnPreviewTick() {
   studiocast::video::CapturedFrameView f;
   std::string err;
   if (!previewCapture_.AcquireFrame(&f, 0, &err)) {
-    // Normal: no frame ready yet.
+    // Normal: no frame ready yet, and the view then carries no buffer, so this
+    // releases nothing. A frame the capture refused after the driver dequeued
+    // it does carry one, and only this call puts that buffer back: drop it and
+    // the preview queue runs one buffer short on every refused frame.
+    std::string rerr;
+    (void)previewCapture_.ReleaseFrame(f, &rerr);
     return;
   }
 

@@ -94,7 +94,8 @@ bool CaptureBufferHoldsFrame(std::size_t mapped_length,
 // single-plane buffer has no such field and passes 0. An offset the payload
 // does not reach describes no image at all, so the frame is refused.
 //
-// Exposed for tests; `V4l2Capture::AcquireFrame()` is the only other caller.
+// Exposed for tests; `CaptureAcceptDequeuedBuffer()` is the only other
+// caller.
 bool CaptureFramePayload(std::size_t mapped_length, std::size_t bytesused,
                          std::size_t data_offset, std::size_t *out_offset,
                          std::size_t *out_bytes, std::string *outErr);
@@ -110,7 +111,13 @@ bool CaptureFramePayload(std::size_t mapped_length, std::size_t bytesused,
 // length instead, which `CaptureFramePayload` already bounds, so it is always
 // inside.
 //
-// Exposed for tests; `V4l2Capture::AcquireFrame()` is the only other caller.
+// Either the offset or the mapping can refuse a frame here, and `outErr` names
+// the one the operator acts on. A mapping that would have held the walk on its
+// own gives the offset message; a mapping shorter than the walk gives the
+// mapping message, because no offset makes that walk fit.
+//
+// Exposed for tests; `CaptureAcceptDequeuedBuffer()` is the only other
+// caller.
 bool CaptureRawWalkFitsMapping(std::size_t mapped_length,
                                std::size_t data_offset,
                                const CaptureFormat &fmt, std::string *outErr);
@@ -127,6 +134,35 @@ struct CapturedFrameView {
   std::uint64_t timestamp_ns = 0;
   bool timestamp_monotonic = false;
 };
+
+// A buffer VIDIOC_DQBUF just returned, in the fields both buffer types have.
+// The multi-planar arm reads `bytesused` and `data_offset` from its one plane,
+// and the single-plane arm has no `data_offset` and passes 0.
+struct CaptureDequeuedBuffer {
+  const void *mapped_start = nullptr;
+  std::size_t mapped_length = 0;
+  std::size_t bytesused = 0;
+  std::size_t data_offset = 0;
+
+  int index = -1;
+  std::uint64_t sequence = 0;
+  std::uint64_t timestamp_ns = 0;
+  bool timestamp_monotonic = false;
+};
+
+// Fills `out` from a dequeued buffer and says whether the frame can be used.
+//
+// The buffer index goes into `out` before the two refusals this makes, so a
+// refused frame carries the buffer the driver dequeued. That is a contract,
+// not an accident: a refusal here leaves the buffer out of the driver queue,
+// and `ReleaseFrame()` finds it by `CapturedFrameView::index` alone. An index
+// written below the refusals leaves the view at -1, and the driver loses one
+// buffer on every refused frame.
+//
+// Exposed for tests; `V4l2Capture::AcquireFrame()` is the only other caller.
+bool CaptureAcceptDequeuedBuffer(const CaptureDequeuedBuffer &buf,
+                                 const CaptureFormat &fmt,
+                                 CapturedFrameView *out, std::string *outErr);
 
 class V4l2Capture final {
 public:
@@ -150,7 +186,20 @@ public:
   const CaptureFormat &Actual() const { return actual_; }
 
   // Acquire a frame (DQBUF). Caller MUST call ReleaseFrame() with the returned
-  // view.
+  // view, on failure as well as on success.
+  //
+  // The call clears `*out` first, so the view carries only what this call put
+  // in it. Every claim below is therefore the function's own, and holds for a
+  // caller that keeps one view across calls as well.
+  //
+  // A frame refused after VIDIOC_DQBUF is a buffer already out of the driver
+  // queue, and the view carries its `index`, so ReleaseFrame() gives that
+  // buffer back. The one exception is a buffer index the driver reports out of
+  // range: no buffer of this capture answers to it, so the view keeps `index`
+  // at -1 and STREAMOFF is what reclaims that one buffer. A failure that
+  // dequeues no buffer - a poll error, a timeout, a VIDIOC_DQBUF that returns
+  // an error - leaves `index` at -1 as well. ReleaseFrame() returns early on
+  // either, so the call is correct after any failure.
   bool AcquireFrame(CapturedFrameView *out, int timeout_ms, std::string *error);
 
   // Release a frame back to driver (QBUF).
