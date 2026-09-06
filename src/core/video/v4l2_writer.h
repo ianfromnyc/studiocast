@@ -140,9 +140,12 @@ struct FormatLadderResult {
   std::string attempt_log;
 
   // The message of the first rung whose answer the parse refused, and the
-  // index of that rung in `rungs`. Both belong to the failure message: a walk
-  // that kept a rung leaves the message empty, because the layout it gives
-  // back is the whole answer.
+  // index of that rung in `rungs`. A walk that kept a rung leaves both empty,
+  // because the layout it gives back is the whole answer.
+  //
+  // The failure message names the rung, thus `NegotiateFormat` reads the
+  // index and reads the message only to ask whether there was a refusal: the
+  // attempt log already carries the text. The tests read the text itself.
   std::string first_refusal;
   std::size_t first_refusal_rung = 0;
 };
@@ -175,8 +178,13 @@ struct FormatRestore {
 // itself when the writer asks for no stride.
 //
 // A walk that keeps a rung leaves the device holding that rung's format. A
-// walk that fails puts back the format `restore.save` read, so that a failed
-// open leaves the device as it found it.
+// walk that keeps no rung puts back the format `restore.save` read, so that
+// it leaves the device as it found it.
+//
+// That is a claim about the walk alone, not about the open. Everything after
+// a kept rung is outside it: a caller that opens the device and then closes
+// it, because the format the walk kept is not the format it asked for, leaves
+// the device holding the format the walk set.
 //
 // Exposed for tests; `V4l2Writer::Open()` is the only other caller.
 FormatLadderResult
