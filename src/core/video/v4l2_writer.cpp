@@ -439,33 +439,38 @@ bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
   const std::size_t rows =
       a.height > 0 ? static_cast<std::size_t>(a.height) : 0u;
 
-  // The driver's own report must hold together: the rows it says the frame
-  // has must fit in the frame size it says the buffer holds. `WriteFrame`
-  // sizes every write() from `size_image`, so raising that value to match a
-  // longer stride only hides the disagreement, and the writer then pushes
-  // more bytes than the frame the driver sized. On a v4l2loopback output the
-  // surplus runs into the next frame, and the picture is torn from then on.
-  //
-  // A frame size of 0 is not that disagreement: it is no report at all, and
-  // the raise below gives it the value the stride implies.
-  if (size > 0 && bpl * rows > size) {
-    if (outErr)
-      *outErr = "Driver reported bytesperline=" + std::to_string(bpl) +
-                " for " + std::to_string(a.height) +
-                " rows, which does not fit sizeimage=" + std::to_string(size);
-    return false;
-  }
-
   // Only a row too short to hold the pixels is raised, because the converter
   // writes the whole packed row and the driver cannot have meant less.
+  const std::size_t driverBpl = bpl;
   const std::size_t minBpl = MinBytesPerLine(a.width, a.format);
   if (bpl < minBpl)
     bpl = minBpl;
   a.bytes_per_line = bpl;
 
-  // A raised stride is the one case where the frame size no longer follows
-  // the driver's own report, so it follows the raise.
+  // The rows the writer walks must fit the frame the driver sized.
+  // `WriteFrame` sizes every write() from `size_image`, so raising that value
+  // to match a longer row only hides the disagreement, and the writer then
+  // pushes more bytes than the frame the driver sized. On a v4l2loopback
+  // output the surplus runs into the next frame, and the picture is torn from
+  // then on.
+  //
+  // The measure comes after the raise, because the raised row is the row the
+  // writer walks. A stride below the packed row is itself a contradiction in
+  // the report of a packed format, thus the frame that stride implies gets no
+  // more trust than a stride the driver padded.
+  //
+  // A frame size of 0 is not that disagreement: it is no report at all, and
+  // the raise below gives it the value the row implies.
   const std::size_t minSize = bpl * rows;
+  if (size > 0 && minSize > size) {
+    if (outErr)
+      *outErr = "Driver reported bytesperline=" + std::to_string(driverBpl) +
+                " and sizeimage=" + std::to_string(size) + ", but " +
+                std::to_string(a.height) + " rows of " + std::to_string(bpl) +
+                " bytes do not fit";
+    return false;
+  }
+
   if (size < minSize)
     size = minSize;
   a.size_image = size;

@@ -111,7 +111,8 @@ bool TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair() {
 //
 // The writer keeps the stride the driver reports and raises only a row too
 // short to hold the pixels, because the row must at least hold the pixels the
-// converter writes into it. The frame size then follows the row.
+// converter writes into it. The frame size then follows the row, as long as
+// the raised rows still fit the frame the driver sized.
 bool TestV4l2WriterFormatParseReadsBothUnionArms() {
   using video::ActualFormat;
   using video::ParseChosenOutputFmt;
@@ -125,7 +126,7 @@ bool TestV4l2WriterFormatParseReadsBothUnionArms() {
       {"odd YUYV width, packed driver stride", V4L2_PIX_FMT_YUYV, 3, 4, 8, 32,
        8u, 32u},
       {"YUYV stride below the packed row is raised", V4L2_PIX_FMT_YUYV, 3, 4, 4,
-       16, 8u, 32u},
+       32, 8u, 32u},
       {"YUYV stride of zero is raised", V4L2_PIX_FMT_YUYV, 640, 480, 0, 0,
        1280u, 614400u},
       {"odd RGB24 width, packed driver stride", V4L2_PIX_FMT_RGB24, 3, 4, 9, 36,
@@ -138,7 +139,7 @@ bool TestV4l2WriterFormatParseReadsBothUnionArms() {
       {"YUYV padded row is kept, mplane", V4L2_PIX_FMT_YUYV, 640, 480, 1536,
        737280, 1536u, 737280u, true},
       {"YUYV stride below the packed row is raised, mplane", V4L2_PIX_FMT_YUYV,
-       3, 4, 4, 16, 8u, 32u, true},
+       3, 4, 4, 32, 8u, 32u, true},
       {"odd RGB24 width, packed driver stride, mplane", V4L2_PIX_FMT_RGB24, 3,
        4, 9, 36, 9u, 36u, true},
 #endif
@@ -281,15 +282,20 @@ bool TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite() {
 #endif
 }
 
-// The driver's own report has to hold together: the rows it says the frame
-// has must fit the frame size it says the buffer holds. The writer sizes
-// every write() from `size_image`, so raising that value to match a longer
-// stride only hides the disagreement and then pushes more bytes than the
-// frame the driver sized. On a v4l2loopback output the surplus runs into the
-// next frame, and the picture is torn from then on.
+// The rows the writer walks have to fit the frame size the driver says the
+// buffer holds. The writer sizes every write() from `size_image`, so raising
+// that value to match a longer row only hides the disagreement and then
+// pushes more bytes than the frame the driver sized. On a v4l2loopback output
+// the surplus runs into the next frame, and the picture is torn from then on.
+//
+// The measure comes after the row is raised, because the raised row is the
+// row the writer walks. A stride below the packed row is a contradiction in
+// the report of a packed format, thus the frame that stride implies gets no
+// more trust than a stride the driver padded: the writer has no buffer to
+// measure, because write() gives it none.
 //
 // A frame size of 0 is not that disagreement: it is no report at all, and the
-// raise gives it the value the stride implies. That case must stay accepted.
+// raise gives it the value the row implies. That case must stay accepted.
 bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold() {
   using video::ActualFormat;
   using video::ParseChosenOutputFmt;
@@ -301,11 +307,17 @@ bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold() {
        2048, 921600, 0u, 0u},
       {"one byte of stride too many", V4L2_PIX_FMT_YUYV, 640, 480, 1281, 614400,
        0u, 0u},
+      {"a stride raised past the packed row overruns the frame",
+       V4L2_PIX_FMT_YUYV, 3, 4, 4, 16, 0u, 0u},
+      {"a stride of zero raised past the packed row overruns the frame",
+       V4L2_PIX_FMT_RGB24, 640, 480, 0, 614400, 0u, 0u},
 #ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
       {"padded YUYV rows overrun the reported frame, mplane", V4L2_PIX_FMT_YUYV,
        640, 480, 1536, 614400, 0u, 0u, true},
       {"RGB24 rows overrun the reported frame, mplane", V4L2_PIX_FMT_RGB24, 640,
        480, 2048, 921600, 0u, 0u, true},
+      {"a stride raised past the packed row overruns the frame, mplane",
+       V4L2_PIX_FMT_YUYV, 3, 4, 4, 16, 0u, 0u, true},
 #endif
   };
 
@@ -334,8 +346,10 @@ bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold() {
   const LayoutCase accepted[] = {
       {"a stride with no frame size at all", V4L2_PIX_FMT_YUYV, 640, 480, 1280,
        0, 1280u, 614400u},
-      {"a stride below the packed row is raised, not refused",
-       V4L2_PIX_FMT_YUYV, 3, 4, 4, 16, 8u, 32u},
+      {"a stride below the packed row is raised inside the frame",
+       V4L2_PIX_FMT_YUYV, 3, 4, 4, 32, 8u, 32u},
+      {"a stride of zero is raised inside the frame", V4L2_PIX_FMT_YUYV, 640,
+       480, 0, 614400, 1280u, 614400u},
 #ifdef V4L2_CAP_VIDEO_OUTPUT_MPLANE
       {"a stride with no frame size at all, mplane", V4L2_PIX_FMT_YUYV, 640,
        480, 1280, 0, 1280u, 614400u, true},
