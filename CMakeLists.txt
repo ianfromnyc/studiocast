@@ -51,28 +51,50 @@ pkg_check_modules(PULSE_SIMPLE QUIET IMPORTED_TARGET libpulse-simple)
 
 # libyuv (optional) for SIMD-optimized RGB/YUV conversions. Keep a scalar
 # fallback so StudioCast still builds on minimal systems.
+#
+# STUDIOCAST_ENABLE_LIBYUV picks the policy: AUTO detects and falls back, ON
+# requires libyuv, OFF skips the detection. See cmake/ProjectOptions.cmake.
+string(TOUPPER "${STUDIOCAST_ENABLE_LIBYUV}" _studiocast_libyuv_mode)
+if (_studiocast_libyuv_mode MATCHES "^(ON|1|TRUE|YES|Y)$")
+    set(_studiocast_libyuv_mode "ON")
+elseif (_studiocast_libyuv_mode MATCHES "^(OFF|0|FALSE|NO|N|IGNORE|NOTFOUND)$")
+    set(_studiocast_libyuv_mode "OFF")
+elseif (NOT _studiocast_libyuv_mode STREQUAL "AUTO")
+    message(FATAL_ERROR
+            "STUDIOCAST_ENABLE_LIBYUV must be AUTO, ON or OFF, not '${STUDIOCAST_ENABLE_LIBYUV}'.")
+endif()
+
 set(_studiocast_have_libyuv FALSE)
 set(_studiocast_libyuv_target "")
-pkg_check_modules(LIBYUV QUIET IMPORTED_TARGET libyuv)
-if (TARGET PkgConfig::LIBYUV)
-    set(_studiocast_have_libyuv TRUE)
-    set(_studiocast_libyuv_target PkgConfig::LIBYUV)
-else()
-    find_path(LIBYUV_INCLUDE_DIR NAMES libyuv/convert_argb.h)
-    find_library(LIBYUV_LIBRARY NAMES yuv libyuv)
-    if (LIBYUV_INCLUDE_DIR AND LIBYUV_LIBRARY)
-        add_library(studiocast_libyuv UNKNOWN IMPORTED)
-        set_target_properties(studiocast_libyuv PROPERTIES
-                IMPORTED_LOCATION "${LIBYUV_LIBRARY}"
-                INTERFACE_INCLUDE_DIRECTORIES "${LIBYUV_INCLUDE_DIR}"
-        )
+if (NOT _studiocast_libyuv_mode STREQUAL "OFF")
+    pkg_check_modules(LIBYUV QUIET IMPORTED_TARGET libyuv)
+    if (TARGET PkgConfig::LIBYUV)
         set(_studiocast_have_libyuv TRUE)
-        set(_studiocast_libyuv_target studiocast_libyuv)
+        set(_studiocast_libyuv_target PkgConfig::LIBYUV)
+    else()
+        find_path(LIBYUV_INCLUDE_DIR NAMES libyuv/convert_argb.h)
+        find_library(LIBYUV_LIBRARY NAMES yuv libyuv)
+        if (LIBYUV_INCLUDE_DIR AND LIBYUV_LIBRARY)
+            add_library(studiocast_libyuv UNKNOWN IMPORTED)
+            set_target_properties(studiocast_libyuv PROPERTIES
+                    IMPORTED_LOCATION "${LIBYUV_LIBRARY}"
+                    INTERFACE_INCLUDE_DIRECTORIES "${LIBYUV_INCLUDE_DIR}"
+            )
+            set(_studiocast_have_libyuv TRUE)
+            set(_studiocast_libyuv_target studiocast_libyuv)
+        endif()
     endif()
 endif()
 
 if (_studiocast_have_libyuv)
     message(STATUS "libyuv found; optimized RGB/YUV conversion enabled.")
+elseif (_studiocast_libyuv_mode STREQUAL "ON")
+    message(FATAL_ERROR
+            "STUDIOCAST_ENABLE_LIBYUV=ON, but libyuv was not found. Install the libyuv development files "
+            "(libyuv-devel on Fedora, libyuv-dev on Debian and Ubuntu), or set STUDIOCAST_ENABLE_LIBYUV=AUTO "
+            "to fall back to the built-in RGB/YUV conversion.")
+elseif (_studiocast_libyuv_mode STREQUAL "OFF")
+    message(STATUS "libyuv disabled by STUDIOCAST_ENABLE_LIBYUV=OFF; using built-in scalar RGB/YUV conversion.")
 else()
     message(STATUS "libyuv not found; using built-in scalar RGB/YUV conversion.")
 endif()
@@ -1116,6 +1138,7 @@ if (BUILD_TESTING)
 
     add_executable(studiocast-cmake-open-backend-cache-tests
             tests/cmake_open_backend_cache_tests.cpp
+            tests/scoped_temp_dir.h
     )
 
     target_link_libraries(studiocast-cmake-open-backend-cache-tests PRIVATE
@@ -1144,6 +1167,37 @@ if (BUILD_TESTING)
     add_test(NAME studiocast-cmake-open-backend-cache-tests
             COMMAND studiocast-cmake-open-backend-cache-tests)
 
+    add_executable(studiocast-cmake-libyuv-option-tests
+            tests/cmake_libyuv_option_tests.cpp
+            tests/scoped_temp_dir.h
+    )
+
+    target_link_libraries(studiocast-cmake-libyuv-option-tests PRIVATE
+            studiocast_core
+    )
+
+    target_include_directories(studiocast-cmake-libyuv-option-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    target_compile_definitions(studiocast-cmake-libyuv-option-tests PRIVATE
+            STUDIOCAST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+            STUDIOCAST_CMAKE_COMMAND="${CMAKE_COMMAND}"
+    )
+
+    studiocast_set_project_warnings(studiocast-cmake-libyuv-option-tests)
+    studiocast_enable_sanitizers(studiocast-cmake-libyuv-option-tests)
+
+    set_target_properties(studiocast-cmake-libyuv-option-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-cmake-libyuv-option-tests
+            COMMAND studiocast-cmake-libyuv-option-tests)
+
     add_executable(studiocast-video-tests
             tests/video_service_tests.cpp
             tests/latest_frame_wins_worker_tests.cpp
@@ -1151,6 +1205,7 @@ if (BUILD_TESTING)
             tests/frame_artifact_cache_tests.cpp
             tests/cuda_kernel_cache_tests.cpp
             tests/v4l2_capture_negotiation_tests.cpp
+            tests/v4l2_writer_layout_tests.cpp
             tests/video_effect_cpu_tests.cpp
             tests/rgb_yuyv_convert_tests.cpp
     )

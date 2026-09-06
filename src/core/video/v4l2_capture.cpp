@@ -1,5 +1,7 @@
 #include "v4l2_capture.h"
 
+#include "v4l2_writer.h"
+
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
@@ -266,7 +268,7 @@ std::vector<std::uint32_t> EnumeratePixelFormatsAnyType(int fd) {
 
   const TypeSpec types[] = {
       {V4L2_BUF_TYPE_VIDEO_CAPTURE, false},
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
       {V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, true},
 #endif
   };
@@ -484,7 +486,7 @@ bool TrySetFmtCapture(int fd, const TypeSpec &t, int width, int height,
     f.fmt.pix.bytesperline = 0;
     f.fmt.pix.sizeimage = 0;
   } else {
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
     f.fmt.pix_mp.width = static_cast<__u32>(width);
     f.fmt.pix_mp.height = static_cast<__u32>(height);
     f.fmt.pix_mp.pixelformat = FourccFor(fmt);
@@ -503,7 +505,7 @@ bool TrySetFmtCapture(int fd, const TypeSpec &t, int width, int height,
     if (!t.mplane) {
       f.fmt.pix.pixelformat = fourcc;
     } else {
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
       f.fmt.pix_mp.pixelformat = fourcc;
 #else
       return false;
@@ -534,6 +536,31 @@ bool TrySetFmtCapture(int fd, const TypeSpec &t, int width, int height,
   return false;
 }
 
+// Bytes a captured row of this width holds when the driver packs it with no
+// padding. This is not the writer's `MinBytesPerLine`: the writer asks the
+// driver for a row and must fit the whole final YUYV pair the converters
+// write, while the driver has already filled a captured row and puts only two
+// bytes there for the last pixel of an odd width. The only use here is a
+// floor for a driver that reports a row too short to hold the pixels at all.
+std::size_t CapturePackedBytesPerLine(int width, CapturePixelFormat fmt) {
+  if (width <= 0)
+    return 0u;
+
+  const std::size_t w = static_cast<std::size_t>(width);
+  switch (fmt) {
+  case CapturePixelFormat::yuyv:
+    return w * 2u;
+  case CapturePixelFormat::rgb24:
+    return w * 3u;
+  case CapturePixelFormat::mjpeg:
+    // Compressed: the driver reports no meaningful row size.
+    return 0u;
+  }
+  return 0u;
+}
+
+} // namespace
+
 bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
                            int fps_num, int fps_den, CaptureFormat *out,
                            std::string *outErr) {
@@ -560,13 +587,20 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
       return false;
     }
   } else {
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
     w = static_cast<int>(f.fmt.pix_mp.width);
     h = static_cast<int>(f.fmt.pix_mp.height);
     fourcc = f.fmt.pix_mp.pixelformat;
-    if (f.fmt.pix_mp.num_planes < 1) {
+    // The read path maps and walks plane 0 alone, so any other plane count
+    // describes a frame this code cannot read. Name the count here: without
+    // this the open runs on and stops at `VIDIOC_QUERYBUF`, where the kernel
+    // answers EINVAL and the user is told nothing about the layout.
+    if (f.fmt.pix_mp.num_planes != 1) {
       if (outErr)
-        *outErr = "mplane format returned num_planes=0";
+        *outErr =
+            "mplane format returned num_planes=" +
+            std::to_string(static_cast<unsigned>(f.fmt.pix_mp.num_planes)) +
+            ", only one plane is supported";
       return false;
     }
     bpl = static_cast<std::size_t>(f.fmt.pix_mp.plane_fmt[0].bytesperline);
@@ -600,14 +634,41 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
     a.bytes_per_line = bpl;
     a.size_image = size;
   } else {
-    // Provide conservative minima for uncompressed formats.
-    const std::size_t bpp = (a.format == CapturePixelFormat::rgb24) ? 3u : 2u;
-    const std::size_t minBpl = static_cast<std::size_t>(a.width) * bpp;
-    if (bpl < minBpl)
-      bpl = minBpl;
+    const std::size_t rows =
+        a.height > 0 ? static_cast<std::size_t>(a.height) : 0u;
+
+    // The driver's own report must hold together: the rows it says the frame
+    // has must fit in the frame size it says the buffer holds. Raising
+    // `size_image` to match the stride only hides the disagreement, and the
+    // read path then walks a frame longer than the buffer the driver sized,
+    // which is a read past the end of the mapping on every frame.
+    //
+    // A frame size of 0 is not that disagreement: it is no report at all, and
+    // the raise below gives it the value the stride implies. The mapped
+    // buffer `VIDIOC_QUERYBUF` reports is what that value must then fit in,
+    // and `CaptureBufferHoldsFrame` is the check that compares them.
+    if (size > 0 && bpl * rows > size) {
+      if (outErr)
+        *outErr = "Driver reported bytesperline=" + std::to_string(bpl) +
+                  " for " + std::to_string(a.height) +
+                  " rows, which does not fit sizeimage=" + std::to_string(size);
+      return false;
+    }
+
+    // Keep the stride the driver laid the frame out with. Raising it above
+    // the driver's value does not make the row longer, it only makes the read
+    // path walk the frame at a stride the data does not use. Only a row too
+    // short to hold the pixels, which no driver can have filled, is raised.
+    const std::size_t packedBpl = CapturePackedBytesPerLine(a.width, a.format);
+    if (bpl < packedBpl)
+      bpl = packedBpl;
     a.bytes_per_line = bpl;
 
-    const std::size_t minSize = bpl * static_cast<std::size_t>(a.height);
+    // A raised stride is the one case where the walk is not the driver's own
+    // layout, so the frame size follows it. `V4l2Capture::Open()` then checks
+    // the mapped buffer against this value, which is the length the walk must
+    // stay inside.
+    const std::size_t minSize = bpl * rows;
     if (size < minSize)
       size = minSize;
     a.size_image = size;
@@ -617,7 +678,66 @@ bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
   return true;
 }
 
-} // namespace
+bool CaptureBufferHoldsFrame(std::size_t mapped_length,
+                             const CaptureFormat &fmt, std::string *outErr) {
+  if (mapped_length >= fmt.size_image)
+    return true;
+
+  if (outErr)
+    *outErr = "Driver mapped a capture buffer of " +
+              std::to_string(mapped_length) + " bytes for a frame of " +
+              std::to_string(fmt.size_image) + " bytes";
+  return false;
+}
+
+bool CaptureFramePayload(std::size_t mapped_length, std::size_t bytesused,
+                         std::size_t data_offset, std::size_t *out_offset,
+                         std::size_t *out_bytes, std::string *outErr) {
+  if (!out_offset || !out_bytes)
+    return false;
+
+  // `bytesused` is the one number the driver gives per frame that negotiation
+  // never saw, so the mapping is the only bound it has. A count below the
+  // mapping is a frame with less in it; a count above it is a walk past the
+  // end of the mapping on that frame.
+  const std::size_t used = std::min(bytesused, mapped_length);
+
+  if (data_offset > used) {
+    if (outErr)
+      *outErr = "Driver reported a plane data_offset of " +
+                std::to_string(data_offset) + " bytes in a payload of " +
+                std::to_string(used) + " bytes";
+    return false;
+  }
+
+  *out_offset = data_offset;
+  *out_bytes = used - data_offset;
+  return true;
+}
+
+bool CaptureRawWalkFitsMapping(std::size_t mapped_length,
+                               std::size_t data_offset,
+                               const CaptureFormat &fmt, std::string *outErr) {
+  // Compressed frames walk `bytesused`, which the mapping already bounds.
+  if (fmt.format == CapturePixelFormat::mjpeg)
+    return true;
+
+  const std::size_t rows =
+      fmt.height > 0 ? static_cast<std::size_t>(fmt.height) : 0u;
+  const std::size_t walk = fmt.bytes_per_line * rows;
+
+  const std::size_t room =
+      data_offset < mapped_length ? mapped_length - data_offset : 0u;
+  if (room >= walk)
+    return true;
+
+  if (outErr)
+    *outErr = "Driver reported a plane data_offset of " +
+              std::to_string(data_offset) + " bytes, which leaves " +
+              std::to_string(room) + " bytes of the mapping for a frame of " +
+              std::to_string(walk) + " bytes";
+  return false;
+}
 
 bool ShouldPreferMjpegForResolution(int width, int height) {
   // Heuristic: uncompressed YUYV at 720p+ tends to be unsupported, unstable,
@@ -721,7 +841,7 @@ bool V4l2Capture::Open(const std::string &device, int width, int height,
   // Try capture single-plane first, then mplane.
   const TypeSpec types[] = {
       {V4L2_BUF_TYPE_VIDEO_CAPTURE, false},
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
       {V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, true},
 #endif
   };
@@ -970,6 +1090,16 @@ bool V4l2Capture::Open(const std::string &device, int width, int height,
         return false;
       }
 
+      // The mapping is the only place the negotiated frame size has to fit.
+      std::string lenErr;
+      if (!CaptureBufferHoldsFrame(static_cast<std::size_t>(b.length), actual_,
+                                   &lenErr)) {
+        if (error)
+          *error = lenErr;
+        Close();
+        return false;
+      }
+
       void *start = ::mmap(nullptr, static_cast<std::size_t>(b.length),
                            PROT_READ | PROT_WRITE, MAP_SHARED, fd_,
                            static_cast<off_t>(b.m.offset));
@@ -991,7 +1121,7 @@ bool V4l2Capture::Open(const std::string &device, int width, int height,
         return false;
       }
     } else {
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
       v4l2_plane planes[1]{};
       v4l2_buffer b{};
       b.type = buf_type_;
@@ -1010,6 +1140,15 @@ bool V4l2Capture::Open(const std::string &device, int width, int height,
 
       const std::size_t len = static_cast<std::size_t>(planes[0].length);
       const off_t off = static_cast<off_t>(planes[0].m.mem_offset);
+
+      // The mapping is the only place the negotiated frame size has to fit.
+      std::string lenErr;
+      if (!CaptureBufferHoldsFrame(len, actual_, &lenErr)) {
+        if (error)
+          *error = lenErr + " (mplane)";
+        Close();
+        return false;
+      }
 
       void *start =
           ::mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, off);
@@ -1282,12 +1421,28 @@ bool V4l2Capture::AcquireFrame(CapturedFrameView *out, int timeout_ms,
         (static_cast<std::uint64_t>(b.timestamp.tv_usec) * 1000ULL);
     out->timestamp_monotonic =
         (b.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0;
-    out->bytes = static_cast<std::size_t>(b.bytesused);
-    out->data = static_cast<const std::uint8_t *>(buffers_[idx].start);
+
+    // A single-plane buffer has no `data_offset`, so the image starts at the
+    // beginning of the mapping.
+    std::size_t off = 0;
+    std::size_t bytes = 0;
+    if (!CaptureFramePayload(buffers_[idx].length,
+                             static_cast<std::size_t>(b.bytesused),
+                             /*data_offset=*/0u, &off, &bytes, error))
+      return false;
+
+    // The raw readers walk the negotiated frame from `out->data`, not
+    // `out->bytes`, so the mapping has to hold that walk from where the image
+    // starts. An offset of 0 always does, and this arm has no other offset.
+    if (!CaptureRawWalkFitsMapping(buffers_[idx].length, off, actual_, error))
+      return false;
+
+    out->bytes = bytes;
+    out->data = static_cast<const std::uint8_t *>(buffers_[idx].start) + off;
     return true;
   }
 
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
   v4l2_plane planes[1]{};
   v4l2_buffer b{};
   b.type = buf_type_;
@@ -1315,8 +1470,24 @@ bool V4l2Capture::AcquireFrame(CapturedFrameView *out, int timeout_ms,
       (static_cast<std::uint64_t>(b.timestamp.tv_sec) * 1000000000ULL) +
       (static_cast<std::uint64_t>(b.timestamp.tv_usec) * 1000ULL);
   out->timestamp_monotonic = (b.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0;
-  out->bytes = static_cast<std::size_t>(planes[0].bytesused);
-  out->data = static_cast<const std::uint8_t *>(buffers_[idx].start);
+
+  // On a multi-planar buffer the image starts `data_offset` bytes into the
+  // plane, and `bytesused` counts those bytes as well.
+  std::size_t off = 0;
+  std::size_t bytes = 0;
+  if (!CaptureFramePayload(
+          buffers_[idx].length, static_cast<std::size_t>(planes[0].bytesused),
+          static_cast<std::size_t>(planes[0].data_offset), &off, &bytes, error))
+    return false;
+
+  // The raw readers walk the negotiated frame from `out->data`, not
+  // `out->bytes`, so a `data_offset` moves the walk later in the mapping
+  // without making it shorter. Refuse the frame rather than walk off the end.
+  if (!CaptureRawWalkFitsMapping(buffers_[idx].length, off, actual_, error))
+    return false;
+
+  out->bytes = bytes;
+  out->data = static_cast<const std::uint8_t *>(buffers_[idx].start) + off;
   return true;
 #else
   if (error)
@@ -1350,7 +1521,7 @@ bool V4l2Capture::ReleaseFrame(const CapturedFrameView &f, std::string *error) {
     return true;
   }
 
-#ifdef V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+#ifdef V4L2_CAP_VIDEO_CAPTURE_MPLANE
   v4l2_plane planes[1]{};
   v4l2_buffer b{};
   b.type = buf_type_;

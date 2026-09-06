@@ -38,17 +38,6 @@ void RgbToYuv(const Rgb &c, std::uint8_t *y, std::uint8_t *u, std::uint8_t *v) {
   *v = ClampU8(V);
 }
 
-std::size_t MinBytesPerLine(int width, PixelFormat fmt) {
-  const auto w = static_cast<std::size_t>(width);
-  switch (fmt) {
-  case PixelFormat::yuyv:
-    return w * 2u;
-  case PixelFormat::rgb24:
-    return w * 3u;
-  }
-  return w * 2u;
-}
-
 } // namespace
 
 bool FillMovingColorBars(std::uint8_t *dst, std::size_t dst_size,
@@ -62,6 +51,14 @@ bool FillMovingColorBars(std::uint8_t *dst, std::size_t dst_size,
   if (layout.width <= 0 || layout.height <= 0) {
     if (error)
       *error = "invalid layout width/height";
+    return false;
+  }
+
+  // YUYV requires an even width because pixels are packed in pairs. Check it
+  // before the row size, so an odd width gets the message that explains it.
+  if (layout.format == PixelFormat::yuyv && (layout.width % 2) != 0) {
+    if (error)
+      *error = "YUYV requires an even width";
     return false;
   }
 
@@ -116,13 +113,6 @@ bool FillMovingColorBars(std::uint8_t *dst, std::size_t dst_size,
       }
     }
     return true;
-  }
-
-  // YUYV requires even width because pixels are packed in pairs.
-  if ((layout.width % 2) != 0) {
-    if (error)
-      *error = "YUYV requires an even width";
-    return false;
   }
 
   for (std::size_t y = 0; y < h; ++y) {

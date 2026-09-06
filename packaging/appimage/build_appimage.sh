@@ -93,6 +93,11 @@ run() {
   "$@"
 }
 
+# The source archive is shared with the RPM flow, so both make the same file.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=../_lib/source_archive.sh
+source "${REPO_ROOT}/packaging/_lib/source_archive.sh"
+
 write_file() {
   local path="$1"
   local mode="$2"
@@ -244,38 +249,6 @@ configure_and_build() {
   run cmake --build "${CMAKE_BUILD_DIR}" --target studiocast-installer
 }
 
-create_source_archive() {
-  log "Creating source archive ${SOURCE_ARCHIVE_PATH}"
-  run rm -f -- "${SOURCE_ARCHIVE_PATH}"
-
-  if command -v git >/dev/null 2>&1 &&
-      git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
-      git -C "${REPO_ROOT}" rev-parse --verify HEAD^{commit} >/dev/null 2>&1; then
-    run git -C "${REPO_ROOT}" archive \
-      --format=tar.gz \
-      --prefix="StudioCast-${VERSION}/" \
-      --output="${SOURCE_ARCHIVE_PATH}" \
-      HEAD
-  else
-    log "git archive is unavailable; falling back to a working-tree tarball"
-    local parent_dir repo_dir
-    parent_dir="$(dirname "${REPO_ROOT}")"
-    repo_dir="$(basename "${REPO_ROOT}")"
-    run tar -C "${parent_dir}" \
-      --exclude="${repo_dir}/.git" \
-      --exclude="${repo_dir}/build" \
-      --exclude="${repo_dir}/dist" \
-      --exclude="${repo_dir}/cmake-build-*" \
-      -czf "${SOURCE_ARCHIVE_PATH}" \
-      --transform "s#^${repo_dir}#StudioCast-${VERSION}#" \
-      "${repo_dir}"
-  fi
-
-  if [[ "${DRY_RUN}" -eq 0 && ! -f "${SOURCE_ARCHIVE_PATH}" ]]; then
-    die "source archive was not created: ${SOURCE_ARCHIVE_PATH}"
-  fi
-}
-
 stage_appdir() {
   log "Staging AppDir at ${APPDIR}"
   run rm -rf -- "${APPDIR}"
@@ -305,6 +278,8 @@ stage_appdir() {
   run install -m 0644 "${icon_path}" "${APPDIR}/studiocast-installer.svg"
   run install -m 0644 "${icon_path}" "${APPDIR}/.DirIcon"
 
+  # The AppRun body must stay unexpanded, so the single quotes are deliberate.
+  # shellcheck disable=SC2016
   write_file "${APPDIR}/AppRun" 0755 \
     '#!/usr/bin/env bash' \
     'set -euo pipefail' \
@@ -430,7 +405,8 @@ main() {
 
   run install -d -m 0755 "${DIST_DIR}"
   configure_and_build
-  create_source_archive
+  studiocast_create_source_archive "${REPO_ROOT}" "${VERSION}" \
+    "${SOURCE_ARCHIVE_PATH}"
   stage_appdir
   build_appimage || true
   archive_appdir

@@ -40,10 +40,21 @@ bool TestV4l2UnsupportedFormatsAreSkippedWithoutDuplicates();
 bool TestV4l2ExplicitMjpegRequestDoesNotFallBackToYuyvInsideOpenOrder();
 bool TestV4l2FakeNegotiationUsesOrderedFallback();
 bool TestV4l2MjpegDecodeFailureFallsBackToRawOnce();
+bool TestV4l2CaptureNegotiationKeepsTheDriverRowStride();
+bool TestV4l2CaptureNegotiationRefusesRowsTheFrameSizeCannotHold();
+bool TestV4l2CaptureNegotiationRefusesAnMplaneReportWithoutOnePlane();
+bool TestV4l2CaptureBufferMustHoldTheNegotiatedFrame();
+bool TestV4l2CaptureFramePayloadStaysInsideTheMapping();
+bool TestV4l2CaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset();
+bool TestV4l2CaptureDrainFailureStopsCaptureOnARefusal();
 bool TestYuyvToRgb24MatchesBt601AndPreservesPadding();
+bool TestYuyvToRgb24TailStaysInsideAPackedOddWidthRow();
 bool TestYuyvToRgb24BackendsMatchScalarReference();
 bool TestRgb24ToYuyvMatchesBt601WithinChromaRounding();
 bool TestRgb24ToYuyvBackendsMatchScalarReference();
+bool TestRgb24ToYuyvLibyuvKeepsTheOddWidthRowContract();
+bool TestRgb24ToYuyvDispatchRefusesTheWidestRow();
+bool TestRgb24ToYuyvDispatchRefusesARowShorterThanTheFinalPair();
 bool TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants();
 bool TestRgb24Bgr24BackendsMatchScalarAndPreservePadding();
 bool TestRgb24Bgr24PublicPathMatchesScalarInPlace();
@@ -51,6 +62,7 @@ bool TestResizeRgb24BilinearPreservesActivePixelsAndZerosPadding();
 bool TestResizeRgb24BilinearHandlesDegenerateAxesAndPlanReuse();
 bool TestBackgroundRemoveCpuMatchesReferenceAndPreservesPadding();
 bool TestBackgroundBlurCpuMatchesReferenceAndPreservesPadding();
+bool TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair();
 } // namespace studiocast::tests
 
 namespace {
@@ -1092,6 +1104,13 @@ int main() {
        &studiocast::tests::TestRgb24ToYuyvMatchesBt601WithinChromaRounding},
       {"RGB24 to YUYV backends match scalar reference",
        &studiocast::tests::TestRgb24ToYuyvBackendsMatchScalarReference},
+      {"RGB24 to YUYV libyuv keeps the odd width row contract",
+       &studiocast::tests::TestRgb24ToYuyvLibyuvKeepsTheOddWidthRowContract},
+      {"RGB24 to YUYV dispatch refuses the widest row",
+       &studiocast::tests::TestRgb24ToYuyvDispatchRefusesTheWidestRow},
+      {"RGB24 to YUYV dispatch refuses a row shorter than the final pair",
+       &studiocast::tests::
+           TestRgb24ToYuyvDispatchRefusesARowShorterThanTheFinalPair},
       {"RGB24 to YUYV public path matches scalar with scratch variants",
        &studiocast::tests::
            TestRgb24ToYuyvPublicPathMatchesScalarWithScratchVariants},
@@ -1111,6 +1130,27 @@ int main() {
       {"Background blur CPU matches reference and preserves padding",
        &studiocast::tests::
            TestBackgroundBlurCpuMatchesReferenceAndPreservesPadding},
+      {"V4L2 writer row size holds the odd width YUYV pair",
+       &studiocast::tests::TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair},
+      {"V4L2 capture negotiation keeps the driver row stride",
+       &studiocast::tests::TestV4l2CaptureNegotiationKeepsTheDriverRowStride},
+      {"V4L2 capture negotiation refuses rows the frame size cannot hold",
+       &studiocast::tests::
+           TestV4l2CaptureNegotiationRefusesRowsTheFrameSizeCannotHold},
+      {"V4L2 capture negotiation refuses an mplane report without one plane",
+       &studiocast::tests::
+           TestV4l2CaptureNegotiationRefusesAnMplaneReportWithoutOnePlane},
+      {"V4L2 capture buffer must hold the negotiated frame",
+       &studiocast::tests::TestV4l2CaptureBufferMustHoldTheNegotiatedFrame},
+      {"V4L2 capture frame payload stays inside the mapping",
+       &studiocast::tests::TestV4l2CaptureFramePayloadStaysInsideTheMapping},
+      {"V4L2 capture raw walk stays inside the mapping after a plane offset",
+       &studiocast::tests::
+           TestV4l2CaptureRawWalkStaysInsideTheMappingAfterAPlaneOffset},
+      {"V4L2 capture drain failure stops capture on a refusal",
+       &studiocast::tests::TestV4l2CaptureDrainFailureStopsCaptureOnARefusal},
+      {"YUYV->RGB tail stays inside a packed odd width row",
+       &studiocast::tests::TestYuyvToRgb24TailStaysInsideAPackedOddWidthRow},
   };
 
   int failed = 0;

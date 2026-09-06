@@ -39,7 +39,9 @@ Most Linux broadcast-effect projects prove one cool trick or half bake the broad
 
 StudioCast is an early-preview Linux project. It is usable for testing on
 Ubuntu 22.04 and 24.04, with a source-build flow and an installer wizard target
-for release packaging. Packaging, model installation, hardware behavior, and
+for release packaging. Fedora 44 is a newer early-preview target: it can build
+from source and it has an RPM package that you build locally. Ubuntu remains
+the primary platform. Packaging, model installation, hardware behavior, and
 some effects are still evolving.
 
 Known caveats:
@@ -54,6 +56,7 @@ Known caveats:
 ## Requirements
 
 - Ubuntu 22.04 or 24.04, or a close Ubuntu-family desktop distribution.
+- Fedora 44 as an early-preview source-build and RPM target.
 - A V4L2-compatible physical camera for camera input.
 - `v4l2loopback` for the StudioCast virtual camera.
 - A PulseAudio-compatible audio stack with `pactl` for virtual audio routing.
@@ -93,6 +96,38 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target studiocast-installer
 ./build/studiocast-installer
 ```
+
+- Fedora 44 RPM (early preview): build the package locally, then install it
+  with `dnf`. On a host that is not Fedora 44, add `--container` and the script
+  builds in a `registry.fedoraproject.org/fedora:44` podman or docker
+  container.
+
+```bash
+packaging/rpm/build_rpm.sh
+packaging/rpm/build_rpm.sh --container
+sudo dnf install ./dist/rpm/studiocast-<version>-1.fc44.x86_64.rpm
+```
+
+  The package installs the StudioCast programs, a desktop entry, an icon, and a
+  systemd user service. The package does not enable the service, so start it
+  yourself:
+
+```bash
+systemctl --user enable --now studiocastd.service
+```
+
+  Fedora ships no dlib package, so the build compiles a pinned dlib release
+  from source and links it into the programs statically. Open Video Eye Contact
+  therefore works in the RPM, and the package adds no dlib shared library to
+  the system. `packaging/rpm/build_rpm.sh --without dlib` skips that extra
+  build if you do not want it.
+
+  The virtual camera also needs the `v4l2loopback` kernel module, which Fedora
+  does not ship. Enable RPM Fusion Free and install `akmod-v4l2loopback` for it.
+  `dnf` installs StudioCast without the module, but the virtual camera stays
+  unavailable until you add it. The GUI installer wizard is not part of the RPM,
+  because the installer backend is Ubuntu-only, and `./scripts/setup.sh` does
+  not support Fedora either.
 
 - Build from source manually: use the commands below when developing,
   installing over SSH, debugging setup, or recovering from a failed install.

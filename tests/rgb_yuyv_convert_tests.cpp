@@ -10,8 +10,12 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
+
+#include <sys/mman.h>
+#include <unistd.h>
 
 namespace studiocast::tests {
 namespace {
@@ -48,8 +52,11 @@ struct RgbBgrBackendCase {
   video::internal::Rgb24Bgr24Backend backend;
 };
 
+// Bytes a YUYV row uses for this width. The width widens first, because
+// (width + 1) overflows int at the largest width, which is exactly the
+// arithmetic the production code has to avoid.
 constexpr std::size_t ActiveYuyvBytes(int width) {
-  return static_cast<std::size_t>((width + 1) / 2) * 4u;
+  return ((static_cast<std::size_t>(width) + 1u) / 2u) * 4u;
 }
 
 constexpr std::size_t ActiveRgbBytes(int width) {
@@ -228,7 +235,129 @@ bool CompareYuyvToReference(const std::vector<std::uint8_t> &actual,
   return true;
 }
 
+// One read-write page with a PROT_NONE page behind it. A frame placed so that
+// it ends at the boundary turns a read past the frame into a fault instead of
+// a silent success, which is what a captured mmap'd buffer does at the end of
+// its last page.
+class GuardedFrame {
+public:
+  explicit GuardedFrame(std::size_t bytes) {
+    const std::size_t page = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+    if (bytes == 0u || bytes > page)
+      return;
+
+    void *base = ::mmap(nullptr, page * 2u, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED)
+      return;
+
+    auto *bytes_base = static_cast<std::uint8_t *>(base);
+    if (::mprotect(bytes_base + page, page, PROT_NONE) != 0) {
+      ::munmap(base, page * 2u);
+      return;
+    }
+
+    base_ = bytes_base;
+    mapped_ = page * 2u;
+    frame_ = bytes_base + page - bytes;
+  }
+
+  ~GuardedFrame() {
+    if (base_)
+      ::munmap(base_, mapped_);
+  }
+
+  GuardedFrame(const GuardedFrame &) = delete;
+  GuardedFrame &operator=(const GuardedFrame &) = delete;
+
+  std::uint8_t *frame() const { return frame_; }
+
+private:
+  std::uint8_t *base_ = nullptr;
+  std::size_t mapped_ = 0u;
+  std::uint8_t *frame_ = nullptr;
+};
+
 } // namespace
+
+// A captured YUYV row is only as long as the driver made it, and a driver
+// that accepts an odd width packs the last pixel into two bytes: it has a Y
+// and a U, but no V. Reading the V of that pixel walks past the row, and on
+// the last row past the frame. The converter must stay inside the row the
+// caller gave it and treat the missing chroma as neutral.
+bool TestYuyvToRgb24TailStaysInsideAPackedOddWidthRow() {
+  using video::internal::YuyvToRgbBackend;
+
+  const std::array<YuyvToRgbBackendCase, 3> backends{{
+      {YuyvToRgbBackend::scalar},
+      {YuyvToRgbBackend::sse41},
+      {YuyvToRgbBackend::avx2},
+  }};
+
+  for (const int width : {1, 3, 7, 9, 15, 17, 33}) {
+    const int height = 3;
+    const std::size_t packed_stride = static_cast<std::size_t>(width) * 2u;
+    const std::size_t frame_bytes =
+        packed_stride * static_cast<std::size_t>(height);
+
+    GuardedFrame guarded(frame_bytes);
+    if (guarded.frame() == nullptr) {
+      std::cerr << "the guarded frame could not be mapped for width " << width
+                << "\n";
+      return false;
+    }
+
+    std::uint32_t state = static_cast<std::uint32_t>(width) * 977u + 0x51edu;
+    for (std::size_t i = 0; i < frame_bytes; ++i) {
+      state = state * 1664525u + 1013904223u;
+      guarded.frame()[i] = static_cast<std::uint8_t>((state >> 24) & 0xffu);
+    }
+
+    // The same frame in a row long enough to hold the final pair, with a
+    // neutral V byte where the packed row has nothing. This is what the
+    // converter must produce from the packed row.
+    const std::size_t padded_stride = ActiveYuyvBytes(width);
+    std::vector<std::uint8_t> padded(
+        padded_stride * static_cast<std::size_t>(height), 0x80u);
+    for (int y = 0; y < height; ++y) {
+      std::copy_n(guarded.frame() + static_cast<std::size_t>(y) * packed_stride,
+                  packed_stride,
+                  padded.data() + static_cast<std::size_t>(y) * padded_stride);
+    }
+
+    const std::size_t dst_stride = ActiveRgbBytes(width);
+    std::vector<std::uint8_t> expected(
+        dst_stride * static_cast<std::size_t>(height), 0xcdu);
+    video::internal::YuyvToRgbScalar(padded.data(), width, height,
+                                     padded_stride, expected.data(),
+                                     dst_stride);
+
+    for (const YuyvToRgbBackendCase &backend : backends) {
+      if (!video::internal::YuyvToRgbBackendAvailable(backend.backend))
+        continue;
+
+      std::vector<std::uint8_t> actual(
+          dst_stride * static_cast<std::size_t>(height), 0xcdu);
+      if (!ConvertWithBackend(backend.backend, guarded.frame(), width, height,
+                              packed_stride, actual.data(), dst_stride)) {
+        std::cerr << "YUYV->RGB backend "
+                  << video::internal::YuyvToRgbBackendName(backend.backend)
+                  << " reported available but conversion failed\n";
+        return false;
+      }
+
+      if (actual != expected) {
+        std::cerr << "YUYV->RGB backend "
+                  << video::internal::YuyvToRgbBackendName(backend.backend)
+                  << " read the missing chroma of the odd-width tail at width "
+                  << width << "\n";
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
 
 bool TestYuyvToRgb24MatchesBt601AndPreservesPadding() {
   const std::array<ConvertCase, 9> cases{{
@@ -533,6 +662,164 @@ bool TestRgb24ToYuyvBackendsMatchScalarReference() {
                                   label)) {
         return false;
       }
+    }
+  }
+
+  return true;
+}
+
+// A YUYV row holds ceil(width / 2) * 4 bytes, because an odd width still
+// writes the whole final pair. The test pins both halves of that contract for
+// the libyuv backend: it refuses a row that is too short for the final pair,
+// and with a legal row it gives the same odd-width tail as the scalar path.
+bool TestRgb24ToYuyvLibyuvKeepsTheOddWidthRowContract() {
+  constexpr std::array<int, 4> widths{1, 7, 15, 17};
+  constexpr int height = 3;
+
+  for (const int width : widths) {
+    const std::size_t src_stride = static_cast<std::size_t>(width) * 3u + 5u;
+    const std::size_t dst_stride = ActiveYuyvBytes(width);
+    std::vector<std::uint8_t> src(src_stride *
+                                  static_cast<std::size_t>(height));
+    FillDeterministicRgb(&src, width, height, src_stride,
+                         static_cast<std::uint32_t>(width * 53 + 7));
+
+    const std::size_t scratch_size =
+        video::internal::Rgb24ToYuyvLibyuvScratchBytes(width, height);
+    std::vector<std::uint8_t> scratch(scratch_size);
+
+    // width * 2 bytes stops one pair short for an odd width, so the backend
+    // must decline instead of writing past the row.
+    std::vector<std::uint8_t> guarded(
+        dst_stride * static_cast<std::size_t>(height), 0xcd);
+    if (video::internal::Rgb24ToYuyvLibyuv(
+            src.data(), width, height, src_stride, guarded.data(),
+            static_cast<std::size_t>(width) * 2u, scratch.data(),
+            scratch.size())) {
+      std::cerr << "libyuv accepted a " << (width * 2)
+                << " byte row for width " << width << "\n";
+      return false;
+    }
+
+    if (!video::internal::Rgb24ToYuyvBackendAvailable(
+            video::internal::Rgb24ToYuyvBackend::libyuv)) {
+      continue;
+    }
+
+    std::vector<std::uint8_t> expected(
+        dst_stride * static_cast<std::size_t>(height), 0xcd);
+    video::internal::Rgb24ToYuyvScalar(src.data(), width, height, src_stride,
+                                       expected.data(), dst_stride);
+
+    std::vector<std::uint8_t> actual(
+        dst_stride * static_cast<std::size_t>(height), 0xcd);
+    if (!video::internal::Rgb24ToYuyvLibyuv(src.data(), width, height,
+                                            src_stride, actual.data(),
+                                            dst_stride, scratch.data(),
+                                            scratch.size())) {
+      std::cerr << "libyuv refused a tight " << dst_stride
+                << " byte row for width " << width << "\n";
+      return false;
+    }
+
+    const std::string label =
+        "libyuv tight row " + std::to_string(width) + "x" +
+        std::to_string(height);
+    if (!CompareYuyvToReference(actual, expected, width, height, dst_stride, 1,
+                                label)) {
+      return false;
+    }
+
+    // The final pair repeats the last luma, so the two luma slots match.
+    const std::size_t tail = static_cast<std::size_t>(width - 1) * 2u;
+    for (int y = 0; y < height; ++y) {
+      const std::uint8_t *row =
+          actual.data() + static_cast<std::size_t>(y) * dst_stride;
+      if (row[tail] != row[tail + 2u]) {
+        std::cerr << label << " odd tail luma mismatch at row " << y << ": "
+                  << static_cast<int>(row[tail]) << "/"
+                  << static_cast<int>(row[tail + 2u]) << "\n";
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+// The row size is ceil(width / 2) * 4 bytes. Computed as (width + 1) / 2 * 4
+// in int, that arithmetic overflows at the largest width and lands on zero, so
+// the guard would accept any row at all. The dispatch must therefore size the
+// row in std::size_t, and refuse this one before it touches the buffers.
+//
+// The dispatch checks the row size only against the buffers and the geometry,
+// which are all valid here, so nothing else can refuse this call. The scratch
+// buffer is real, but the dispatch never looks at it.
+bool TestRgb24ToYuyvDispatchRefusesTheWidestRow() {
+  constexpr int width = std::numeric_limits<int>::max();
+  std::array<std::uint8_t, 8> src{};
+  std::array<std::uint8_t, 8> dst{};
+  std::array<std::uint8_t, 8> scratch{};
+
+  if (video::internal::Rgb24ToYuyvDispatchWithScratch(
+          src.data(), width, 1, src.size(), dst.data(), dst.size(),
+          scratch.data(), scratch.size())) {
+    std::cerr << "dispatch accepted an " << dst.size() << " byte row for width "
+              << width << "\n";
+    return false;
+  }
+
+  return true;
+}
+
+// Every backend writes the whole final YUYV pair, so a row shorter than
+// ceil(width / 2) * 4 bytes has no converter that fits. The dispatch entry
+// point checks it once for all of them: it writes nothing and says so, instead
+// of letting a backend run into the short row.
+bool TestRgb24ToYuyvDispatchRefusesARowShorterThanTheFinalPair() {
+  constexpr std::array<int, 3> widths{1, 7, 17};
+  constexpr int height = 4;
+
+  for (const int width : widths) {
+    const std::size_t src_stride = static_cast<std::size_t>(width) * 3u;
+    const std::size_t short_stride = static_cast<std::size_t>(width) * 2u;
+    std::vector<std::uint8_t> src(src_stride *
+                                  static_cast<std::size_t>(height));
+    FillDeterministicRgb(&src, width, height, src_stride,
+                         static_cast<std::uint32_t>(width * 17 + 3));
+
+    const std::size_t scratch_size =
+        video::Rgb24ToYuyvScratchBytes(width, height);
+    std::vector<std::uint8_t> scratch(scratch_size);
+
+    std::vector<std::uint8_t> dst(
+        short_stride * static_cast<std::size_t>(height), 0xcd);
+    if (video::internal::Rgb24ToYuyvDispatchWithScratch(
+            src.data(), width, height, src_stride, dst.data(), short_stride,
+            scratch.empty() ? nullptr : scratch.data(), scratch.size())) {
+      std::cerr << "dispatch accepted a " << short_stride
+                << " byte row for width " << width << "\n";
+      return false;
+    }
+
+    for (const std::uint8_t byte : dst) {
+      if (byte != 0xcd) {
+        std::cerr << "dispatch wrote into a short row for width " << width
+                  << "\n";
+        return false;
+      }
+    }
+
+    // The next size up is the shortest legal row, so the same call must work.
+    const std::size_t legal_stride = ActiveYuyvBytes(width);
+    std::vector<std::uint8_t> ok(
+        legal_stride * static_cast<std::size_t>(height), 0xcd);
+    if (!video::internal::Rgb24ToYuyvDispatchWithScratch(
+            src.data(), width, height, src_stride, ok.data(), legal_stride,
+            scratch.empty() ? nullptr : scratch.data(), scratch.size())) {
+      std::cerr << "dispatch refused a legal " << legal_stride
+                << " byte row for width " << width << "\n";
+      return false;
     }
   }
 

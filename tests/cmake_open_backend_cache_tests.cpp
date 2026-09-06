@@ -5,9 +5,8 @@
 #include <sstream>
 #include <string>
 
-#include <unistd.h>
-
 #include "core/util/exec.h"
+#include "scoped_temp_dir.h"
 
 #ifndef STUDIOCAST_SOURCE_DIR
 #define STUDIOCAST_SOURCE_DIR ""
@@ -20,6 +19,8 @@
 namespace {
 
 namespace fs = std::filesystem;
+
+using studiocast::tests::ScopedTempDir;
 
 bool Expect(bool condition, const char *message) {
   if (!condition) {
@@ -50,37 +51,6 @@ std::string ShellQuote(const std::string &value) {
   out += "'";
   return out;
 }
-
-class ScopedTempDir {
-public:
-  explicit ScopedTempDir(const std::string &prefix) {
-    std::error_code ec;
-    const fs::path base = fs::temp_directory_path(ec);
-    if (ec) {
-      error_ = "temp_directory_path failed: " + ec.message();
-      return;
-    }
-    path_ = base /
-            (prefix + "-" + std::to_string(static_cast<long long>(::getpid())));
-    fs::remove_all(path_, ec);
-    fs::create_directories(path_, ec);
-    if (ec)
-      error_ = "create_directories failed: " + ec.message();
-  }
-
-  ~ScopedTempDir() {
-    std::error_code ec;
-    fs::remove_all(path_, ec);
-  }
-
-  bool ok() const { return error_.empty(); }
-  const std::string &error() const { return error_; }
-  const fs::path &path() const { return path_; }
-
-private:
-  fs::path path_;
-  std::string error_;
-};
 
 std::string ReadFile(const fs::path &path) {
   std::ifstream in(path);

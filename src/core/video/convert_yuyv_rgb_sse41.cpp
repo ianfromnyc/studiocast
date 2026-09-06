@@ -112,7 +112,12 @@ void YuyvToRgbSse41(const std::uint8_t *src, int width, int height,
     }
 
     if (x < width) {
-      YuyvToRgbScalar(s, width - x, 1, src_stride, d, dst_stride);
+      // `s` has already moved over the pixels this row converted, so the
+      // scalar tail gets the bytes that are left in the row, not the whole
+      // stride. It needs that to know whether the row holds the V byte of an
+      // unpaired final pixel.
+      const std::size_t used = static_cast<std::size_t>(x) * 2u;
+      YuyvToRgbScalar(s, width - x, 1, src_stride - used, d, dst_stride);
     }
   }
 }

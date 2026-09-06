@@ -9,7 +9,12 @@ For user-facing setup and usage, start with [../README.md](../README.md).
 
 StudioCast currently targets Ubuntu 22.04 and 24.04. The setup helper supports
 Ubuntu-family distributions and installs the common build/runtime dependencies,
-ONNX Runtime, and v4l2loopback support.
+ONNX Runtime, and v4l2loopback support. Fedora 44 is an early-preview target:
+`packaging/rpm/build_rpm.sh` builds an RPM package. The setup helper is
+Ubuntu-only, so a Fedora machine needs its dependencies by hand: the
+`BuildRequires` list in `packaging/rpm/studiocast.spec.in` names them,
+`scripts/install/dlib.sh` builds the pinned dlib, and the `v4l2loopback` module
+comes from RPM Fusion Free.
 
 One-shot development setup:
 
@@ -96,6 +101,10 @@ change, merge it to `master`, and tag the resulting commit if it is a release.
   template for `studiocastd`.
 - [../packaging/appimage](../packaging/appimage): release packaging scaffold
   for the standalone GUI installer bundle.
+- [../packaging/rpm](../packaging/rpm): Fedora spec template, desktop entry,
+  icon, and the RPM build and verify scripts.
+- [../packaging/_lib](../packaging/_lib): shared shell helpers for the
+  packaging scripts.
 - [../docs](../docs): architecture, setup, model installation, manual testing,
   trademark, roadmap, and design notes.
 
@@ -179,9 +188,10 @@ Release packaging:
 - The AppDir layout places the backend at
   `usr/share/studiocast/installer/studiocast-installer-backend`, which is the
   installed path the GUI already probes relative to the installer binary.
-- The same packaging script creates `StudioCast-<version>-source.tar.gz` from
-  `HEAD` with `git archive` when available, stages it at
-  `usr/share/studiocast/source/StudioCast-<version>-source.tar.gz`, and leaves
+- The same packaging script creates `StudioCast-<version>-source.tar.gz` with
+  the shared helper `packaging/_lib/source_archive.sh`, which uses `git archive`
+  on `HEAD` when git is available. The script stages the archive at
+  `usr/share/studiocast/source/StudioCast-<version>-source.tar.gz` and leaves
   the standalone source archive in `dist/appimage/`.
 - Release AppImages are self-contained for the installer GUI, backend, and
   matching source archive. Runtime dependencies still come from supported system
@@ -197,10 +207,138 @@ Release packaging:
   SHA256 before making it executable, requires AppImage generation, and uploads
   the installer bundle, AppDir archive, source archive, and checksum file as
   workflow artifacts. It does not tag commits or publish release assets by
-  itself.
+  itself. The same workflow carries the `rpm-fedora-44` job for the Fedora
+  package, which is described below.
 - The packaged installer is still a source-build installer. The GUI defaults to
   the bundled source archive, and users can still point it at another release
   archive or a local checkout.
+
+Fedora RPM packaging:
+
+- `packaging/rpm/build_rpm.sh` renders `packaging/rpm/studiocast.spec.in` into
+  a spec with the `VERSION` value and the pinned dlib version, creates the
+  source archive, downloads the dlib source, and builds the source RPM and the
+  binary RPMs in a private rpmbuild tree under `build/rpm`. It never touches
+  `~/rpmbuild`.
+- The script uses the same `packaging/_lib/source_archive.sh` helper as the
+  AppImage script, so both flows ship an identical
+  `StudioCast-<version>-source.tar.gz`.
+- Results land in `dist/rpm/`: `studiocast-<version>-1.fc44.src.rpm`,
+  `studiocast-<version>-1.fc44.x86_64.rpm`, the matching
+  `studiocast-debuginfo` and `studiocast-debugsource` packages, and a
+  `studiocast-<version>-rpm.sha256` checksum file.
+- `--container` runs rpmbuild inside a `registry.fedoraproject.org/fedora:44`
+  podman or docker container. Use it on a host that is not Fedora 44. The
+  container build takes about 2.5 minutes on a 32-core machine. The container
+  runs `packaging/rpm/container_build.sh`, which the script copies into the
+  build directory; the install test runs `packaging/rpm/install_test.sh` over
+  stdin. Both are checked-in files, so `shellcheck -x` reads them like the
+  other packaging scripts.
+- Other options: `--srpm-only` builds the source RPM only, `--with NAME` and
+  `--without NAME` change a spec build conditional, `--install-builddeps` runs
+  `dnf builddep` on the rendered spec before a native build (needs root or
+  sudo; container mode installs its own build dependencies), `--rpmlint`
+  prints an rpmlint report, and `--keep-downloads` keeps the cached dlib
+  tarball when `--clean` removes the build tree. The rpmlint status never
+  fails the script.
+- Spec build conditionals: `open_cuda` (on), `open_audio` (on), `libyuv` (on),
+  `dlib` (on), and `tests` (on); `installer` (off). With `tests`, `%check`
+  runs the full ctest suite. `installer` stays off because the installer
+  backend is Ubuntu-only. The spec is `ExclusiveArch: x86_64`.
+- Every conditional reaches the configure step, so the source package decides
+  the binary. `libyuv` sets `STUDIOCAST_ENABLE_LIBYUV`, a three-way option:
+  `AUTO` is the default for a plain source build and falls back to the built-in
+  scalar, SSSE3 and AVX2 conversion; `ON`, which `--with libyuv` passes, fails
+  the configure step when libyuv is missing; `OFF`, which `--without libyuv`
+  passes, ignores a libyuv that the build machine has installed. A build with
+  libyuv also declares `Provides: studiocast(libyuv)`.
+
+Bundled dlib in the RPM:
+
+- Fedora ships no dlib package, so the RPM build makes its own. `Source1` is
+  the dlib release tarball pinned in `packaging/rpm/dlib.lock`, which holds
+  `DLIB_VERSION`, `DLIB_URL`, `DLIB_SHA256`, and the license note.
+- `build_rpm.sh` downloads that tarball on the host, checks the SHA256, caches
+  it under `build/rpm/downloads`, and copies it into the rpmbuild `SOURCES`
+  directory. The container never reaches the network for the sources. A
+  checksum mismatch stops the build.
+- `%build` compiles dlib into a private prefix inside the build tree and
+  passes `-Ddlib_DIR=<prefix>/lib64/cmake/dlib` to the StudioCast configure
+  step. The library is static, position independent, and built with the Fedora
+  hardening, LTO, and annobin flags, so the package ships no extra shared
+  object. Image codecs, the GUI, FFmpeg, and CUDA are all off, because
+  StudioCast uses the shape predictor and the plain image processing headers
+  only.
+- dlib links CBLAS and LAPACK through `flexiblas-devel`, selected with
+  `-DBLA_VENDOR=FlexiBLAS`. FlexiBLAS is the Fedora BLAS front end: it keeps
+  one link-time interface and lets the machine owner pick the back end
+  (OpenBLAS by default) at run time. The package therefore requires
+  `libflexiblas.so.3`.
+- The package declares `Provides: bundled(dlib) = <version>`, installs the
+  upstream license as `/usr/share/licenses/studiocast/dlib-LICENSE.txt`, and
+  carries the license tag `MPL-2.0 AND BSL-1.0`.
+- `--without dlib` skips the download and the extra build. The package is then
+  plain `MPL-2.0`, has no `bundled(dlib)` provide, and Open Video Eye Contact
+  is unavailable.
+- To bump the pin: change `DLIB_VERSION`, `DLIB_URL`, and `DLIB_SHA256` in
+  `packaging/rpm/dlib.lock` in one change, then run
+  `packaging/rpm/build_rpm.sh --clean --container --rpmlint` and
+  `packaging/rpm/verify_rpm.sh --install-test --container`. The lock file holds
+  the full procedure.
+- `scripts/install/dlib.sh` builds the same pinned dlib for a Fedora source
+  build, into `/opt/studiocast/dlib/<version>` by default, and prints the
+  `-Ddlib_DIR` value to pass to CMake. It supports `--prefix`, `--jobs`,
+  `--dry-run`, and `-y`. The RPM build does not need it.
+- The package ships the `Runtime` CMake component only: `studiocast`,
+  `studiocastd`, `studiocastctl`, `studiocast-probe`, `studiocast-maxine`,
+  `studiocast-open`, `studiocast-audio`, and `studiocast-video`, plus a desktop
+  entry, an icon, the license files, and the systemd user unit.
+- Run-time `Requires` are `pulseaudio-utils`, `v4l-utils`, and
+  `hicolor-icon-theme`, plus the soname dependencies that rpmbuild finds for
+  Qt6, libpulse, ONNX Runtime, libjpeg, libpng, and libyuv, plus FlexiBLAS in
+  a dlib build. Nothing links sqlite, so the package has no sqlite dependency.
+  `Recommends: v4l2loopback` is a weak dependency, so `dnf` installs the package
+  when it is absent. The module comes from RPM Fusion Free as
+  `akmod-v4l2loopback`, and the virtual camera needs it.
+- The Fedora `onnxruntime` package is CPU-only and has no CUDA execution
+  provider. GPU Open CUDA inference on Fedora therefore needs an upstream GPU
+  ONNX Runtime that the user installs. Open Audio runs on the CPU, so it works
+  with the Fedora package.
+- `studiocast --version` reports the git SHA as `unknown` in an RPM build,
+  because `git archive` puts no git metadata in the source archive.
+- The packaged unit comes from
+  `packaging/systemd/user/studiocastd-system.service.in`. The build replaces
+  `@BINDIR@` and installs the result as
+  `/usr/lib/systemd/user/studiocastd.service` with
+  `ExecStart=/usr/bin/studiocastd`. The source-install template
+  `packaging/systemd/user/studiocastd.service` is a different file and keeps
+  `ExecStart=%h/.local/bin/studiocastd`.
+- `packaging/rpm/verify_rpm.sh` checks the artifacts: package names, metadata,
+  the file list, the declared dependencies, and the checksum file.
+  `--install-test` installs the binary RPM with `dnf`, runs the programs, and
+  removes the package again. That test needs root, so use `--container` to run
+  it in a Fedora 44 container. `--no-container-check` lets it run directly on a
+  disposable root system, such as a CI container job.
+- The script reads `rpm -qp --provides` for `bundled(dlib)` and for
+  `studiocast(libyuv)`, and adapts. For a dlib package it also expects the
+  license tag, the dlib license file, and the FlexiBLAS dependency, and the
+  install test looks for dlib type names inside
+  `/usr/bin/studiocastd`. That binary check is the cheapest observable: dlib
+  shows up in the product only through Open Video Eye Contact, which needs a
+  running daemon, a camera, and an installed model pack.
+- For a libyuv package the script expects the `libyuv.so.0` dependency, and for
+  a package without the provide it expects no libyuv dependency at all. The two
+  checks together prove that the build conditional, not the build machine,
+  decided the backend.
+- CI: `.github/workflows/release-packaging.yml` has the `rpm-fedora-44` job. It
+  runs in a `registry.fedoraproject.org/fedora:44` container, always on release
+  events, and on `workflow_dispatch` when the `build_rpm` input is true, which
+  is the default. It uploads the RPMs and the SHA256 file as the
+  `studiocast-rpm-fedora-44` artifact. `.github/workflows/ci.yml` has the
+  `rpm-package-smoke` job, which runs the same build on every push and is the
+  only Fedora/GCC 16 compile check in push CI. Both jobs run the scripts
+  natively with `--install-builddeps` and `--no-container-check`, because a
+  GitHub container job cannot start podman.
 
 First release checklist:
 
@@ -233,7 +371,8 @@ First release checklist:
 7. After release packaging finishes, download the
    `studiocast-gui-installer-ubuntu-22.04` workflow artifact and attach the
    AppImage, AppDir archive, source archive, and SHA256 file to the GitHub
-   Release.
+   Release. Download the `studiocast-rpm-fedora-44` artifact as well, and attach
+   the source RPM, the binary RPM, and its SHA256 file.
 
 Pinned AppImage tool updates:
 
@@ -255,6 +394,22 @@ For release-equivalent local validation with preinstalled packaging tools:
 
 ```bash
 packaging/appimage/build_appimage.sh --clean --appimage-required
+```
+
+Maintainer commands for the Fedora RPM, on a Fedora 44 host (add
+`--install-builddeps` to the build command when the build dependencies are not
+installed yet):
+
+```bash
+packaging/rpm/build_rpm.sh --clean --rpmlint
+packaging/rpm/verify_rpm.sh --install-test --container
+```
+
+The same commands on a host that is not Fedora 44:
+
+```bash
+packaging/rpm/build_rpm.sh --clean --rpmlint --container
+packaging/rpm/verify_rpm.sh --install-test --container
 ```
 
 ## Daemon architecture
@@ -469,9 +624,15 @@ Useful checks:
 
 ## Packaging and systemd notes
 
-The systemd user service template is:
+There are two systemd user service templates:
 
 - [../packaging/systemd/user/studiocastd.service](../packaging/systemd/user/studiocastd.service)
+  is for source installs. It keeps `ExecStart=%h/.local/bin/studiocastd`,
+  because the install helper copies it into `~/.config/systemd/user/`.
+- [../packaging/systemd/user/studiocastd-system.service.in](../packaging/systemd/user/studiocastd-system.service.in)
+  is for distribution packages. The RPM build replaces `@BINDIR@` and installs
+  the result as `/usr/lib/systemd/user/studiocastd.service` with
+  `ExecStart=/usr/bin/studiocastd`.
 
 The install helper:
 
@@ -494,8 +655,32 @@ systemctl --user restart studiocastd.service
 journalctl --user -u studiocastd.service -f
 ```
 
-The current packaging flow is suitable for development and MVP testing. Treat
-distribution packaging and polished non-developer install flows as future work.
+The RPM does not enable its unit. A packaged install starts the daemon after:
+
+```bash
+systemctl --user enable --now studiocastd.service
+```
+
+A unit in `~/.config/systemd/user/` always wins over the packaged unit. A user
+who did a source install first therefore keeps starting
+`~/.local/bin/studiocastd` after an RPM install. Remove the old copy before you
+switch to the package:
+
+```bash
+./scripts/uninstall.sh
+```
+
+The uninstall script stops the unit, deletes
+`~/.config/systemd/user/studiocastd.service`, and reloads the user manager.
+Deleting that file by hand has the same result if you then run:
+
+```bash
+systemctl --user daemon-reload
+```
+
+The Fedora RPM is the first distribution package. The source-build flow remains
+suitable for development and MVP testing. Treat packages for other
+distributions and polished non-developer install flows as future work.
 
 ## Deeper docs
 

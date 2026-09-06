@@ -1,0 +1,294 @@
+# RPM spec template for StudioCast on Fedora.
+#
+# packaging/rpm/build_rpm.sh renders this template into build/rpm/SPECS/
+# studiocast.spec. The substitutions are @VERSION@, which becomes the content
+# of the repository VERSION file, and @DLIB_VERSION@, which comes from
+# packaging/rpm/dlib.lock. This mirrors how build_appimage.sh renders
+# packaging/appimage/studiocast-installer.desktop.in.
+#
+# Do not run rpmbuild on the .in file. Run packaging/rpm/build_rpm.sh, or on a
+# non-Fedora host run packaging/rpm/build_rpm.sh --container.
+#
+# The spec needs rpm 4.20 or later, for the new-style %%bcond and for
+# %%{_smp_build_ncpus}. Fedora 42 and later have it. It does not parse on
+# EL9 or EL10, which stay on rpm 4.16 and 4.18: an enterprise Linux build
+# would need the old %%bcond_with spellings and a %%{?_smp_build_ncpus}
+# fallback.
+#
+# Build conditionals (pass with rpmbuild --with NAME / --without NAME, or with
+# build_rpm.sh --with NAME / --without NAME):
+#
+#   open_cuda  (default on)   Open CUDA video backend. It uses ONNX Runtime and
+#                             loads the CUDA execution provider at run time, so
+#                             the package still works on a machine with no CUDA.
+#   open_audio (default on)   Open Audio backend. ONNX Runtime, CPU baseline.
+#   dlib       (default on)   dlib face landmarks for Open Video Eye Contact.
+#                             Fedora has no dlib package, so the build makes a
+#                             private static dlib from the pinned source
+#                             tarball in packaging/rpm/dlib.lock. Nothing goes
+#                             on the host and the package ships no extra
+#                             shared object. Use --without dlib to skip the
+#                             extra build; Eye Contact is then unavailable.
+#   libyuv     (default on)   Build against libyuv for an extra, optimized RGB
+#                             to YUYV conversion backend. Turn it off to build
+#                             with the project scalar, SSSE3 and AVX2 backends
+#                             only. The conditional sets
+#                             STUDIOCAST_ENABLE_LIBYUV, so an on build fails
+#                             the configure step when libyuv is missing and an
+#                             off build ignores a libyuv that is installed.
+#   tests      (default on)   Build the test suite and run ctest in %%check.
+#   installer  (default off)  The GUI installer and its backend. The backend is
+#                             an apt-based script for Ubuntu, so it is useless
+#                             inside an RPM. Keep it off unless you are testing
+#                             the installer build itself.
+#
+%bcond open_cuda 1
+%bcond open_audio 1
+%bcond dlib 1
+%bcond libyuv 1
+%bcond tests 1
+%bcond installer 0
+
+# Pinned dlib release. build_rpm.sh renders this from packaging/rpm/dlib.lock,
+# which also holds the download URL and the SHA256 of the tarball.
+%global dlib_version @DLIB_VERSION@
+# Where the private dlib build installs itself. It stays inside the build tree
+# and never reaches the buildroot.
+%global dlib_prefix %{_builddir}/StudioCast-%{version}/dlib-prefix
+
+Name:           studiocast
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        Broadcast-style audio and video effects manager for Linux
+
+# StudioCast itself is MPL-2.0. A dlib build also carries the bundled dlib
+# sources, which are under the Boost Software License 1.0.
+%if %{with dlib}
+License:        MPL-2.0 AND BSL-1.0
+%else
+License:        MPL-2.0
+%endif
+URL:            https://github.com/ianfromnyc/studiocast
+
+# The x86 SIMD sources are guarded by CMAKE_SYSTEM_PROCESSOR, so the tree can
+# in principle build on aarch64. Only x86_64 is tested, so keep the package to
+# that architecture until an aarch64 build is verified.
+ExclusiveArch:  x86_64
+
+# build_rpm.sh makes this archive from the git tree with
+# packaging/_lib/source_archive.sh. It is not a release asset URL, so rpmlint
+# reports an invalid Source0 URL. That is expected.
+Source0:        StudioCast-%{version}-source.tar.gz
+
+%if %{with dlib}
+# build_rpm.sh downloads this tarball and checks it against the SHA256 in
+# packaging/rpm/dlib.lock before rpmbuild starts. The text after #/ is the
+# local file name that rpmbuild uses.
+Source1:        https://github.com/davisking/dlib/archive/refs/tags/v%{dlib_version}.tar.gz#/dlib-%{dlib_version}.tar.gz
+
+# dlib is compiled into the programs as a static library, so declare the bundle
+# as the Fedora bundling guidelines ask.
+Provides:       bundled(dlib) = %{dlib_version}
+%endif
+
+%if %{with libyuv}
+# The optimized RGB to YUYV backend is a build-time choice that leaves no other
+# mark on the metadata. packaging/rpm/verify_rpm.sh reads this provide to tell
+# the two builds apart, the same way it reads bundled(dlib), and then expects
+# the libyuv soname in the run-time dependencies.
+Provides:       studiocast(libyuv) = %{version}-%{release}
+%endif
+
+BuildRequires:  cmake
+BuildRequires:  ninja-build
+BuildRequires:  gcc-c++
+BuildRequires:  pkgconf-pkg-config
+BuildRequires:  qt6-qtbase-devel
+BuildRequires:  pulseaudio-libs-devel
+BuildRequires:  libjpeg-turbo-devel
+BuildRequires:  libpng-devel
+BuildRequires:  onnxruntime-devel
+%if %{with libyuv}
+BuildRequires:  libyuv-devel
+%endif
+%if %{with dlib}
+# dlib matrix code uses CBLAS and LAPACK. FlexiBLAS is the Fedora BLAS front
+# end: it keeps one link-time interface and lets the machine owner choose the
+# back end (OpenBLAS by default) at run time. Reference blas-devel and
+# lapack-devel would also work, but they are the slow netlib libraries.
+BuildRequires:  flexiblas-devel
+%endif
+BuildRequires:  desktop-file-utils
+BuildRequires:  systemd-rpm-macros
+
+# Command line helpers that the daemon and the probe tool call.
+Requires:       pulseaudio-utils
+Requires:       v4l-utils
+Requires:       hicolor-icon-theme
+
+# The virtual camera needs the v4l2loopback kernel module. Fedora does not ship
+# it; it comes from RPM Fusion as akmod-v4l2loopback or kmod-v4l2loopback. A
+# weak dependency lets the package install when RPM Fusion is not enabled.
+Recommends:     v4l2loopback
+
+%description
+StudioCast applies broadcast-style effects to a webcam and a microphone on
+Linux. It sends the processed video to a v4l2loopback device and the processed
+audio to a PulseAudio or PipeWire null sink, so any conferencing or streaming
+application can use them.
+
+The package ships the GUI, the studiocastd background service, the studiocastctl
+command line client, and the backend helper tools.
+
+The background service is not enabled by the package. To start it:
+
+    systemctl --user enable --now studiocastd.service
+
+%prep
+%setup -q -n StudioCast-%{version}
+%if %{with dlib}
+# -T -D keeps the already unpacked StudioCast tree and adds Source1 to it, so
+# the dlib source lands at dlib-%%{dlib_version}/ inside the build tree.
+%setup -q -T -D -n StudioCast-%{version} -a 1
+# Copy the dlib license to the top level under a clear name. %%license in
+# %%files then installs it next to the StudioCast license files.
+cp -p dlib-%{dlib_version}/LICENSE.txt dlib-LICENSE.txt
+%endif
+
+%build
+%if %{with dlib}
+# Fedora has no dlib package, so build the pinned dlib source first. It goes
+# into a private prefix inside the build tree and links into the programs as a
+# static library, so the package ships no extra shared object.
+#
+# The Fedora %%cmake macro is deliberately not used here. It forces
+# BUILD_SHARED_LIBS=ON and a fixed build directory name, and both are wrong for
+# this private copy. The distribution build flags are passed by hand instead,
+# so the static library gets the same hardening, LTO and annobin notes as the
+# rest of the package.
+#
+# The exports stay inside a subshell. The %%cmake macro below keeps a CXXFLAGS
+# value that is already set, so leaking these would silently change the
+# StudioCast build too.
+(
+  export CFLAGS="%{build_cflags}"
+  export CXXFLAGS="%{build_cxxflags}"
+  export LDFLAGS="%{build_ldflags}"
+
+  # Only the shape predictor and the plain image processing headers are used,
+  # so every image codec, the GUI, CUDA and the FFmpeg support are off. BLAS
+  # and LAPACK stay on because the landmark solver uses them. BLA_VENDOR picks
+  # FlexiBLAS; without it dlib takes the first thing pkg-config offers.
+  %{__cmake} -S dlib-%{dlib_version} -B dlib-build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=%{dlib_prefix} \
+      -DCMAKE_INSTALL_LIBDIR=%{_lib} \
+      -DBUILD_SHARED_LIBS=OFF \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+      -DBLA_VENDOR=FlexiBLAS \
+      -DDLIB_NO_GUI_SUPPORT=ON \
+      -DDLIB_USE_CUDA=OFF \
+      -DDLIB_USE_BLAS=ON \
+      -DDLIB_USE_LAPACK=ON \
+      -DDLIB_USE_MKL_FFT=OFF \
+      -DDLIB_USE_FFMPEG=OFF \
+      -DDLIB_JPEG_SUPPORT=OFF \
+      -DDLIB_PNG_SUPPORT=OFF \
+      -DDLIB_GIF_SUPPORT=OFF \
+      -DDLIB_WEBP_SUPPORT=OFF \
+      -DDLIB_JXL_SUPPORT=OFF \
+      -DDLIB_LINK_WITH_SQLITE3=OFF
+
+  %{__cmake} --build dlib-build --parallel %{_smp_build_ncpus}
+  %{__cmake} --install dlib-build
+)
+%endif
+
+# The Fedora %%cmake macro already selects the Ninja generator and passes the
+# distribution build flags, so do not add -G here.
+#
+# %%cmake also sets BUILD_SHARED_LIBS=ON. The internal library studiocast_core
+# has no install rule and no version, so a shared build leaves the programs
+# with a dependency on a library that the package does not ship. Keep it
+# static, so each program carries the code it needs.
+%cmake \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DSTUDIOCAST_ENABLE_WERROR=OFF \
+    -DSTUDIOCAST_ENABLE_OPEN_CUDA=%{?with_open_cuda:ON}%{!?with_open_cuda:OFF} \
+    -DSTUDIOCAST_ENABLE_OPEN_AUDIO=%{?with_open_audio:ON}%{!?with_open_audio:OFF} \
+    -DSTUDIOCAST_ENABLE_DLIB=%{?with_dlib:ON}%{!?with_dlib:OFF} \
+    -DSTUDIOCAST_ENABLE_LIBYUV=%{?with_libyuv:ON}%{!?with_libyuv:OFF} \
+%if %{with dlib}
+    -Ddlib_DIR=%{dlib_prefix}/%{_lib}/cmake/dlib \
+%endif
+    -DBUILD_TESTING=%{?with_tests:ON}%{!?with_tests:OFF}
+
+%cmake_build
+
+%install
+# The CMake install rules cover the program files only. The desktop entry, the
+# icon and the systemd unit are installed below.
+DESTDIR=%{buildroot} %{__cmake} --install "%{__cmake_builddir}" --component Runtime
+%if %{with installer}
+DESTDIR=%{buildroot} %{__cmake} --install "%{__cmake_builddir}" --component Installer
+%endif
+
+install -D -p -m 0644 packaging/rpm/studiocast.desktop \
+    %{buildroot}%{_datadir}/applications/studiocast.desktop
+install -D -p -m 0644 packaging/rpm/studiocast.svg \
+    %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/studiocast.svg
+
+# The unit template in packaging/systemd/user/studiocastd.service is for source
+# installs and starts the daemon from the home directory. A packaged install
+# needs the daemon from the package binary directory instead.
+install -d -m 0755 %{buildroot}%{_userunitdir}
+sed -e 's|@BINDIR@|%{_bindir}|g' \
+    packaging/systemd/user/studiocastd-system.service.in \
+    > %{buildroot}%{_userunitdir}/studiocastd.service
+chmod 0644 %{buildroot}%{_userunitdir}/studiocastd.service
+
+%check
+desktop-file-validate %{buildroot}%{_datadir}/applications/studiocast.desktop
+%if %{with tests}
+%ctest
+%{buildroot}%{_bindir}/studiocast-probe --self-test
+%endif
+
+%post
+%systemd_user_post studiocastd.service
+
+%preun
+%systemd_user_preun studiocastd.service
+
+# %%systemd_user_postun is empty on Fedora. Use the restart variant, so an
+# upgrade marks a running daemon for restart.
+%postun
+%systemd_user_postun_with_restart studiocastd.service
+
+%files
+%license LICENSE NOTICE
+%if %{with dlib}
+%license dlib-LICENSE.txt
+%endif
+%doc README.md CHANGELOG.md
+%{_bindir}/studiocast
+%{_bindir}/studiocast-audio
+%{_bindir}/studiocast-maxine
+%{_bindir}/studiocast-open
+%{_bindir}/studiocast-probe
+%{_bindir}/studiocast-video
+%{_bindir}/studiocastctl
+%{_bindir}/studiocastd
+%{_datadir}/applications/studiocast.desktop
+%{_datadir}/icons/hicolor/scalable/apps/studiocast.svg
+%{_userunitdir}/studiocastd.service
+%if %{with installer}
+%{_bindir}/studiocast-installer
+%dir %{_datadir}/studiocast
+%dir %{_datadir}/studiocast/installer
+%{_datadir}/studiocast/installer/studiocast-installer-backend
+%endif
+
+%changelog
+* Thu Sep 03 2026 Ian Penovich <ip@ianfromnyc.us> - @VERSION@-1
+- First RPM package of StudioCast for Fedora.

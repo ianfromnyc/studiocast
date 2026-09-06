@@ -1,0 +1,29 @@
+# systemd user unit template for distribution packages (RPM, and later DEB).
+#
+# The packaging script replaces @BINDIR@ with the package binary directory
+# (/usr/bin on Fedora) and installs the result as studiocastd.service in the
+# system-wide user unit directory.
+#
+# The sibling file studiocastd.service is for source installs. It keeps
+# ExecStart=%h/.local/bin/studiocastd, because scripts/install/user_service.sh
+# copies it into ~/.config/systemd/user/. A unit in the home directory always
+# wins over the packaged unit, so a user who did a source install first must
+# remove that copy to use the packaged one.
+#
+# The package does not enable this unit. To start it:
+#   systemctl --user enable --now studiocastd.service
+
+[Unit]
+Description=StudioCast background service
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=@BINDIR@/studiocastd
+Restart=on-failure
+RestartSec=2s
+KillSignal=SIGTERM
+TimeoutStopSec=5
+
+[Install]
+WantedBy=default.target

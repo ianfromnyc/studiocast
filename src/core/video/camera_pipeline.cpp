@@ -7191,6 +7191,7 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     // frames and keep only the most recent, dropping older frames to avoid
     // "living in the past".
     int dropped_this_frame = 0;
+    std::string drain_fatal_err;
     for (;;) {
       if (stop_.load())
         break;
@@ -7198,7 +7199,16 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
       CapturedFrameView newer{};
       std::string nerr;
       if (!cap.AcquireFrame(&newer, 0, &nerr)) {
-        // No additional frame ready.
+        // A recoverable failure only says no additional frame is ready. Any
+        // other failure is a frame the capture refused after the driver
+        // dequeued the buffer, so put that buffer back and stop with the
+        // error. Dropping it here would leave the queue one buffer short on
+        // every refused frame, and say nothing.
+        if (CaptureDrainFailureStopsCapture(nerr)) {
+          std::string rerr;
+          (void)cap.ReleaseFrame(newer, &rerr);
+          drain_fatal_err = nerr;
+        }
         break;
       }
 
@@ -7210,6 +7220,13 @@ void CameraPipeline::ThreadMain(CameraPipelineConfig cfg) {
     }
     if (dropped_this_frame > 0) {
       dropped_capture_frames_total += dropped_this_frame;
+    }
+    if (!drain_fatal_err.empty()) {
+      std::string rerr;
+      (void)cap.ReleaseFrame(f, &rerr);
+      std::lock_guard<std::mutex> lock(mu_);
+      last_error_ = "Capture acquire failed: " + drain_fatal_err;
+      break;
     }
     last_capture_sequence = f.sequence;
 

@@ -313,3 +313,98 @@ jobs:
         run: |
           packaging/appimage/verify_bundle.sh \
             --dist-dir "${PWD}/dist/ci-package-smoke"
+
+  # The packaging scripts are checked-in files rather than heredocs so that a
+  # linter can read them. This job is that linter, so a regression such as the
+  # one an unquoted glob caused cannot come back unnoticed.
+  shell-lint:
+    name: shellcheck (packaging scripts)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The same image the packages are built in, so the ShellCheck is the one
+    # the packaging targets. Which release that is moves with the image, so
+    # the step below prints it and the log says what actually ran.
+    container:
+      image: registry.fedoraproject.org/fedora:44
+
+    steps:
+      - name: Install ShellCheck
+        # git is needed by the checkout action; it is not in the base image.
+        run: |
+          dnf install -y --setopt=install_weak_deps=false ShellCheck git
+          shellcheck --version
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint the packaging scripts
+        # -x follows a sourced file, so a helper library is read with the
+        # script that uses it. Every script under packaging/ is covered, so a
+        # new one joins the job on its own. scripts/install/dlib.sh is here as
+        # well, because the RPM build downloads the pinned dlib source with it.
+        #
+        # mapfile reports its own status, not the status of find, so an empty
+        # list has to fail on its own. Without that, a packaging/ that is
+        # renamed leaves the job linting one file and reporting success.
+        run: |
+          mapfile -t files < <(find packaging -name '*.sh' | sort)
+          (( ${#files[@]} > 0 )) || { echo "no packaging scripts found"; exit 1; }
+          shellcheck -x "${files[@]}" scripts/install/dlib.sh
+
+  # The RPM build is also the only Fedora build in push CI, so it checks the
+  # sources against the Fedora compiler and the Fedora Qt 6 as well.
+  rpm-package-smoke:
+    name: rpm package smoke (Fedora 44)
+    runs-on: ubuntu-24.04
+    # The build compiles StudioCast and a private dlib, so it is the longest
+    # job here. Cap it, so a hung step cannot hold a runner for six hours.
+    timeout-minutes: 90
+    container:
+      image: registry.fedoraproject.org/fedora:44
+
+    steps:
+      - name: Install base tools (for checkout and the cache)
+        # actions/cache packs the cached directory with tar and zstd, and
+        # neither is in the base image.
+        run: |
+          dnf install -y --setopt=install_weak_deps=false \
+            git rpm-build rpmdevtools rpmlint dnf5-plugins tar zstd
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Trust the workspace
+        # The checkout belongs to a different user id than this container, so
+        # git refuses to read it until the workspace is a safe directory.
+        # build_rpm.sh calls git archive to make the source archive.
+        run: |
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Cache the pinned dlib source
+        # The tarball is 19 MB and the pin changes rarely, so keep it between
+        # runs. --keep-downloads below tells --clean to leave it in place.
+        uses: actions/cache@v4
+        with:
+          path: build/rpm/downloads
+          key: rpm-dlib-${{ hashFiles('packaging/rpm/dlib.lock') }}
+
+      - name: Build RPM packages
+        # A container job cannot run podman, so this is the native build path.
+        # --install-builddeps reads the BuildRequires from the rendered spec,
+        # so the package list stays in the spec only.
+        #
+        # The script also downloads the dlib source pinned in
+        # packaging/rpm/dlib.lock and checks its SHA256. Fedora has no dlib
+        # package, so the spec builds that source as a private static library.
+        # --keep-downloads keeps the cached tarball for the next run.
+        run: |
+          packaging/rpm/build_rpm.sh --clean --keep-downloads \
+            --install-builddeps --rpmlint
+
+      - name: Verify RPM packages
+        # The job is already root inside a container, so the install test does
+        # not need a container of its own.
+        run: |
+          packaging/rpm/verify_rpm.sh --install-test --no-container-check

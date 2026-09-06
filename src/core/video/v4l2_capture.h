@@ -6,6 +6,10 @@
 #include <string>
 #include <vector>
 
+// V4L2 format the driver reports back from VIDIOC_S_FMT. Only a reference to
+// one crosses this header, so it stays free of <linux/videodev2.h>.
+struct v4l2_format;
+
 namespace studiocast::video {
 
 enum class CapturePixelFormat {
@@ -50,6 +54,66 @@ struct CaptureFormat {
   std::size_t bytes_per_line = 0;
   std::size_t size_image = 0;
 };
+
+// Reads the format the driver reported after VIDIOC_S_FMT into a
+// `CaptureFormat`. `mplane` says which union arm of `f` holds the answer.
+//
+// The driver has already laid the frame out, so `bytes_per_line` keeps the
+// stride the driver reported: a larger row size does not make the row longer,
+// it only makes the reader walk the frame at a stride the data does not use.
+// A row too short to hold the pixels, or a stride of 0, is raised to the
+// packed row size, and `size_image` is raised to the row size times the
+// height. Compressed MJPEG has no row size, so both values stay as reported.
+//
+// A report whose own rows do not fit its own frame size is refused, because
+// the read path would then walk past the end of the mapped buffer. A frame
+// size of 0 is no report at all rather than that disagreement, so it takes
+// the raise instead of the refusal.
+//
+// Exposed for tests; `V4l2Capture::Open()` is the only other caller.
+bool ParseChosenCaptureFmt(const v4l2_format &f, bool mplane, int fps,
+                           int fps_num, int fps_den, CaptureFormat *out,
+                           std::string *outErr);
+
+// True when a buffer VIDIOC_QUERYBUF reported is long enough to hold the frame
+// `fmt` describes. The read path walks `fmt.size_image` bytes of the mapping,
+// so a shorter buffer is a read past the end of it. This is the length the
+// walk must stay inside, and negotiation alone cannot know it.
+//
+// Exposed for tests; `V4l2Capture::Open()` is the only other caller.
+bool CaptureBufferHoldsFrame(std::size_t mapped_length,
+                             const CaptureFormat &fmt, std::string *outErr);
+
+// Resolves where the image sits in a buffer VIDIOC_DQBUF just returned.
+// `bytesused` is the driver's own count of the bytes it wrote, and it is the
+// length the compressed read path walks, so the mapping has to bound it like
+// every other walk: a count above `mapped_length` is clamped to it.
+//
+// On a multi-planar buffer `bytesused` also includes `data_offset`, so the
+// image starts that many bytes into the plane and is that much shorter. The
+// single-plane buffer has no such field and passes 0. An offset the payload
+// does not reach describes no image at all, so the frame is refused.
+//
+// Exposed for tests; `V4l2Capture::AcquireFrame()` is the only other caller.
+bool CaptureFramePayload(std::size_t mapped_length, std::size_t bytesused,
+                         std::size_t data_offset, std::size_t *out_offset,
+                         std::size_t *out_bytes, std::string *outErr);
+
+// True when the walk the raw read path makes stays inside the mapping after a
+// plane `data_offset` moves the start of the image.
+//
+// A raw reader does not walk the payload length: it walks
+// `bytes_per_line * height` from the start of the image, because that is the
+// layout negotiation gave it. An offset therefore moves the walk later in the
+// mapping but does not make it shorter, and the last `data_offset` bytes of
+// it fall past the end of the mapping. A compressed frame walks the payload
+// length instead, which `CaptureFramePayload` already bounds, so it is always
+// inside.
+//
+// Exposed for tests; `V4l2Capture::AcquireFrame()` is the only other caller.
+bool CaptureRawWalkFitsMapping(std::size_t mapped_length,
+                               std::size_t data_offset,
+                               const CaptureFormat &fmt, std::string *outErr);
 
 struct CapturedFrameView {
   const std::uint8_t *data = nullptr;

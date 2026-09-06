@@ -52,6 +52,10 @@ bool DlibFaceLandmarks::EnsureInitialized(const std::string &model_id_override,
 #if !STUDIOCAST_HAVE_DLIB
   (void)model_id_override;
   if (error) {
+    // The "STUDIOCAST_HAVE_DLIB=0" text is load-bearing for packaging. The RPM
+    // install test in packaging/rpm/verify_rpm.sh greps the installed
+    // studiocastd for it to prove that a --without dlib package really has no
+    // dlib. Change the wording there in the same commit.
     *error = "dlib is not available in this build (STUDIOCAST_HAVE_DLIB=0).";
   }
   return false;

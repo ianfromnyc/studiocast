@@ -26,12 +26,23 @@ bool FitsInt(std::size_t value) {
 }
 #endif
 
+// Bytes one YUYV row needs for this width. An odd width still fills the whole
+// final pixel pair, so the row rounds up to ceil(width / 2) * 4. The width is
+// widened first, because (width + 1) would overflow int at the largest width.
+std::size_t Rgb24ToYuyvRowBytes(int width) {
+  if (width <= 0)
+    return 0u;
+  return ((static_cast<std::size_t>(width) + 1u) / 2u) * 4u;
+}
+
 struct Rgb24ToYuyvDispatchPlan {
   Rgb24ToYuyvBackend backend;
   Rgb24ToYuyvWithScratchFn convert;
   bool needs_scratch;
 };
 
+// Only the build without libyuv makes the scalar path the default plan.
+#if !STUDIOCAST_HAVE_LIBYUV
 void ConvertScalarWithScratch(const std::uint8_t *src, int width, int height,
                               std::size_t src_stride, std::uint8_t *dst,
                               std::size_t dst_stride, std::uint8_t *scratch,
@@ -40,6 +51,7 @@ void ConvertScalarWithScratch(const std::uint8_t *src, int width, int height,
   (void)scratch_size;
   Rgb24ToYuyvScalar(src, width, height, src_stride, dst, dst_stride);
 }
+#endif
 
 #if STUDIOCAST_HAVE_X86_SIMD
 void ConvertSsse3WithScratch(const std::uint8_t *src, int width, int height,
@@ -132,16 +144,24 @@ std::size_t Rgb24ToYuyvDispatchScratchBytes(int width, int height) {
   return 0;
 }
 
-void Rgb24ToYuyvDispatchWithScratch(const std::uint8_t *src, int width,
+bool Rgb24ToYuyvDispatchWithScratch(const std::uint8_t *src, int width,
                                     int height, std::size_t src_stride,
                                     std::uint8_t *dst, std::size_t dst_stride,
                                     std::uint8_t *scratch,
                                     std::size_t scratch_size) {
   if (!src || !dst || width <= 0 || height <= 0)
-    return;
+    return false;
+
+  // Every backend writes ceil(width / 2) * 4 bytes into a row, because an odd
+  // width still fills the final YUYV pair. Check that shared precondition once
+  // here: a shorter row has no converter that fits it, so refuse the frame
+  // instead of letting a backend write past the row.
+  if (dst_stride < Rgb24ToYuyvRowBytes(width))
+    return false;
 
   kDispatchPlan.convert(src, width, height, src_stride, dst, dst_stride,
                         scratch, scratch_size);
+  return true;
 }
 
 bool Rgb24ToYuyvLibyuvAvailable() {
@@ -173,6 +193,12 @@ bool Rgb24ToYuyvLibyuv(const std::uint8_t *src, int width, int height,
   if (!src || !dst || width <= 0 || height <= 0)
     return false;
 
+  // The dispatch entry point already refused a row this short, so this only
+  // guards a direct call. A shorter dst_stride is a caller error either way:
+  // the scalar path would write past the row too.
+  if (dst_stride < Rgb24ToYuyvRowBytes(width))
+    return false;
+
   const std::size_t argb_stride = static_cast<std::size_t>(width) * 4u;
   const std::size_t argb_bytes = argb_stride * static_cast<std::size_t>(height);
   if (!scratch || scratch_size < argb_bytes || !FitsInt(src_stride) ||
@@ -183,10 +209,25 @@ bool Rgb24ToYuyvLibyuv(const std::uint8_t *src, int width, int height,
   const int src_stride_i = static_cast<int>(src_stride);
   const int dst_stride_i = static_cast<int>(dst_stride);
   const int argb_stride_i = static_cast<int>(argb_stride);
-  return libyuv::RAWToARGB(src, src_stride_i, scratch, argb_stride_i, width,
-                           height) == 0 &&
-         libyuv::ARGBToYUY2(scratch, argb_stride_i, dst, dst_stride_i, width,
-                            height) == 0;
+  if (libyuv::RAWToARGB(src, src_stride_i, scratch, argb_stride_i, width,
+                        height) != 0 ||
+      libyuv::ARGBToYUY2(scratch, argb_stride_i, dst, dst_stride_i, width,
+                         height) != 0) {
+    return false;
+  }
+
+  // libyuv writes 0 into the second luma slot of the last YUYV pair when the
+  // width is odd. The other backends duplicate the final pixel there. Copy the
+  // luma so every backend gives the same bytes.
+  if ((width & 1) != 0) {
+    const std::size_t tail = static_cast<std::size_t>(width - 1) * 2u;
+    for (int y = 0; y < height; ++y) {
+      std::uint8_t *row = dst + static_cast<std::size_t>(y) * dst_stride;
+      row[tail + 2u] = row[tail];
+    }
+  }
+
+  return true;
 #else
   (void)src;
   (void)width;

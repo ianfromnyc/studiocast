@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=StudioCast
+GenericName=Audio and Video Effects Manager
+Comment=Broadcast-style audio and video effects for Linux
+Exec=studiocast
+Icon=studiocast
+Terminal=false
+Categories=AudioVideo;Audio;Video;
+Keywords=camera;webcam;microphone;stream;effects;
+StartupNotify=true
