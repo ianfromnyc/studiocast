@@ -178,6 +178,10 @@ bool WaitUntil(const std::function<bool()> &pred,
 // never at `Start()`. A wait that needs more loops thus moves the event and
 // the window that follows it together, and each settle window stays shorter
 // than the backoff that it must not cross.
+//
+// The check for a detached hook has one known limit: it asks if a copy of
+// the counting hook is alive, thus a test that keeps an unused copy and then
+// replaces `sleep_for` detaches the counter without a report.
 class SupervisorLoopCounter final {
 public:
   // Installs the sleep hook that counts the loops. Call this after the test
