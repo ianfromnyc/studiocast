@@ -1361,28 +1361,62 @@ bool TestFrameBufferReportsAFrameThatWasNeverTaken() {
 
 // The hand-off carries whole frames between two threads with no lock. A torn
 // frame would hold the bytes of two writes at once.
+//
+// The producer stops on a count of hand-offs, not on a count of writes. A
+// publish that answers `published` says the consumer took the frame before it,
+// thus the producer sees each hand-off as it happens and keeps writing until it
+// has enough of them. CPU load changes how long the producer must write, but
+// not how many hand-offs the consumer gets: a machine too busy to give the
+// consumer a slice for a long time makes this test slower, not false. The cap
+// on the writes is the second bound, and it stops a buffer that hands nothing
+// over from writing for ever.
 bool TestFrameBufferSurvivesAProducerAndAConsumer() {
   constexpr std::size_t kFrameBytes = 4096;
-  constexpr int kFrames = 20000;
+  // Writes that stress the hand-off before the producer starts to wait.
+  constexpr std::uint64_t kFrames = 20000;
+  // Hand-offs the consumer must take. Each one is a frame the consumer read
+  // while the producer wrote the next.
+  constexpr int kHandoffs = 32;
+  // A write count no healthy run comes near, because 32 hand-offs need 32
+  // writes at best and the writes above give thousands on an idle machine.
+  constexpr std::uint64_t kWriteCap = kFrames * 500;
 
   studiocast::pw::TripleFrameBuffer buffer;
   buffer.Reset(kFrameBytes);
 
   std::atomic<bool> done{false};
+  std::atomic<bool> torn{false};
   std::atomic<std::uint64_t> dropped{0};
+  std::atomic<int> handoffs{0};
+  std::atomic<std::uint64_t> writes{0};
   std::thread producer([&] {
     std::vector<std::uint8_t> frame(kFrameBytes, 0);
-    for (int i = 0; i < kFrames; ++i) {
-      const auto value = static_cast<std::uint8_t>(i % 251);
+    std::uint64_t written = 0;
+    int seen = 0;
+    while (!torn.load(std::memory_order_relaxed) && written < kWriteCap &&
+           (written < kFrames || seen < kHandoffs)) {
+      const auto value = static_cast<std::uint8_t>(written % 251);
       std::fill(frame.begin(), frame.end(), value);
-      if (buffer.Publish(frame.data(), frame.size()) ==
-          studiocast::pw::PublishOutcome::replaced)
+      const bool first = written == 0;
+      const auto outcome = buffer.Publish(frame.data(), frame.size());
+      ++written;
+      if (outcome == studiocast::pw::PublishOutcome::replaced) {
         dropped.fetch_add(1, std::memory_order_relaxed);
+      } else if (!first) {
+        // The publish before this one left a frame on offer, and that frame
+        // has gone: the consumer took it.
+        ++seen;
+      }
+      // The writes are done and the producer only waits for hand-offs now. It
+      // gives up the core, thus a consumer that has none can run.
+      if (written >= kFrames && seen < kHandoffs)
+        std::this_thread::yield();
     }
+    handoffs.store(seen, std::memory_order_relaxed);
+    writes.store(written, std::memory_order_relaxed);
     done.store(true, std::memory_order_release);
   });
 
-  bool torn = false;
   int taken = 0;
   while (!done.load(std::memory_order_acquire)) {
     const std::uint8_t *frame = buffer.Acquire();
@@ -1391,18 +1425,27 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
     ++taken;
     for (std::size_t i = 1; i < kFrameBytes; ++i) {
       if (frame[i] != frame[0]) {
-        torn = true;
+        // The producer reads this and stops, because a torn frame ends the
+        // test and no hand-off after it means anything.
+        torn.store(true, std::memory_order_relaxed);
         break;
       }
     }
-    if (torn)
+    if (torn.load(std::memory_order_relaxed))
       break;
   }
 
   producer.join();
 
-  return Expect(!torn,
+  return Expect(!torn.load(std::memory_order_relaxed),
                 "the consumer read a frame that two writes tore apart") &&
+         Expect(handoffs.load(std::memory_order_relaxed) >= kHandoffs,
+                "the producer handed over " +
+                    std::to_string(handoffs.load(std::memory_order_relaxed)) +
+                    " frames of the " + std::to_string(kHandoffs) +
+                    " the test needs, in " +
+                    std::to_string(writes.load(std::memory_order_relaxed)) +
+                    " writes") &&
          Expect(taken > 0, "the consumer should have read something");
 }
 
