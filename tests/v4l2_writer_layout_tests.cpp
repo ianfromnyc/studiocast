@@ -1105,4 +1105,78 @@ bool TestV4l2WriterRestoresOnlyAFormatItCouldUse() {
   return true;
 }
 
+// The pipeline gives a failed writer open a five second retry budget, for the
+// window in which v4l2loopback answers a producer that opened it a moment too
+// early. It knows that window by the message the open failed with.
+//
+// EINVAL is one face of the window. The blank report is the other: the driver
+// answers, and the frame it names has no rows, which is the report it gives
+// while a consumer disconnects. Both are gone a moment later, thus both must
+// read as transient or the budget cannot heal the window it was built for.
+//
+// A report the driver stands by is not transient. A device that takes no
+// write(), a plane count the writer cannot use and a report that contradicts
+// itself all say the same thing on every retry.
+bool TestV4l2WriterNamesTheRefusalsARetryCanOutlive() {
+  using video::OutputOpenErrorIsTransient;
+  using video::ParseChosenOutputFmt;
+
+  // The refusal the parse writes for the blank report of a disconnect window,
+  // taken from the parse itself so that the two stay one string.
+  const LayoutCase blank = {"0x0", V4L2_PIX_FMT_YUYV, 0, 0, 0, 0, 0u, 0u};
+  v4l2_format f{};
+  FillDriverFormat(&f, blank);
+  video::ActualFormat a;
+  std::string blankErr;
+  if (!Expect(
+          !ParseChosenOutputFmt(f, /*mplane=*/false, /*fps=*/30, &a, &blankErr),
+          "the parse must refuse a blank report"))
+    return false;
+  if (!Expect(OutputOpenErrorIsTransient(blankErr),
+              "the blank report must read as transient")) {
+    std::cerr << "  got '" << blankErr << "'\n";
+    return false;
+  }
+
+  // The pipeline reads the whole composed failure, not the refusal alone.
+  const std::string composed =
+      "Failed to set/query format for /dev/video10 (desired=YUYV, 1280x720)\n"
+      "querycap.driver=v4l2 loopback card=StudioCast bus=platform\n"
+      "Tried VIDEO_OUTPUT S_FMT(with stride): the driver answered a format "
+      "the writer cannot use: " +
+      blankErr + "\n";
+  if (!Expect(OutputOpenErrorIsTransient(composed),
+              "a composed failure must carry the refusal through"))
+    return false;
+
+  struct TransientCase {
+    const char *error;
+    bool want;
+  };
+
+  const TransientCase cases[] = {
+      {"VIDIOC_S_FMT failed: Invalid argument", true},
+      {"Device does not support write(): it does not advertise "
+       "V4L2_CAP_READWRITE.",
+       false},
+      {"mplane format returned num_planes=2, only one plane is supported",
+       false},
+      {"Driver reported bytesperline=1536 and sizeimage=614400, but 480 rows "
+       "of 1536 bytes do not fit",
+       false},
+      {"", false},
+  };
+
+  for (const TransientCase &c : cases) {
+    const bool got = OutputOpenErrorIsTransient(c.error);
+    if (!Expect(got == c.want, "a refusal the driver stands by must not be "
+                               "retried, and a transient one must be")) {
+      std::cerr << "  '" << c.error << "': expected " << c.want << ", got "
+                << got << "\n";
+      return false;
+    }
+  }
+
+  return true;
+}
 } // namespace studiocast::tests

@@ -390,6 +390,17 @@ bool FrameIsUsable(int width, int height) { return width > 0 && height > 0; }
 // buffer of 4 TB.
 constexpr std::size_t kMaxFrameBytes = 256u * 1024u * 1024u;
 
+// The sentence `ParseChosenOutputFmt` writes for a blank report, and the
+// sentence `OutputOpenErrorIsTransient` looks for in the failure the pipeline
+// reads. Both take it from here, so that the refusal and the retry cannot
+// drift apart.
+constexpr const char *kBlankFrameRefusal = "Driver reported a blank frame";
+
+// strerror(EINVAL). v4l2loopback answers it to the ioctls of a producer that
+// opened the device a moment too early, and the composed failure carries the
+// text of the ioctl that failed.
+constexpr const char *kInvalidArgument = "Invalid argument";
+
 } // namespace
 
 bool OutputDeviceCanWrite(std::uint32_t caps, std::string *outErr) {
@@ -406,6 +417,11 @@ bool OutputDeviceCanWrite(std::uint32_t caps, std::string *outErr) {
     *outErr = why + ".";
   }
   return false;
+}
+
+bool OutputOpenErrorIsTransient(const std::string &error) {
+  return error.find(kInvalidArgument) != std::string::npos ||
+         error.find(kBlankFrameRefusal) != std::string::npos;
 }
 
 bool SavedOutputFmtIsRestorable(const v4l2_format &f, bool mplane) {
@@ -470,8 +486,8 @@ bool ParseChosenOutputFmt(const v4l2_format &f, bool mplane, int fps,
   // past it to the rung below, where the driver often names the real frame.
   if (!FrameIsUsable(w, h)) {
     if (outErr) {
-      *outErr = "Driver reported a blank frame: " + std::to_string(w) + "x" +
-                std::to_string(h);
+      *outErr = std::string(kBlankFrameRefusal) + ": " + std::to_string(w) +
+                "x" + std::to_string(h);
     }
     return false;
   }

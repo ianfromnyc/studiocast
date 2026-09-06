@@ -94,6 +94,18 @@ bool OutputDeviceCanWrite(std::uint32_t caps, std::string *outErr);
 // other caller.
 bool SavedOutputFmtIsRestorable(const v4l2_format &f, bool mplane);
 
+// True when a failed `V4l2Writer::Open()` names a condition that may be gone
+// a moment later, thus one the caller can wait out. `CameraPipeline` retries
+// the open for a short budget while this answers yes, and reports the failure
+// at once when it answers no.
+//
+// The window is the one v4l2loopback opens while a producer closes or a
+// consumer disconnects. It has two faces: the driver answers EINVAL, or it
+// answers a blank frame report. A report the driver stands by, such as a
+// plane count the writer cannot use or a device that takes no write(), says
+// the same thing on every retry.
+bool OutputOpenErrorIsTransient(const std::string &error);
+
 // One rung of the format ladder: a question for the driver, and the union arm
 // the answer lands in.
 struct FormatLadderRung {

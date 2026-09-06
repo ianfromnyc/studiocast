@@ -71,6 +71,7 @@ bool TestV4l2WriterFormatLadderRefusesABlankFrameReport();
 bool TestV4l2WriterRefusesAFrameLargerThanItCanHold();
 bool TestV4l2WriterFormatLadderPutsTheDeviceFormatBack();
 bool TestV4l2WriterRestoresOnlyAFormatItCouldUse();
+bool TestV4l2WriterNamesTheRefusalsARetryCanOutlive();
 bool TestV4l2WriterRefusesADeviceThatCannotTakeWrites();
 } // namespace studiocast::tests
 
@@ -1158,6 +1159,8 @@ int main() {
        &studiocast::tests::TestV4l2WriterFormatLadderPutsTheDeviceFormatBack},
       {"V4L2 writer restores only a format it could use",
        &studiocast::tests::TestV4l2WriterRestoresOnlyAFormatItCouldUse},
+      {"V4L2 writer names the refusals a retry can outlive",
+       &studiocast::tests::TestV4l2WriterNamesTheRefusalsARetryCanOutlive},
       {"V4L2 writer refuses a device that cannot take writes",
        &studiocast::tests::TestV4l2WriterRefusesADeviceThatCannotTakeWrites},
       {"V4L2 capture negotiation keeps the driver row stride",
