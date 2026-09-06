@@ -521,6 +521,14 @@ public:
   void SetMirrorEnabled(bool enabled) override;
 
 private:
+  // The only test seam of this class. The state a start is in — `starting_`
+  // set and `running_` not — lives inside Start() alone, between the launch
+  // of the frame thread and the notification Start() waits for. No caller
+  // reaches that window from outside. The test that holds EnsureOutputOpen
+  // and CloseOutput to internal::RunOwnsOutput therefore sets the two flags
+  // through this friend. Only tests/video_service_tests.cpp defines it.
+  friend class CameraPipelineTestAccess;
+
   // Opens (or reuses) the loopback writer.
   //
   // If `out_opened_or_renegotiated` is non-null, it will be set to true when we

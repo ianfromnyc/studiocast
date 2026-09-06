@@ -10,6 +10,7 @@
 #include <thread>
 #include <utility>
 
+#include "core/video/camera_pipeline.h"
 #include "core/video/effects/broadcast_effect_contract.h"
 #include "core/video/scaling_policy.h"
 #include "core/video/virtual_camera_service.h"
@@ -64,6 +65,39 @@ bool TestBackgroundRemoveCpuMatchesReferenceAndPreservesPadding();
 bool TestBackgroundBlurCpuMatchesReferenceAndPreservesPadding();
 bool TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair();
 } // namespace studiocast::tests
+
+namespace studiocast::video {
+
+// Reaches the run flags of a CameraPipeline, which only Start() sets. The
+// friend declaration in the pipeline names this, and this file is the only
+// place that defines it. See `camera output paths obey the run-owns-output
+// rule` below for what it is for.
+class CameraPipelineTestAccess final {
+public:
+  explicit CameraPipelineTestAccess(CameraPipeline &pipeline)
+      : pipeline_(pipeline) {}
+
+  // Puts the pipeline in a run state of the caller's choice. `running=false`
+  // with `starting=true` is the window Start() waits in.
+  void SetRunState(bool running, bool starting) {
+    std::lock_guard<std::mutex> lock(pipeline_.mu_);
+    pipeline_.running_ = running;
+    pipeline_.starting_ = starting;
+  }
+
+  // The output device the pipeline believes it holds. CloseOutput clears it
+  // and Status() reports it, so it tells a close that went through from one
+  // that was refused.
+  void SetOutputDevice(const std::string &device) {
+    std::lock_guard<std::mutex> lock(pipeline_.mu_);
+    pipeline_.output_device_ = device;
+  }
+
+private:
+  CameraPipeline &pipeline_;
+};
+
+} // namespace studiocast::video
 
 namespace {
 
@@ -1379,6 +1413,76 @@ bool TestCameraOutputBelongsToTheRunWhileItRuns() {
   return true;
 }
 
+// The rule above, held against the two paths that ask it. EnsureOutputOpen
+// and CloseOutput must both leave the output alone while a start is under
+// way, not while a run is up alone: `starting_` without `running_` is the
+// window Start() waits in, and a path that looks at `running_` there lets
+// another thread open or take down the output between two ticks of the frame
+// thread.
+//
+// The pipeline goes to a device that is not there, so a refusal and a real
+// try answer differently. Each half has its idle control beside it, which is
+// what tells the guard from an answer the pipeline would give anyway.
+bool TestCameraOutputPathsObeyTheRunOwnsOutputRule() {
+  using studiocast::video::CameraPipeline;
+  using studiocast::video::CameraPipelineTestAccess;
+
+  CameraPipeline pipeline;
+  CameraPipelineTestAccess access(pipeline);
+
+  CameraPipelineConfig cfg;
+  cfg.input_device = "/dev/studiocast-test-absent-camera";
+  cfg.output_device = "/dev/studiocast-test-absent-loopback";
+  cfg.width = 640;
+  cfg.height = 480;
+  cfg.fps = 30;
+
+  // Control: an idle pipeline goes to the device itself, and fails there.
+  access.SetRunState(/*running=*/false, /*starting=*/false);
+  std::string error;
+  if (pipeline.EnsureOutputOpen(cfg, &error)) {
+    std::cerr << "an idle pipeline must go to the output device itself\n";
+    return false;
+  }
+  if (error.empty()) {
+    std::cerr << "an open that failed must say why\n";
+    return false;
+  }
+
+  // A start under way owns the output, so the open is answered, not made.
+  access.SetRunState(/*running=*/false, /*starting=*/true);
+  error.clear();
+  if (!pipeline.EnsureOutputOpen(cfg, &error)) {
+    std::cerr << "a start under way must keep EnsureOutputOpen away from the "
+                 "output device: "
+              << error << "\n";
+    return false;
+  }
+  if (!error.empty()) {
+    std::cerr << "an open the run owns must report no failure\n";
+    return false;
+  }
+
+  // The same start owns the close.
+  const std::string held = "/dev/studiocast-test-held-output";
+  access.SetOutputDevice(held);
+  pipeline.CloseOutput();
+  if (pipeline.Status().output_device != held) {
+    std::cerr << "a start under way must keep CloseOutput away from the "
+                 "output\n";
+    return false;
+  }
+
+  // Control: the same close on an idle pipeline goes through.
+  access.SetRunState(/*running=*/false, /*starting=*/false);
+  pipeline.CloseOutput();
+  if (!pipeline.Status().output_device.empty()) {
+    std::cerr << "an idle pipeline must let CloseOutput take the output down\n";
+    return false;
+  }
+  return true;
+}
+
 bool TestStandaloneGpuScalerPolicySkipsInactiveBackendTransfers() {
   using studiocast::video::ShouldRunStandaloneGpuScaler;
 
@@ -1472,6 +1576,8 @@ int main() {
        &TestCameraNodeRestartBackoffIgnoresAReplacedNode},
       {"camera output belongs to the run while it runs",
        &TestCameraOutputBelongsToTheRunWhileItRuns},
+      {"camera output paths obey the run-owns-output rule",
+       &TestCameraOutputPathsObeyTheRunOwnsOutputRule},
       {"PipeWire output state reports a write failure",
        &TestPipeWireOutputStateReportsAWriteFailure},
       {"pipewire output status hides the numbers of a down node",
