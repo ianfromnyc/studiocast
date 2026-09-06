@@ -341,8 +341,8 @@ bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold() {
   }
 
   // The two reports that look like the refusal but are not it: a frame size
-  // of 0 is no report at all, and a stride below the packed row is measured
-  // against the frame size before it is raised.
+  // of 0 is no report at all, and a raised row that still fits the frame the
+  // driver sized keeps that frame.
   const LayoutCase accepted[] = {
       {"a stride with no frame size at all", V4L2_PIX_FMT_YUYV, 640, 480, 1280,
        0, 1280u, 614400u},
