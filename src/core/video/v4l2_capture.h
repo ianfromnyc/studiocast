@@ -181,12 +181,18 @@ public:
   // Acquire a frame (DQBUF). Caller MUST call ReleaseFrame() with the returned
   // view, on failure as well as on success.
   //
-  // A failure after VIDIOC_DQBUF is a frame this refused with the buffer
-  // already out of the driver queue, and the view carries a valid `index` on
-  // every such refusal, so ReleaseFrame() gives the buffer back. A failure
-  // before VIDIOC_DQBUF - a poll error, a timeout - dequeues nothing and
-  // leaves `index` at -1, which ReleaseFrame() returns early on. The call is
-  // therefore correct after any failure.
+  // The call clears `*out` first, so the view carries only what this call put
+  // in it. Every claim below is therefore the function's own, and holds for a
+  // caller that keeps one view across calls as well.
+  //
+  // A frame refused after VIDIOC_DQBUF is a buffer already out of the driver
+  // queue, and the view carries its `index`, so ReleaseFrame() gives that
+  // buffer back. The one exception is a buffer index the driver reports out of
+  // range: no buffer of this capture answers to it, so the view keeps `index`
+  // at -1 and STREAMOFF is what reclaims that one buffer. A failure before
+  // VIDIOC_DQBUF - a poll error, a timeout - dequeues nothing and leaves
+  // `index` at -1 as well. ReleaseFrame() returns early on either, so the call
+  // is correct after any failure.
   bool AcquireFrame(CapturedFrameView *out, int timeout_ms, std::string *error);
 
   // Release a frame back to driver (QBUF).

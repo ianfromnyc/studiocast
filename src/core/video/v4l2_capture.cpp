@@ -1411,6 +1411,13 @@ bool V4l2Capture::AcquireFrame(CapturedFrameView *out, int timeout_ms,
                                std::string *error) {
   if (!out)
     return false;
+
+  // The view says what this call left behind, never what an earlier call did.
+  // A caller that keeps one view across calls would otherwise read the buffer
+  // of the frame before out of a failure here, and give the driver back a
+  // buffer it already holds.
+  *out = CapturedFrameView{};
+
   if (fd_ < 0) {
     if (error)
       *error = "Capture not open.";

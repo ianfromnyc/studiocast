@@ -677,6 +677,37 @@ bool TestCaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop() {
                 "a failure before the dequeue must release no buffer");
 }
 
+// `AcquireFrame()` promises that a failure before `VIDIOC_DQBUF` leaves the
+// view with no buffer, so a release after it gives nothing back. The promise
+// is the function's own, not the caller's: a caller that keeps one view across
+// calls must not read the buffer of an earlier frame out of it after a poll
+// error or a timeout, because that buffer belongs to the driver again. A
+// capture that was never opened is the cheapest failure before the dequeue,
+// and it needs no device.
+bool TestCaptureAcquireClearsTheViewBeforeItCanFail() {
+  using studiocast::video::CapturedFrameView;
+  using studiocast::video::V4l2Capture;
+
+  V4l2Capture cap;
+
+  // The view of a frame the caller already released, given to the next call
+  // again.
+  CapturedFrameView reused{};
+  reused.index = 5;
+  reused.sequence = 11;
+  reused.bytes = 614400;
+
+  std::string err;
+  if (!Expect(!cap.AcquireFrame(&reused, /*timeout_ms=*/0, &err),
+              "a capture that is not open must refuse to acquire a frame"))
+    return false;
+
+  return Expect(reused.index < 0 && reused.data == nullptr &&
+                    reused.bytes == 0u,
+                "a failure before the dequeue must leave the view with no "
+                "buffer to release");
+}
+
 // One check serves both buffer types, and each type reaches it for its own
 // reason. A plane offset is what moves the walk past the end of the mapping on
 // the multi-planar arm; the single-plane arm has no offset, so only a mapping
@@ -752,6 +783,10 @@ bool TestV4l2CaptureRefusedFrameKeepsTheBufferIndexForTheDrainLoop() {
 
 bool TestV4l2CaptureRawWalkRefusalNamesItsCause() {
   return TestCaptureRawWalkRefusalNamesItsCause();
+}
+
+bool TestV4l2CaptureAcquireClearsTheViewBeforeItCanFail() {
+  return TestCaptureAcquireClearsTheViewBeforeItCanFail();
 }
 
 bool TestV4l2CapturePreferenceTreats720pAsMjpegWorthy() {
