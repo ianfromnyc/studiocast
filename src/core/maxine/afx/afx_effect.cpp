@@ -7,6 +7,9 @@
 #include <filesystem>
 #include <sstream>
 #include <string>
+#include <vector>
+
+#include "core/maxine/afx/afx_loader_path.h"
 
 namespace studiocast::maxine::afx {
 
@@ -34,8 +37,9 @@ SmFolderFromComputeCap(const std::optional<std::pair<int, int>> &cap,
   const int major = cap->first;
   const int minor = cap->second;
 
-  // Supported folders (per issue requirements):
-  // sm_75, sm_80, sm_86, sm_89, sm_90, sm_100, sm_120.
+  // The SDK ships model packs for these folders only: sm_75, sm_80, sm_86,
+  // sm_89, sm_90, sm_100, sm_120. The AFX `features/download_features.sh` maps
+  // every GPU it knows onto that same set.
   if (major == 7) {
     if (minor >= 5)
       return std::string("sm_75");
@@ -43,6 +47,9 @@ SmFolderFromComputeCap(const std::optional<std::pair<int, int>> &cap,
   if (major == 8) {
     if (minor >= 9)
       return std::string("sm_89");
+    // 8.7 is Jetson Orin. NVIDIA ships no sm_87 pack, so it takes the sm_86
+    // engines, which is the nearest architecture the SDK has. Add an sm_87
+    // line here if a later SDK starts to ship one.
     if (minor >= 6)
       return std::string("sm_86");
     if (minor >= 0)
@@ -72,7 +79,7 @@ SmFolderFromComputeCap(const std::optional<std::pair<int, int>> &cap,
 }
 
 std::optional<fs::path>
-FindFirstExistingFile(std::initializer_list<fs::path> candidates) {
+FindFirstExistingFile(const std::vector<fs::path> &candidates) {
   std::error_code ec;
   for (const auto &p : candidates) {
     if (p.empty())
@@ -84,63 +91,124 @@ FindFirstExistingFile(std::initializer_list<fs::path> candidates) {
   return std::nullopt;
 }
 
-bool PrependEnvPath(const char *var, const fs::path &dir,
-                    std::string *error_out) {
-  if (!var || std::strlen(var) == 0) {
-    if (error_out)
-      *error_out = "Internal error: env var name is empty.";
-    return false;
-  }
-  const std::string add = dir.string();
-  if (add.empty()) {
-    if (error_out)
-      *error_out =
-          "Internal error: attempted to prepend an empty directory to env.";
-    return false;
+// The version numbers of `<stem>.so.<digits>[.<digits>...]`, or nothing when
+// `filename` does not have that shape. The parts order the versions: `.so.2`
+// gives {2}, `.so.2.1.0` gives {2, 1, 0}, and {2} sorts below {2, 1, 0}.
+std::optional<std::vector<unsigned long long>>
+SoVersionParts(const std::string &filename, const std::string &stem) {
+  const std::string prefix = stem + ".so.";
+  if (filename.size() <= prefix.size() ||
+      filename.compare(0, prefix.size(), prefix) != 0) {
+    return std::nullopt;
   }
 
-  const char *old = std::getenv(var);
-  const std::string oldStr = old ? std::string(old) : std::string();
-
-  auto contains_exact = [&](const std::string &list,
-                            const std::string &item) -> bool {
-    if (list.empty())
-      return false;
-    size_t start = 0;
-    while (start <= list.size()) {
-      const size_t end = list.find(':', start);
-      const std::string token = (end == std::string::npos)
-                                    ? list.substr(start)
-                                    : list.substr(start, end - start);
-      if (token == item)
-        return true;
-      if (end == std::string::npos)
-        break;
-      start = end + 1;
+  std::vector<unsigned long long> parts;
+  unsigned long long value = 0;
+  bool have_digits = false;
+  for (std::size_t i = prefix.size(); i < filename.size(); ++i) {
+    const char c = filename[i];
+    if (c >= '0' && c <= '9') {
+      value = value * 10ull + static_cast<unsigned long long>(c - '0');
+      have_digits = true;
+      continue;
     }
-    return false;
-  };
-
-  if (contains_exact(oldStr, add)) {
-    return true; // idempotent
-  }
-
-  std::string next;
-  if (oldStr.empty()) {
-    next = add;
-  } else {
-    next = add + ":" + oldStr;
-  }
-
-  if (::setenv(var, next.c_str(), 1) != 0) {
-    if (error_out) {
-      std::ostringstream oss;
-      oss << "Failed to set " << var << ": " << std::strerror(errno);
-      *error_out = oss.str();
+    if (c == '.' && have_digits) {
+      parts.push_back(value);
+      value = 0;
+      have_digits = false;
+      continue;
     }
-    return false;
+    return std::nullopt;
   }
-  return true;
+
+  if (!have_digits)
+    return std::nullopt;
+  parts.push_back(value);
+  return parts;
+}
+
+// The highest `<stem>.so.<version>` file in `lib_dir`, or an empty path when
+// there is none.
+fs::path HighestVersionedLibrary(const fs::path &lib_dir,
+                                 const std::string &stem) {
+  std::error_code ec;
+  fs::directory_iterator it(lib_dir, ec);
+  const fs::directory_iterator end;
+
+  fs::path best;
+  std::optional<std::vector<unsigned long long>> best_version;
+  for (; !ec && it != end; it.increment(ec)) {
+    const auto parts = SoVersionParts(it->path().filename().string(), stem);
+    if (!parts)
+      continue;
+
+    std::error_code file_ec;
+    if (!fs::is_regular_file(it->path(), file_ec) || file_ec)
+      continue;
+
+    if (!best_version || *best_version < *parts) {
+      best_version = parts;
+      best = it->path();
+    }
+  }
+
+  return best;
+}
+
+// The libraries that can hold one effect, in the order to try them. A feature
+// that holds more than one effect, such as studio voice, names its libraries
+// after the effect selector; the other features name theirs after the feature.
+// AFX 2.1.0 installs `.so`, `.so.2` and `.so.2.1.0`; `.so.1` is for the older
+// SDK.
+std::vector<fs::path> FeatureLibraryCandidates(const fs::path &lib_dir,
+                                               const std::string &selector,
+                                               const std::string &feature_id) {
+  std::vector<std::string> stems;
+  if (!selector.empty())
+    stems.push_back("libnv_audiofx_" + selector);
+  if (!feature_id.empty() && feature_id != selector)
+    stems.push_back("libnv_audiofx_" + feature_id);
+
+  std::vector<fs::path> out;
+  out.reserve(stems.size() * 4);
+  for (const auto &stem : stems) {
+    out.push_back(lib_dir / (stem + ".so"));
+    out.push_back(lib_dir / (stem + ".so.2"));
+    out.push_back(lib_dir / (stem + ".so.1"));
+  }
+
+  // The names above are the links the SDK installs beside the real file. A
+  // tree that lost the links still holds `<stem>.so.2.1.0`, so try the highest
+  // version of each stem after the names we know.
+  for (const auto &stem : stems) {
+    const fs::path versioned = HighestVersionedLibrary(lib_dir, stem);
+    if (!versioned.empty())
+      out.push_back(versioned);
+  }
+  return out;
+}
+
+// True when `dir` is on LD_LIBRARY_PATH of this process.
+//
+// This compares against the entries of the variable itself. Asking
+// LdLibraryPathWithDirs whether it wants to add the directory would answer
+// "already there" for a directory that CanGoOnLoaderPath refuses, because
+// that function leaves such a directory out.
+bool LoaderPathHasDir(const fs::path &dir) {
+  if (dir.empty() || !CanGoOnLoaderPath(dir))
+    return false;
+  const char *current = std::getenv("LD_LIBRARY_PATH");
+  if (!current)
+    return false;
+
+  const std::string want = dir.string();
+  std::istringstream in(current);
+  std::string entry;
+  while (std::getline(in, entry, ':')) {
+    if (entry == want)
+      return true;
+  }
+  return false;
 }
 
 std::optional<fs::path> ResolveModelPath(const AfxEffectConfig &cfg,
@@ -174,23 +242,34 @@ std::optional<fs::path> ResolveModelPath(const AfxEffectConfig &cfg,
     return std::nullopt;
   }
 
-  std::string model_name;
-  if (cfg.feature_id == "denoiser") {
-    model_name = cfg.use_denoiser_v2_model ? "denoiser_v2_48k.trtpkg"
-                                           : "denoiser_48k.trtpkg";
-  } else if (cfg.effect_selector == "studio_voice_low_latency") {
-    model_name = "studio_voice_low_latency_48k.trtpkg";
-  } else {
-    model_name = cfg.feature_id + "_48k.trtpkg";
+  // The model is named after the effect selector, which for most features is
+  // the feature id itself. The denoiser has a second model.
+  std::vector<std::string> model_names;
+  if (cfg.feature_id == "denoiser" && cfg.use_denoiser_v2_model) {
+    model_names.push_back("denoiser_v2_48k.trtpkg");
+  }
+  if (!cfg.effect_selector.empty()) {
+    model_names.push_back(cfg.effect_selector + "_48k.trtpkg");
+  }
+  if (!cfg.feature_id.empty() && cfg.feature_id != cfg.effect_selector) {
+    model_names.push_back(cfg.feature_id + "_48k.trtpkg");
   }
 
-  const fs::path expected =
-      cfg.features_dir / cfg.feature_id / "models" / *sm / model_name;
-  if (!fs::exists(expected, ec)) {
+  const fs::path model_dir = cfg.features_dir / cfg.feature_id / "models" / *sm;
+  std::vector<fs::path> candidates;
+  candidates.reserve(model_names.size());
+  for (const auto &name : model_names) {
+    candidates.push_back(model_dir / name);
+  }
+
+  const auto found = FindFirstExistingFile(candidates);
+  if (!found) {
     if (error_out) {
       std::ostringstream oss;
-      oss << "AFX model file not found: " << expected.string() << ". "
-          << "Expected models under `"
+      oss << "AFX model file not found: "
+          << (candidates.empty() ? model_dir.string()
+                                 : candidates.front().string())
+          << ". Expected models under `"
           << (cfg.features_dir / cfg.feature_id / "models").string() << "` "
           << "(SM folder " << *sm << ").";
       *error_out = oss.str();
@@ -198,7 +277,7 @@ std::optional<fs::path> ResolveModelPath(const AfxEffectConfig &cfg,
     return std::nullopt;
   }
 
-  return expected;
+  return *found;
 }
 
 } // namespace
@@ -267,9 +346,17 @@ bool AfxEffect::Configure(const AfxEffectConfig &cfg, std::string *error_out) {
           "AFX features_dir is empty (expected `<AFX_ROOT>/features`).";
     return false;
   }
-  if (cfg_.channels == 0) {
-    if (error_out)
-      *error_out = "AFX channels must be >= 1.";
+  // The AFX 2.1.0 effects run one channel, and Run builds a one-element array
+  // of channel pointers for them. Anything else would make the SDK read past
+  // that array, so refuse it here. A stereo caller splits the channels itself
+  // and calls Run once per channel.
+  if (cfg_.channels != 1) {
+    if (error_out) {
+      std::ostringstream oss;
+      oss << "AFX effects run 1 channel; StudioCast asked for " << cfg_.channels
+          << ".";
+      *error_out = oss.str();
+    }
     return false;
   }
   if (cfg_.frame_samples == 0) {
@@ -288,18 +375,25 @@ bool AfxEffect::Configure(const AfxEffectConfig &cfg, std::string *error_out) {
   resolved_model_path_ = *mp;
 
   resolved_feature_lib_dir_ = cfg_.features_dir / cfg_.feature_id / "lib";
-  const auto lib = FindFirstExistingFile({
-      resolved_feature_lib_dir_ / ("libnv_audiofx_" + cfg_.feature_id + ".so"),
-      resolved_feature_lib_dir_ /
-          ("libnv_audiofx_" + cfg_.feature_id + ".so.1"),
-  });
+  const auto lib_candidates = FeatureLibraryCandidates(
+      resolved_feature_lib_dir_, cfg_.effect_selector, cfg_.feature_id);
+  const auto lib = FindFirstExistingFile(lib_candidates);
   if (!lib) {
     if (error_out) {
+      std::ostringstream tried;
+      bool first = true;
+      for (const auto &c : lib_candidates) {
+        if (!first)
+          tried << ", ";
+        first = false;
+        tried << c.filename().string();
+      }
       std::ostringstream oss;
       oss << "AFX feature library not found for `" << cfg_.feature_id << "`. "
-          << "Expected `libnv_audiofx_" << cfg_.feature_id << ".so` under `"
+          << "Tried " << tried.str() << " under `"
           << resolved_feature_lib_dir_.string() << "`. "
-          << "Ensure you ran the AFX `install_feature.sh` for this feature.";
+          << "Ensure you downloaded the AFX feature `" << cfg_.feature_id
+          << "`.";
       *error_out = oss.str();
     }
     return false;
@@ -312,7 +406,10 @@ bool AfxEffect::Configure(const AfxEffectConfig &cfg, std::string *error_out) {
 
 bool AfxEffect::SetU32Any(NvAFX_Handle handle, const char *what,
                           std::initializer_list<const char *> candidates,
-                          std::uint32_t v, std::string *error_out) {
+                          std::uint32_t v, std::string *error_out,
+                          bool *unsupported_out) {
+  if (unsupported_out)
+    *unsupported_out = false;
   if (!api_ || !api_->IsInitialized() || !api_->f().NvAFX_SetU32) {
     if (error_out)
       *error_out = "AFX API not initialized (missing NvAFX_SetU32).";
@@ -320,6 +417,8 @@ bool AfxEffect::SetU32Any(NvAFX_Handle handle, const char *what,
   }
   std::ostringstream tried;
   bool first = true;
+  bool any_tried = false;
+  bool all_unsupported = true;
   for (const auto *sel : candidates) {
     if (!sel || std::strlen(sel) == 0)
       continue;
@@ -331,7 +430,16 @@ bool AfxEffect::SetU32Any(NvAFX_Handle handle, const char *what,
     if (st == NVAFX_SUCCESS) {
       return true;
     }
+    any_tried = true;
+    // INVALID_PARAM means the effect does not take this parameter.
+    // IMMUTABLE_PARAM means it takes it but keeps the value it was loaded
+    // with. Either way there is nothing the caller can do, so both read as
+    // "not available" and only another status is a real failure.
+    if (st != NVAFX_ERR_INVALID_PARAM && st != NVAFX_ERR_IMMUTABLE_PARAM)
+      all_unsupported = false;
   }
+  if (unsupported_out)
+    *unsupported_out = any_tried && all_unsupported;
   if (error_out) {
     std::ostringstream oss;
     oss << "NvAFX_SetU32 failed for " << what << " (tried: " << tried.str()
@@ -343,7 +451,10 @@ bool AfxEffect::SetU32Any(NvAFX_Handle handle, const char *what,
 
 bool AfxEffect::SetFloatAny(NvAFX_Handle handle, const char *what,
                             std::initializer_list<const char *> candidates,
-                            float v, std::string *error_out) {
+                            float v, std::string *error_out,
+                            bool *unsupported_out) {
+  if (unsupported_out)
+    *unsupported_out = false;
   if (!api_ || !api_->IsInitialized() || !api_->f().NvAFX_SetFloat) {
     if (error_out)
       *error_out = "AFX API not initialized (missing NvAFX_SetFloat).";
@@ -351,6 +462,8 @@ bool AfxEffect::SetFloatAny(NvAFX_Handle handle, const char *what,
   }
   std::ostringstream tried;
   bool first = true;
+  bool any_tried = false;
+  bool all_unsupported = true;
   for (const auto *sel : candidates) {
     if (!sel || std::strlen(sel) == 0)
       continue;
@@ -362,7 +475,16 @@ bool AfxEffect::SetFloatAny(NvAFX_Handle handle, const char *what,
     if (st == NVAFX_SUCCESS) {
       return true;
     }
+    any_tried = true;
+    // INVALID_PARAM means the effect does not take this parameter.
+    // IMMUTABLE_PARAM means it takes it but keeps the value it was loaded
+    // with. Either way there is nothing the caller can do, so both read as
+    // "not available" and only another status is a real failure.
+    if (st != NVAFX_ERR_INVALID_PARAM && st != NVAFX_ERR_IMMUTABLE_PARAM)
+      all_unsupported = false;
   }
+  if (unsupported_out)
+    *unsupported_out = any_tried && all_unsupported;
   if (error_out) {
     std::ostringstream oss;
     oss << "NvAFX_SetFloat failed for " << what << " (tried: " << tried.str()
@@ -403,6 +525,41 @@ bool AfxEffect::SetStringAny(NvAFX_Handle handle, const char *what,
   return false;
 }
 
+// The same parameter can come up again, because the GUI can update the
+// intensity as often as it likes. Keep one note for each message, so that the
+// warnings stay a short list and not a log.
+void AfxEffect::NoteOptionalParam(const char *what, bool unsupported,
+                                  const std::string &set_err) {
+  std::string note;
+  if (unsupported) {
+    note = "Effect `" + cfg_.effect_selector + "` takes no " + what + ".";
+  } else {
+    note = "Effect `" + cfg_.effect_selector + "` did not take the " + what +
+           ": " + set_err;
+  }
+  if (std::find(warnings_.begin(), warnings_.end(), note) != warnings_.end())
+    return;
+  warnings_.push_back(std::move(note));
+}
+
+bool AfxEffect::GetU32Any(NvAFX_Handle handle,
+                          std::initializer_list<const char *> candidates,
+                          std::uint32_t *out) const {
+  if (!out || !api_ || !api_->IsInitialized() || !api_->f().NvAFX_GetU32) {
+    return false;
+  }
+  for (const auto *sel : candidates) {
+    if (!sel || std::strlen(sel) == 0)
+      continue;
+    std::uint32_t v = 0;
+    if (api_->f().NvAFX_GetU32(handle, sel, &v) == NVAFX_SUCCESS) {
+      *out = v;
+      return true;
+    }
+  }
+  return false;
+}
+
 bool AfxEffect::Load(std::string *error_out) {
   if (!configured_) {
     if (error_out)
@@ -423,14 +580,14 @@ bool AfxEffect::Load(std::string *error_out) {
   }
 
   Destroy();
+  warnings_.clear();
 
-  // Ensure the feature library can be discovered by the AFX SDK loader.
-  std::string env_err;
-  if (!PrependEnvPath("LD_LIBRARY_PATH", resolved_feature_lib_dir_, &env_err)) {
-    if (error_out)
-      *error_out = env_err;
-    return false;
-  }
+  // The AFX core loads the feature library by its bare name, and glibc reads
+  // LD_LIBRARY_PATH only when the process starts. A process that did not get
+  // the directory at start cannot add it, so say that plainly when the effect
+  // does not come up.
+  const bool lib_dir_on_loader_path =
+      LoaderPathHasDir(resolved_feature_lib_dir_);
 
   NvAFX_Handle h = nullptr;
   const NvAFX_Status stCreate =
@@ -439,78 +596,114 @@ bool AfxEffect::Load(std::string *error_out) {
     if (error_out) {
       std::ostringstream oss;
       oss << "NvAFX_CreateEffect failed for effect `" << cfg_.effect_selector
-          << "` (status=" << stCreate
-          << "). Ensure the AFX feature library is installed and discoverable ("
-          << resolved_feature_lib_path_.string() << ").";
+          << "` (status=" << stCreate << "). The feature library is "
+          << resolved_feature_lib_path_.string() << ".";
+      if (!lib_dir_on_loader_path) {
+        if (!CanGoOnLoaderPath(resolved_feature_lib_dir_)) {
+          oss << " Its directory " << resolved_feature_lib_dir_.string()
+              << " can never go on LD_LIBRARY_PATH, which is how the AFX core "
+                 "finds it: the loader splits that variable on ':' and this "
+                 "name holds one. Rename the directory.";
+        } else {
+          oss << " Its directory " << resolved_feature_lib_dir_.string()
+              << " is not on LD_LIBRARY_PATH, which is how the AFX core finds "
+                 "it. StudioCast programs put it there when they start, so run "
+                 "this program again, or export LD_LIBRARY_PATH with that "
+                 "directory before you start it.";
+        }
+      }
       *error_out = oss.str();
     }
     return false;
   }
   handle_ = h;
 
-  // Parameter setup. We intentionally try a small set of plausible selector
-  // names to stay resilient across SDK revisions without proprietary headers.
+  // Parameter setup. The names come from `nvAudioEffects.h` of AFX 2.1.0,
+  // with the v1.0 name kept as a second choice for an older SDK. The model
+  // goes first, then the stream format.
+  //
+  // Every effect needs the model, the sample rate and the frame size. The
+  // other parameters belong to some effects alone: the AFX 2.1.0 microphone
+  // effects all run with one channel and reject a channel count, and studio
+  // voice also rejects the intensity, the effect version and the VAD flag. A
+  // rejected parameter of that kind gives a warning, not a failure.
   std::string set_err;
-  if (!SetStringAny(handle_, "model_path",
-                    {"modelPath", "model_path", "model", "trtModelPath",
-                     "trt_model_path"},
+  if (!SetStringAny(handle_, "model_path", {"model_path", "modelPath"},
                     resolved_model_path_.string(), &set_err)) {
     if (error_out)
       *error_out = set_err;
     Destroy();
     return false;
   }
-  if (!SetU32Any(handle_, "sample_rate",
-                 {"sampleRate", "sample_rate", "samplerate"},
+  if (!SetU32Any(handle_, "sample_rate", {"input_sample_rate", "sample_rate"},
                  static_cast<std::uint32_t>(cfg_.sample_rate), &set_err)) {
     if (error_out)
       *error_out = set_err;
     Destroy();
     return false;
   }
-  if (!SetU32Any(handle_, "channels",
-                 {"numChannels", "num_channels", "channels"}, cfg_.channels,
-                 &set_err)) {
-    if (error_out)
-      *error_out = set_err;
-    Destroy();
-    return false;
-  }
   if (!SetU32Any(handle_, "frame_samples",
-                 {"numSamplesPerFrame", "num_samples_per_frame", "frameSize",
-                  "frame_size", "frameSamples", "frame_samples"},
+                 {"num_samples_per_input_frame", "num_samples_per_frame"},
                  cfg_.frame_samples, &set_err)) {
     if (error_out)
       *error_out = set_err;
     Destroy();
     return false;
   }
-  if (!SetFloatAny(
-          handle_, "intensity",
-          {"intensityRatio", "intensity_ratio", "intensity", "strength"},
-          cfg_.intensity, &set_err)) {
-    if (error_out)
-      *error_out = set_err;
-    Destroy();
-    return false;
-  }
-  if (cfg_.effect_version) {
-    if (!SetU32Any(handle_, "effect_version",
-                   {"effectVersion", "effect_version", "version"},
-                   *cfg_.effect_version, &set_err)) {
+
+  // The channel count is part of the effect. An effect that does not take one
+  // says so with an invalid parameter status; then read the count it reports
+  // and stop only when that count is not the one the caller needs. Any other
+  // status is a real SDK error, so stop at once and keep its message.
+  bool channels_unsupported = false;
+  if (!SetU32Any(handle_, "channels", {"num_input_channels", "num_channels"},
+                 cfg_.channels, &set_err, &channels_unsupported)) {
+    if (!channels_unsupported) {
       if (error_out)
         *error_out = set_err;
       Destroy();
       return false;
     }
-  }
-  if (cfg_.vad_enabled) {
-    if (!SetU32Any(handle_, "vad_enabled",
-                   {"useVAD", "use_vad", "vad", "enableVAD"}, 1u, &set_err)) {
-      if (error_out)
-        *error_out = set_err;
+    std::uint32_t actual = 0;
+    const bool known =
+        GetU32Any(handle_, {"num_input_channels", "num_channels"}, &actual);
+    if (known && actual != cfg_.channels) {
+      if (error_out) {
+        std::ostringstream oss;
+        oss << "AFX effect `" << cfg_.effect_selector << "` runs with "
+            << actual << " channel(s); StudioCast asked for " << cfg_.channels
+            << ".";
+        *error_out = oss.str();
+      }
       Destroy();
       return false;
+    }
+    std::ostringstream oss;
+    oss << "Effect `" << cfg_.effect_selector
+        << "` takes no channel count; it runs with ";
+    if (known) {
+      oss << actual << " channel(s).";
+    } else {
+      oss << "its own channel count.";
+    }
+    warnings_.push_back(oss.str());
+  }
+
+  bool unsupported = false;
+  if (!SetFloatAny(handle_, "intensity", {"intensity_ratio"}, cfg_.intensity,
+                   &set_err, &unsupported)) {
+    NoteOptionalParam("intensity", unsupported, set_err);
+  }
+  if (cfg_.effect_version) {
+    if (!SetU32Any(handle_, "effect_version", {"effect_version"},
+                   *cfg_.effect_version, &set_err, &unsupported)) {
+      NoteOptionalParam("effect version", unsupported, set_err);
+    }
+  }
+  if (cfg_.vad_enabled) {
+    if (!SetU32Any(handle_, "vad_enabled", {"enable_vad"}, 1u, &set_err,
+                   &unsupported)) {
+      NoteOptionalParam("VAD flag", unsupported, set_err);
     }
   }
 
@@ -542,14 +735,19 @@ bool AfxEffect::UpdateIntensity(float intensity, std::string *error_out) {
     return false;
   }
 
+  // Studio voice takes no intensity. Keep that a note and a no-op, and report
+  // every other status as the failure it is.
   std::string set_err;
-  if (!SetFloatAny(
-          handle_, "intensity",
-          {"intensityRatio", "intensity_ratio", "intensity", "strength"},
-          intensity, &set_err)) {
-    if (error_out)
-      *error_out = set_err;
-    return false;
+  bool unsupported = false;
+  if (!SetFloatAny(handle_, "intensity", {"intensity_ratio"}, intensity,
+                   &set_err, &unsupported)) {
+    if (!unsupported) {
+      if (error_out)
+        *error_out = set_err;
+      return false;
+    }
+    NoteOptionalParam("intensity", true, set_err);
+    return true;
   }
 
   cfg_.intensity = intensity;
@@ -574,8 +772,40 @@ bool AfxEffect::Run(const float *input, float *output,
     return false;
   }
 
+  // Configure refuses anything but one channel. Check again, because the
+  // arrays below hold one pointer each and a larger count would make the SDK
+  // read past them.
+  if (cfg_.channels != 1) {
+    if (error_out) {
+      std::ostringstream oss;
+      oss << "AFX effects run 1 channel; StudioCast asked for " << cfg_.channels
+          << ".";
+      *error_out = oss.str();
+    }
+    return false;
+  }
+
+  // Load handed the SDK cfg_.frame_samples as num_samples_per_input_frame, so
+  // the effect reads and writes exactly that many samples per channel. A
+  // different count here would make it run past the buffers, or leave part of
+  // them untouched. Say which counts disagree instead of leaving it to the
+  // SDK's return status.
+  if (num_samples != cfg_.frame_samples) {
+    if (error_out) {
+      std::ostringstream oss;
+      oss << "AFX Run received " << num_samples << " samples; the effect was "
+          << "loaded for " << cfg_.frame_samples << " per frame.";
+      *error_out = oss.str();
+    }
+    return false;
+  }
+
+  // The SDK takes an array of channel pointers. StudioCast runs the AFX
+  // effects with one channel; a stereo caller splits the channels itself.
+  const float *in_channels[1] = {input};
+  float *out_channels[1] = {output};
   const NvAFX_Status st =
-      api_->f().NvAFX_Run(handle_, input, output, num_samples);
+      api_->f().NvAFX_Run(handle_, in_channels, out_channels, num_samples, 1u);
   if (st != NVAFX_SUCCESS) {
     if (error_out) {
       std::ostringstream oss;

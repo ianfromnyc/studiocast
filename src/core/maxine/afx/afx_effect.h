@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "core/maxine/afx_api.h"
 
@@ -34,6 +35,10 @@ struct AfxEffectConfig {
   // Sample format assumptions for MVP: float PCM.
   int sample_rate = 48000;
   std::uint32_t frame_samples = 480;
+
+  // Must be 1. The AFX 2.1.0 effects run one channel, and Run hands the SDK
+  // one channel pointer. A stereo caller splits the channels and runs the
+  // effect once per channel.
   std::uint32_t channels = 1;
 
   // Effect intensity (implementation-defined by AFX), typically 0..1.
@@ -88,6 +93,13 @@ public:
 
   const AfxEffectConfig &config() const { return cfg_; }
   const fs::path &resolved_model_path() const { return resolved_model_path_; }
+  const fs::path &resolved_feature_lib_path() const {
+    return resolved_feature_lib_path_;
+  }
+
+  // Parameters that the effect did not take, and other notes from the last
+  // Load. Empty when every parameter was set.
+  const std::vector<std::string> &warnings() const { return warnings_; }
 
   // Validates config and resolves the model path (if not explicitly provided).
   bool Configure(const AfxEffectConfig &cfg, std::string *error_out);
@@ -108,15 +120,29 @@ public:
   void Destroy();
 
 private:
+  // `unsupported_out`, when given, tells whether every candidate failed with
+  // the "invalid parameter" status, which is how the SDK says that the effect
+  // does not take the parameter. Any other status is a real failure.
   bool SetU32Any(NvAFX_Handle handle, const char *what,
                  std::initializer_list<const char *> candidates,
-                 std::uint32_t v, std::string *error_out);
+                 std::uint32_t v, std::string *error_out,
+                 bool *unsupported_out = nullptr);
   bool SetFloatAny(NvAFX_Handle handle, const char *what,
                    std::initializer_list<const char *> candidates, float v,
-                   std::string *error_out);
+                   std::string *error_out, bool *unsupported_out = nullptr);
   bool SetStringAny(NvAFX_Handle handle, const char *what,
                     std::initializer_list<const char *> candidates,
                     const std::string &v, std::string *error_out);
+  // Records a warning about an optional parameter the effect refused. A
+  // parameter the effect does not take is normal; any other failure keeps the
+  // message of the SDK call, which the "takes no ..." wording would hide.
+  void NoteOptionalParam(const char *what, bool unsupported,
+                         const std::string &set_err);
+
+  // Reads the first parameter of `candidates` that the effect reports.
+  bool GetU32Any(NvAFX_Handle handle,
+                 std::initializer_list<const char *> candidates,
+                 std::uint32_t *out) const;
 
   AfxApi *api_ = nullptr;
   NvAFX_Handle handle_ = nullptr;
@@ -128,6 +154,7 @@ private:
   fs::path resolved_model_path_;
   fs::path resolved_feature_lib_dir_;
   fs::path resolved_feature_lib_path_;
+  std::vector<std::string> warnings_;
 };
 
 } // namespace studiocast::maxine::afx

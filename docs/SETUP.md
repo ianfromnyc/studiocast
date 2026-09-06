@@ -367,42 +367,63 @@ Verify:
 StudioCast does **not** ship or redistribute NVIDIA Maxine SDK assets. You must obtain them yourself
 from NVIDIA and comply with NVIDIA's license terms.
 
-Use the helper tool to print authoritative paths and install commands:
+One NGC API key does the whole install. Get a key at <https://ngc.nvidia.com> under
+**Setup -> API key**, then:
 
 ```bash
-./cmake-build-debug/studiocast-maxine init
+export NGC_API_KEY="..."        # do not commit this
+./scripts/setup.sh --maxine -- --download all --install-features --install-afx-features
+```
+
+That asks NGC for the newest SDK version, caches the archives under
+`$XDG_CACHE_HOME/studiocast/maxine`, extracts them under `$XDG_DATA_HOME/studiocast/maxine`,
+and installs the feature models and libraries. Nothing needs `sudo`.
+`NGC_CLI_API_KEY` works as well; the helper exports both names for the NVIDIA scripts.
+
+A free NVIDIA Developer Program account is enough. The VFX, AR and AFX cores and all
+their feature packs come from the NGC resources `vfx_sdk_core`, `ar_sdk_core` and
+`maxine_linux_audio_effects_sdk`. The `maxine_linux_vfx_sdk_ga` and
+`maxine_linux_ar_sdk_ga` resources are the NVIDIA AI Enterprise packaging of the same
+SDKs and need that subscription; select one with `--vfx-resource` or `--ar-resource`.
+
+An audio only install is one command:
+
+```bash
+./scripts/setup/maxine.sh --download afx --install-afx-features
+```
+
+Useful options: `--list-versions vfx` prints the versions on NGC with their platform,
+`--sdk-version vfx=1.2.0.0_linux` pins one, `--dry-run` shows the steps without writing,
+and `--vfx-tar/--ar-tar/--afx-tar` extract archives that you already have.
+
+The helper takes the newest Linux version by itself, extracts only the core archive of a
+version (never the Triton Inference Server build beside it), and works around the fixed
+`/usr/local/VideoFX` path inside the SDK's own `install_feature.sh` by running a patched
+copy of it. Nothing is written outside your own directories.
+
+By default, `--install-afx-features` downloads the four AFX features that the StudioCast
+microphone effects use: `denoiser`, `dereverb`, `dereverb_denoiser` and `studio_voice`, all
+at 48 kHz. Those are the four that `studiocast-maxine doctor` reports. Acoustic echo
+cancellation and super resolution are optional, because nothing in StudioCast selects them
+yet; add them by naming the whole list:
+
+```bash
+./scripts/setup/maxine.sh --install-afx-features \
+  --afx-effects "denoiser-48k,dereverb-48k,dereverb_denoiser-48k,studio_voice-48k,aec-48k,superres-16k_to_48k"
+```
+
+Full instructions, including the entitlement table and the offline path, are in
+`docs/maxine_install.md`.
+
+Verify the result:
+
+```bash
+./cmake-build-debug/studiocast-maxine doctor
 ./cmake-build-debug/studiocast-maxine install-hints
 ```
 
 Current Linux Maxine SDK builds typically expose `libVideoFX.so` for VFX and
-`libnvARPose.so` for AR. StudioCast now auto-detects those names directly, but
-you still need to run the SDK-provided `install_feature.sh` steps so the effect
-models and feature libraries are installed.
-
-### Optional: automate extraction + feature install
-
-If you already downloaded the SDK tarballs, you can extract them into the expected layout and install
-features (models/libs) via NGC:
-
-```bash
-export NGC_CLI_API_KEY="..."   # do not commit this
-export NGC_API_KEY="..."       # do not commit this
-./scripts/setup/maxine.sh \
-  --vfx-tar ~/Downloads/NVIDIA_VFX_SDK_linux_*.tar.gz \
-  --ar-tar  ~/Downloads/NVIDIA_AR_SDK_linux_*.tar.gz \
-  --afx-tar ~/Downloads/Audio_Effects_SDK.tar.gz \
-  --install-features --install-afx-features --build-dir ./cmake-build-debug
-```
-
-By default, `--install-afx-features` downloads the MVP AFX feature set (AEC + Superres). To customize:
-
-```bash
-./scripts/setup/maxine.sh --install-afx-features --afx-effects "superres-16k_to_48k,superres-8k_to_16k,aec-16k,aec-48k"
-```
-
-This runs the SDK-provided `install_feature.sh` scripts under the hood.
-
-For AFX features, the helper uses the SDK-provided `download_features.sh` script and requires `NGC_API_KEY`.
+`libnvARPose.so` for AR. StudioCast auto-detects those names directly.
 
 ## 5) Run daemon + use in OBS
 

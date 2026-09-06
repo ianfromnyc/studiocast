@@ -1,5 +1,7 @@
 #include "core/maxine/nvcv_api.h"
 
+#include "core/maxine/sdk_runtime.h"
+
 #include <algorithm>
 #include <filesystem>
 #include <optional>
@@ -113,6 +115,10 @@ FindLibWithSymbol(const std::vector<fs::path> &lib_dirs,
       [&](const fs::path &full) -> std::optional<SharedLibLoadResult> {
     SharedLibLoadResult res;
     res.path = full;
+
+    // The SDK Core 1.x ships its own CUDA/TensorRT runtime under
+    // `<root>/external`. Make it findable before we ask the loader.
+    PreloadSdkRuntimeIfLocal(full);
 
     std::string err;
     if (!res.lib.Open(full, scope, &err)) {
@@ -289,6 +295,8 @@ bool NvcvApi::InitializeFromLibraryPathImpl(Requirement req,
       *error_out = error_;
     return false;
   }
+
+  PreloadSdkRuntimeIfLocal(library_path);
 
   std::string err;
   if (!impl_->lib.Open(library_path, util::DynLib::Scope::Global, &err)) {

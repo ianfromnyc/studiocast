@@ -15,6 +15,7 @@
 #include "core/config/settings.h"
 #include "core/maxine/afx/afx_audio_processor.h"
 #include "core/maxine/afx/afx_effect.h"
+#include "core/maxine/afx/afx_loader_path.h"
 #include "core/maxine/afx_api.h"
 #include "core/maxine/gpu_selection.h"
 #include "core/maxine/paths.h"
@@ -112,6 +113,16 @@ int main(int argc, char **argv) {
   if (argc < 2) {
     Usage(argv[0]);
     return 1;
+  }
+
+  // This tool runs AFX effects itself, so it needs the feature libraries on
+  // the loader path as well. It starts again when they are missing.
+  {
+    std::string loader_note;
+    studiocast::maxine::afx::EnsureAfxFeatureLibsOnLoaderPath(argv,
+                                                              &loader_note);
+    if (!loader_note.empty())
+      std::fprintf(stderr, "%s\n", loader_note.c_str());
   }
 
   const std::string cmd = argv[1];

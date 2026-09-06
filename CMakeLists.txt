@@ -232,7 +232,11 @@ add_library(studiocast_core
         src/core/maxine/reason_codes.cpp
         src/core/maxine/paths.h
         src/core/maxine/paths.cpp
+        src/core/maxine/sdk_runtime.h
+        src/core/maxine/sdk_runtime.cpp
         src/core/maxine/maxine_manager.h
+        src/core/maxine/afx/afx_loader_path.h
+        src/core/maxine/afx/afx_loader_path.cpp
         src/core/maxine/maxine_manager.cpp
         src/core/maxine/nvcv_types.h
         src/core/maxine/nvcv_api.h
@@ -864,6 +868,20 @@ if (BUILD_TESTING)
                 WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         )
 
+        add_test(NAME studiocast-ngc-lib-tests
+                COMMAND "${STUDIOCAST_BASH_PROGRAM}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/ngc_lib_tests.sh")
+        set_tests_properties(studiocast-ngc-lib-tests PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+
+        add_test(NAME studiocast-maxine-setup-tests
+                COMMAND "${STUDIOCAST_BASH_PROGRAM}"
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tests/maxine_setup_tests.sh")
+        set_tests_properties(studiocast-maxine-setup-tests PROPERTIES
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+
         add_test(NAME studiocast-uninstall-pkgconfig-tests
                 COMMAND "${STUDIOCAST_BASH_PROGRAM}"
                         "${CMAKE_CURRENT_SOURCE_DIR}/tests/uninstall_pkgconfig_tests.sh")
@@ -899,6 +917,58 @@ if (BUILD_TESTING)
     )
 
     add_test(NAME studiocast-maxine-paths-tests COMMAND studiocast-maxine-paths-tests)
+
+    add_executable(studiocast-maxine-features-tests
+            tests/maxine_features_tests.cpp
+    )
+
+    target_link_libraries(studiocast-maxine-features-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-maxine-features-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    # One test reads scripts/setup/maxine.sh, to keep the default feature list
+    # of the installer and the features the mic effects select in step.
+    target_compile_definitions(studiocast-maxine-features-tests PRIVATE
+            STUDIOCAST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-maxine-features-tests)
+    studiocast_enable_sanitizers(studiocast-maxine-features-tests)
+
+    set_target_properties(studiocast-maxine-features-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-maxine-features-tests
+            COMMAND studiocast-maxine-features-tests)
+
+    add_executable(studiocast-afx-effect-tests
+            tests/afx_effect_tests.cpp
+    )
+
+    target_link_libraries(studiocast-afx-effect-tests PRIVATE studiocast_core)
+
+    target_include_directories(studiocast-afx-effect-tests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
+            "${STUDIOCAST_GENERATED_DIR}"
+    )
+
+    studiocast_set_project_warnings(studiocast-afx-effect-tests)
+    studiocast_enable_sanitizers(studiocast-afx-effect-tests)
+
+    set_target_properties(studiocast-afx-effect-tests PROPERTIES
+            AUTOMOC OFF
+            AUTOUIC OFF
+            AUTORCC OFF
+    )
+
+    add_test(NAME studiocast-afx-effect-tests
+            COMMAND studiocast-afx-effect-tests)
 
     add_executable(studiocast-nvcv-validation-tests
             tests/nvcv_validation_tests.cpp

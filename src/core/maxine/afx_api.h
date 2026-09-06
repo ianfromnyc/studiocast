@@ -17,6 +17,14 @@ namespace studiocast::maxine::afx {
 
 using NvAFX_Status = int;
 inline constexpr NvAFX_Status NVAFX_SUCCESS = 0;
+// The status the SDK answers with when an effect does not take a parameter
+// (`NVAFX_STATUS_INVALID_PARAM` in nvAudioEffects.h).
+inline constexpr NvAFX_Status NVAFX_ERR_INVALID_PARAM = 3;
+// The status for a parameter that the effect takes but cannot change after
+// NvAFX_Load (`NVAFX_STATUS_IMMUTABLE_PARAM`). For a caller that wants to set
+// a value this means the same thing as "not available": the effect keeps what
+// it was loaded with. Any other status is a real failure.
+inline constexpr NvAFX_Status NVAFX_ERR_IMMUTABLE_PARAM = 4;
 
 using NvAFX_Handle = void *;
 using NvAFX_ParameterSelector = const char *;
@@ -56,12 +64,12 @@ public:
 
   using NvAFX_Load_t = NvAFX_Status (*)(NvAFX_Handle handle);
 
-  // Signature depends on effect; most AFX effects are frame-based float PCM.
-  // We keep the ABI minimal and will refine the signature once we integrate
-  // actual AFX processing.
-  using NvAFX_Run_t = NvAFX_Status (*)(NvAFX_Handle handle, const float *input,
-                                       float *output,
-                                       std::uint32_t num_samples);
+  // `NvAFX_Run` takes one pointer per channel, the number of samples in each
+  // channel, and the number of channels (nvAudioEffects.h of AFX 2.1.0).
+  using NvAFX_Run_t = NvAFX_Status (*)(NvAFX_Handle handle,
+                                       const float **input, float **output,
+                                       std::uint32_t num_input_samples,
+                                       std::uint32_t num_input_channels);
 
   struct Functions {
     NvAFX_CreateEffect_t NvAFX_CreateEffect = nullptr;
@@ -98,6 +106,15 @@ public:
   // Initialize by dlopening a specific shared object path.
   bool InitializeFromLibraryPath(const std::filesystem::path &library_path,
                                  std::string *error_out);
+
+  // Test seam: installs function pointers without loading a library, so the
+  // tests can drive AfxEffect with a stand-in for the SDK.
+  void SetFunctionsForTesting(const Functions &f) {
+    f_ = f;
+    initialized_ = true;
+    library_path_.clear();
+    error_.clear();
+  }
 
   bool IsInitialized() const { return initialized_; }
   const std::filesystem::path &library_path() const { return library_path_; }

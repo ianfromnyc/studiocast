@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "core/config/settings.h"
+#include "core/maxine/afx/afx_loader_path.h"
 #include "core/maxine/gpu.h"
 #include "core/util/exec.h"
 #include "core/util/fs.h"
@@ -833,6 +834,36 @@ Report Run(bool /*verbose*/) {
         "AFX feature download script present (features/download_features.sh)",
         afxRoot.root, fs::path("features") / "download_features.sh",
         afxRoot.env_hint.c_str()));
+
+    // The AFX core loads a feature library by its bare name, so the loader
+    // must already know where the feature libraries are.
+    {
+      CheckResult c;
+      c.name = "AFX feature libraries on the loader path (LD_LIBRARY_PATH)";
+      const auto dirs = studiocast::maxine::afx::AfxFeatureLibDirs(
+          afxRoot.root.empty() ? fs::path() : afxRoot.root / "features");
+      if (dirs.empty()) {
+        c.skipped = true;
+        c.details = "No AFX feature is installed.";
+      } else {
+        const char *current = std::getenv("LD_LIBRARY_PATH");
+        const auto missing = studiocast::maxine::afx::LdLibraryPathWithDirs(
+            current ? std::string(current) : std::string(), dirs);
+        c.ok = !missing.has_value();
+        if (c.ok) {
+          c.details = "All " + std::to_string(dirs.size()) +
+                      " feature lib dir(s) are on the loader path.";
+        } else {
+          // Not a failure: a StudioCast program that runs AFX effects puts
+          // the directories there itself and starts again.
+          c.skipped = true;
+          c.details = "Not on LD_LIBRARY_PATH of this process. studiocastd "
+                      "adds them at start and runs again. Wanted: " +
+                      *missing;
+        }
+      }
+      rep.checks.push_back(c);
+    }
   }
 
   // Notes

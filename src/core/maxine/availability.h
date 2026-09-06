@@ -30,12 +30,9 @@ BuildCanonicalMaxineBlockedCopy(const MaxineDiagnostics &d,
 std::string
 FormatCanonicalMaxineBlockedCopy(const CanonicalMaxineBlockedCopy &c);
 
-// Compile-time availability of the Maxine backend.
-//
-// StudioCast's long-term plan is to load Maxine features dynamically (dlopen)
-// so that CPU-only builds still work.
-//
-// For now this is a simple build-time flag.
+// True always: StudioCast loads the Maxine libraries at run time (dlopen),
+// so a build never leaves the backend out. Use RuntimeAvailable to find out
+// whether the machine can in fact run Maxine.
 bool BackendBuilt();
 
 // Runtime availability check (best-effort).

@@ -7,7 +7,10 @@
 #include "core/config/settings.h"
 #include "core/maxine/effects/vfx_background_blur_effect.h"
 #include "core/maxine/effects/vfx_green_screen_effect.h"
+#include "core/maxine/maxine_manager.h"
 #include "core/maxine/nvcv_api.h"
+#include "core/maxine/paths.h"
+#include "core/maxine/sdk_runtime.h"
 #include "core/maxine/vfx_api.h"
 #include "core/probe/probe.h"
 #include "core/util/xdg.h"
@@ -117,6 +120,61 @@ UniqueMaxineGpuArgs(const studiocast::probe::Report &rep) {
   return out;
 }
 
+// Prints where one Maxine component was resolved and whether it can be loaded.
+static void PrintComponentDetail(const studiocast::maxine::ComponentDiagnostics &c) {
+  std::cout << "  " << c.component << "\n";
+  std::cout << "    root     : " << c.root.string() << " ("
+            << (c.root_exists ? "found" : "missing") << ", source "
+            << c.root_source << ")\n";
+
+  std::cout << "    library  : "
+            << (c.library.empty() ? std::string("not found")
+                                  : c.library.string());
+  if (c.library_exists) {
+    std::cout << (c.library_loadable ? " [loadable]" : " [NOT loadable]");
+  }
+  std::cout << "\n";
+  if (c.library_exists && !c.library_loadable &&
+      !c.library_dlopen_error.empty()) {
+    std::cout << "      error  : " << c.library_dlopen_error << "\n";
+  }
+
+  if (c.library_exists) {
+    const auto &rt = studiocast::maxine::PreloadSdkRuntime(c.library, c.root);
+    std::cout << "    runtime  : " << rt.Summary() << "\n";
+    for (const auto &p : rt.problems) {
+      std::cout << "      " << p << "\n";
+    }
+  }
+
+  if (c.require_models_dir || c.models_dir_exists) {
+    std::cout << "    models   : " << c.models_dir.string();
+    if (c.models_dir_exists) {
+      std::cout << " (" << c.models_dir_source << ")";
+    } else {
+      std::cout << " [missing]";
+    }
+    std::cout << "\n";
+  }
+
+  std::cout << "    features : " << c.features_dir.string()
+            << (c.features_dir_exists ? "" : " [missing]") << "\n";
+
+  for (const auto &p : c.problems) {
+    std::cout << "    problem  : " << p << "\n";
+  }
+}
+
+static void PrintMaxineSdkSection() {
+  const studiocast::maxine::MaxineManager mgr;
+  const auto d = mgr.Diagnose(false);
+
+  std::cout << "\nMaxine SDK\n";
+  PrintComponentDetail(d.vfx);
+  PrintComponentDetail(d.ar);
+  PrintComponentDetail(d.afx);
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
     Usage(argv[0]);
@@ -160,6 +218,7 @@ int main(int argc, char **argv) {
   if (cmd == "doctor") {
     const auto rep = studiocast::probe::Run(false);
     std::cout << rep.ToText() << "\n";
+    PrintMaxineSdkSection();
     return rep.AllChecksPassed() ? 0 : 3;
   }
 
@@ -322,7 +381,9 @@ int main(int argc, char **argv) {
     int frames = 1;
     std::uint32_t mode = 0;
     bool temporal = true;
-    fs::path model_dir = vfx / "models";
+    // Empty means "work it out from the library the loader found". The SDK
+    // Core 1.x has no <root>/models, so a fixed name would be wrong there.
+    fs::path model_dir;
 
     for (int i = 2; i < argc; ++i) {
       const std::string a = argv[i];
@@ -361,6 +422,19 @@ int main(int argc, char **argv) {
             studiocast::maxine::NvcvApi::Requirement::VfxCompat, &err)) {
       std::cerr << "NvCVImage runtime unavailable: " << err << "\n";
       return 4;
+    }
+
+    // The layout is only known once the library is resolved:
+    // ModelsDirForLibrary takes <root>/models before <root>/lib/models, the
+    // same order `doctor` reports.
+    if (model_dir.empty()) {
+      model_dir =
+          studiocast::maxine::ModelsDirForLibrary(vfx_api.library_path());
+    }
+    if (model_dir.empty()) {
+      std::cerr << "No models directory under the VFX SDK root. Pass "
+                   "--model-dir.\n";
+      model_dir = vfx / "models";
     }
 
     studiocast::maxine::effects::VfxGreenScreenEffect gs(&vfx_api, &nvcv_api,
@@ -552,7 +626,9 @@ int main(int argc, char **argv) {
     std::uint32_t mode = 0;
     bool temporal = true;
     int strength = 32; // UI knob [1..64]
-    fs::path model_dir = vfx / "models";
+    // Empty means "work it out from the library the loader found". The SDK
+    // Core 1.x has no <root>/models, so a fixed name would be wrong there.
+    fs::path model_dir;
 
     for (int i = 2; i < argc; ++i) {
       const std::string a = argv[i];
@@ -593,6 +669,19 @@ int main(int argc, char **argv) {
             studiocast::maxine::NvcvApi::Requirement::VfxCompat, &err)) {
       std::cerr << "NvCVImage runtime unavailable: " << err << "\n";
       return 4;
+    }
+
+    // The layout is only known once the library is resolved:
+    // ModelsDirForLibrary takes <root>/models before <root>/lib/models, the
+    // same order `doctor` reports.
+    if (model_dir.empty()) {
+      model_dir =
+          studiocast::maxine::ModelsDirForLibrary(vfx_api.library_path());
+    }
+    if (model_dir.empty()) {
+      std::cerr << "No models directory under the VFX SDK root. Pass "
+                   "--model-dir.\n";
+      model_dir = vfx / "models";
     }
 
     studiocast::maxine::effects::VfxGreenScreenEffect gs(&vfx_api, &nvcv_api,

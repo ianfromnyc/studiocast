@@ -172,11 +172,15 @@ bool VfxRelightingEffect::EnsureEffectCreated(std::string *error) {
 
   auto &f = vfx_->f();
 
-  // Effect selector strings vary by SDK version/build. Try a small candidate
-  // list.
+  // Effect selector strings vary by SDK version/build. The SDK Core 1.x names
+  // come first; the rest are kept for older builds.
   static constexpr const char *kSelectors[] = {
-      "Video Relighting", "Relighting",        "Relight",
-      "Key Light",        "Virtual Key Light",
+      maxine::vfx::NVVFX_FX_RELIGHTING,
+      maxine::vfx::NVVFX_FX_AIGS_RELIGHTING,
+      "Video Relighting",
+      "Relight",
+      "Key Light",
+      "Virtual Key Light",
   };
 
   NvCV_Status s = static_cast<NvCV_Status>(-1);

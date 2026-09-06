@@ -20,7 +20,15 @@ struct ComponentPaths {
   std::vector<fs::path> searched_lib_dirs; // derived from root
   fs::path library; // resolved shared library path (empty if missing)
 
+  // Resolved models directory. Legacy SDKs (0.7/0.8) keep it at
+  // `<root>/models`; the SDK Core 1.x keeps it at `<root>/lib/models`.
   fs::path models_dir;
+  // Relative name of the directory that `models_dir` came from: "models" or
+  // "lib/models". Empty when no candidate exists.
+  std::string models_dir_source;
+  // All models directories we look at, in priority order.
+  std::vector<fs::path> candidate_models_dirs;
+
   fs::path features_dir;
 
   // Some components (e.g. AFX) do not ship a `models/` directory.
@@ -52,5 +60,13 @@ struct MaxinePathsReport {
 //
 // The returned report contains precise missing-piece diagnostics.
 MaxinePathsReport ResolveMaxinePaths();
+
+// Derives the models directory from the path of an SDK library. It finds the
+// SDK root above the library and then takes `<root>/models` (legacy 0.7/0.8)
+// before `<root>/lib/models` (SDK Core 1.x), which is the order
+// ResolveMaxinePaths reports, so both name one directory for one tree.
+// Returns an empty path when the root holds neither. Effects use it because
+// they only know the library they loaded.
+fs::path ModelsDirForLibrary(const fs::path &library);
 
 } // namespace studiocast::maxine

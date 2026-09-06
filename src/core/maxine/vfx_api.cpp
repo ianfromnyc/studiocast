@@ -1,5 +1,6 @@
 #include "core/maxine/vfx_api.h"
 
+#include "core/maxine/sdk_runtime.h"
 #include "core/util/xdg.h"
 
 #include <filesystem>
@@ -50,6 +51,10 @@ FindLibWithSymbol(const std::vector<fs::path> &lib_dirs,
       [&](const fs::path &full) -> std::optional<SharedLibLoadResult> {
     SharedLibLoadResult res;
     res.path = full;
+
+    // The SDK Core 1.x ships its own CUDA/TensorRT runtime under
+    // `<root>/external`. Make it findable before we ask the loader.
+    PreloadSdkRuntimeIfLocal(full);
 
     std::string err;
     if (!res.lib.Open(full, scope, &err)) {
@@ -173,8 +178,12 @@ bool VfxApi::InitializeImpl(const std::vector<std::filesystem::path> &sdk_roots,
       continue;
     }
 
-    const auto models = root / "models";
-    if (!fs::exists(models, ec) || !fs::is_directory(models, ec)) {
+    // Legacy SDKs keep the models in `<root>/models`; the SDK Core 1.x keeps
+    // them in `<root>/lib/models`.
+    const bool has_models =
+        fs::is_directory(root / "models", ec) ||
+        fs::is_directory(root / "lib" / "models", ec);
+    if (!has_models) {
       continue;
     }
 
@@ -225,6 +234,8 @@ bool VfxApi::InitializeImpl(const std::vector<std::filesystem::path> &sdk_roots,
 
 bool VfxApi::InitializeFromLibraryPathImpl(
     const std::filesystem::path &library_path, std::string *error_out) {
+  PreloadSdkRuntimeIfLocal(library_path);
+
   std::string err;
   if (!lib_.Open(library_path, util::DynLib::Scope::Global, &err)) {
     error_ = err;

@@ -8,6 +8,13 @@
 
 namespace studiocast::maxine {
 
+// True when `features_dir` (an `<SDK root>/features` directory) holds the
+// install marker of the StudioCast feature `feature_id` (for example
+// "denoise"). The known SDK directory names of each feature stay in
+// `maxine_manager.cpp`. Exposed for the tests.
+bool FeatureMarkerInstalled(const std::filesystem::path &features_dir,
+                            const std::string &feature_id);
+
 struct FeatureInstallStatus {
   std::string id; // e.g. "greenscreen"
   bool installed = false;
@@ -44,7 +51,13 @@ struct ComponentDiagnostics {
   std::filesystem::path library;
 
   std::filesystem::path models_dir;
+  // "models" (legacy) or "lib/models" (SDK Core 1.x). Empty when missing.
+  std::string models_dir_source;
+  std::vector<std::filesystem::path> candidate_models_dirs;
   std::filesystem::path features_dir;
+
+  // Some components (e.g. AFX) do not ship a models directory.
+  bool require_models_dir = true;
 
   bool root_exists = false;
   bool models_dir_exists = false;

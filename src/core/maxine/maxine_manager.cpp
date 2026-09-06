@@ -62,42 +62,69 @@ std::string JsonEscape(const std::string &s) {
   return out;
 }
 
-bool HasFeatureMarker(const fs::path &features_dir,
-                      const std::string &feature_id) {
+// The directory names that install each StudioCast feature id, newest first.
+// SDK Core 1.x names each VFX or AR feature directory after its NGC model,
+// for example `nvvfxdenoising`; AFX names each directory after the effect.
+// The older names stay in the list so an SDK 0.7 or 0.8 tree keeps working.
+std::vector<std::string> MarkerNamesFor(const std::string &feature_id) {
+  // VFX.
+  if (feature_id == "greenscreen")
+    return {"nvvfxgreenscreen", "greenscreen"};
+  if (feature_id == "bgblur")
+    return {"nvvfxbackgroundblur", "backgroundblur", "bgblur"};
+  if (feature_id == "denoise")
+    return {"nvvfxdenoising", "denoising", "denoise"};
+  if (feature_id == "relighting")
+    return {"nvvfxrelighting", "nvvfxaigsrelighting", "aigsrelighting",
+            "relighting"};
+
+  // AR.
+  if (feature_id == "gaze_redirection")
+    return {"nvargazeredirection", "gazeredirection", "eyecontact",
+            "gaze_redirection"};
+  if (feature_id == "face_detection")
+    return {"nvarfaceboxdetection", "faceboxdetection", "facebox",
+            "face_detection"};
+  if (feature_id == "body_detection")
+    return {"nvarbodydetection", "bodydetection", "bodyboxdetection",
+            "bodybox", "body_detection"};
+
+  // AFX. The directory names are the ids that StudioCast uses, except for
+  // the older name of the dereverb effect.
+  if (feature_id == "dereverb")
+    return {"dereverb", "room_echo_removal"};
+  return {feature_id};
+}
+
+// True when `features_dir` holds an entry that one of `names` names. The
+// comparison takes the whole name, without case: a name that only holds
+// another one, such as `dereverb_denoiser` and `dereverb`, must not count,
+// and neither must the SDK helpers (`install_feature.sh`, `README.md`,
+// `compute_capability`), which no feature names.
+bool HasAnyFeatureMarker(const fs::path &features_dir,
+                         const std::vector<std::string> &names) {
   if (features_dir.empty()) {
     return false;
   }
   std::error_code ec;
-  if (!fs::exists(features_dir, ec) || !fs::is_directory(features_dir, ec)) {
+  if (!fs::is_directory(features_dir, ec)) {
     return false;
   }
 
-  // Fast path: exact directory/file match.
-  if (fs::exists(features_dir / feature_id, ec)) {
-    return true;
+  std::set<std::string> wanted;
+  for (const auto &name : names) {
+    wanted.insert(ToLowerCopy(name));
   }
 
-  // Heuristic: match against entry names (case-insensitive substring).
-  const std::string needle = ToLowerCopy(feature_id);
   for (const auto &entry : fs::directory_iterator(features_dir, ec)) {
     if (ec) {
       break;
     }
-    const std::string name = ToLowerCopy(entry.path().filename().string());
-    if (name.find(needle) != std::string::npos) {
+    if (wanted.count(ToLowerCopy(entry.path().filename().string())) != 0) {
       return true;
     }
   }
 
-  return false;
-}
-
-bool HasAnyFeatureMarker(const fs::path &features_dir,
-                         const std::vector<std::string> &ids) {
-  for (const auto &id : ids) {
-    if (HasFeatureMarker(features_dir, id))
-      return true;
-  }
   return false;
 }
 
@@ -137,6 +164,9 @@ ComponentDiagnostics ConvertComponent(const ComponentPaths &c) {
   out.searched_lib_dirs = c.searched_lib_dirs;
   out.library = c.library;
   out.models_dir = c.models_dir;
+  out.models_dir_source = c.models_dir_source;
+  out.candidate_models_dirs = c.candidate_models_dirs;
+  out.require_models_dir = c.require_models_dir;
   out.features_dir = c.features_dir;
   out.root_exists = c.root_exists;
   out.models_dir_exists = c.models_dir_exists;
@@ -276,6 +306,11 @@ std::string PickTopReasonFromMissingEffects(
 
 } // namespace
 
+bool FeatureMarkerInstalled(const fs::path &features_dir,
+                            const std::string &feature_id) {
+  return HasAnyFeatureMarker(features_dir, MarkerNamesFor(feature_id));
+}
+
 MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
   MaxineDiagnostics d;
 
@@ -388,47 +423,40 @@ MaxineDiagnostics MaxineManager::Diagnose(bool verbose_probe) const {
     }
   }
 
-  // Feature install markers (best-effort heuristics).
+  // Feature install markers (see MarkerNamesFor).
   auto add_feature = [&](ComponentDiagnostics *comp, const std::string &id,
-                         const std::string &hint,
-                         const std::vector<std::string> &marker_aliases = {}) {
+                         const std::string &hint) {
     FeatureInstallStatus f;
     f.id = id;
-    std::vector<std::string> markers;
-    markers.push_back(id);
-    markers.insert(markers.end(), marker_aliases.begin(), marker_aliases.end());
-    f.installed = HasAnyFeatureMarker(comp->features_dir, markers);
+    f.installed = FeatureMarkerInstalled(comp->features_dir, id);
     f.details = f.installed ? "installed" : hint;
     comp->features.push_back(std::move(f));
   };
 
   add_feature(&d.vfx, "greenscreen",
-              "missing (run VFX install_feature.sh for greenscreen)");
+              "missing (run VFX install_feature.sh for nvvfxgreenscreen)");
   add_feature(&d.vfx, "bgblur",
-              "missing (run VFX install_feature.sh for bgblur)", {"blur"});
+              "missing (run VFX install_feature.sh for nvvfxbackgroundblur)");
   add_feature(&d.vfx, "denoise",
-              "missing (run VFX install_feature.sh for denoise)");
+              "missing (run VFX install_feature.sh for nvvfxdenoising)");
   add_feature(&d.vfx, "relighting",
-              "missing (run VFX install_feature.sh for relighting)");
+              "missing (run VFX install_feature.sh for nvvfxrelighting)");
   add_feature(&d.ar, "gaze_redirection",
-              "missing (run AR install_feature.sh for gaze_redirection)",
-              {"eyecontact", "GazeRedirection"});
+              "missing (run AR install_feature.sh for nvargazeredirection)");
   add_feature(&d.ar, "face_detection",
-              "missing (run AR install_feature.sh for face_detection)",
-              {"FaceBoxDetection", "facebox"});
+              "missing (run AR install_feature.sh for nvarfaceboxdetection)");
   add_feature(&d.ar, "body_detection",
-              "optional (install AR body detection to improve tracking)",
-              {"BodyBoxDetection", "bodybox"});
+              "optional (run AR install_feature.sh for nvarbodydetection to "
+              "improve tracking)");
 
   add_feature(&d.afx, "denoiser",
-              "missing (run AFX install_feature.sh for denoiser)");
+              "missing (run AFX download_features.sh for denoiser)");
   add_feature(&d.afx, "dereverb",
-              "missing (run AFX install_feature.sh for dereverb)",
-              {"room_echo_removal"});
+              "missing (run AFX download_features.sh for dereverb)");
   add_feature(&d.afx, "dereverb_denoiser",
-              "missing (run AFX install_feature.sh for dereverb_denoiser)");
+              "missing (run AFX download_features.sh for dereverb_denoiser)");
   add_feature(&d.afx, "studio_voice",
-              "missing (run AFX install_feature.sh for studio_voice)");
+              "missing (run AFX download_features.sh for studio_voice)");
 
   // Derive effect availability using stable effect IDs.
   const bool gpu_ok = d.gpu.ok && d.driver.ok;
@@ -871,6 +899,9 @@ std::string MaxineDiagnostics::ToJson() const {
     oss << ",";
     oss << "\"models_dir\":";
     json_string(c.models_dir.string());
+    oss << ",";
+    oss << "\"models_dir_source\":";
+    json_string(c.models_dir_source);
     oss << ",";
     oss << "\"features_dir\":";
     json_string(c.features_dir.string());
