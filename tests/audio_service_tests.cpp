@@ -195,19 +195,23 @@ public:
     };
   }
 
-  // Shortens the safety timeout. Only the self-tests of this class use it.
-  void SetTimeoutsForTesting(std::chrono::milliseconds stall) {
+  // Shortens the safety timeouts. Only the self-tests of this class use it.
+  void SetTimeoutsForTesting(std::chrono::milliseconds stall,
+                             std::chrono::milliseconds cap) {
     stall_timeout_ = stall;
+    wall_clock_cap_ = cap;
   }
 
   // Waits until `pred` is true. Gives the supervisor up to `max_loops` more
   // loops in place of a wall-clock deadline: CPU load changes how long a loop
-  // takes, but not how many chances the service gets. A wait that stops
+  // takes, but not how many chances the service gets. The wall-clock cap is
+  // the second bound, and it stops a hung predicate. A wait that stops
   // before the predicate is true prints why, and where the wait was.
   bool WaitUntil(
       const std::function<bool()> &pred, int max_loops,
       const std::source_location loc = std::source_location::current()) const {
     const auto start = std::chrono::steady_clock::now();
+    const auto deadline = start + wall_clock_cap_;
     if (!HookIsInstalled()) {
       Report("the counting sleep hook is gone; call HookSleep after the test "
              "sets the other hooks, and never assign sleep_for later",
@@ -223,14 +227,24 @@ public:
       if (pred())
         return true;
       std::unique_lock<std::mutex> lock(mu_);
-      if (!cv_.wait_for(lock, stall_timeout_, [&] { return count_ > seen; })) {
-        const long long done = count_;
-        lock.unlock();
+      const std::chrono::nanoseconds left =
+          deadline - std::chrono::steady_clock::now();
+      if (left > std::chrono::nanoseconds::zero() &&
+          cv_.wait_for(lock,
+                       std::min<std::chrono::nanoseconds>(stall_timeout_, left),
+                       [&] { return count_ > seen; }))
+        continue;
+      const long long done = count_;
+      lock.unlock();
+      if (std::chrono::steady_clock::now() >= deadline)
+        Report("the wait reached the wall-clock cap of " +
+                   std::to_string(wall_clock_cap_.count()) + " ms",
+               loc, done, max_loops, start);
+      else
         Report("no supervisor loop in " +
                    std::to_string(stall_timeout_.count()) + " ms",
                loc, done, max_loops, start);
-        break;
-      }
+      break;
     }
     return pred();
   }
@@ -265,6 +279,10 @@ private:
   // Safety net for a supervisor that stopped or is stuck. Only a failed test
   // waits this long.
   std::chrono::milliseconds stall_timeout_{std::chrono::seconds(10)};
+
+  // Second bound of a wait. A predicate that hangs cannot keep CI for the
+  // budget of loops multiplied by the stall timeout.
+  std::chrono::milliseconds wall_clock_cap_{std::chrono::seconds(60)};
 
   // Held by the counter and by every live copy of the counting hook.
   std::shared_ptr<const int> token_ = std::make_shared<const int>(0);
@@ -301,7 +319,7 @@ bool ReportMissing(const std::string &log, const std::string &needle) {
 // test waited, how many loops the service did, and how long the wait was.
 bool TestSupervisorLoopCounterReportsStall() {
   SupervisorLoopCounter loops;
-  loops.SetTimeoutsForTesting(100ms);
+  loops.SetTimeoutsForTesting(100ms, 60s);
 
   VirtualAudioServiceHooks hooks;
   loops.HookSleep(&hooks);
@@ -334,7 +352,7 @@ bool TestSupervisorLoopCounterReportsStall() {
 // true.
 bool TestSupervisorLoopCounterDetectsReplacedSleepHook() {
   SupervisorLoopCounter loops;
-  loops.SetTimeoutsForTesting(5s);
+  loops.SetTimeoutsForTesting(5s, 60s);
 
   VirtualAudioServiceHooks hooks;
   loops.HookSleep(&hooks);
@@ -362,6 +380,48 @@ bool TestSupervisorLoopCounterDetectsReplacedSleepHook() {
   }
   if (log.find("HookSleep") == std::string::npos)
     return ReportMissing(log, "HookSleep");
+  return true;
+}
+
+// A loop budget alone lets a wait run for `max_loops` stall timeouts. A
+// second bound in wall-clock time keeps a broken build inside a normal CI
+// step.
+bool TestSupervisorLoopCounterCapsTheWallClock() {
+  SupervisorLoopCounter loops;
+  loops.SetTimeoutsForTesting(30s, 200ms);
+
+  VirtualAudioServiceHooks hooks;
+  loops.HookSleep(&hooks);
+  std::atomic<bool> stop{false};
+  std::thread supervisor([&] {
+    while (!stop.load(std::memory_order_relaxed))
+      hooks.sleep_for(25ms);
+  });
+
+  std::string log;
+  bool reached = true;
+  const auto start = std::chrono::steady_clock::now();
+  {
+    ScopedCerrCapture capture;
+    reached = loops.WaitUntil([] { return false; }, 3000);
+    log = capture.text();
+  }
+  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start);
+  stop.store(true, std::memory_order_relaxed);
+  supervisor.join();
+
+  if (reached) {
+    std::cerr << "the wait passed although the predicate is never true\n";
+    return false;
+  }
+  if (elapsed > 2s) {
+    std::cerr << "the wait took " << elapsed.count()
+              << " ms; the wall-clock cap did not stop it\n";
+    return false;
+  }
+  if (log.find("wall-clock") == std::string::npos)
+    return ReportMissing(log, "wall-clock");
   return true;
 }
 
@@ -4832,6 +4892,8 @@ int main() {
        &TestSupervisorLoopCounterReportsStall},
       {"supervisor loop counter detects a replaced sleep hook",
        &TestSupervisorLoopCounterDetectsReplacedSleepHook},
+      {"supervisor loop counter caps the wall-clock time",
+       &TestSupervisorLoopCounterCapsTheWallClock},
       {"pactl load-module quotes vector arguments",
        &TestPactlLoadModuleQuotesVectorArguments},
       {"pactl load-module string compatibility splitter",
