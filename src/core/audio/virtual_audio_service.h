@@ -241,11 +241,13 @@ private:
 
   mutable std::mutex mu_;
 
-  // Guards the supervisor handle and the stop_ flag in Start() and in Stop().
-  // Start() and Stop() can run at the same time, so the "is it joinable?"
-  // test, the join and the publish must be one step: without the lock two
-  // callers both see a joinable handle and both join the same supervisor,
-  // which is undefined behaviour.
+  // Guards the supervisor handle, the stop_ flag and the start mark in
+  // Start() and in Stop(). Start() and Stop() can run at the same time, so
+  // the "is it joinable?" test of Stop(), the join and the publish of
+  // Start() must be one step: without the lock two callers both see a
+  // joinable handle and both join the same supervisor, which is undefined
+  // behaviour. Start() makes no such test any more; the start mark below is
+  // what keeps a second caller away from the handle.
   //
   // Stop() holds this lock across the join on purpose. src/core/video does
   // the opposite: VirtualCameraService::Stop() moves the handle out under the
