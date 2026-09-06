@@ -66,6 +66,17 @@ bool TestResizeRgb24BilinearHandlesDegenerateAxesAndPlanReuse();
 bool TestBackgroundRemoveCpuMatchesReferenceAndPreservesPadding();
 bool TestBackgroundBlurCpuMatchesReferenceAndPreservesPadding();
 bool TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair();
+bool TestV4l2WriterFormatParseReadsBothUnionArms();
+bool TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite();
+bool TestV4l2WriterRefusesRowsTheFrameSizeCannotHold();
+bool TestV4l2WriterFormatLadderStepsPastAParseRefusal();
+bool TestV4l2WriterFormatLadderRefusesABlankFrameReport();
+bool TestV4l2WriterRefusesAFrameLargerThanItCanHold();
+bool TestV4l2WriterFormatLadderPutsTheDeviceFormatBack();
+bool TestV4l2WriterRestoresOnlyAFormatItCouldUse();
+bool TestV4l2WriterRestoresOnlyTheBufferTypeARungChanged();
+bool TestV4l2WriterNamesTheRefusalsARetryCanOutlive();
+bool TestV4l2WriterRefusesADeviceThatCannotTakeWrites();
 } // namespace studiocast::tests
 
 namespace {
@@ -995,7 +1006,8 @@ bool TestStandaloneGpuScalerPolicySkipsInactiveBackendTransfers() {
           /*have_deferred_gpu_out=*/true,
           /*allow_cpu_resize=*/false,
           /*same_backend_effects_ran=*/true)) {
-    std::cerr << "standalone GPU scaler should skip when no scaling is needed\n";
+    std::cerr
+        << "standalone GPU scaler should skip when no scaling is needed\n";
     return false;
   }
 
@@ -1073,8 +1085,7 @@ int main() {
        &studiocast::tests::
            TestOpenCudaF32ResizeBorderContractIsReplicateNoGpuSafe},
       {"Open CUDA alpha clamp and solid BGR contract are no-GPU safe",
-       &studiocast::tests::
-           TestOpenCudaAlphaClampAndSolidBgrContractNoGpuSafe},
+       &studiocast::tests::TestOpenCudaAlphaClampAndSolidBgrContractNoGpuSafe},
       {"CUDA u8 resize rounding contract is no-GPU safe",
        &studiocast::tests::TestCudaU8ResizeRoundingContractIsNoGpuSafe},
       {"CUDA resize availability probe is thread-safe",
@@ -1135,6 +1146,29 @@ int main() {
            TestBackgroundBlurCpuMatchesReferenceAndPreservesPadding},
       {"V4L2 writer row size holds the odd width YUYV pair",
        &studiocast::tests::TestV4l2WriterRowSizeHoldsTheOddWidthYuyvPair},
+      {"V4L2 writer format parse reads both union arms",
+       &studiocast::tests::TestV4l2WriterFormatParseReadsBothUnionArms},
+      {"V4L2 writer refuses an mplane plane count it cannot write",
+       &studiocast::tests::
+           TestV4l2WriterRefusesAnMplanePlaneCountItCannotWrite},
+      {"V4L2 writer refuses rows the frame size cannot hold",
+       &studiocast::tests::TestV4l2WriterRefusesRowsTheFrameSizeCannotHold},
+      {"V4L2 writer format ladder steps past a parse refusal",
+       &studiocast::tests::TestV4l2WriterFormatLadderStepsPastAParseRefusal},
+      {"V4L2 writer format ladder refuses a blank frame report",
+       &studiocast::tests::TestV4l2WriterFormatLadderRefusesABlankFrameReport},
+      {"V4L2 writer refuses a frame larger than it can hold",
+       &studiocast::tests::TestV4l2WriterRefusesAFrameLargerThanItCanHold},
+      {"V4L2 writer format ladder puts the device format back",
+       &studiocast::tests::TestV4l2WriterFormatLadderPutsTheDeviceFormatBack},
+      {"V4L2 writer restores only a format it could use",
+       &studiocast::tests::TestV4l2WriterRestoresOnlyAFormatItCouldUse},
+      {"V4L2 writer restores only the buffer type a rung changed",
+       &studiocast::tests::TestV4l2WriterRestoresOnlyTheBufferTypeARungChanged},
+      {"V4L2 writer names the refusals a retry can outlive",
+       &studiocast::tests::TestV4l2WriterNamesTheRefusalsARetryCanOutlive},
+      {"V4L2 writer refuses a device that cannot take writes",
+       &studiocast::tests::TestV4l2WriterRefusesADeviceThatCannotTakeWrites},
       {"V4L2 capture negotiation keeps the driver row stride",
        &studiocast::tests::TestV4l2CaptureNegotiationKeepsTheDriverRowStride},
       {"V4L2 capture negotiation refuses rows the frame size cannot hold",
