@@ -1361,48 +1361,169 @@ bool TestFrameBufferReportsAFrameThatWasNeverTaken() {
 
 // The hand-off carries whole frames between two threads with no lock. A torn
 // frame would hold the bytes of two writes at once.
+//
+// The producer stops on a count of hand-offs, not on a count of writes, and
+// the consumer counts the hand-offs. A frame whose bytes differ from the frame
+// before it is a frame that crossed, thus the count is the consumer's own
+// record of what it got. The producer keeps writing until that count is high
+// enough. CPU load changes how long the producer must write, but not how many
+// hand-offs the consumer gets: a machine too busy to give the consumer a slice
+// for a long time makes this test slower, not false. The cap on the writes is
+// the second bound, and it stops a buffer that hands nothing over from writing
+// for ever.
+//
+// The producer keeps its own count of the hand-offs, but only to report it: a
+// publish that answers `published` says the consumer took the frame before it.
+// A buffer that never raises the fresh bit makes every publish answer
+// `published` although no frame crosses, thus the producer's count alone is not
+// proof of a hand-off. The two counts together name that break.
 bool TestFrameBufferSurvivesAProducerAndAConsumer() {
   constexpr std::size_t kFrameBytes = 4096;
-  constexpr int kFrames = 20000;
+  // Writes that stress the hand-off before the producer starts to wait.
+  constexpr std::uint64_t kFrames = 20000;
+  // Hand-offs the consumer must take. Each one is a frame the consumer read
+  // while the producer wrote the next.
+  //
+  // This count sets what the test costs on a loaded machine. A consumer that
+  // must share its core waits a full scheduler round for each hand-off, thus
+  // the time is linear in this count and in the length of the run queue: on
+  // one core with 32 other jobs on it, the slowest of 15 runs took 0.29 s at 1
+  // hand-off, 1.12 s at 8 and 3.59 s at 32. An idle machine gives the same
+  // time at each count.
+  //
+  // A count of 1 is enough to catch the fault this test was written for, which
+  // is a hand-off that never happens. 8 also says that the two ends keep the
+  // hand-off up: 8 hand-offs need 8 consumer runs, which one producer time
+  // slice cannot give. Raise this count for more interleaving, but know that
+  // the wait on a loaded machine goes up with it.
+  constexpr int kHandoffs = 8;
+  // A write count no healthy run comes near, because 8 hand-offs need 8
+  // writes at best and the writes above give thousands on an idle machine.
+  constexpr std::uint64_t kWriteCap = kFrames * 500;
+  // The third bound, on the clock. The write cap counts writes, thus what it
+  // costs in time changes with the machine load: a buffer that hands nothing
+  // over reached the cap in 9.4 seconds on an idle machine, but was still
+  // writing after 300 seconds on one core that carried 32 other jobs. This
+  // bound ends such a run at 120 seconds under any load.
+  //
+  // The bound must stay above the slowest healthy run, because a run that
+  // reaches it fails. On one core, the slowest healthy run took 0.95 seconds
+  // with 32 other jobs on that core, 9.9 seconds with 384 and 26.0 seconds
+  // with 1024. 120 seconds thus keeps a margin of more than 100x at the load
+  // that made this test flake, and it stays far below the 1500 second default
+  // timeout of ctest.
+  //
+  // The clock can only fail this test, never pass it, because the test reads
+  // expired in an Expect() of its own. The counters alone do not make this
+  // true: the count of the hand-offs can reach the bar after the bound fires,
+  // because a frame was still on offer when the producer stopped. Such a run
+  // fails on the clock, which is correct for a run that was this slow.
+  constexpr int kDeadlineSeconds = 120;
 
   studiocast::pw::TripleFrameBuffer buffer;
   buffer.Reset(kFrameBytes);
 
   std::atomic<bool> done{false};
+  std::atomic<bool> torn{false};
   std::atomic<std::uint64_t> dropped{0};
+  std::atomic<int> handoffs{0};
+  std::atomic<std::uint64_t> writes{0};
+  // The consumer counts the frames that crossed. The producer reads the count
+  // to know when to stop, and the test asserts on it, thus the stop rule and
+  // the bar are the same number and cannot disagree.
+  std::atomic<int> crossed{0};
+  std::atomic<bool> expired{false};
   std::thread producer([&] {
     std::vector<std::uint8_t> frame(kFrameBytes, 0);
-    for (int i = 0; i < kFrames; ++i) {
-      const auto value = static_cast<std::uint8_t>(i % 251);
+    const auto start = std::chrono::steady_clock::now();
+    std::uint64_t written = 0;
+    int seen = 0;
+    bool late = false;
+    while (!torn.load(std::memory_order_relaxed) && written < kWriteCap &&
+           (written < kFrames ||
+            crossed.load(std::memory_order_relaxed) < kHandoffs)) {
+      const auto value = static_cast<std::uint8_t>(written % 251);
       std::fill(frame.begin(), frame.end(), value);
-      if (buffer.Publish(frame.data(), frame.size()) ==
-          studiocast::pw::PublishOutcome::replaced)
+      const bool first = written == 0;
+      const auto outcome = buffer.Publish(frame.data(), frame.size());
+      ++written;
+      if (outcome == studiocast::pw::PublishOutcome::replaced) {
         dropped.fetch_add(1, std::memory_order_relaxed);
+      } else if (!first) {
+        // The publish before this one left a frame on offer, and that frame
+        // has gone: the consumer took it.
+        ++seen;
+      }
+      // The writes are done and the producer only waits for hand-offs now.
+      if (written >= kFrames &&
+          crossed.load(std::memory_order_relaxed) < kHandoffs) {
+        // The wait is the only part of this loop the write cap does not hold
+        // to a time, thus the clock is read here and nowhere else.
+        if (std::chrono::steady_clock::now() - start >
+            std::chrono::seconds(kDeadlineSeconds)) {
+          late = true;
+          break;
+        }
+        // The producer gives up the core. This is not what makes the hand-off
+        // happen: Linux preempts the producer anyway, and 30 runs with the
+        // line removed, on one core with 32 other jobs on it, gave 0 failures
+        // and the same time. The line is kept because it holds on a scheduler
+        // that does not preempt, and because it keeps the wait from filling
+        // the core with writes that the consumer can only drop.
+        std::this_thread::yield();
+      }
     }
+    handoffs.store(seen, std::memory_order_relaxed);
+    writes.store(written, std::memory_order_relaxed);
+    expired.store(late, std::memory_order_relaxed);
     done.store(true, std::memory_order_release);
   });
 
-  bool torn = false;
   int taken = 0;
+  int last = -1;
   while (!done.load(std::memory_order_acquire)) {
     const std::uint8_t *frame = buffer.Acquire();
     if (!frame)
       continue;
     ++taken;
+    // A frame that holds a value the frame before it did not hold is a frame
+    // that crossed. A buffer that gives the same frame again does not raise
+    // this count, thus the count says what the consumer got, not what the
+    // producer offered.
+    if (frame[0] != last) {
+      last = frame[0];
+      crossed.fetch_add(1, std::memory_order_relaxed);
+    }
     for (std::size_t i = 1; i < kFrameBytes; ++i) {
       if (frame[i] != frame[0]) {
-        torn = true;
+        // The producer reads this and stops, because a torn frame ends the
+        // test and no hand-off after it means anything.
+        torn.store(true, std::memory_order_relaxed);
         break;
       }
     }
-    if (torn)
+    if (torn.load(std::memory_order_relaxed))
       break;
   }
 
   producer.join();
 
-  return Expect(!torn,
+  return Expect(!torn.load(std::memory_order_relaxed),
                 "the consumer read a frame that two writes tore apart") &&
+         Expect(!expired.load(std::memory_order_relaxed),
+                "the producer waited " + std::to_string(kDeadlineSeconds) +
+                    " seconds for " + std::to_string(kHandoffs) +
+                    " hand-offs and gave up: the hand-offs never came, or the "
+                    "machine is far too slow") &&
+         Expect(crossed.load(std::memory_order_relaxed) >= kHandoffs,
+                "the consumer took " +
+                    std::to_string(crossed.load(std::memory_order_relaxed)) +
+                    " frames of the " + std::to_string(kHandoffs) +
+                    " the test needs, in " +
+                    std::to_string(writes.load(std::memory_order_relaxed)) +
+                    " writes, and the producer counted " +
+                    std::to_string(handoffs.load(std::memory_order_relaxed)) +
+                    " hand-offs") &&
          Expect(taken > 0, "the consumer should have read something");
 }
 
