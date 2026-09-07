@@ -1404,13 +1404,21 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
   // costs in time changes with the machine load: a buffer that hands nothing
   // over reached the cap in 9.4 seconds on an idle machine, but was still
   // writing after 300 seconds on one core that carried 32 other jobs. This
-  // bound ends such a run in seconds under any load.
+  // bound ends such a run at 120 seconds under any load.
   //
-  // The clock can only fail this test, never pass it. A run that reaches the
-  // bound has too few hand-offs, thus the bound stops the loop and the test
-  // reports the wait as the failure. A test that ends well always ends on the
-  // count of the hand-offs.
-  constexpr int kDeadlineSeconds = 30;
+  // The bound must stay above the slowest healthy run, because a run that
+  // reaches it fails. On one core, the slowest healthy run took 0.95 seconds
+  // with 32 other jobs on that core, 9.9 seconds with 384 and 26.0 seconds
+  // with 1024. 120 seconds thus keeps a margin of more than 100x at the load
+  // that made this test flake, and it stays far below the 1500 second default
+  // timeout of ctest.
+  //
+  // The clock can only fail this test, never pass it, because the test reads
+  // expired in an Expect() of its own. The counters alone do not make this
+  // true: the count of the hand-offs can reach the bar after the bound fires,
+  // because a frame was still on offer when the producer stopped. Such a run
+  // fails on the clock, which is correct for a run that was this slow.
+  constexpr int kDeadlineSeconds = 120;
 
   studiocast::pw::TripleFrameBuffer buffer;
   buffer.Reset(kFrameBytes);
@@ -1504,7 +1512,9 @@ bool TestFrameBufferSurvivesAProducerAndAConsumer() {
                 "the consumer read a frame that two writes tore apart") &&
          Expect(!expired.load(std::memory_order_relaxed),
                 "the producer waited " + std::to_string(kDeadlineSeconds) +
-                    " seconds for the hand-offs and gave up") &&
+                    " seconds for " + std::to_string(kHandoffs) +
+                    " hand-offs and gave up: the hand-offs never came, or the "
+                    "machine is far too slow") &&
          Expect(crossed.load(std::memory_order_relaxed) >= kHandoffs,
                 "the consumer took " +
                     std::to_string(crossed.load(std::memory_order_relaxed)) +
